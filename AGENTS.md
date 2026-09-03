@@ -135,8 +135,9 @@ Discovery is read-only. Import is an explicit administrator action: preserve eve
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing
 divergent PostgreSQL history.
 
-amd64 Linux and Windows release packages include `mira-codex` plus `codex-code-mode-host`, built from
-the official tag pinned by `CODEX_VERSION` and the narrow patch under `patches/codex/`. Keep ordinary
+amd64 Linux and Windows release packages include a canonical `mira-codex-package` with the Codex
+entrypoint, code-mode host, platform sandbox helpers, `rg`, resources and manifest, built from the
+official tag pinned by `CODEX_VERSION` and the narrow patch under `patches/codex/`. Keep ordinary
 official Codex installations usable, but never select one for remote ThreadStore execution unless the
 Node's runtime probe confirms support. `mira codex` intentionally injects the current Server endpoint,
 store ID and Node credential so CLI and web/App Server sessions share PostgreSQL.

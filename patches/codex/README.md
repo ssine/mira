@@ -18,11 +18,12 @@ git -C codex am ../patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-ad
 Build Codex using the upstream instructions. The resulting CLI and App Server understand the
 `[experimental_thread_store]` configuration documented in the repository root README.
 
-Mira's release workflow performs this application and builds `mira-codex` together with
-`codex-code-mode-host` for Linux amd64 and Windows amd64. Both binaries are packaged beside
-`mira-node`; the Node probes the remote ThreadStore configuration before advertising a build as
-compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both release
-matrix builds, not just changing the version file.
+Mira's release workflow performs this application and uses Codex's canonical package builder for
+Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the entrypoint,
+`codex-code-mode-host`, platform sandbox resources, `rg` and `codex-package.json`; it is packaged
+beside `mira-node`. The Node probes the remote ThreadStore configuration before advertising a build
+as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
+release matrix builds, not just changing the version file.
 
 The patch is intentionally kept separate from the Mira control plane. When updating Codex, rebase
 or regenerate it against the new upstream tag, run the `codex-thread-store` tests, and verify the

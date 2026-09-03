@@ -58,6 +58,9 @@ try {
   assert.equal(digest(await fs.readFile(configuration)), configBefore);
   const version = JSON.parse(command(path.join(prefix, "bin/mira"), ["--json", "version"], { env: environment }));
   assert.equal(version.data.build.version, current);
+  await fs.access(path.join(prefix, "share/mira/versions", current, "mira-codex-package/bin/codex"));
+  await fs.access(path.join(prefix, "share/mira/versions", current, "mira-codex-package/codex-resources/bwrap"));
+  await fs.access(path.join(prefix, "share/mira/versions", current, "mira-codex-package/codex-package.json"));
   await fs.access(path.join(prefix, "share/mira/versions", previous, "mira-node"));
   const protectedInstall = await fs.readFile(path.join(prefix, "bin/mira-node"));
   await fs.appendFile(path.join(releases, `mira_${current}_linux_amd64.tar.gz`), "corruption");

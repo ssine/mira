@@ -16,18 +16,17 @@ permissions:
 
 jobs:
   codex:
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            artifact: mira-codex-linux-amd64
-            host_artifact: codex-code-mode-host-linux-amd64
+            package: mira-codex-package-linux-amd64
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
-            artifact: mira-codex-windows-amd64.exe
-            host_artifact: codex-code-mode-host-windows-amd64.exe
+            package: mira-codex-package-windows-amd64
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
@@ -59,7 +58,10 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        run: bash upstream-codex/.github/scripts/install-musl-build-tools.sh
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils libcap-dev pkg-config
+          bash upstream-codex/.github/scripts/install-musl-build-tools.sh
 
       - name: Configure verified Codex rusty_v8 artifacts
         shell: bash
@@ -86,32 +88,74 @@ jobs:
           echo "RUSTY_V8_ARCHIVE=$artifact_dir/$archive" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=$artifact_dir/$binding" >> "$GITHUB_ENV"
 
+      - name: Build Linux sandbox resource
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          export AWS_LC_SYS_NO_JITTER_ENTROPY=1
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
+          export "$target_no_jitter=1"
+          cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
+            --target "$TARGET" --release --locked --bin bwrap
+          bwrap="upstream-codex/codex-rs/target/${TARGET}/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap"
+          digest=$(sha256sum "$bwrap" | awk '{print $1}')
+          echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
+
       - name: Build Mira-compatible Codex
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          build_args=(--bin codex --bin codex-code-mode-host)
           if [[ "$TARGET" == "x86_64-pc-windows-msvc" ]]; then
             export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+            build_args+=(--bin codex-command-runner --bin codex-windows-sandbox-setup)
           else
             export AWS_LC_SYS_NO_JITTER_ENTROPY=1
+            target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
+            export "$target_no_jitter=1"
           fi
           cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
-            --target "$TARGET" --release --locked --bin codex --bin codex-code-mode-host
-          source="upstream-codex/codex-rs/target/${TARGET}/release/codex"
-          host_source="upstream-codex/codex-rs/target/${TARGET}/release/codex-code-mode-host"
-          if [[ "$TARGET" == *windows* ]]; then source="${source}.exe"; fi
-          if [[ "$TARGET" == *windows* ]]; then host_source="${host_source}.exe"; fi
-          cp "$source" "${{ matrix.artifact }}"
-          cp "$host_source" "${{ matrix.host_artifact }}"
+            --target "$TARGET" --release --locked "${build_args[@]}"
+
+      - name: Assemble canonical Codex package
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PACKAGE: ${{ matrix.package }}
+          CODEX_REPO_ROOT: ${{ github.workspace }}/upstream-codex
+        run: |
+          set -euo pipefail
+          codex_version=$(<CODEX_VERSION)
+          release_dir="$GITHUB_WORKSPACE/upstream-codex/codex-rs/target/${TARGET}/release"
+          suffix=""
+          [[ "$TARGET" == *windows* ]] && suffix=".exe"
+          arguments=(
+            --target "$TARGET"
+            --package-version "$codex_version"
+            --package-dir "$GITHUB_WORKSPACE/$PACKAGE"
+            --entrypoint-bin "$release_dir/codex${suffix}"
+            --code-mode-host-bin "$release_dir/codex-code-mode-host${suffix}"
+          )
+          if [[ "$TARGET" == *windows* ]]; then
+            arguments+=(
+              --codex-command-runner-bin "$release_dir/codex-command-runner.exe"
+              --codex-windows-sandbox-setup-bin "$release_dir/codex-windows-sandbox-setup.exe"
+            )
+          else
+            arguments+=(--bwrap-bin "$release_dir/bwrap")
+          fi
+          python upstream-codex/scripts/build_codex_package.py "${arguments[@]}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: mira-codex-${{ matrix.target }}
-          path: |
-            ${{ matrix.artifact }}
-            ${{ matrix.host_artifact }}
+          path: ${{ matrix.package }}
           if-no-files-found: error
           retention-days: 7
 
@@ -136,7 +180,6 @@ jobs:
         with:
           pattern: mira-codex-*
           path: codex-dist
-          merge-multiple: true
 
       - name: Validate unified version
         shell: bash
@@ -150,10 +193,8 @@ jobs:
 
       - name: Build desktop Node and CLI artifacts
         env:
-          MIRA_CODEX_LINUX_AMD64: ${{ github.workspace }}/codex-dist/mira-codex-linux-amd64
-          MIRA_CODEX_HOST_LINUX_AMD64: ${{ github.workspace }}/codex-dist/codex-code-mode-host-linux-amd64
-          MIRA_CODEX_WINDOWS_AMD64: ${{ github.workspace }}/codex-dist/mira-codex-windows-amd64.exe
-          MIRA_CODEX_HOST_WINDOWS_AMD64: ${{ github.workspace }}/codex-dist/codex-code-mode-host-windows-amd64.exe
+          MIRA_CODEX_PACKAGE_LINUX_AMD64: ${{ github.workspace }}/codex-dist/mira-codex-x86_64-unknown-linux-musl
+          MIRA_CODEX_PACKAGE_WINDOWS_AMD64: ${{ github.workspace }}/codex-dist/mira-codex-x86_64-pc-windows-msvc
           MIRA_REQUIRE_CODEX_BUNDLE: "true"
         run: |
           go -C node test ./...

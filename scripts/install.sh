@@ -21,7 +21,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-for program in curl tar sha256sum; do
+for program in curl diff tar sha256sum; do
   command -v "$program" >/dev/null 2>&1 || { printf 'Required command missing: %s\n' "$program" >&2; exit 1; }
 done
 [ "$(uname -s)" = Linux ] || { printf '%s\n' 'This installer supports Linux and WSL. Use the PowerShell installer on Windows.' >&2; exit 1; }
@@ -90,9 +90,8 @@ if [ -d "$install_root/versions/$version" ]; then
   # Version directories are immutable. Re-installing an identical release is safe.
   cmp "$package_dir/mira-node" "$install_root/versions/$version/mira-node" >/dev/null || { printf '%s\n' 'This version is already installed with different contents; refusing to overwrite it.' >&2; exit 1; }
   cmp "$package_dir/mira" "$install_root/versions/$version/mira" >/dev/null || { printf '%s\n' 'Installed CLI contents differ; refusing to overwrite.' >&2; exit 1; }
-  if [ -e "$package_dir/mira-codex" ]; then
-    cmp "$package_dir/mira-codex" "$install_root/versions/$version/mira-codex" >/dev/null 2>&1 || { printf '%s\n' 'Installed Mira Codex contents differ; refusing to overwrite.' >&2; exit 1; }
-    cmp "$package_dir/codex-code-mode-host" "$install_root/versions/$version/codex-code-mode-host" >/dev/null 2>&1 || { printf '%s\n' 'Installed Codex tool host contents differ; refusing to overwrite.' >&2; exit 1; }
+  if [ -d "$package_dir/mira-codex-package" ]; then
+    diff -qr "$package_dir/mira-codex-package" "$install_root/versions/$version/mira-codex-package" >/dev/null 2>&1 || { printf '%s\n' 'Installed Mira Codex package contents differ; refusing to overwrite.' >&2; exit 1; }
   fi
 else
   mv "$package_dir" "$install_root/versions/$version"

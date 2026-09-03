@@ -23,7 +23,8 @@ amd64 发布包内置同一 `CODEX_VERSION` 基线的 Mira 版 Codex 及 code-mo
 
 在管理员网站展开「添加设备」即可复制带当前 Server 地址的安装命令。
 Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。amd64 桌面包同时安装
-支持 PostgreSQL ThreadStore 的 `mira-codex`，无需另外改写官方 Codex 安装。
+支持 PostgreSQL ThreadStore 的完整 Mira Codex package，包含平台 sandbox helper、code-mode host、
+`rg` 和官方 package manifest，无需另外改写官方 Codex 安装。
 后续桌面端执行 `mira update`；Android 在 APP 内检查更新。身份和配置随升级保留。
 具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 
@@ -164,8 +165,9 @@ resize/Ctrl-C，以及 Codex 自动发现和 App Server 启停已在 Windows 11 
 
 ## Codex ThreadStore
 
-发布流程从根目录 `CODEX_VERSION` 指定的官方 tag 应用最小补丁，同时构建 `mira-codex` 和
-`codex-code-mode-host`。Node 启动 App Server 时通过环境继承同一 Node
+发布流程从根目录 `CODEX_VERSION` 指定的官方 tag 应用最小补丁，再通过官方 canonical package
+builder 组装入口、code-mode host、Linux bwrap / Windows sandbox helpers、`rg` 和 package manifest。
+Node 启动 App Server 时通过环境继承同一 Node
 credential，不把 token 放入进程参数：
 
 ```toml
