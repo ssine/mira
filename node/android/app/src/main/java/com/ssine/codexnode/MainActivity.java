@@ -53,6 +53,13 @@ public final class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        NodeConfig config = NodeConfig.load(this);
+        // Some OEMs suppress package-replaced/boot broadcasts. Opening the app
+        // can safely resume an opted-in node, but never undo an explicit Stop.
+        if (config.autoStart && config.validate() == null
+                && !NodeConfig.isUserStopped(this) && !MiraNodeService.isRunning()) {
+            MiraNodeService.start(this);
+        }
         handler.post(statusUpdater);
     }
 
@@ -117,6 +124,11 @@ public final class MainActivity extends Activity {
         button(content, "Grant non-root screen capture", view -> requestScreenCapture());
         button(content, "Grant shared-file access", view -> requestAllFilesAccess());
         button(content, "Check for updates", view -> checkForUpdates((Button) view));
+        TextView backgroundHelp = new TextView(this);
+        backgroundHelp.setText("If Android blocks restart after an upgrade or reboot, allow Auto-launch / background activity in system app settings. Opening Mira also resumes an opted-in node; Stop keeps it stopped.");
+        content.addView(backgroundHelp);
+        button(content, "Android app settings", view -> startActivity(new Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))));
         return scroll;
     }
 
@@ -227,6 +239,12 @@ public final class MainActivity extends Activity {
     }
 
     private void updateStatus() {
+        if (!MiraNodeService.isRunning()) {
+            statusView.setText(NodeConfig.isUserStopped(this)
+                    ? "Status: Stopped by user"
+                    : "Status: Service is not running. Tap Save and start. Android may have blocked background startup.");
+            return;
+        }
         SharedPreferences prefs = getSharedPreferences(NodeConfig.PREFS, MODE_PRIVATE);
         String status = prefs.getString(NodeConfig.KEY_STATUS, "Stopped");
         String mode = prefs.getString(NodeConfig.KEY_EFFECTIVE_MODE, "none");

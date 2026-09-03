@@ -76,3 +76,10 @@ Root-created Node identities inherit the app-private directory's owner and SELin
 0600 permissions. Switching root/app mode must keep the same credential and approval; never solve
 ownership failures by making credentials world-readable or disabling SELinux. A root launch also
 repairs identities created by earlier builds without replacing their content.
+
+Enable **Start after reboot or app upgrade** to opt into recovery. Some OEMs (including the tested
+ColorOS device) block the package-replaced broadcast unless Auto-launch/background activity is
+allowed in system app settings. Opening Mira resumes an opted-in node when the service is absent;
+an explicit **Stop** remains stopped. The UI must not display a persisted "Connected" status when
+the service no longer exists. **Android app settings** opens the platform configuration page.
+This is not a promise that every OEM will keep an app alive indefinitely.
