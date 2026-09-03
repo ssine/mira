@@ -64,6 +64,13 @@ try {
     nodes.push({ root, identity, key, state });
   }
   const [a,b] = nodes;
+  if (process.env.MIRA_SSH_WINDOWS_BIN) {
+    const binaryDir = process.env.MIRA_SSH_WINDOWS_BIN;
+    await fs.copyFile(path.join(repo, "tests/windows_ssh_e2e.ps1"), path.join(binaryDir, "windows_ssh_e2e.ps1"));
+    const winPath = input => execFileSync("wslpath", ["-w", input], { encoding: "utf8" }).trim();
+    const out = execFileSync("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", winPath(path.join(binaryDir, "windows_ssh_e2e.ps1")), "-BinaryDirectory", winPath(binaryDir), "-ServerUrl", url, "-LinuxNode", b.key], { encoding: "utf8", timeout: 180_000 });
+    console.log(out.trim());
+  }
   let result = await cli(a.identity, ["ssh", b.key, "--", "printf OUT; printf ERR >&2; exit 7"]);
   assert.equal(result.code, 7, result.stderr); assert.equal(result.stdout.toString(), "OUT"); assert.equal(result.stderr, "ERR");
   result = await cli(a.identity, ["ssh", b.key, "--", "cat"], { input: Buffer.from([0, 1, 255, 128, 13, 10]) });

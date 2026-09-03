@@ -55,11 +55,14 @@ func (fs *sshFileSystem) RealPath(value string) (string, error) {
 	if !strings.HasPrefix(value, "/") {
 		value = path.Join(fs.wirePath(fs.runtime.roots[0]), value)
 	}
-	p, err := fs.nativePath(value, true)
+	_, err := fs.nativePath(value, true)
 	if err != nil {
 		return "", err
 	}
-	return fs.wirePath(p), nil
+	// Keep the configured namespace, including Windows 8.3 aliases and Unix
+	// symlinked roots. Returning a resolved long path could fall outside the
+	// lexical configured root on the next request even though it is the same file.
+	return path.Clean(value), nil
 }
 
 type sshOpenFile struct {
