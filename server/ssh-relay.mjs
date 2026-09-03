@@ -75,6 +75,10 @@ export class SSHRelay {
     } catch (error) { this.end(sessionId, "open failed"); throw error; }
   }
 
+  sessionCount(nodeId) {
+    return [...this.sessions.values()].filter(s => s.sourceNodeId === nodeId || s.targetNodeId === nodeId).length;
+  }
+
   async upgrade(request, socket, head, sessionId, side) {
     const reject = status => { socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); };
     const protocols = String(request.headers["sec-websocket-protocol"] ?? "").split(",").map(v => v.trim());

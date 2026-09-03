@@ -29,7 +29,10 @@ test("disconnect/revocation closes both caller and target sessions, idempotently
   for (const [id, source, target] of [["a","revoked","other"], ["b","other","revoked"], ["c","other","another"]]) {
     relay.sessions.set(id, { sessionId: id, sourceNodeId: source, targetNodeId: target, principal: {}, streams: { source: { destroy() { destroyed++; } } }, sockets: { target: { terminate() { terminated++; } } } });
   }
+  assert.equal(relay.sessionCount("revoked"), 2);
+  assert.equal(relay.sessionCount("other"), 3);
   relay.disconnectNode("revoked"); relay.disconnectNode("revoked");
+  assert.equal(relay.sessionCount("revoked"), 0);
   assert.equal(relay.sessions.size, 1); assert.equal(destroyed, 2); assert.equal(terminated, 2); assert.equal(notified, 2);
   relay.close();
 });

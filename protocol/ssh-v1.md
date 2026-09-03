@@ -183,3 +183,8 @@ revocation and child cleanup. Platform compile checks alone are not Android APK 
 Upgrade Server first (append-only migration 9), then Node/CLI pairs. Old Nodes remain usable for
 their existing capabilities; SSH needs the new target Node and caller CLI. No existing identity
 or conversation data is deleted, and no Caddy port/SSH listener must be opened.
+
+Since 0.10.1, Node detail/list responses include `sshSessionCount`, counting pending and attached
+relay sessions where the Node is either endpoint (self-connections count once). `mira update`
+refuses a nonzero count unless explicitly forced. Like the existing process/PTY preflight, this
+is an advisory check, not an atomic drain or distributed update lock.

@@ -275,7 +275,8 @@ async function route(request, response) {
     const principal = await authorize(request, response, "trusted", { clientType: "cli" });
     if (!principal) return;
     const includeRevoked = principal.kind === "admin" && url.searchParams.get("includeRevoked") === "true";
-    sendJson(response, 200, { data: await listNodes(pool, { includeRevoked }) });
+    const nodes = await listNodes(pool, { includeRevoked });
+    sendJson(response, 200, { data: nodes.map(node => ({ ...node, sshSessionCount: sshRelay.sessionCount(node.nodeId) })) });
     return;
   }
   match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})$/i);
@@ -284,7 +285,7 @@ async function route(request, response) {
     if (!principal) return;
     const node = await getNode(pool, match[1], { includeRevoked: principal.kind === "admin" });
     if (!node) errorJson(response, 404, "Node not found", "not_found");
-    else sendJson(response, 200, node);
+    else sendJson(response, 200, { ...node, sshSessionCount: sshRelay.sessionCount(node.nodeId) });
     return;
   }
   if (request.method === "GET" && url.pathname === "/v1/dynamic-tools") {

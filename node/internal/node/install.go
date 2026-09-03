@@ -187,6 +187,9 @@ func updatePreflight(ctx context.Context, options cliOptions) error {
 	if node["status"] != "online" {
 		return fmt.Errorf("Node is offline; cannot verify active sessions. Restore its connection or explicitly use --force")
 	}
+	if count, ok := node["sshSessionCount"].(float64); ok && count > 0 {
+		return fmt.Errorf("active SSH session exists; close it first or explicitly use --force")
+	}
 	for _, capability := range []string{"process", "pty"} {
 		result, _, err := client.invoke(ctx, client.identity.NodeID, capability, map[string]any{"action": "list"})
 		if err != nil {

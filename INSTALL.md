@@ -1,6 +1,6 @@
 # 安装、接入与更新
 
-Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.9.4**，发布来源为
+Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.10.1**，发布来源为
 [GitHub Releases](https://github.com/ssine/mira/releases)。无需安装 Go、Node.js 或 Termux。
 官方 Codex 是独立软件，它的版本号不与 Mira 绑定。
 
@@ -97,7 +97,7 @@ mira update
 服务。旧目录保留，身份/配置不变。默认不会把较新的开发版降级到较旧的 latest。
 操作需要能访问 GitHub；下载或校验失败不会替换现有程序。
 
-更新前检查当前 Node 上的运行中托管进程、PTY、Codex App Server；存在活跃会话或无法确认
+更新前检查当前 Node 上的运行中托管进程、PTY、Codex App Server 和入站/出站 SSH；存在活跃会话或无法确认
 状态时拒绝更新。关闭会话后重试；明确接受中断时可用 `mira update --force`。
 已批准但离线的 Node 也会拒绝普通更新，因为无法确认其本地会话是否仍在运行。
 此检查是尽力而为，不是分布式 drain/锁，检查后仍应避免开始新任务。
@@ -120,6 +120,8 @@ Home Server 上由 Nix/systemd/Compose 管理的 Server 与 Node，应继续由�
 HTTPS/WSS 接入建议使用 0.9.2 或更新版本；它修复了 HTTP/2 注册后 WebSocket TLS 协商失败的问题。
 Server 建议使用 0.9.3 或更新版本，避免节点升级重连时，旧连接的关闭事件把新连接错误标记为离线。
 Android 域名接入需要 0.9.4 或更新版本；APK 通过 NDK/cgo 使用 Android 系统 DNS，无需用户安装额外组件。
+SSH/SFTP 需要 Server 与目标 Node 升级至 0.10.1；调用方 CLI 也需升级。先升级并备份 Server，
+再逐台更新 Node。0.10.0 为开发验收候选版，正式版使用 0.10.1，确保 Android 也能发现更新。
 
 ## 发布维护
 

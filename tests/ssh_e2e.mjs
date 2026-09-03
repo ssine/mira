@@ -94,6 +94,12 @@ try {
   const pidFile = path.join(b.root, "ssh-child.pid");
   const alive = cli(a.identity, ["ssh", b.key, "--", `echo $$ > '${pidFile}'; exec sleep 60`], { timeout: 10_000 });
   const childPID = await wait(async () => { try { return Number((await fs.readFile(pidFile)).toString().trim()); } catch { return null; } }, "SSH child PID");
+  for (const node of [a, b]) {
+    const status = await adminRequest(url, admin, `/v1/nodes/${node.state.nodeId}`);
+    assert(status.sshSessionCount > 0, "SSH count must include both endpoints");
+    const update = await cli(node.identity, ["update", "--version", "0.0.1"]);
+    assert.notEqual(update.code, 0); assert.match(update.stderr, /active SSH session/);
+  }
   await adminRequest(url, admin, `/v1/admin/nodes/${a.state.nodeId}/revoke`, { method: "POST", body: "{}" });
   result = await alive; assert.notEqual(result.code, 0);
   await wait(async () => { try { process.kill(childPID, 0); return false; } catch (err) { return err.code === "ESRCH"; } }, "SSH child reaped after revocation");

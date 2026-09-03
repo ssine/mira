@@ -9,7 +9,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 管理员网站已连通。0.9.0 增加原生 Windows ConPTY、统一版本、安装器和签名 APK 发布。
 durable scheduler、writer lease、完整恢复演练和集群批量更新仍待完成。
 
-0.10.0 候选版加入真正的 SSH/SFTP 节点互连：`mira ssh <设备>`、`mira scp`、`mira sftp`。
+0.10.1 加入真正的 SSH/SFTP 节点互连：`mira ssh <设备>`、`mira scp`、`mira sftp`。
 客户端内置，目标 Node 从同一二进制启动独立 SSH worker，通过单独的反向 WSS 数据流连接；
 不需要开放 22 端口或安装系统 sshd。权限沿用已批准的 Node 身份，具体功能、限制和使用方式见
 [SSH 协议与使用说明](./protocol/ssh-v1.md)。

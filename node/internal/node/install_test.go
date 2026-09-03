@@ -89,11 +89,13 @@ func TestUpdatePreflightRequiresKnownIdleState(t *testing.T) {
 	for _, test := range []struct {
 		name, status, appServer, want string
 		busy                          bool
+		sshSessions                   int
 	}{
-		{"offline", "offline", "stopped", "offline", false},
-		{"app-server", "online", "running", "App Server is active", false},
-		{"process", "online", "stopped", "active process", true},
-		{"idle", "online", "stopped", "", false},
+		{"offline", "offline", "stopped", "offline", false, 0},
+		{"app-server", "online", "running", "App Server is active", false, 0},
+		{"process", "online", "stopped", "active process", true, 0},
+		{"ssh", "online", "stopped", "active SSH", false, 1},
+		{"idle", "online", "stopped", "", false, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var nodeID string
@@ -104,7 +106,7 @@ func TestUpdatePreflightRequiresKnownIdleState(t *testing.T) {
 					return
 				}
 				if r.Method == http.MethodGet {
-					_ = json.NewEncoder(w).Encode(map[string]any{"status": test.status, "reportedAppServer": map[string]any{"status": test.appServer}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"status": test.status, "sshSessionCount": test.sshSessions, "reportedAppServer": map[string]any{"status": test.appServer}})
 					return
 				}
 				_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"processes": []map[string]any{{"running": test.busy}}, "sessions": []any{}}})
