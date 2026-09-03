@@ -25,7 +25,8 @@ export class SSHRelay {
   }
 
   async keys(nodeId) {
-    const result = await this.pool.query(`SELECT keys.host_key, keys.client_key, credentials.credential_id
+    const result = await this.pool.query(`SELECT keys.host_key, keys.client_key, credentials.credential_id,
+      nodes.capabilities->'ssh' AS ssh_enabled
       FROM mira_node_ssh_keys keys JOIN mira_node_credentials credentials USING (credential_id)
       JOIN codex_nodes nodes USING (node_id)
       WHERE nodes.node_id = $1 AND nodes.approval_status = 'approved' AND credentials.revoked_at IS NULL`, [nodeId]);
@@ -51,7 +52,7 @@ export class SSHRelay {
   async create(principal, targetNodeId, request) {
     const [source, target] = await Promise.all([this.keys(principal.nodeId), this.keys(targetNodeId)]);
     if (!source || source.credential_id !== principal.credentialId) return fail(409, "publish this Node's SSH public keys first");
-    if (!target || !this.nodeChannel.isConnected(targetNodeId)) return fail(409, "target Node is offline or does not support SSH yet");
+    if (!target || target.ssh_enabled !== true || !this.nodeChannel.isConnected(targetNodeId)) return fail(409, "target Node is offline or does not support SSH yet");
     const count = nodeId => [...this.sessions.values()].filter(s => s.sourceNodeId === nodeId || s.targetNodeId === nodeId).length;
     if (this.sessions.size >= maxSessions || count(principal.nodeId) >= maxPerNode || count(targetNodeId) >= maxPerNode) {
       return fail(429, "SSH session limit reached");

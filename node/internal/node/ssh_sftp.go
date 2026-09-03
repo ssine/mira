@@ -296,9 +296,7 @@ func (fs *sshFileSystem) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 }
 
 func (fs *sshFileSystem) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
-	copy := *r
-	copy.Method = "Lstat"
-	return fs.Filelist(&copy)
+	return fs.Filelist(&sftp.Request{Method: "Lstat", Filepath: r.Filepath})
 }
 func (fs *sshFileSystem) Readlink(value string) (string, error) {
 	p, err := fs.nativePath(value, true)
