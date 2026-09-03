@@ -123,6 +123,18 @@ jobs:
           cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
             --target "$TARGET" --release --locked "${build_args[@]}"
 
+      - name: Strip Linux release binaries
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          release_dir="upstream-codex/codex-rs/target/${TARGET}/release"
+          for binary in codex codex-code-mode-host; do
+            strip --strip-debug --strip-unneeded "$release_dir/$binary"
+          done
+
       - name: Assemble canonical Codex package
         shell: bash
         env:
