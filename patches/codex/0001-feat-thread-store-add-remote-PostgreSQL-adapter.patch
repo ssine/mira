@@ -1386,7 +1386,7 @@ index ee0fd5a..48b5146 100644
 +    RemoteHttp {
 +        endpoint: String,
 +        store_id: String,
-+        bearer_token: String,
++        bearer_token: Option<String>,
 +    },
      #[schemars(skip)]
      InMemory {
@@ -1395,7 +1395,7 @@ diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
 index 19484e2..4211e74 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -3511,6 +3511,32 @@
+@@ -3511,6 +3511,31 @@
              "type"
            ],
            "type": "object"
@@ -1419,7 +1419,6 @@ index 19484e2..4211e74 100644
 +            }
 +          },
 +          "required": [
-+            "bearer_token",
 +            "endpoint",
 +            "store_id",
 +            "type"
@@ -1486,7 +1485,7 @@ index 96da2f7..9972267 100644
 +        }) => ThreadStoreConfig::RemoteHttp {
 +            endpoint,
 +            store_id,
-+            bearer_token,
++            bearer_token: bearer_token.or_else(|| std::env::var("MIRA_NODE_TOKEN").ok()).unwrap_or_default(),
 +        },
          Some(ThreadStoreToml::InMemory { id }) => ThreadStoreConfig::InMemory { id },
          None => ThreadStoreConfig::Local,
@@ -2387,4 +2386,3 @@ index 0000000..a670e97
 +}
 -- 
 2.51.2
-

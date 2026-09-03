@@ -6,23 +6,25 @@
 /.rustup/
 /server/node_modules/
 /.android-sdk/
-/android/library/dist/
-/android/.gradle/
-/android/build/
-/android/app/build/
-/android/local.properties
+/node/dist/
+/node/mira-node
+/node/android/.gradle/
+/node/android/build/
+/node/android/app/build/
+/node/android/local.properties
 
 # Local service configuration and logs.
 .env
 .env.*
 !.env.example
 *.log
-/node-agent/state.json
+/node/state.json
 
 # End-to-end test state. Client homes can contain auth tokens and shell snapshots.
-/runtime/client-*/
-/runtime/workspace/
-/runtime/*.dump
+/tests/client-*/
+/tests/workspace/
+/tests/bin/
+/tests/*.dump
 __pycache__/
 *.py[cod]
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mira device control"
+  short_description: "Operate trusted Mira Nodes from Codex"
+  default_prompt: "Use Mira to inspect or operate one of my approved devices."

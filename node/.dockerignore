@@ -1,0 +1,4 @@
+android/
+dist/
+legacy-js/
+**/*_test.go

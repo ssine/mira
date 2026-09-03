@@ -121,6 +121,193 @@ const migrations = [
         updated_at = NOW();
     `,
   },
+  {
+    version: 5,
+    name: "mira-node-terminology",
+    sql: `
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'codex_nodes'
+            AND column_name = 'agent_version'
+        ) AND NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'codex_nodes'
+            AND column_name = 'node_version'
+        ) THEN
+          ALTER TABLE codex_nodes RENAME COLUMN agent_version TO node_version;
+        END IF;
+      END $$;
+    `,
+  },
+  {
+    version: 6,
+    name: "admin-node-identity-and-audit",
+    sql: `
+      CREATE TABLE IF NOT EXISTS mira_admin_users (
+        admin_user_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        singleton BOOLEAN NOT NULL DEFAULT TRUE UNIQUE CHECK (singleton),
+        username TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS mira_admin_users_username_idx
+        ON mira_admin_users (LOWER(username));
+
+      CREATE TABLE IF NOT EXISTS mira_admin_sessions (
+        session_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        admin_user_id UUID NOT NULL REFERENCES mira_admin_users(admin_user_id) ON DELETE CASCADE,
+        token_hash TEXT NOT NULL UNIQUE,
+        csrf_token_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX IF NOT EXISTS mira_admin_sessions_expiry_idx
+        ON mira_admin_sessions (expires_at) WHERE revoked_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS mira_node_enrollment_requests (
+        enrollment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        credential_id UUID NOT NULL UNIQUE,
+        credential_secret_hash TEXT NOT NULL,
+        credential_fingerprint TEXT NOT NULL,
+        node_key TEXT NOT NULL,
+        verification_code TEXT NOT NULL,
+        hostname TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        architecture TEXT NOT NULL,
+        node_mode TEXT NOT NULL,
+        node_version TEXT NOT NULL,
+        capabilities JSONB NOT NULL,
+        codex_installations JSONB NOT NULL,
+        default_desired_app_server JSONB NOT NULL,
+        machine_status JSONB NOT NULL DEFAULT '{}'::jsonb,
+        requested_from TEXT,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'approved', 'rejected', 'expired')),
+        decision_note TEXT,
+        approved_by UUID REFERENCES mira_admin_users(admin_user_id) ON DELETE SET NULL,
+        requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        approved_at TIMESTAMPTZ,
+        rejected_at TIMESTAMPTZ,
+        node_id UUID
+      );
+
+      CREATE INDEX IF NOT EXISTS mira_node_enrollments_status_idx
+        ON mira_node_enrollment_requests (status, requested_at DESC);
+      CREATE INDEX IF NOT EXISTS mira_node_enrollments_key_idx
+        ON mira_node_enrollment_requests (node_key, requested_at DESC);
+
+      ALTER TABLE codex_nodes
+        ADD COLUMN IF NOT EXISTS enrollment_id UUID
+          REFERENCES mira_node_enrollment_requests(enrollment_id) ON DELETE SET NULL,
+        ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'revoked'
+          CHECK (approval_status IN ('approved', 'revoked')),
+        ADD COLUMN IF NOT EXISTS approved_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS last_authenticated_at TIMESTAMPTZ;
+
+      UPDATE codex_nodes SET approval_status = 'revoked', revoked_at = COALESCE(revoked_at, NOW())
+        WHERE enrollment_id IS NULL;
+
+      ALTER TABLE mira_node_enrollment_requests
+        DROP CONSTRAINT IF EXISTS mira_node_enrollment_requests_node_id_fkey;
+      ALTER TABLE mira_node_enrollment_requests
+        ADD CONSTRAINT mira_node_enrollment_requests_node_id_fkey
+        FOREIGN KEY (node_id) REFERENCES codex_nodes(node_id) ON DELETE SET NULL;
+
+      CREATE TABLE IF NOT EXISTS mira_node_credentials (
+        credential_id UUID PRIMARY KEY,
+        node_id UUID NOT NULL REFERENCES codex_nodes(node_id) ON DELETE CASCADE,
+        enrollment_id UUID REFERENCES mira_node_enrollment_requests(enrollment_id) ON DELETE SET NULL,
+        secret_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_used_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        UNIQUE (enrollment_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS mira_node_credentials_node_idx
+        ON mira_node_credentials (node_id) WHERE revoked_at IS NULL;
+
+      CREATE TABLE IF NOT EXISTS mira_audit_events (
+        audit_event_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        action TEXT NOT NULL,
+        actor_type TEXT,
+        actor_admin_id UUID,
+        actor_node_id UUID,
+        client_type TEXT,
+        target_node_id UUID,
+        thread_id TEXT,
+        request_id TEXT,
+        success BOOLEAN NOT NULL DEFAULT TRUE,
+        error_code TEXT,
+        request_address TEXT,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS mira_audit_events_created_idx
+        ON mira_audit_events (created_at DESC);
+
+      CREATE OR REPLACE FUNCTION mira_reject_audit_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'mira_audit_events is append-only';
+      END;
+      $$;
+
+      DROP TRIGGER IF EXISTS mira_audit_events_append_only ON mira_audit_events;
+      CREATE TRIGGER mira_audit_events_append_only
+        BEFORE UPDATE OR DELETE ON mira_audit_events
+        FOR EACH ROW EXECUTE FUNCTION mira_reject_audit_mutation();
+    `,
+  },
+  {
+    version: 7,
+    name: "remove-secrets-from-central-app-server-overrides",
+    sql: `
+      UPDATE codex_nodes AS nodes
+      SET desired_app_server = jsonb_set(
+        nodes.desired_app_server,
+        '{configOverrides}',
+        COALESCE(
+          (
+            SELECT jsonb_agg(value)
+            FROM jsonb_array_elements_text(nodes.desired_app_server->'configOverrides') AS value
+            WHERE value !~* '(bearer_token|access_token|password|secret|api_key)[[:space:]]*='
+          ),
+          '[]'::jsonb
+        )
+      )
+      WHERE jsonb_typeof(nodes.desired_app_server->'configOverrides') = 'array';
+
+      UPDATE mira_node_enrollment_requests AS requests
+      SET default_desired_app_server = jsonb_set(
+        requests.default_desired_app_server,
+        '{configOverrides}',
+        COALESCE(
+          (
+            SELECT jsonb_agg(value)
+            FROM jsonb_array_elements_text(requests.default_desired_app_server->'configOverrides') AS value
+            WHERE value !~* '(bearer_token|access_token|password|secret|api_key)[[:space:]]*='
+          ),
+          '[]'::jsonb
+        )
+      )
+      WHERE jsonb_typeof(requests.default_desired_app_server->'configOverrides') = 'array';
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

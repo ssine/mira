@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Mira · 私有设备网络</title>
+    <link rel="stylesheet" href="/vendor/xterm.css">
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Mira 首页"><span class="mark">M</span><span>Mira</span></a>
+      <div class="server-state"><span id="healthDot" class="dot"></span><span id="healthText">正在连接 Server</span></div>
+      <button id="logoutButton" class="ghost hidden" type="button">退出</button>
+    </header>
+
+    <main>
+      <section id="loginView" class="login-shell hidden">
+        <div class="login-copy">
+          <p class="eyebrow">PRIVATE EXECUTION FABRIC</p>
+          <h1>你的设备，<br><em>一个控制面。</em></h1>
+          <p>批准可信设备，观察运行状态，并让 Codex 在 Windows、WSL、Linux 与 Android 之间安全协作。</p>
+          <div class="trust-line"><span>PostgreSQL 唯一事实源</span><span>设备主动回连</span><span>本地权限边界</span></div>
+        </div>
+        <form id="loginForm" class="login-card">
+          <div><p class="eyebrow">ADMIN CONSOLE</p><h2>登录 Mira</h2><p class="muted">管理员密码只用于此控制台，不会下发到 Node。</p></div>
+          <label>账号<input id="username" name="username" autocomplete="username" value="admin" required></label>
+          <label>密码<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+          <p id="loginError" class="error hidden" role="alert"></p>
+          <button class="primary" type="submit">进入控制台 <span>→</span></button>
+        </form>
+      </section>
+
+      <section id="setupView" class="setup hidden">
+        <p class="eyebrow">ONE-TIME SETUP</p><h1>先创建管理员</h1>
+        <p>Server 已连接数据库，但还没有管理员。请在 Server 主机本地执行：</p>
+        <code>cd server &amp;&amp; npm run admin -- set-password admin</code>
+        <p class="muted">设置完成后重启 Server，再刷新此页面。密码不会写入环境变量或仓库。</p>
+      </section>
+
+      <section id="dashboardView" class="dashboard hidden">
+        <div class="hero-row">
+          <div><p class="eyebrow">CONTROL PLANE</p><h1>设备网络</h1><p class="muted">批准接入、查看健康状态、选择 Codex 的运行位置。</p></div>
+          <button id="refreshButton" class="secondary" type="button">刷新状态</button>
+        </div>
+        <div class="metrics" aria-label="设备摘要">
+          <article><span>在线 Node</span><strong id="onlineCount">—</strong><small>Reverse channel</small></article>
+          <article><span>待审批</span><strong id="pendingCount">—</strong><small>15 分钟内有效</small></article>
+          <article><span>已批准设备</span><strong id="approvedCount">—</strong><small>Trusted fabric</small></article>
+          <article><span>存储后端</span><strong class="word">PG</strong><small>唯一事实来源</small></article>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head"><div><p class="eyebrow">ENROLLMENTS</p><h2>接入申请</h2></div><span class="hint">核对设备上显示的六位验证码</span></div>
+          <div id="enrollmentList" class="enrollment-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><div><p class="eyebrow">NODES</p><h2>已知设备</h2></div><label class="toggle"><input id="showRevoked" type="checkbox"><span></span>显示已撤销</label></div>
+          <div id="nodeGrid" class="node-grid"></div>
+        </section>
+
+        <section class="panel audit-panel">
+          <div class="panel-head"><div><p class="eyebrow">AUDIT</p><h2>最近活动</h2></div><span class="hint">敏感内容不会进入审计 metadata</span></div>
+          <div class="table-wrap"><table><thead><tr><th>时间</th><th>动作</th><th>身份</th><th>目标</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
+        </section>
+      </section>
+
+      <section id="workspaceView" class="workspace hidden" aria-labelledby="workspaceTitle">
+        <div class="workspace-bar">
+          <button id="workspaceBack" class="back-button" type="button" aria-label="返回设备列表">← 返回设备列表</button>
+          <div class="workspace-identity">
+            <span id="workspaceStatus" class="badge">offline</span>
+            <div><h1 id="workspaceTitle">设备工作台</h1><p id="workspaceSubtitle" class="muted"></p></div>
+          </div>
+          <button id="workspaceRefresh" class="secondary" type="button">刷新节点</button>
+        </div>
+
+        <div class="workspace-tabs" role="tablist" aria-label="设备工具">
+          <button class="workspace-tab active" type="button" role="tab" aria-selected="true" data-workspace-tab="overview">概况</button>
+          <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="files">文件浏览器</button>
+          <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="shell">交互式 Shell</button>
+          <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="debug">能力调试</button>
+        </div>
+
+        <div id="workspaceNotice" class="workspace-notice hidden" role="status"></div>
+
+        <section id="overviewPanel" class="workspace-panel" data-workspace-panel="overview">
+          <div class="workspace-metrics">
+            <article><span>系统进程</span><strong id="systemProcessCount">—</strong><small id="processCountHint">等待节点响应</small></article>
+            <article><span>CPU 核心</span><strong id="nodeCpuCount">—</strong><small id="nodeLoadHint">主机运行状态</small></article>
+            <article><span>可用内存</span><strong id="nodeMemoryAvailable">—</strong><small id="nodeMemoryHint">—</small></article>
+            <article><span>运行时间</span><strong id="nodeUptime">—</strong><small id="nodeRuntimeHint">—</small></article>
+          </div>
+          <div class="overview-grid">
+            <article class="tool-card"><p class="eyebrow">DEVICE</p><h2>节点信息</h2><dl id="nodeFacts" class="facts"></dl></article>
+            <article class="tool-card"><p class="eyebrow">CAPABILITIES</p><h2>可用能力</h2><div id="workspaceCapabilities" class="capabilities"></div></article>
+            <article class="tool-card resource-card"><p class="eyebrow">RESOURCES</p><h2>资源使用</h2><div id="memoryResource"></div><div id="diskResources" class="resource-list"></div></article>
+            <article class="tool-card network-card"><p class="eyebrow">NETWORK</p><h2>网络接口</h2><div id="networkInterfaces" class="network-list"></div></article>
+          </div>
+        </section>
+
+        <section id="filesPanel" class="workspace-panel hidden" data-workspace-panel="files">
+          <div class="file-toolbar">
+            <label>文件根目录<select id="fileRootSelect" aria-label="选择文件根目录"></select></label>
+            <button id="fileRefresh" class="secondary" type="button">刷新目录</button>
+          </div>
+          <p class="file-root-note">这里列出的是当前 Node 的文件入口，不是磁盘容量限制。默认可浏览整机；只有在 Node 上显式配置 <code>MIRA_NODE_ALLOWED_ROOTS</code> 才会收紧范围。</p>
+          <nav id="fileBreadcrumbs" class="breadcrumbs" aria-label="当前路径"></nav>
+          <div class="file-layout">
+            <div class="file-list-card">
+              <div class="file-list-head"><span>名称</span><span>大小</span><span>修改时间</span></div>
+              <div id="fileList" class="file-list"></div>
+            </div>
+            <aside class="preview-card">
+              <div class="preview-head"><div><p class="eyebrow">READ ONLY</p><h2 id="previewName">文件预览</h2></div><button id="previewClose" class="ghost hidden" type="button">关闭</button></div>
+              <div id="previewMeta" class="preview-meta">选择一个文本文件。最多读取前 256 KiB，不提供写入或删除操作。</div>
+              <pre id="filePreview" class="file-preview" tabindex="0">尚未选择文件</pre>
+            </aside>
+          </div>
+        </section>
+
+        <section id="shellPanel" class="workspace-panel hidden" data-workspace-panel="shell">
+          <div class="shell-card">
+            <div class="shell-head">
+              <div><p class="eyebrow">REMOTE PTY</p><h2>交互式 Shell</h2><p id="shellState" class="muted">尚未连接</p></div>
+              <div class="shell-actions"><button id="shellInterrupt" class="ghost hidden" type="button">Ctrl-C</button><button id="shellClear" class="ghost" type="button">清屏</button><button id="shellConnect" class="approve" type="button">连接 Shell</button><button id="shellDisconnect" class="danger hidden" type="button">断开</button></div>
+            </div>
+            <p class="shell-warning">Shell 拥有 mira-node 所在操作系统用户的权限，不受文件浏览器 allowed roots 限制。请只执行你明确认可的命令。</p>
+            <div id="terminalOutput" class="terminal-output" role="application" aria-label="Mira 远程交互式 Shell"></div>
+            <p class="shell-input-hint">连接后点击终端即可键入；支持方向键、Tab、复制粘贴和终端控制序列。</p>
+          </div>
+        </section>
+
+        <section id="debugPanel" class="workspace-panel hidden" data-workspace-panel="debug">
+          <div class="debug-intro">
+            <div><p class="eyebrow">AGENT DYNAMIC TOOLS</p><h2>能力调试器</h2><p>这里直接读取 Server 注入 Codex App Server 的最终工具定义，并通过同一条 <code>home_nodes</code> 调度路径执行。</p></div>
+            <div class="debug-legend"><span><i class="available"></i>当前节点可调用</span><span><i class="unavailable"></i>当前节点未提供</span></div>
+          </div>
+          <p class="debug-warning">调试不是模拟：文件写入、进程、PTY 和屏幕输入等操作会真实发生在所选节点上，并进入 Mira 审计日志。</p>
+          <div class="debug-layout">
+            <aside class="debug-tool-pane">
+              <div class="debug-pane-head"><span id="debugNamespace">home_nodes</span><small id="debugToolCount">正在读取工具定义…</small></div>
+              <div id="debugToolList" class="debug-tool-list"></div>
+            </aside>
+            <div class="debug-main">
+              <section class="debug-schema-card">
+                <div class="debug-card-head"><div><p class="eyebrow">TOOL SCHEMA</p><h2 id="debugToolTitle">选择一个工具</h2></div><span id="debugToolAvailability" class="debug-availability"></span></div>
+                <p id="debugToolDescription" class="muted">工具说明与 JSON Schema 会显示在这里。</p>
+                <div id="debugActions" class="debug-actions"></div>
+                <details class="schema-details"><summary>查看 Agent 收到的 inputSchema</summary><pre id="debugToolSchema" class="debug-code">{}</pre></details>
+              </section>
+              <form id="debugForm" class="debug-call-card">
+                <div class="debug-card-head"><div><p class="eyebrow">REAL INVOCATION</p><h2>调用参数</h2></div><label class="timeout-field">超时（ms）<input id="debugTimeout" type="number" min="100" max="120000" step="100" value="30000"></label></div>
+                <div class="debug-preset-head"><span>常用参数</span><small>已经按所选 action 预制</small></div>
+                <div id="debugPresetFields" class="debug-preset-fields"></div>
+                <details id="debugAdvanced" class="debug-advanced">
+                  <summary>高级模式：直接编辑 JSON arguments</summary>
+                  <textarea id="debugArguments" class="debug-editor" spellcheck="false" autocomplete="off" aria-describedby="debugCallHint">{}</textarea>
+                </details>
+                <div class="debug-call-actions"><span id="debugCallHint" class="muted">nodeId 会预填为当前节点，可直接修改参数。</span><button id="debugRun" class="primary debug-run" type="submit">执行真实调用 <span>→</span></button></div>
+              </form>
+              <section class="debug-result-card">
+                <div class="debug-card-head"><div><p class="eyebrow">RESULT</p><h2>调用结果</h2></div><span id="debugResultMeta" class="debug-result-meta">尚未执行</span></div>
+                <img id="debugResultImage" class="debug-result-image hidden" alt="节点截图调试结果">
+                <pre id="debugResult" class="debug-code debug-result">等待调用…</pre>
+              </section>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden" role="status"></div>
+  </body>
+</html>

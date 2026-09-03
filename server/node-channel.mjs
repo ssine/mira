@@ -7,65 +7,115 @@ import {
   dynamicToolNamespace,
   dynamicToolSpecs,
 } from "./dynamic-tools.mjs";
-import { setNodeChannelStatus } from "./node-registry.mjs";
+import { getNode, setNodeChannelStatus } from "./node-registry.mjs";
 
 function jsonMessage(data) {
   return JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
 }
 
-function tokenProtocol(token) {
-  return `auth.${Buffer.from(token).toString("base64url")}`;
+function protocolToken(request) {
+  const encoded = String(request.headers["sec-websocket-protocol"] ?? "")
+    .split(",").map((value) => value.trim())
+    .find((value) => value.startsWith("auth."))?.slice(5);
+  if (!encoded) return null;
+  try {
+    return Buffer.from(encoded, "base64url").toString("utf8");
+  } catch {
+    return null;
+  }
 }
 
 function mergeDynamicTools(existing) {
   const tools = Array.isArray(existing) ? existing : [];
-  return [
-    ...tools.filter((tool) => tool?.name !== dynamicToolNamespace),
-    ...dynamicToolSpecs(),
-  ];
+  return [...tools.filter((tool) => tool?.name !== dynamicToolNamespace), ...dynamicToolSpecs()];
+}
+
+function rejectUpgrade(socket, status, label) {
+  socket.write(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  socket.destroy();
+}
+
+function channelError(message, statusCode, code) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.code = code;
+  return error;
 }
 
 export class NodeChannel {
-  constructor({ server, pool, authToken }) {
+  constructor({ server, pool, authService }) {
     this.pool = pool;
-    this.authToken = authToken;
+    this.authService = authService;
+    this.capabilityService = null;
     this.nodes = new Map();
     this.pending = new Map();
     this.proxies = new Map();
     this.wss = new WebSocketServer({
       noServer: true,
       maxPayload: 16 * 1024 * 1024,
-      handleProtocols: (protocols) =>
-        protocols.has("codex-node-v1") ? "codex-node-v1" : protocols.values().next().value,
+      handleProtocols: (protocols) => {
+        if (protocols.has("mira-node-v1")) return "mira-node-v1";
+        if (protocols.has("mira-client-v1")) return "mira-client-v1";
+        return false;
+      },
     });
-    server.on("upgrade", (request, socket, head) => this.upgrade(request, socket, head));
+    server.on("upgrade", (request, socket, head) => {
+      void this.upgrade(request, socket, head).catch((error) => {
+        console.error("websocket upgrade failed", error);
+        socket.destroy();
+      });
+    });
   }
 
-  authorized(request, url, nodeConnection) {
-    if (request.headers.authorization === `Bearer ${this.authToken}`) return true;
-    if (!nodeConnection && url.searchParams.get("access_token") === this.authToken) return true;
-    const protocols = String(request.headers["sec-websocket-protocol"] ?? "")
-      .split(",")
-      .map((value) => value.trim());
-    return nodeConnection && protocols.includes(tokenProtocol(this.authToken));
+  setCapabilityService(service) {
+    this.capabilityService = service;
   }
 
-  upgrade(request, socket, head) {
+  isConnected(nodeId) {
+    return this.nodes.get(nodeId)?.readyState === WebSocket.OPEN;
+  }
+
+  async nodeAuthorization(request, nodeId) {
+    const token = protocolToken(request);
+    const principal = token ? await this.authService.authenticateNodeToken(token, "node") : null;
+    if (!principal) return { status: 401 };
+    if (principal.revoked || principal.nodeId !== nodeId) return { status: 403 };
+    return { status: 200, principal };
+  }
+
+  async proxyAuthorization(request, targetNodeId) {
+    const token = protocolToken(request);
+    const principal = token
+      ? await this.authService.authenticateNodeToken(token, "app-server")
+      : await this.authService.authenticate(request, "app-server");
+    if (!principal) return { status: 401 };
+    if (principal.revoked || !this.authService.permits(principal, "trusted")) return { status: 403 };
+    const target = await getNode(this.pool, targetNodeId);
+    if (!target) return { status: 404 };
+    if (target.capabilities?.appServer !== true) return { status: 409 };
+    return { status: 200, principal };
+  }
+
+  async upgrade(request, socket, head) {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     const nodeMatch = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/connect$/i);
     const proxyMatch = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/app-server$/i);
     if (!nodeMatch && !proxyMatch) {
-      socket.destroy();
+      rejectUpgrade(socket, 404, "Not Found");
       return;
     }
-    if (!this.authorized(request, url, Boolean(nodeMatch))) {
-      socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
-      socket.destroy();
+    // Durable credentials are never accepted from the URL/query string.
+    const authorization = nodeMatch
+      ? await this.nodeAuthorization(request, nodeMatch[1])
+      : await this.proxyAuthorization(request, proxyMatch[1]);
+    if (authorization.status !== 200) {
+      const labels = { 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 409: "Conflict" };
+      rejectUpgrade(socket, authorization.status, labels[authorization.status]);
       return;
     }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
       if (nodeMatch) this.attachNode(nodeMatch[1], ws);
-      else this.attachProxy(proxyMatch[1], ws);
+      else this.attachProxy(proxyMatch[1], ws, authorization.principal);
     });
   }
 
@@ -74,9 +124,7 @@ export class NodeChannel {
     if (previous?.readyState === WebSocket.OPEN) previous.close(1012, "replaced");
     this.nodes.set(nodeId, ws);
     void setNodeChannelStatus(this.pool, nodeId, {
-      connected: true,
-      connectedAt: new Date().toISOString(),
-      protocolVersion: 1,
+      connected: true, connectedAt: new Date().toISOString(), protocolVersion: 1,
     });
     ws.on("message", (data) => {
       void this.handleNodeMessage(nodeId, ws, data).catch((error) => {
@@ -87,19 +135,17 @@ export class NodeChannel {
     ws.on("close", () => {
       if (this.nodes.get(nodeId) === ws) this.nodes.delete(nodeId);
       void setNodeChannelStatus(this.pool, nodeId, {
-        connected: false,
-        disconnectedAt: new Date().toISOString(),
-        protocolVersion: 1,
+        connected: false, disconnectedAt: new Date().toISOString(), protocolVersion: 1,
       });
       for (const [requestId, pending] of this.pending) {
         if (pending.nodeId === nodeId) {
           clearTimeout(pending.timeout);
-          pending.reject(new Error(`node ${nodeId} disconnected`));
+          pending.reject(channelError("target Node disconnected", 503, "node_offline"));
           this.pending.delete(requestId);
         }
       }
       for (const [sessionId, proxy] of this.proxies) {
-        if (proxy.nodeId === nodeId) {
+        if (proxy.targetNodeId === nodeId) {
           proxy.ws.close(1011, "node disconnected");
           this.proxies.delete(sessionId);
         }
@@ -121,12 +167,12 @@ export class NodeChannel {
       clearTimeout(pending.timeout);
       this.pending.delete(message.requestId);
       if (message.ok) pending.resolve(message.result);
-      else pending.reject(new Error(message.error?.message ?? "node request failed"));
+      else pending.reject(channelError(message.error?.message ?? "Node request failed", 400, "node_request_failed"));
       return;
     }
     if (message.type === "appserver.message") {
       const proxy = this.proxies.get(message.sessionId);
-      if (!proxy || proxy.nodeId !== nodeId) return;
+      if (!proxy || proxy.targetNodeId !== nodeId) return;
       await this.forwardAppServerMessage(proxy, message.payload);
       return;
     }
@@ -149,40 +195,40 @@ export class NodeChannel {
       if (proxy.ws.readyState === WebSocket.OPEN) proxy.ws.send(payload);
       return;
     }
-    if (
-      message.method === "item/tool/call" &&
-      message.params?.namespace === dynamicToolNamespace &&
-      message.id !== undefined
-    ) {
+    if (message.id !== undefined && proxy.startRequestIds.has(String(message.id))) {
+      proxy.startRequestIds.delete(String(message.id));
+      if (typeof message.result?.thread?.id === "string") proxy.threadId = message.result.thread.id;
+    }
+    if (message.method === "item/tool/call" && message.params?.namespace === dynamicToolNamespace && message.id !== undefined) {
+      const executionActor = {
+        kind: "node", nodeId: proxy.targetNodeId, subjectId: null,
+        clientType: "app-server", transport: "internal", revoked: false,
+      };
       try {
         const result = await dispatchDynamicTool(
-          this,
-          this.pool,
-          message.params.tool,
-          message.params.arguments,
-        );
-        this.trySendToNode(proxy.nodeId, {
-          type: "appserver.message",
-          sessionId: proxy.sessionId,
-          payload: JSON.stringify({
-            id: message.id,
-            result: {
-              contentItems: dynamicToolContentItems(message.params.tool, result),
-              success: true,
+          this.capabilityService, executionActor, message.params.tool,
+          message.params.arguments, {
+            requestId: String(message.id),
+            threadId: message.params?.threadId ?? proxy.threadId ?? null,
+            auditMetadata: {
+              source: "app-server",
+              ...(typeof message.params?.parentThreadId === "string" ? { parentThreadId: message.params.parentThreadId } : {}),
+              ...(typeof message.params?.subagentThreadId === "string" ? { subagentThreadId: message.params.subagentThreadId } : {}),
             },
-          }),
+          },
+        );
+        this.trySendToNode(proxy.targetNodeId, {
+          type: "appserver.message", sessionId: proxy.sessionId,
+          payload: JSON.stringify({ id: message.id, result: {
+            contentItems: dynamicToolContentItems(message.params.tool, result), success: true,
+          } }),
         });
       } catch (error) {
-        this.trySendToNode(proxy.nodeId, {
-          type: "appserver.message",
-          sessionId: proxy.sessionId,
-          payload: JSON.stringify({
-            id: message.id,
-            result: {
-              contentItems: [{ type: "inputText", text: error.message }],
-              success: false,
-            },
-          }),
+        this.trySendToNode(proxy.targetNodeId, {
+          type: "appserver.message", sessionId: proxy.sessionId,
+          payload: JSON.stringify({ id: message.id, result: {
+            contentItems: [{ type: "inputText", text: error.message }], success: false,
+          } }),
         });
       }
       return;
@@ -190,15 +236,18 @@ export class NodeChannel {
     if (proxy.ws.readyState === WebSocket.OPEN) proxy.ws.send(payload);
   }
 
-  attachProxy(nodeId, ws) {
-    if (!this.nodes.has(nodeId)) {
+  attachProxy(targetNodeId, ws, caller) {
+    if (!this.isConnected(targetNodeId)) {
       ws.close(1013, "node capability channel is offline");
       return;
     }
     const sessionId = crypto.randomUUID();
-    const proxy = { nodeId, sessionId, ws };
+    const proxy = {
+      targetNodeId, callerNodeId: caller.kind === "node" ? caller.nodeId : null,
+      sessionId, ws, threadId: null, startRequestIds: new Set(),
+    };
     this.proxies.set(sessionId, proxy);
-    if (!this.trySendToNode(nodeId, { type: "appserver.open", sessionId })) {
+    if (!this.trySendToNode(targetNodeId, { type: "appserver.open", sessionId })) {
       this.proxies.delete(sessionId);
       ws.close(1013, "node capability channel is offline");
       return;
@@ -216,23 +265,29 @@ export class NodeChannel {
           message.params ??= {};
           message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
         }
+        if (message.method === "thread/start" && message.id !== undefined) {
+          proxy.startRequestIds.add(String(message.id));
+        }
+        if (["thread/resume", "turn/start"].includes(message.method) && typeof message.params?.threadId === "string") {
+          proxy.threadId = message.params.threadId;
+        }
         payload = JSON.stringify(message);
       } catch {
-        // App-server will report malformed JSON-RPC payloads.
+        // The upstream App Server reports malformed JSON-RPC payloads.
       }
-      if (!this.trySendToNode(nodeId, { type: "appserver.message", sessionId, payload })) {
+      if (!this.trySendToNode(targetNodeId, { type: "appserver.message", sessionId, payload })) {
         ws.close(1011, "node disconnected");
       }
     });
     ws.on("close", () => {
       this.proxies.delete(sessionId);
-      this.trySendToNode(nodeId, { type: "appserver.close", sessionId });
+      this.trySendToNode(targetNodeId, { type: "appserver.close", sessionId });
     });
   }
 
   sendToNode(nodeId, message) {
     const ws = this.nodes.get(nodeId);
-    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error(`node ${nodeId} is offline`);
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw channelError("target Node is offline", 503, "node_offline");
     ws.send(JSON.stringify(message));
   }
 
@@ -245,12 +300,12 @@ export class NodeChannel {
     }
   }
 
-  invoke(nodeId, capability, params, timeoutMs = 30_000) {
+  async invoke(nodeId, capability, params, timeoutMs = 30_000) {
     const requestId = crypto.randomUUID();
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId);
-        reject(new Error(`node ${capability} request timed out`));
+        reject(channelError("capability request timed out", 504, "capability_timeout"));
       }, timeoutMs);
       this.pending.set(requestId, { nodeId, resolve, reject, timeout });
       try {
@@ -261,6 +316,17 @@ export class NodeChannel {
         reject(error);
       }
     });
+  }
+
+  disconnectNode(nodeId, reason = "revoked") {
+    const ws = this.nodes.get(nodeId);
+    if (ws?.readyState === WebSocket.OPEN) ws.close(1008, reason);
+    for (const [sessionId, proxy] of this.proxies) {
+      if (proxy.targetNodeId === nodeId || proxy.callerNodeId === nodeId) {
+        proxy.ws.close(1008, reason);
+        this.proxies.delete(sessionId);
+      }
+    }
   }
 
   close() {

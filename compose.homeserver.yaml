@@ -3,6 +3,7 @@ name: mira
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: mira
       POSTGRES_USER: mira
@@ -17,13 +18,17 @@ services:
 
   control:
     build: ./server
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://mira:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/mira
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: "8787"
-      THREAD_STORE_TOKEN: ${THREAD_STORE_TOKEN:?set THREAD_STORE_TOKEN in .env}
+      MIRA_SECURE_COOKIES: "true"
+      # Safe because the published port below is loopback-only and Caddy is the
+      # only network-facing caller. Never enable this on a directly exposed port.
+      MIRA_TRUST_PROXY_HEADERS: "true"
     ports:
-      - "0.0.0.0:8787:8787"
+      - "127.0.0.1:8787:8787"
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,18 +44,20 @@ services:
       timeout: 3s
       retries: 20
 
-  node-agent:
-    build: ./node-agent
+  node:
+    build: ./node
+    profiles: ["container-node"]
+    restart: unless-stopped
     environment:
-      CONTROL_SERVER_URL: http://control:8787
-      CONTROL_SERVER_TOKEN: ${THREAD_STORE_TOKEN:?set THREAD_STORE_TOKEN in .env}
-      NODE_AGENT_KEY: mira-homeserver-docker
-      NODE_AGENT_HEARTBEAT_SECONDS: "1"
-      NODE_AGENT_ALLOWED_ROOTS: '["/home/node"]'
+      MIRA_SERVER_URL: http://control:8787
+      MIRA_NODE_KEY: mira-homeserver-docker
+      MIRA_IDENTITY_FILE: /home/node/.config/mira/identity.json
+      MIRA_NODE_HEARTBEAT_SECONDS: "1"
       APP_SERVER_CODEX_HOME: /home/node/.codex
       APP_SERVER_LISTEN_URL: ws://127.0.0.1:4510
     volumes:
       - homeserver-codex-home:/home/node/.codex
+      - homeserver-node-identity:/home/node/.config/mira
     depends_on:
       control:
         condition: service_healthy
@@ -58,3 +65,4 @@ services:
 volumes:
   postgres-data:
   homeserver-codex-home:
+  homeserver-node-identity:

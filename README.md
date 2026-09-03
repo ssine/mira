@@ -1,230 +1,223 @@
 # Mira
 
-Mira 是一个面向个人设备集群的 Codex 控制与持久化实验项目。它让 Windows、WSL、Linux、
-NAS 和 Android 节点主动连接到一个中心 Control Server，并允许 Codex 在指定节点运行、跨节点
-调用文件/进程/PTY/屏幕能力，同时把 thread 历史统一保存在 PostgreSQL。
+Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准的私有设备网络。每台
+设备运行统一的 Mira Node 并主动连接中央 Server；Codex 仍原生运行在选定设备上，但可以通过
+`home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
+持久化事实来源。
 
-> 当前状态：功能完整的 PoC，尚未完成面向公网和无人值守环境所需的安全、调度与运维能力。
-
-## 核心目标
-
-- PostgreSQL 是 Codex thread 的唯一持久化事实来源；
-- 每台桌面或服务器节点仍可原生运行自己的 Codex CLI/App Server；
-- Node Agent 只需主动连出，不需要在家庭设备上开放入站端口；
-- 中央端能够选择 App Server 的运行节点，并把其他在线节点暴露为 Codex `dynamicTools`；
-- Android 可以只作为设备节点，不要求安装或运行 Codex；
-- root thread、subagent 和跨节点恢复使用同一套存储与工具协议。
+当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
+管理员网站已连通。durable scheduler、writer lease、正式备份恢复和 Windows ConPTY 仍待完成。
 
 ## 架构
 
 ```text
-CLI / Desktop / future Web & Mobile
-               |
-               | App Server WebSocket proxy
-               v
-        Mira Control Server ---------------- PostgreSQL
-          |           |                      authoritative store events
-          |           +-- node registry      + immutable rollout items
-          |           +-- desired state      + rebuildable projections
-          |           +-- dynamicTools
-          |
-          +======== outbound WebSocket channels ========+
-          |                    |                        |
-     Windows agent         WSL agent          Linux/NAS/Android agent
-          |                    |                        |
-  file/process/PTY       native Codex          device capabilities
-  local App Server       local App Server       optional App Server
+Codex / mira CLI / Admin Web
+              │ HTTPS / WSS
+              ▼
+         Mira Server ───────── PostgreSQL
+         │ auth + audit          authoritative events
+         │ CapabilityService     immutable thread items
+         │ App Server broker     rebuildable projections
+         │
+         └════ outbound WebSocket channels ════╗
+              │                    │            │
+          Windows/WSL          Linux/NAS    Android APK
+          file/process/PTY     file/process  file/process
+          Codex App Server     /PTY/Codex    screen/input
 ```
 
-Control Server 会给经过代理的 `thread/start` 和 `thread/resume` 注入 `home_nodes` namespace。
-因此运行在节点 A 的 Codex 可以安全地请求节点 B 执行受限操作。父 thread 创建的 subagent 和
-delegate 会继承同一组动态工具。
+Server 在代理的 `thread/start` 和 `thread/resume` 中注入 `home_nodes`。运行在 Node A 的 Codex
+可调用 Node B；subagent 继承 dynamicTools，但仍作为独立 thread 保存，并保留父子关系。所有 HTTP
+CLI 调用和 dynamicTools 最终都经过同一个 `CapabilityService`。
 
-## 已实现能力
+## 身份和权限
 
-### Control Server 与存储
+v1 只有两类安全身份：
 
-- PostgreSQL 权威事件日志与可重建投影；
-- 细粒度 JSON state delta 和 thread history append/replace/delete；
-- compare-and-swap、operation UUID 幂等重试和非冲突自动 rebase；
-- thread generation、父子 thread 投影与版本一致历史读取；
-- 带 checksum 的数据库 migration；
-- 节点注册、heartbeat、desired/reported App Server 状态；
-- Node Agent 反向 WebSocket、多路 capability RPC 和 App Server 代理。
+- 一个管理员账号：本地命令设置 Argon2id 密码，网页使用数据库 Session、严格 Cookie 和 CSRF；
+- 每台设备一个 Node credential：`mira-node`、`mira` CLI、本地 Codex/App Server 共用同一个
+  `identity.json`。
 
-完整存储协议见 [ADAPTER_PROTOCOL_V2.md](./ADAPTER_PROTOCOL_V2.md)。
+Node 在首次启动前生成 256-bit secret，只向 Server 提交 SHA-256。管理员在网站核对六位验证码并
+批准后，设备才可注册和连接。所有 approved Node 在 v1 中彼此信任；目标设备的操作系统权限、
+symlink、文件/输出/session 限制以及 Android 权限仍会独立执行。没有全局 `THREAD_STORE_TOKEN`、
+CLI 登录、Node ACL 或长期 token query parameter。
 
-### 桌面与服务器 Node Agent
+详细协议见 [protocol/auth-v1.md](./protocol/auth-v1.md)，存储协议见
+[protocol/thread-store-v2.md](./protocol/thread-store-v2.md)，稳定架构结论见 [AGENTS.md](./AGENTS.md)。
 
-- 自动发现 Codex binary，并上报版本、App Server 支持和 SHA-256；
-- 识别 Windows、WSL 和 Linux，采集 hostname、系统、CPU、内存、磁盘、网络与 session 状态；
-- 根据中心 desired state 启动、停止和重启本地 `codex app-server`；
-- 文件：roots/stat/list/read/write/mkdir/move/remove；
-- 进程：系统进程列表，以及 start/poll/signal 托管进程；
-- PTY：open/write/poll/close/list；Linux/WSL 使用 `util-linux script`，Windows 当前使用 pipes fallback；
-- allowed roots、realpath/symlink、文件大小、输出大小和 session 数量边界。
+## 已实现组件
 
-### Android
-
-- Mira Node APK：内置 ARM64 Go Agent，手机不依赖 ADB、Node.js 或 Termux 即可独立回连；
-- root 模式：APK 经用户授权使用 KernelSU、Magisk 或 APatch；
-- 非 root 模式：通过 Accessibility、MediaProjection 和应用/共享存储权限提供受限能力；
-- APK 管理原生子进程生命周期、自动重连、开机启动和私有配置文件。
-
-APK 不会自行取得 root。root 设备仍需安装 root provider 并由用户明确授权；Mira 不再需要额外
-安装 KernelSU module。
-
-`android/library/` 表示 APK 的内部 native 数据面。它目前不是 AAR/JNI 意义上的链接库，而是由
-Gradle 编译、打包并由前台服务启动的独立 Go executable；进程隔离使同一份 binary 可以在应用
-UID 或 `su` 授予的 root UID 下运行。
-
-## 仓库布局
-
-| 路径 | 内容 |
+| 路径 | 作用 |
 | --- | --- |
-| `server/` | Node.js Control Server、PostgreSQL schema 和 thread store |
-| `node-agent/` | Windows/WSL/Linux Agent |
-| `android/app/` | root/非 root 统一 Android 应用模块 |
-| `android/library/` | 随 APK 打包的 Android ARM64 Go 数据面 |
-| `runtime/` | 存储、App Server、subagent、多节点与 Android E2E |
-| `patches/codex/` | 针对官方 Codex 的可重放 ThreadStore 补丁 |
-| `ADAPTER_PROTOCOL_V2.md` | 细粒度存储 wire protocol |
+| `server/` | Node.js Mira Server、认证、审计、CapabilityService、App Server broker 与 ThreadStore API |
+| `server/public/` | Server 同源提供的管理员设备控制台，无独立前端构建链 |
+| `node/cmd/mira-node/` | Windows/Linux/WSL/Android 共用的常驻 Node |
+| `node/cmd/mira/` | 人类和 Codex 共用的远程控制 CLI |
+| `node/internal/node/` | 身份、接入、反向通道、文件、进程、PTY、屏幕和平台适配 |
+| `node/android/app/` | root/非 root 统一 APK 外壳和 Android Framework bridge |
+| `patches/codex/` | 官方 Codex ThreadStore HTTP 适配与 subagent dynamicTools 补丁 |
+| `skills/mira/` | 可安装的 Codex 使用说明，不包含任何 credential 或固定设备信息 |
+| `tests/` | 存储、认证、Node、App Server、subagent、多节点与 Android E2E |
 
-官方 Codex 源码不会 vendoring 到本仓库。当前补丁基于 `rust-v0.151.0`（`78c2908`），应用和
-升级方法见 [patches/codex/README.md](./patches/codex/README.md)。
+## 本地启动与网站验收
 
-## 本地启动
-
-需要 Docker、Node.js 22+ 和 npm：
+需要 Docker、Node.js 22+、Go 1.23+ 和 npm：
 
 ```bash
-git clone https://github.com/ssine/mira.git
-cd mira
-
 docker compose up -d postgres
 npm ci --prefix server
-THREAD_STORE_TOKEN=local-poc-token npm --prefix server start
+
+# 只在 Server 主机本地运行；密码从隐藏终端或 stdin 读取
+npm run admin --prefix server -- set-password admin
+
+# loopback HTTP 验收时允许非 Secure Cookie；生产不要设置 false
+MIRA_SECURE_COOKIES=false npm start --prefix server
 ```
 
-本地 Compose 只把 PostgreSQL 暴露在 `127.0.0.1:55432`。Control Server 默认监听
-`127.0.0.1:8787`，默认数据库 URL 与本地 Compose 一致。
+打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。网站可登录、查看待审批申请、批准/拒绝、
+查看 Node 状态/能力、撤销设备并检查追加式审计记录。每台在线设备还提供独立工作台：只读文件
+浏览器默认从该 Node 运行身份可见的完整文件系统开始；交互式 Shell 复用带游标的 PTY session；概况页通过
+轻量 `process/count` 展示当前 Node 可见的系统进程数，并展示 OS/CPU 配置、CPU 采样、内存和
+各 allowed root 所在磁盘的用量、运行时间及网络接口。能力调试器直接读取注入 Codex 的
+`home_nodes` dynamicTools schema，按 tool/action 提供预制参数表单，并通过同一调度路径执行真实调用；
+高级模式仍可直接编辑完整 JSON arguments。生产由 Caddy 提供 HTTPS/WSS 后保持
+`MIRA_SECURE_COOKIES=true`。
 
-修改版 Codex 的配置示例：
+## 启动 Node 与审批
+
+```bash
+MIRA_SERVER_URL=http://127.0.0.1:8787 \
+MIRA_NODE_KEY=wsl-main \
+MIRA_IDENTITY_FILE=/home/user/.config/mira/identity.json \
+CODEX_BINARY=/absolute/path/to/codex \
+APP_SERVER_CODEX_HOME=/path/to/codex-home \
+go -C node run ./cmd/mira-node
+```
+
+Node 显示 enrollment ID 和六位验证码，等待网站批准。身份文件默认位于 Linux/WSL 的
+`~/.config/mira/identity.json`、Windows 的 `%LOCALAPPDATA%\\Mira\\identity.json`，Android 使用
+APK 私有 no-backup 目录；`MIRA_IDENTITY_FILE` 可覆盖。写入采用临时文件、原子 rename 和用户
+`0600` 权限。
+
+未配置 `MIRA_NODE_ALLOWED_ROOTS` 时，Linux/WSL/Android 从 `/` 开始，Windows 自动列出所有当前
+可用盘符。最终能否读取仍由 `mira-node` 的 OS 用户权限决定。如需把某台 Node 收紧到特定工作区，
+可显式设置 `MIRA_NODE_ALLOWED_ROOTS='["/path/to/workspace"]'`。
+
+构建两个桌面命令：
+
+```bash
+go -C node build -o dist/mira-node ./cmd/mira-node
+go -C node build -o dist/mira ./cmd/mira
+```
+
+## `mira` CLI
+
+CLI 不单独登录，直接读取当前设备的 Node identity。所有命令支持 `--json` 和 `--timeout 30s`：
+
+```bash
+mira identity show --json
+mira nodes list --json
+mira codex                         # 本机 Codex 继承同一 Node credential
+mira file read --node nas --path /data/report.txt --output /tmp/report.txt
+mira process count --node homeserver --json
+mira process run --node homeserver -- /usr/bin/git status --short
+mira pty open --node wsl-main -- /bin/bash
+mira screen screenshot --node android-phone --output /tmp/phone.png
+mira app-server start --node wsl-main
+mira app-server connect --node wsl-main
+```
+
+Node selector 可以是 UUID、精确 `nodeKey` 或唯一 hostname；歧义时失败。进程命令始终使用
+executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
+
+## Codex ThreadStore
+
+修改版 Codex 仍配置 endpoint 和 store ID。Node 启动 App Server 时通过环境继承同一 Node
+credential，不把 token 放入进程参数：
 
 ```toml
 [experimental_thread_store]
 type = "remote_http"
-endpoint = "http://127.0.0.1:8787"
-store_id = "my-mira-store"
-bearer_token = "local-poc-token"
+endpoint = "https://mira.ssine.cc"
+store_id = "personal"
 
 [features]
 multi_agent_v2 = true
 ```
 
-使用同一个 `store_id` 的 CLI 和 App Server 会共享同一份 thread 历史。
+本机直接运行时使用 `mira codex` 包装命令从 identity file 安全设置 `MIRA_NODE_TOKEN`；不要打印该变量。
+补丁保留显式 `bearer_token` 仅用于受控开发兼容。
 
-## 启动 Node Agent
+## Android APK
 
-```bash
-CONTROL_SERVER_URL=http://127.0.0.1:8787 \
-CONTROL_SERVER_TOKEN=local-poc-token \
-NODE_AGENT_KEY=wsl-main \
-NODE_AGENT_ALLOWED_ROOTS='["/home/user/projects"]' \
-CODEX_BINARY=/absolute/path/to/codex \
-APP_SERVER_CODEX_HOME=/path/to/codex-home \
-APP_SERVER_LISTEN_URL=ws://127.0.0.1:4510 \
-node node-agent/agent.mjs
-```
-
-`APP_SERVER_CONFIG_OVERRIDES` 是 JSON string array，会转换为重复的 Codex `-c` 参数。token 等
-秘密应仅保存在节点本地，中心只下发 endpoint、store ID 等非秘密运行选择。
-
-## 构建 Android APK
-
-需要 Android SDK 35、JDK 17+、Gradle 8.13+ 和 Go 1.23+：
+APK 内嵌相同 Go `mira-node`，不依赖 ADB、Node.js 或 Termux。Java 负责 Activity、前台服务、
+Accessibility、MediaProjection、权限与子进程生命周期；Go 负责共同协议和数据面。root 只能由用户
+通过 KernelSU、Magisk 或 APatch 明确授权，APK 无法自行获得 root。非 root 模式遵循 Android
+权限限制。
 
 ```bash
-cd android
+cd node/android
 ANDROID_HOME=/path/to/android-sdk gradle :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
-
-在 APK 中填写 Control Server URL、Bearer token 和稳定 node key，然后选择：
-
-- `Auto`：先尝试 `su`，未安装或未授权 root 时退回普通应用模式；
-- `Root`：必须得到 KernelSU/Magisk/APatch 授权；
-- `App`：始终使用普通应用 UID。
-
-非 root 模式不能读取其他应用私有目录、执行任意系统进程或静默批准权限。MediaProjection 每次
-建立投屏会话仍需要遵循 Android 的用户确认流程。
 
 ## Home Server Compose
 
 ```bash
 cp .env.example .env
-# 为 THREAD_STORE_TOKEN 和 POSTGRES_PASSWORD 设置随机值
-docker compose --env-file .env -f compose.homeserver.yaml up -d --build
+docker compose --env-file .env -f compose.homeserver.yaml up -d postgres
+printf '%s\n' 'your-admin-password' | \
+docker compose --env-file .env -f compose.homeserver.yaml run --rm -T control \
+  npm run admin -- set-password admin
+docker compose --env-file .env -f compose.homeserver.yaml up -d --build postgres control
 ```
 
-该 Compose 会监听 `0.0.0.0:8787`，只适合可信局域网或已有网络隔离的环境。真正控制宿主文件和
-进程时，应使用专用低权限用户运行原生 Node Agent，并显式设置 allowed roots；不要挂载 `/` 或
-Docker socket。
+`.env` 只需要 PostgreSQL 密码。Mira 管理员密码不进入 Compose/Nix 环境。Server 只发布到宿主机
+`127.0.0.1:8787`，由同机 Caddy 提供 TLS/WSS；不要把 8787 直接暴露到 LAN 或公网。Compose 只在
+这个 loopback-only 前提下信任 Caddy 写入的 `X-Forwarded-For`，用于登录限速和审计来源地址。
+Node 继续只主动连出。宿主原生 Node 的 OS 运行身份决定整机实际可访问范围；需要额外隔离时再显式
+配置较窄的 allowed roots。PostgreSQL 与 Server 使用 `restart: unless-stopped`，数据保存在命名卷
+`postgres-data`。
 
-## API 概览
+Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件、进程和 PTY 才对应真实主机，
+而不是容器命名空间。Compose 中的 `node` 服务只保留作隔离测试，需要时显式启用
+`--profile container-node`；不要把它当作 Home Server 主机 Node。
 
-除 `/healthz` 外，所有接口都要求 `Authorization: Bearer <token>`。
+## 主要 API
 
-| 方法 | 路径 | 用途 |
+| 方法 | 路径 | 身份与用途 |
 | --- | --- | --- |
-| `GET` | `/healthz` | PostgreSQL 与 schema 状态 |
-| `GET` | `/v1/capabilities` | 服务能力和协议版本 |
-| `GET` | `/v1/nodes` | 节点、机器状态、Codex 与 App Server 状态 |
-| `POST` | `/v1/nodes/register` | Node Agent 注册 |
-| `POST` | `/v1/nodes/{id}/heartbeat` | 状态上报与 desired state 拉取 |
-| `PUT` | `/v1/nodes/{id}/desired-app-server` | 设置节点 App Server 运行配置 |
-| `POST` | `/v1/nodes/{id}/invoke` | 调用 file/process/PTY/screen/status capability |
-| `WS` | `/v1/nodes/{id}/connect` | Node Agent 反向复用通道 |
-| `WS` | `/v1/nodes/{id}/app-server` | 代理节点 App Server |
-| `GET` | `/v1/dynamic-tools` | 当前 dynamic tool specs |
-| `POST` | `/v1/dynamic-tools/call` | 调试 dynamic tool |
-| `GET` | `/v2/stores/{storeId}` | 读取 store head/state/history manifest |
-| `GET` | `/v2/stores/{storeId}/threads/{threadId}/history` | 一致历史读取 |
-| `POST` | `/v2/stores/{storeId}/commits` | 细粒度原子 delta commit |
-| `GET/PUT` | `/v1/stores/{storeId}` | v1 snapshot 兼容接口 |
-| `POST` | `/v1/stores/{storeId}/rebuild` | 从权威事件重建 snapshot |
+| `GET` | `/healthz` | 公开健康与 schema 信息 |
+| `POST/GET` | `/v1/node-enrollments[/{id}]` | 公开提交；原 Node token 轮询 |
+| `POST` | `/v1/admin/login`, `/v1/admin/logout` | 管理员 Session |
+| `GET` | `/v1/admin/session` | 刷新 Session 与 CSRF token |
+| `GET/POST` | `/v1/admin/enrollments[/{id}/approve|reject]` | 管理员审批 |
+| `POST` | `/v1/admin/nodes/{id}/revoke|restore` | 管理员撤销；使用新 enrollment 恢复 |
+| `GET` | `/v1/admin/audit-events` | 管理员追加式审计 |
+| `GET` | `/v1/nodes[/{id}]` | approved Node 或管理员查看设备 |
+| `GET/POST` | `/v1/dynamic-tools[/call]` | 读取并调用注入 Codex 的最终 dynamicTools |
+| `POST` | `/v1/nodes/register`, `/v1/nodes/{id}/heartbeat` | 仅凭证对应的 Node 自身 |
+| `POST` | `/v1/nodes/{id}/invoke` | 可信身份经 CapabilityService 调用目标 |
+| `PUT` | `/v1/nodes/{id}/desired-app-server` | 可信身份选择 App Server 状态 |
+| `WS` | `/v1/nodes/{id}/connect` | Node 反向通道，Node ID 严格绑定 |
+| `WS` | `/v1/nodes/{id}/app-server` | Cookie 或 `auth.*` subprotocol；无 token query |
+| `GET/POST` | `/v2/stores/...` | 细粒度权威 event/delta ThreadStore |
+| `GET/PUT` | `/v1/stores/{storeId}` | snapshot 兼容接口 |
 
 ## 验证
 
-在 Control Server 与 PostgreSQL 已启动后：
-
 ```bash
 npm run check --prefix server
-npm run check --prefix node-agent
-(cd android/library && go test ./...)
-
-node runtime/storage_v2_e2e.mjs
-node runtime/storage_e2e.mjs
-python3 runtime/app_server_e2e.py
-python3 runtime/cli_appserver_e2e.py
-node runtime/node_agent_e2e.mjs
-node runtime/dynamic_tools_model_e2e.mjs
+go -C node test ./...
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build -o /tmp/mira.exe ./cmd/mira
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build -o /tmp/mira-node.exe ./cmd/mira-node
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build -o /tmp/mira-node-android ./cmd/mira-node
+for file in tests/*.mjs; do node --check "$file"; done
+python3 -m compileall -q tests
+node tests/auth_enrollment_e2e.mjs
+node tests/web_console_e2e.mjs
 ```
 
-需要远端节点或真机的测试会读取 `CONTROL_SERVER_URL`、`CONTROL_SERVER_TOKEN`、
-`CODEX_TEST_BINARY` 和相应 node key 环境变量。
-
-## 安全边界与待办
-
-当前版本尚缺少：
-
-- thread 到执行节点的 durable assignment、任务队列和 scheduler；
-- writer lease、quiesce/release/claim 与网络分区 fencing；
-- 多 Codex 版本兼容矩阵和自动 migration 验证；
-- Windows ConPTY；
-- mTLS、短期 capability ticket、每工具授权、审批与不可变审计；
-- Web/手机任务控制 UI 和 Codex Desktop 节点迁移界面；
-- 大历史分页缓存、压缩、正式备份恢复、指标与告警。
-
-仓库中的 `local-poc-token` 和本地数据库口令仅用于 loopback 开发。不要将默认配置暴露到公网；
-跨越可信局域网前必须增加 HTTPS/WSS、独立节点凭据和严格的网络访问控制。
+官方 Codex 补丁基于 `rust-v0.151.0`（`78c2908`）。升级原则是保留上游原始 payload、使用追加式
+migration、让旧事件始终可回放，并把兼容逻辑限制在 ThreadStore/App Server 边界。

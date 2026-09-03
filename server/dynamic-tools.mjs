@@ -56,12 +56,12 @@ export function dynamicToolSpecs() {
           type: "function",
           name: "process",
           description:
-            "List system or managed processes, start a process, poll bounded output, or signal it.",
+            "Count or list system and managed processes, start a process, poll bounded output, or signal it.",
           inputSchema: {
             type: "object",
             properties: {
               nodeId: nodeIdProperty,
-              action: { type: "string", enum: ["list", "start", "poll", "signal"] },
+              action: { type: "string", enum: ["count", "list", "start", "poll", "signal"] },
               processId: { type: "string" },
               command: { type: "string" },
               args: { type: "array", items: { type: "string" }, maxItems: 128 },
@@ -102,7 +102,7 @@ export function dynamicToolSpecs() {
           type: "function",
           name: "screen",
           description:
-            "Inspect and control an Android display through a trusted ADB-backed node. " +
+            "Inspect and control an Android display through a trusted Mira Node. " +
             "Screenshots are returned to the model as images.",
           inputSchema: {
             type: "object",
@@ -153,18 +153,19 @@ export function dynamicToolContentItems(tool, result) {
   return [{ type: "inputText", text: JSON.stringify(result) }];
 }
 
-export async function dispatchDynamicTool(nodeChannel, pool, tool, args) {
+export async function dispatchDynamicTool(capabilityService, actor, tool, args, context = {}) {
   if (tool === "status" && args?.action === "list") {
-    const { listNodes } = await import("./node-registry.mjs");
-    return { nodes: await listNodes(pool) };
+    return { nodes: await capabilityService.list(actor) };
   }
   if (!args || typeof args.nodeId !== "string") {
     throw new Error("nodeId is required");
   }
-  if (tool === "status") return nodeChannel.invoke(args.nodeId, "status", {});
+  if (tool === "status") {
+    return capabilityService.invoke(actor, args.nodeId, "status", {}, context);
+  }
   if (!["file", "process", "pty", "screen"].includes(tool)) {
     throw new Error(`unknown ${dynamicToolNamespace} tool: ${tool}`);
   }
   const { nodeId: _nodeId, ...params } = args;
-  return nodeChannel.invoke(args.nodeId, tool, params);
+  return capabilityService.invoke(actor, args.nodeId, tool, params, context);
 }

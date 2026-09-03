@@ -21,3 +21,8 @@ Build Codex using the upstream instructions. The resulting CLI and App Server un
 The patch is intentionally kept separate from the Mira control plane. When updating Codex, rebase
 or regenerate it against the new upstream tag, run the `codex-thread-store` tests, and verify the
 App Server, CLI resume and subagent E2E scenarios before changing the supported baseline.
+
+`bearer_token` is optional in the remote store table. Mira Node starts App Server with the current
+device credential in `MIRA_NODE_TOKEN`, so the credential stays out of argv and central desired
+state. A manually launched patched Codex must receive that environment value from a wrapper that
+reads the protected Mira identity file, or use an explicit token only in isolated development.
