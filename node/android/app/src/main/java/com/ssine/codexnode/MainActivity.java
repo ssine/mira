@@ -68,6 +68,12 @@ public final class MainActivity extends Activity {
         int padding = dp(20);
         content.setPadding(padding, padding, padding, padding);
         scroll.addView(content);
+        // Android 15 enforces edge-to-edge; keep controls clear of system bars.
+        scroll.setOnApplyWindowInsetsListener((view, insets) -> {
+            view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+            return insets;
+        });
 
         TextView title = new TextView(this);
         title.setText("Mira Node");

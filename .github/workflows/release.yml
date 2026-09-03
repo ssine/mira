@@ -5,6 +5,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a release (false builds signed acceptance artifacts only)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -67,13 +72,21 @@ jobs:
           fi
           printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/mira-release.jks"
           export MIRA_ANDROID_KEYSTORE="${RUNNER_TEMP}/mira-release.jks"
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          ndk_version=$(<node/android/NDK_VERSION)
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${ndk_version}"
           gradle -p node/android --no-daemon assembleRelease
           version=$(<VERSION)
           cp node/android/app/build/outputs/apk/release/app-release.apk "dist/mira_${version}_android_arm64.apk"
           (cd dist && sha256sum "mira_${version}_android_arm64.apk" >> SHA256SUMS)
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-signed-acceptance
+          path: dist/*
+          retention-days: 7
+
       - name: Publish GitHub Release
+        if: github.ref_type == 'tag' || inputs.publish == true
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash

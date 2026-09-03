@@ -49,12 +49,25 @@ request, the same credential becomes usable and the returned Node ID is atomical
 identity in the application's no-backup directory. `Reset identity and enroll again` deletes it;
 the Server-side Node record remains revoked or historical until the administrator manages it.
 
-Build from this directory with Android SDK 35, JDK 17+, Gradle 8.13+ and Go 1.23+:
+Build from this directory with Android SDK 35, the NDK version pinned in `NDK_VERSION`,
+JDK 17+, Gradle 8.13+, Node.js 22 and Go 1.23+:
 
 ```bash
+sdkmanager "ndk;$(cat NDK_VERSION)"
 ANDROID_HOME=/path/to/android-sdk gradle :app:assembleDebug
 ```
 
 The Gradle `preBuild` dependency compiles the shared Go module automatically and includes the
 resulting ARM64 binary in the APK. Build outputs under `app/build/`, `build/`, `.gradle/` and
 `../dist/` are ignored by Git.
+
+Android production builds must enable cgo and `netcgo`, using the NDK's API 26 compiler.
+Android does not expose desktop-style `resolv.conf`; pure-Go DNS can try localhost:53 and fail
+even while Java networking works. The NDK-linked system resolver follows Android networking in
+both root and app mode. No hard-coded DNS server, Server IP or disabled TLS verification is used.
+`scripts/check-android-build.mjs` rejects accidentally packaged pure-Go binaries. A `CGO_ENABLED=0`
+Android cross-compile remains useful only as a shared-code compile check, not a deployable APK.
+
+The Release workflow can be dispatched with `publish=false` to produce signed acceptance artifacts
+without a tag/release; install those on a real device before tagging the release. Verify a domain
+Server URL, not just an IP address, along with screen/file/process capabilities and in-place update.

@@ -8,6 +8,7 @@ def versionParts = miraVersion.split("\\.").collect { Integer.parseInt(it) }
 android {
     namespace "com.ssine.codexnode"
     compileSdk 35
+    ndkVersion file("../NDK_VERSION").text.trim()
 
     defaultConfig {
         applicationId "com.ssine.codexnode"

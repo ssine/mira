@@ -171,10 +171,16 @@ public final class MiraNodeService extends Service {
             try (BufferedReader lines = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
                 String line;
                 while ((line = lines.readLine()) != null) {
-                    if (line.contains("registered Mira Node")) {
+                    if (line.contains("connected reverse capability channel")) {
                         publishStatus(this, "Connected as " + config.nodeKey, effectiveMode);
-                    } else if (line.contains("registration failed") || line.contains("control channel disconnected")) {
-                        publishStatus(this, abbreviate(line), effectiveMode);
+                    } else if (line.contains("registered Mira Node")) {
+                        publishStatus(this, "Registered; opening reverse connection", effectiveMode);
+                    } else if (line.contains("registration failed") || line.contains("reverse channel disconnected")
+                            || line.contains("initial heartbeat failed") || line.contains("heartbeat failed")) {
+                        String message = line;
+                        try { message = new org.json.JSONObject(line).optString("error", line); }
+                        catch (org.json.JSONException ignored) { }
+                        publishStatus(this, abbreviate(message), effectiveMode);
                     }
                 }
             }
