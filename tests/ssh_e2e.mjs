@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { initializeDatabase } from "../server/db.mjs";
 import { hashPassword } from "../server/auth.mjs";
@@ -49,7 +49,7 @@ try {
   await pool.query("INSERT INTO mira_admin_users (username, password_hash) VALUES ('admin', $1)", [await hashPassword("mira-local-admin-password")]);
   await fs.mkdir(path.join(repo, "tests/bin"), { recursive: true });
   for (const [binary, command] of [[nodeBinary,"mira-node"], [cliBinary,"mira"]]) execFileSync("go", ["build", "-o", binary, `./cmd/${command}`], { cwd: path.join(repo, "node") });
-  launch(process.execPath, ["server/server.mjs"], { DATABASE_URL: connection.toString(), LISTEN_HOST: "127.0.0.1", LISTEN_PORT: new URL(url).port, MIRA_SECURE_COOKIES: "false" });
+  launch(process.execPath, ["server/server.mjs"], { DATABASE_URL: connection.toString(), LISTEN_HOST: process.env.MIRA_SSH_TEST_LISTEN ?? "127.0.0.1", LISTEN_PORT: new URL(url).port, MIRA_SECURE_COOKIES: "false" });
   await wait(async () => { try { return (await fetch(url+"/healthz")).ok; } catch { return false; } }, "Server");
   const admin = await loginAdmin(url);
   const nodes = [];
@@ -64,6 +64,11 @@ try {
     nodes.push({ root, identity, key, state });
   }
   const [a,b] = nodes;
+  // Optional local acceptance hook for a physical device; never enabled in CI.
+  if (process.env.MIRA_SSH_DEVICE_TEST) {
+    const hook = await import(pathToFileURL(path.resolve(process.env.MIRA_SSH_DEVICE_TEST)));
+    await hook.default({ url, nodes, cli, admin });
+  }
   if (process.env.MIRA_SSH_WINDOWS_BIN) {
     const binaryDir = process.env.MIRA_SSH_WINDOWS_BIN;
     await fs.copyFile(path.join(repo, "tests/windows_ssh_e2e.ps1"), path.join(binaryDir, "windows_ssh_e2e.ps1"));

@@ -139,9 +139,11 @@ app/filesystem/SELinux restrictions even when a path starts at `/`.
 
 Regular-file reads/writes stream without a total-file-size ceiling; no 4 MiB JSON cap. Up to 64
 open file/directory handles per SFTP subsystem, at most 10,000 entries per directory listing.
-Support: listing/stat, read/write, mkdir, remove/rmdir, non-overwriting rename, size/mode/time
+Support: listing/stat/lstat/readlink, read/write, mkdir, remove/rmdir, non-overwriting rename, size/mode/time
 updates. Append, ownership changes, symlink/hardlink creation and extended OpenSSH filesystem
 operations are not implemented. One-shot stat does not consume a persistent handle slot.
+Unlink and rename operate on a symlink itself, never silently on its target. A configured root's
+real path remains protected from destructive operations through aliases.
 
 ## CLI
 

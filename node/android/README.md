@@ -50,7 +50,7 @@ identity in the application's no-backup directory. `Reset identity and enroll ag
 the Server-side Node record remains revoked or historical until the administrator manages it.
 
 Build from this directory with Android SDK 35, the NDK version pinned in `NDK_VERSION`,
-JDK 17+, Gradle 8.13+, Node.js 22 and Go 1.23+:
+JDK 17+, Gradle 8.13+, Node.js 22 and Go 1.26.6+:
 
 ```bash
 sdkmanager "ndk;$(cat NDK_VERSION)"
@@ -60,6 +60,14 @@ ANDROID_HOME=/path/to/android-sdk gradle :app:assembleDebug
 The Gradle `preBuild` dependency compiles the shared Go module automatically and includes the
 resulting ARM64 binary in the APK. Build outputs under `app/build/`, `build/`, `.gradle/` and
 `../dist/` are ignored by Git.
+
+If `dl.google.com` fails during TLS negotiation, the pinned r27d NDK is also available from
+Google's official `https://dl-ssl.google.com/android/repository/android-ndk-r27d-linux.zip`.
+Verify the archive against the [official r27d release](https://github.com/android/ndk/releases/tag/r27d)
+(Linux SHA1 `22105e410cf29afcf163760cc95522b9fb981121`, size 663956036 bytes), extract it, and
+set `ANDROID_NDK_HOME` to that directory. Keep TLS verification enabled; changing DNS or disabling
+certificate checks is not required for this fallback. The local incident was consistent with
+domain/SNI-dependent network handling, not a missing NDK or missing CA certificate.
 
 Android production builds must enable cgo and `netcgo`, using the NDK's API 26 compiler.
 Android does not expose desktop-style `resolv.conf`; pure-Go DNS can try localhost:53 and fail

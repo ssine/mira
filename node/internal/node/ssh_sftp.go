@@ -46,7 +46,20 @@ func (fs *sshFileSystem) nativePath(value string, allowRoot bool) (string, error
 		}
 		value = filepath.FromSlash(value[1:])
 	}
-	return fs.runtime.authorize(value, allowRoot)
+	resolved, err := fs.runtime.authorize(value, allowRoot)
+	if err != nil {
+		return "", err
+	}
+	if !allowRoot {
+		for _, root := range fs.runtime.realRoots {
+			if pathContained(root, resolved) && pathContained(resolved, root) {
+				return "", fmt.Errorf("operation on an allowed root is forbidden")
+			}
+		}
+	}
+	// Validate the resolved destination, but perform OS operations on the
+	// original path: unlink/rename must affect a symlink, not silently its target.
+	return filepath.Clean(value), nil
 }
 func (fs *sshFileSystem) RealPath(value string) (string, error) {
 	if value == "/" && runtime.GOOS == "windows" {
@@ -139,7 +152,7 @@ func (fs *sshFileSystem) Filecmd(r *sftp.Request) error {
 	case "Mkdir":
 		return os.Mkdir(p, 0750)
 	case "Remove", "Rmdir":
-		info, err := os.Stat(p)
+		info, err := os.Lstat(p)
 		if err != nil {
 			return err
 		}
@@ -230,7 +243,7 @@ func (fs *sshFileSystem) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		}
 	}()
 	if runtime.GOOS == "windows" && r.Filepath == "/" {
-		if r.Method == "Stat" {
+		if r.Method == "Stat" || r.Method == "Lstat" {
 			list.entries = []os.FileInfo{sshVolumeInfo{"/"}}
 		} else if r.Method == "List" {
 			seen := map[string]bool{}
@@ -265,8 +278,12 @@ func (fs *sshFileSystem) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 		if len(list.entries) > 10000 {
 			return nil, fmt.Errorf("directory exceeds 10000 entries")
 		}
-	case "Stat":
-		info, err := os.Stat(p)
+	case "Stat", "Lstat":
+		stat := os.Stat
+		if r.Method == "Lstat" {
+			stat = os.Lstat
+		}
+		info, err := stat(p)
 		if err != nil {
 			return nil, err
 		}
@@ -276,4 +293,24 @@ func (fs *sshFileSystem) Filelist(r *sftp.Request) (sftp.ListerAt, error) {
 	}
 	success = true
 	return list, nil
+}
+
+func (fs *sshFileSystem) Lstat(r *sftp.Request) (sftp.ListerAt, error) {
+	copy := *r
+	copy.Method = "Lstat"
+	return fs.Filelist(&copy)
+}
+func (fs *sshFileSystem) Readlink(value string) (string, error) {
+	p, err := fs.nativePath(value, true)
+	if err != nil {
+		return "", err
+	}
+	target, err := os.Readlink(p)
+	if err != nil {
+		return "", err
+	}
+	if filepath.IsAbs(target) {
+		return fs.wirePath(target), nil
+	}
+	return filepath.ToSlash(target), nil
 }

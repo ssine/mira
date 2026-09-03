@@ -172,6 +172,23 @@ func TestSSHSFTPBinaryAndPolicy(t *testing.T) {
 		t.Fatal("escaped configured root")
 	}
 	if runtime.GOOS != "windows" {
+		file := filepath.Join(root, "keep.txt")
+		if err := os.WriteFile(file, []byte("keep"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(file, filepath.Join(root, "file-link")); err != nil {
+			t.Fatal(err)
+		}
+		info, err := fs.Lstat(cwd + "/file-link")
+		if err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatal("SFTP lstat must preserve symlinks", err)
+		}
+		if err := fs.Remove(cwd + "/file-link"); err != nil {
+			t.Fatal(err)
+		}
+		if data, err := os.ReadFile(file); err != nil || string(data) != "keep" {
+			t.Fatal("unlink removed symlink target")
+		}
 		outside := t.TempDir()
 		if err := os.WriteFile(filepath.Join(outside, "secret"), []byte("outside"), 0600); err != nil {
 			t.Fatal(err)
