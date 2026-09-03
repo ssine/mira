@@ -79,12 +79,12 @@ export function dynamicToolSpecs() {
           type: "function",
           name: "pty",
           description:
-            "Open an interactive terminal session, write input, poll output, or close the session.",
+            "Open an interactive terminal session, write input, poll output, resize it, or close the session.",
           inputSchema: {
             type: "object",
             properties: {
               nodeId: nodeIdProperty,
-              action: { type: "string", enum: ["open", "write", "poll", "close", "list"] },
+              action: { type: "string", enum: ["open", "write", "poll", "resize", "close", "list"] },
               sessionId: { type: "string" },
               command: { type: "string" },
               args: { type: "array", items: { type: "string" }, maxItems: 128 },

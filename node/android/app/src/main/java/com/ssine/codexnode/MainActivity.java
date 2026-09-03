@@ -3,6 +3,7 @@ package com.ssine.codexnode;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -74,8 +75,12 @@ public final class MainActivity extends Activity {
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         content.addView(title);
 
+        TextView version = new TextView(this);
+        version.setText("Version " + installedVersion());
+        content.addView(version);
+
         TextView explanation = new TextView(this);
-        explanation.setText("One APK for rooted and non-rooted Android devices. Auto mode uses su when the root manager grants it, otherwise it falls back to Android app permissions.");
+        explanation.setText("Enter your Mira Server URL, then Save and start. Approve this device on the Server website after checking its verification code. Auto mode uses authorized root when available, otherwise Android app permissions.");
         explanation.setPadding(0, dp(8), 0, dp(16));
         content.addView(explanation);
 
@@ -105,7 +110,47 @@ public final class MainActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         button(content, "Grant non-root screen capture", view -> requestScreenCapture());
         button(content, "Grant shared-file access", view -> requestAllFilesAccess());
+        button(content, "Check for updates", view -> checkForUpdates((Button) view));
         return scroll;
+    }
+
+    private String installedVersion() {
+        try { return getPackageManager().getPackageInfo(getPackageName(), 0).versionName; }
+        catch (PackageManager.NameNotFoundException impossible) { return "unknown"; }
+    }
+
+    private void checkForUpdates(Button button) {
+        button.setEnabled(false);
+        button.setText("Checking GitHub Releases…");
+        new Thread(() -> {
+            try {
+                ReleaseUpdate release = ReleaseUpdate.latest(installedVersion());
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    button.setEnabled(true);
+                    button.setText("Check for updates");
+                    if (!release.newer) {
+                        Toast.makeText(this, "Mira " + installedVersion() + " is up to date", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                    new AlertDialog.Builder(this)
+                            .setTitle("Mira " + release.version + " is available")
+                            .setMessage("Download the signed APK in your browser and open it to confirm the update. Updates from an official Mira release preserve this device's identity and settings. Android may ask you to allow installation from your browser. Running sessions may disconnect during installation.")
+                            .setNegativeButton("Later", null)
+                            .setPositiveButton("Download APK", (dialog, which) -> {
+                                try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(release.downloadUrl))); }
+                                catch (RuntimeException error) { Toast.makeText(this, "No browser available", Toast.LENGTH_LONG).show(); }
+                            }).show();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    button.setEnabled(true);
+                    button.setText("Check for updates");
+                    Toast.makeText(this, "Could not check GitHub Releases. Check your network and try again.", Toast.LENGTH_LONG).show();
+                });
+            }
+        }, "mira-release-check").start();
     }
 
     private void resetIdentity() {

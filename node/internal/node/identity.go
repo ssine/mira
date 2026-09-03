@@ -185,7 +185,7 @@ func (state *persistedNodeState) save(path string) error {
 	}
 	temporaryPath := temporary.Name()
 	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0600); err != nil {
+	if err := protectIdentityFile(temporary); err != nil {
 		temporary.Close()
 		return fmt.Errorf("protect Mira identity: %w", err)
 	}

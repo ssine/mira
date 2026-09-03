@@ -194,6 +194,14 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - A change affecting common node code must pass native Go tests and cross-compile for Windows amd64
   and Android arm64.
 - Android changes should also build the debug APK when an Android SDK is available.
+- `VERSION` is the unified Mira release SemVer. Keep checked mirrors consistent and derive Android
+  versionName/versionCode and release build metadata from it. Codex version and Node wire protocol
+  version are separate concepts. Never regenerate the production Android signing identity.
+- Install/update code must preserve Node identity and configuration, retain old binaries, verify
+  release checksums, refuse unrelated service replacement and avoid silently interrupting sessions.
+- Windows PTY uses real ConPTY behind a build-tagged adapter. Test native Windows, not just cross
+  compilation. Keep UTF-8 decoding state across output chunks and bound all retained data.
+- For release changes, run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`.
 
 Run the baseline checks from the repository root:
 
@@ -213,7 +221,7 @@ POSTGRES_PASSWORD=ci-only-password docker compose -f compose.homeserver.yaml con
 
 The intended architecture still needs durable thread-to-node assignment, a task queue and scheduler,
 writer leases with fencing for network partitions, a multi-version Codex compatibility matrix,
-Windows ConPTY, scheduled credential rotation and hardware-backed key storage, distributed login
+automatic fleet upgrades, scheduled credential rotation and hardware-backed key storage, distributed login
 limits for multi-Server deployments, Web/mobile task submission UI, backup/restore tooling, metrics
 and alerting. The current website is an administrator device console, not a full Codex task UI. Do
 not describe these as already implemented.

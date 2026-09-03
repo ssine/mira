@@ -25,6 +25,7 @@ const listenHost = process.env.LISTEN_HOST ?? "127.0.0.1";
 const listenPort = Number.parseInt(process.env.LISTEN_PORT ?? "8787", 10);
 const databaseUrl = process.env.DATABASE_URL ?? "postgresql://mira:mira-local@127.0.0.1:55432/mira";
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
+const serverPackage = JSON.parse(await fs.readFile(path.join(serverDirectory, "package.json"), "utf8"));
 const publicDirectory = path.join(serverDirectory, "public");
 const staticAssets = new Map([
   ["/", [path.join(publicDirectory, "index.html"), "text/html; charset=utf-8"]],
@@ -147,7 +148,7 @@ async function route(request, response) {
     await pool.query("SELECT 1");
     sendJson(response, 200, {
       status: "ok", backend: "postgresql", databaseIsSourceOfTruth: true,
-      schemaVersion: currentSchemaVersion(), adminConfigured: authState.adminConfigured,
+    version: serverPackage.version, schemaVersion: currentSchemaVersion(), adminConfigured: authState.adminConfigured,
     });
     return;
   }

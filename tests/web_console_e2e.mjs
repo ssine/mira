@@ -70,6 +70,9 @@ assert(assets["/"].includes("/app.js") && assets["/"].includes("/styles.css"), "
 assert(assets["/"].includes("/vendor/xterm.css"), "website shell does not load xterm styles");
 assert(assets["/app.js"].includes('from "/vendor/xterm.js"'), "website does not load the xterm terminal emulator");
 assert(assets["/"].includes("loginForm"), "website does not expose the administrator login view");
+for (const control of ["installLinux", "installWindows", "installServer", "installAndroid"]) {
+  assert(assets["/"].includes(`id="${control}"`), `website omitted installer ${control}`);
+}
 assert(assets["/app.js"].includes("/v1/dynamic-tools"), "website does not load the dynamic tool catalog");
 assert(assets["/app.js"].includes("/v1/dynamic-tools/call"), "website does not expose the dynamic tool debugger call");
 for (const control of ["debugPresetFields", "debugAdvanced", "debugArguments"]) {
@@ -158,7 +161,7 @@ const expectedActions = {
   status: ["list", "get"],
   file: ["roots", "stat", "list", "read", "write", "mkdir", "move", "remove"],
   process: ["count", "list", "start", "poll", "signal"],
-  pty: ["open", "write", "poll", "close", "list"],
+  pty: ["open", "write", "poll", "resize", "close", "list"],
   screen: ["display", "screenshot", "hierarchy", "tap", "swipe", "key", "text"],
 };
 const fieldSetSource = assets["/app.js"].slice(

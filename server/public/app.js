@@ -12,14 +12,17 @@ const workspace = {
   currentRoot: null,
   currentPath: null,
   sessionId: null,
+  ptyResizeSupported: false,
   cursor: 0,
   pollTimer: null,
   pollBusy: false,
   terminal: null,
   fitAddon: null,
   terminalDataDisposable: null,
+  terminalResizeDisposable: null,
   terminalResizeObserver: null,
   terminalResizeFrame: null,
+  terminalResizeTimer: null,
   inputBuffer: "",
   inputFlushTimer: null,
   inputWriteQueue: Promise.resolve(),
@@ -272,7 +275,8 @@ const debugFieldSets = {
   },
   pty: {
     list: ["cursor"], open: ["command", "args", "cwd", "rows", "cols"],
-    write: ["sessionId", "input"], poll: ["sessionId", "cursor"], close: ["sessionId"],
+    write: ["sessionId", "input"], poll: ["sessionId", "cursor"],
+    resize: ["sessionId", "rows", "cols"], close: ["sessionId"],
   },
   screen: {
     display: [], screenshot: [], hierarchy: [], tap: ["x", "y"],
@@ -285,7 +289,7 @@ const debugActionLabels = {
   status: { list: "列出全部节点", get: "读取当前节点" },
   file: { roots: "查看文件入口", stat: "查看文件信息", list: "列出目录", read: "读取文件", write: "写入文件", mkdir: "新建目录", move: "移动/改名", remove: "删除" },
   process: { count: "统计进程", list: "列出进程", start: "启动进程", poll: "读取输出", signal: "发送信号" },
-  pty: { list: "列出会话", open: "打开终端", write: "发送输入", poll: "读取输出", close: "关闭终端" },
+  pty: { list: "列出会话", open: "打开终端", write: "发送输入", poll: "读取输出", resize: "调整窗口", close: "关闭终端" },
   screen: { display: "显示参数", screenshot: "截取屏幕", hierarchy: "界面层级", tap: "点击", swipe: "滑动", key: "按键", text: "输入文字" },
 };
 
@@ -342,8 +346,9 @@ function debugArgumentsPreset(toolName, action) {
   if (toolName === "process" && action === "signal") value.signal = "SIGTERM";
   if (toolName === "pty" && ["list", "poll"].includes(action)) value.cursor = 0;
   if (toolName === "pty" && action === "open") Object.assign(value, { cwd: path, rows: 30, cols: 120 });
-  if (toolName === "pty" && ["write", "poll", "close"].includes(action)) value.sessionId = "<sessionId>";
+  if (toolName === "pty" && ["write", "poll", "resize", "close"].includes(action)) value.sessionId = "<sessionId>";
   if (toolName === "pty" && action === "write") value.input = "";
+  if (toolName === "pty" && action === "resize") Object.assign(value, { rows: 30, cols: 120 });
   if (toolName === "screen" && action === "tap") Object.assign(value, { x: 0, y: 0 });
   if (toolName === "screen" && action === "swipe") Object.assign(value, { startX: 0, startY: 0, endX: 0, endY: 0, durationMs: 300 });
   if (toolName === "screen" && action === "key") value.keyCode = "KEYCODE_HOME";
@@ -638,6 +643,8 @@ function renderStatus(status) {
   addFact(facts, "架构", status.architecture ?? workspace.node.architecture);
   addFact(facts, "运行模式", workspace.node.nodeMode ?? workspace.node.capabilities?.nodeMode);
   addFact(facts, "Node 版本", workspace.node.nodeVersion);
+  addFact(facts, "构建提交", workspace.node.nodeBuild?.commit ?? "unknown");
+  addFact(facts, "节点协议", workspace.node.nodeBuild?.protocolVersion ?? workspace.node.channelStatus?.protocolVersion ?? "—");
   const logicalCount = status.cpu?.logicalCount ?? status.cpuCount;
   addFact(facts, "CPU", [status.cpu?.model, logicalCount ? `${logicalCount} 核` : null].filter(Boolean).join(" · ") || "—");
   addFact(facts, "PTY 后端", status.ptyBackend ?? (capabilityEnabled(workspace.node, "pty") ? "已启用" : "不可用"));
@@ -889,6 +896,22 @@ function scheduleTerminalFit() {
   });
 }
 
+function schedulePTYResize(cols, rows) {
+  if (workspace.terminalResizeTimer) clearTimeout(workspace.terminalResizeTimer);
+  const sessionId = workspace.sessionId;
+  const nodeId = workspace.node?.nodeId;
+  if (!sessionId || !nodeId || !workspace.ptyResizeSupported) return;
+  workspace.terminalResizeTimer = setTimeout(async () => {
+    workspace.terminalResizeTimer = null;
+    if (workspace.sessionId !== sessionId || workspace.node?.nodeId !== nodeId) return;
+    try {
+      await invoke("pty", { action: "resize", sessionId, rows, cols });
+    } catch (error) {
+      if (workspace.sessionId === sessionId) $("#shellState").textContent = `调整终端尺寸失败：${error.message}`;
+    }
+  }, 120);
+}
+
 function ensureTerminal() {
   if (workspace.terminal) return workspace.terminal;
   const terminal = new Terminal({
@@ -920,6 +943,7 @@ function ensureTerminal() {
   workspace.terminal = terminal;
   workspace.fitAddon = fitAddon;
   workspace.terminalDataDisposable = terminal.onData((data) => enqueuePTYInput(data));
+  workspace.terminalResizeDisposable = terminal.onResize(({ cols, rows }) => schedulePTYResize(cols, rows));
   workspace.terminalResizeObserver = new ResizeObserver(scheduleTerminalFit);
   workspace.terminalResizeObserver.observe($("#terminalOutput"));
   terminal.write("连接后可在此执行交互式命令。命令会直接在所选节点上运行。\r\n");
@@ -934,6 +958,10 @@ function disposeTerminal() {
   workspace.terminalResizeObserver = null;
   workspace.terminalDataDisposable?.dispose();
   workspace.terminalDataDisposable = null;
+  workspace.terminalResizeDisposable?.dispose();
+  workspace.terminalResizeDisposable = null;
+  if (workspace.terminalResizeTimer) clearTimeout(workspace.terminalResizeTimer);
+  workspace.terminalResizeTimer = null;
   workspace.terminal?.dispose();
   workspace.terminal = null;
   workspace.fitAddon = null;
@@ -1007,6 +1035,7 @@ async function connectShell() {
     if (cwd) params.cwd = cwd;
     const result = await invoke("pty", params, 60000);
     workspace.sessionId = result.sessionId;
+    workspace.ptyResizeSupported = result.resizeSupported === true;
     workspace.cursor = 0;
     resetPTYInput();
     terminal.reset();
@@ -1023,7 +1052,10 @@ async function disconnectShell({ quiet = false } = {}) {
   const sessionId = workspace.sessionId;
   stopShellPolling();
   workspace.sessionId = null;
+  workspace.ptyResizeSupported = false;
   resetPTYInput();
+  if (workspace.terminalResizeTimer) clearTimeout(workspace.terminalResizeTimer);
+  workspace.terminalResizeTimer = null;
   setShellConnected(false, "已断开");
   if (!sessionId) return;
   try {
@@ -1249,7 +1281,14 @@ async function bootstrap() {
   try {
     const health = await api("/healthz");
     $("#healthDot").classList.add("ok");
-    $("#healthText").textContent = "Server 在线 · PostgreSQL";
+    $("#healthText").textContent = `Server ${health.version ?? ""} 在线 · PostgreSQL`;
+    const origin = window.location.origin;
+    $("#installServer").textContent = origin;
+    $("#installLinux").textContent = `curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --server '${origin}'`;
+    $("#installWindows").textContent = `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1))) -Server '${origin}'`;
+    if (/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(health.version ?? "")) {
+      $("#installAndroid").href = `https://github.com/ssine/mira/releases/download/v${health.version}/mira_${health.version}_android_arm64.apk`;
+    }
     if (!health.adminConfigured) { show("setupView"); return; }
     try {
       const session = await api("/v1/admin/session");
@@ -1264,6 +1303,15 @@ async function bootstrap() {
     $("#healthText").textContent = "Server 不可用";
     show("loginView");
   }
+}
+
+for (const button of document.querySelectorAll("[data-copy-install]")) {
+  button.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText($("#" + button.dataset.copyInstall).textContent);
+      toast("安装命令已复制");
+    } catch { toast("浏览器未允许复制，请选中命令手动复制"); }
+  });
 }
 
 void bootstrap();

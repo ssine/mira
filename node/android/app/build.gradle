@@ -2,6 +2,9 @@ plugins {
     id "com.android.application"
 }
 
+def miraVersion = file("../../../VERSION").text.trim()
+def versionParts = miraVersion.split("\\.").collect { Integer.parseInt(it) }
+
 android {
     namespace "com.ssine.codexnode"
     compileSdk 35
@@ -10,8 +13,26 @@ android {
         applicationId "com.ssine.codexnode"
         minSdk 26
         targetSdk 35
-        versionCode 7
-        versionName "0.7.0"
+        versionCode versionParts[0] * 1000000 + versionParts[1] * 1000 + versionParts[2]
+        versionName miraVersion
+    }
+
+    signingConfigs {
+        if (System.getenv("MIRA_ANDROID_KEYSTORE")) {
+            release {
+                storeFile file(System.getenv("MIRA_ANDROID_KEYSTORE"))
+                storePassword System.getenv("MIRA_ANDROID_STORE_PASSWORD")
+                keyAlias System.getenv("MIRA_ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("MIRA_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (signingConfigs.findByName("release")) signingConfig signingConfigs.release
+        }
     }
 
     sourceSets {
@@ -37,6 +58,8 @@ tasks.register("buildMiraNode", Exec) {
         include "cmd/**/*.go", "internal/**/*.go", "go.mod", "go.sum", "build-android.sh"
     })
     outputs.file(nativeBinary)
+    // Build metadata includes the Git commit even when Go sources are unchanged.
+    outputs.upToDateWhen { false }
 }
 
 tasks.register("copyMiraNode", Copy) {

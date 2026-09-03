@@ -5,7 +5,7 @@ const actions = {
   status: new Set(["get"]),
   file: new Set(["roots", "stat", "list", "read", "write", "mkdir", "move", "remove"]),
   process: new Set(["count", "list", "start", "poll", "signal"]),
-  pty: new Set(["list", "open", "write", "poll", "close"]),
+  pty: new Set(["list", "open", "write", "poll", "resize", "close"]),
   screen: new Set(["display", "screenshot", "hierarchy", "tap", "swipe", "key", "text"]),
 };
 
@@ -60,6 +60,13 @@ function validateParams(capability, params) {
     }
     if (params.env !== undefined && (!isRecord(params.env) || Object.keys(params.env).length > 256 || Object.entries(params.env).some(([key, value]) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || typeof value !== "string" || value.length > 32768))) {
       throw serviceError("env is invalid", 400, "invalid_request");
+    }
+    if (capability === "pty") {
+      validateInteger(params.rows, "rows", 1, 500);
+      validateInteger(params.cols, "cols", 1, 1000);
+      if (params.action === "resize" && (params.rows === undefined || params.cols === undefined)) {
+        throw serviceError("PTY resize requires rows and cols", 400, "invalid_request");
+      }
     }
   }
   if (capability === "screen") {

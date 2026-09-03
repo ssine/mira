@@ -1,5 +1,11 @@
 # Mira Node for Android
 
+Users should install the signed APK from [GitHub Releases](https://github.com/ssine/mira/releases/latest).
+The app displays its unified Mira version and provides **Check for updates**. Android confirms
+installation and verifies the existing signing identity; official upgrades retain app data and Node
+credentials. Migrating from a debug-signed APK requires a one-time reinstall and enrollment.
+See [INSTALL.md](../../INSTALL.md) for the complete installation and update flow.
+
 The Android distribution of Mira Node is one deployable APK with two internal components:
 
 - `app/` is the Android application module. It owns the Activity, foreground service,

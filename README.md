@@ -6,7 +6,15 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 持久化事实来源。
 
 当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
-管理员网站已连通。durable scheduler、writer lease、正式备份恢复和 Windows ConPTY 仍待完成。
+管理员网站已连通。0.9.0 增加原生 Windows ConPTY、统一版本、安装器和签名 APK 发布。
+durable scheduler、writer lease、完整恢复演练和集群批量更新仍待完成。
+
+## 安装与升级
+
+在管理员网站展开「添加设备」即可复制带当前 Server 地址的安装命令。
+Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。
+后续桌面端执行 `mira update`；Android 在 APP 内检查更新。身份和配置随升级保留。
+具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 
 ## 架构
 
@@ -59,6 +67,7 @@ CLI 登录、Node ACL 或长期 token query parameter。
 | `patches/codex/` | 官方 Codex ThreadStore HTTP 适配与 subagent dynamicTools 补丁 |
 | `skills/mira/` | 可安装的 Codex 使用说明，不包含任何 credential 或固定设备信息 |
 | `tests/` | 存储、认证、Node、App Server、subagent、多节点与 Android E2E |
+| `scripts/` | 统一版本检查、跨平台 Release 构建、Linux/Windows 安装与更新 |
 
 ## 本地启动与网站验收
 
@@ -98,7 +107,7 @@ go -C node run ./cmd/mira-node
 Node 显示 enrollment ID 和六位验证码，等待网站批准。身份文件默认位于 Linux/WSL 的
 `~/.config/mira/identity.json`、Windows 的 `%LOCALAPPDATA%\\Mira\\identity.json`，Android 使用
 APK 私有 no-backup 目录；`MIRA_IDENTITY_FILE` 可覆盖。写入采用临时文件、原子 rename 和用户
-`0600` 权限。
+Unix `0600` 权限；Windows 使用受保护的当前用户 / SYSTEM / Administrators DACL。
 
 未配置 `MIRA_NODE_ALLOWED_ROOTS` 时，Linux/WSL/Android 从 `/` 开始，Windows 自动列出所有当前
 可用盘符。最终能否读取仍由 `mira-node` 的 OS 用户权限决定。如需把某台 Node 收紧到特定工作区，
@@ -117,6 +126,9 @@ CLI 不单独登录，直接读取当前设备的 Node identity。所有命令�
 
 ```bash
 mira identity show --json
+mira status
+mira version
+mira update --check
 mira nodes list --json
 mira codex                         # 本机 Codex 继承同一 Node credential
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
@@ -130,6 +142,10 @@ mira app-server connect --node wsl-main
 
 Node selector 可以是 UUID、精确 `nodeKey` 或唯一 hostname；歧义时失败。进程命令始终使用
 executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
+
+Windows 文件、系统进程数/列表、进程启动/终止、CPU/内存/磁盘/网络、真实 ConPTY 输入/VT/
+resize/Ctrl-C，以及本机官方 Codex 自动发现和 App Server 启停已在 Windows 11 实机验证。
+这不代表官方未修改 Codex 已接入 Mira ThreadStore；数据库唯一存储仍需要下面的 Codex 补丁。
 
 ## Codex ThreadStore
 

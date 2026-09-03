@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -42,6 +43,7 @@ type outputBuffer struct {
 	chunks     []outputChunk
 	nextCursor int64
 	size       int
+	pending    map[string][]byte
 }
 
 type streamWriter struct {
@@ -50,16 +52,43 @@ type streamWriter struct {
 }
 
 func (writer streamWriter) Write(value []byte) (int, error) {
-	writer.buffer.push(writer.stream, strings.ToValidUTF8(string(value), "�"))
+	buffer := writer.buffer
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	if buffer.pending == nil {
+		buffer.pending = make(map[string][]byte)
+	}
+	data := append(buffer.pending[writer.stream], value...)
+	end := 0
+	for end < len(data) && utf8.FullRune(data[end:]) {
+		_, size := utf8.DecodeRune(data[end:])
+		end += size
+	}
+	buffer.pushLocked(writer.stream, strings.ToValidUTF8(string(data[:end]), "�"))
+	// Keep only the incomplete trailing codepoint, never the complete output buffer.
+	buffer.pending[writer.stream] = append([]byte(nil), data[end:]...)
 	return len(value), nil
 }
 
+func (buffer *outputBuffer) flush() {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	for stream, pending := range buffer.pending {
+		buffer.pushLocked(stream, strings.ToValidUTF8(string(pending), "�"))
+	}
+	buffer.pending = nil
+}
+
 func (buffer *outputBuffer) push(stream string, text string) {
+	buffer.mu.Lock()
+	defer buffer.mu.Unlock()
+	buffer.pushLocked(stream, text)
+}
+
+func (buffer *outputBuffer) pushLocked(stream string, text string) {
 	if text == "" {
 		return
 	}
-	buffer.mu.Lock()
-	defer buffer.mu.Unlock()
 	chunk := outputChunk{Cursor: buffer.nextCursor, Stream: stream, Text: text}
 	buffer.nextCursor += int64(len(text))
 	buffer.size += len(text)
@@ -273,6 +302,7 @@ func (runtime *capabilityRuntime) startProcess(params processParams) (any, error
 
 func (process *managedProcess) wait() {
 	err := process.command.Wait()
+	process.output.flush()
 	process.mu.Lock()
 	defer process.mu.Unlock()
 	process.running = false

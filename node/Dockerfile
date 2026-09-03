@@ -1,12 +1,17 @@
 FROM golang:1.23-bookworm AS build
 
+ARG MIRA_VERSION=0.9.0
+ARG MIRA_COMMIT=unknown
+ARG MIRA_BUILD_TIME=unknown
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/mira-node ./cmd/mira-node \
-  && CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/mira ./cmd/mira
+RUN link_flags="-s -w -X github.com/ssine/mira/node/internal/node.Version=${MIRA_VERSION} -X github.com/ssine/mira/node/internal/node.Commit=${MIRA_COMMIT} -X github.com/ssine/mira/node/internal/node.BuildTime=${MIRA_BUILD_TIME}" \
+  && CGO_ENABLED=0 go build -trimpath -ldflags="$link_flags" -o /out/mira-node ./cmd/mira-node \
+  && CGO_ENABLED=0 go build -trimpath -ldflags="$link_flags" -o /out/mira ./cmd/mira
 
 FROM node:22-bookworm-slim
 

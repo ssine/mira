@@ -106,19 +106,3 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 		"rootAvailable": currentUserIsRoot(), "nodeMode": detectNodeMode(), "transport": "native",
 	}
 }
-
-func systemProcessList(ctx context.Context) (any, error) {
-	const maximum = 1024 * 1024
-	if runtime.GOOS == "windows" {
-		output, truncated, err := commandOutputLimited(ctx, maximum, "tasklist", "/FO", "CSV", "/NH")
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"format": "tasklist-csv", "output": output, "truncated": truncated, "maxBytes": maximum}, nil
-	}
-	output, truncated, err := commandOutputLimited(ctx, maximum, "ps", "-eo", "pid,ppid,stat,%cpu,%mem,etime,comm,args", "--no-headers")
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"format": "ps", "output": output, "truncated": truncated, "maxBytes": maximum}, nil
-}

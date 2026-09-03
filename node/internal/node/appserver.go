@@ -84,12 +84,7 @@ func (manager *appServerManager) discover(ctx context.Context) error {
 	if !supportsAppServer() {
 		return nil
 	}
-	paths := []string{}
-	if manager.configuration.CodexBinary != "" {
-		paths = append(paths, manager.configuration.CodexBinary)
-	} else if candidate, err := exec.LookPath("codex"); err == nil {
-		paths = append(paths, candidate)
-	}
+	paths := codexCandidatePaths(manager.configuration.CodexBinary)
 	seen := map[string]bool{}
 	installations := []codexInstallation{}
 	for _, candidate := range paths {
@@ -256,6 +251,10 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		command.Env = append(command.Env, "MIRA_NODE_TOKEN="+manager.nodeToken)
 	}
 	if desired.CodexHome != "" {
+		if err := os.MkdirAll(desired.CodexHome, 0700); err != nil {
+			manager.lastError = fmt.Sprintf("create Codex home: %v", err)
+			return fmt.Errorf("%s", manager.lastError)
+		}
 		command.Env = append(command.Env, "CODEX_HOME="+desired.CodexHome)
 	}
 	instance := &appServerInstance{
@@ -272,6 +271,7 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 	manager.instance = instance
 	go func() {
 		_ = command.Wait()
+		instance.output.flush()
 		close(instance.done)
 	}()
 	manager.mu.Unlock()

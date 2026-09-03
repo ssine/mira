@@ -46,6 +46,11 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira.exe ./cmd/mira
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/mira-node-android ./cmd/mira-node
 
+      - name: Build release archives
+        run: |
+          ./scripts/build-release.sh dist
+          node tests/installers_e2e.mjs
+
       - name: Validate Compose files
         env:
           POSTGRES_PASSWORD: ci-only-password
@@ -57,7 +62,8 @@ jobs:
         env:
           MIRA_SECURE_COOKIES: "false"
         run: |
-          docker compose -f compose.yaml up -d postgres
+          docker compose -f compose.yaml up -d --wait postgres
+          trap 'docker compose -f compose.yaml down -v' EXIT
           printf '%s\n' 'mira-local-admin-password' | npm run admin --prefix server -- set-password admin
           npm start --prefix server > /tmp/mira-server.log 2>&1 &
           server_pid=$!
@@ -69,3 +75,15 @@ jobs:
           done
           node tests/auth_enrollment_e2e.mjs
           node tests/web_console_e2e.mjs
+
+  windows-native:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+      - name: Test native Windows capabilities and ConPTY
+        working-directory: node
+        run: go test -v ./...

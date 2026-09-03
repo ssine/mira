@@ -1,8 +1,10 @@
 package node
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -90,11 +92,12 @@ func TestLoadConfigFileAndEnvironmentOverride(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	path := filepath.Join(t.TempDir(), "node.json")
+	rootJSON, _ := json.Marshal(t.TempDir())
 	contents := `{
 		"serverUrl":"https://control.example.test/",
 		"token":"file-token",
 		"nodeKey":"mira-android:test",
-		"allowedRoots":["/tmp"],
+		"allowedRoots":[` + string(rootJSON) + `],
 		"heartbeatSeconds":7,
 		"privilegeMode":"app",
 		"bridgeUrl":"http://127.0.0.1:12345",
@@ -166,7 +169,7 @@ func TestNodeIdentityPersistsCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm()&0077 != 0 {
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
 		t.Fatalf("node identity state is accessible outside its owner: %o", info.Mode().Perm())
 	}
 }

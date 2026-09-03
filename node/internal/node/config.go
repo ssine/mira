@@ -72,6 +72,17 @@ func configFileFromArgs(args []string) (string, error) {
 			return "", fmt.Errorf("unknown argument: %s", args[index])
 		}
 	}
+	if path == "" {
+		candidate, err := defaultConfigFile()
+		if err != nil {
+			return "", err
+		}
+		if _, err := os.Stat(candidate); err == nil {
+			path = candidate
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+	}
 	return path, nil
 }
 

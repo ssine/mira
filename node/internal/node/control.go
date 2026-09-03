@@ -133,7 +133,7 @@ func (client *controlClient) registrationBody(ctx context.Context) map[string]an
 	return map[string]any{
 		"nodeKey": identity.NodeKey, "hostname": identity.Hostname,
 		"platform": identity.Platform, "architecture": identity.Architecture,
-		"nodeMode": identity.Mode, "nodeVersion": nodeVersion,
+		"nodeMode": identity.Mode, "nodeVersion": Version, "nodeBuild": CurrentBuild(),
 		"capabilities":       client.runtime.advertisedCapabilities(ctx),
 		"codexInstallations": client.appServer.installationsView(),
 		"machineStatus":      machineStatus,
@@ -366,7 +366,7 @@ func (client *controlClient) serve(ctx context.Context) error {
 	}()
 	connection.SetReadLimit(16 * 1024 * 1024)
 	if err := client.writeControl(map[string]any{
-		"type": "hello", "nodeId": client.nodeID, "nodeVersion": nodeVersion, "protocolVersion": 1,
+		"type": "hello", "nodeId": client.nodeID, "nodeVersion": Version, "protocolVersion": ProtocolVersion,
 	}); err != nil {
 		return err
 	}

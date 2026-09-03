@@ -20,6 +20,7 @@ function normalizeDescriptor(body) {
     architecture: requiredString("architecture", body.architecture, 64),
     nodeMode: requiredString("nodeMode", body.nodeMode, 64),
     nodeVersion: requiredString("nodeVersion", nodeVersion, 64),
+    nodeBuild: body.nodeBuild ?? {},
     capabilities: body.capabilities ?? {},
     codexInstallations: Array.isArray(body.codexInstallations) ? body.codexInstallations : [],
     defaultDesiredAppServer: body.defaultDesiredAppServer ?? { running: false },
@@ -29,10 +30,14 @@ function normalizeDescriptor(body) {
     ["capabilities", descriptor.capabilities],
     ["defaultDesiredAppServer", descriptor.defaultDesiredAppServer],
     ["machineStatus", descriptor.machineStatus],
+    ["nodeBuild", descriptor.nodeBuild],
   ]) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
       throw new Error(`${name} must be an object`);
     }
+  }
+  if (descriptor.nodeBuild.version !== undefined && descriptor.nodeBuild.version !== descriptor.nodeVersion) {
+    throw new Error("nodeBuild.version must match nodeVersion");
   }
   return descriptor;
 }
@@ -76,6 +81,7 @@ function enrollmentView(row, includeAdminFields = false) {
     architecture: row.architecture,
     nodeMode: row.node_mode,
     nodeVersion: row.node_version,
+    nodeBuild: row.node_build,
     capabilities: row.capabilities,
     codexInstallations: row.codex_installations,
     machineStatus: row.machine_status,
@@ -172,12 +178,12 @@ export async function createEnrollment(pool, request, body) {
       `INSERT INTO mira_node_enrollment_requests (
          credential_id, credential_secret_hash, credential_fingerprint,
          node_key, verification_code, hostname, platform, architecture,
-         node_mode, node_version, capabilities, codex_installations,
+         node_mode, node_version, node_build, capabilities, codex_installations,
          default_desired_app_server, machine_status, requested_from, expires_at
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-         $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15,
-         NOW() + make_interval(mins => $16)
+         $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16,
+         NOW() + make_interval(mins => $17)
        ) RETURNING *`,
       [
         credentialId,
@@ -190,6 +196,7 @@ export async function createEnrollment(pool, request, body) {
         descriptor.architecture,
         descriptor.nodeMode,
         descriptor.nodeVersion,
+        JSON.stringify(descriptor.nodeBuild),
         JSON.stringify(descriptor.capabilities),
         JSON.stringify(descriptor.codexInstallations),
         JSON.stringify(descriptor.defaultDesiredAppServer),
@@ -265,9 +272,9 @@ export async function approveEnrollment(pool, request, principal, enrollmentId, 
       await client.query(
         `UPDATE codex_nodes SET
            enrollment_id = $2, hostname = $3, platform = $4, architecture = $5,
-           node_mode = $6, node_version = $7, capabilities = $8::jsonb,
-           codex_installations = $9::jsonb, machine_status = $10::jsonb,
-           desired_app_server = $11::jsonb, approval_status = 'approved',
+           node_mode = $6, node_version = $7, node_build = $8::jsonb, capabilities = $9::jsonb,
+           codex_installations = $10::jsonb, machine_status = $11::jsonb,
+           desired_app_server = $12::jsonb, approval_status = 'approved',
            approved_at = NOW(), revoked_at = NULL, updated_at = NOW()
          WHERE node_id = $1`,
         [
@@ -278,6 +285,7 @@ export async function approveEnrollment(pool, request, principal, enrollmentId, 
           row.architecture,
           row.node_mode,
           row.node_version,
+          JSON.stringify(row.node_build),
           JSON.stringify(row.capabilities),
           JSON.stringify(row.codex_installations),
           JSON.stringify(row.machine_status),
@@ -293,11 +301,11 @@ export async function approveEnrollment(pool, request, principal, enrollmentId, 
       const inserted = await client.query(
         `INSERT INTO codex_nodes (
            enrollment_id, node_key, hostname, platform, architecture, node_mode,
-           node_version, capabilities, codex_installations, machine_status,
+           node_version, node_build, capabilities, codex_installations, machine_status,
            desired_app_server, approval_status, approved_at
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb,
-           $11::jsonb, 'approved', NOW()
+           $11::jsonb, $12::jsonb, 'approved', NOW()
          ) RETURNING node_id`,
         [
           enrollmentId,
@@ -307,6 +315,7 @@ export async function approveEnrollment(pool, request, principal, enrollmentId, 
           row.architecture,
           row.node_mode,
           row.node_version,
+          JSON.stringify(row.node_build),
           JSON.stringify(row.capabilities),
           JSON.stringify(row.codex_installations),
           JSON.stringify(row.machine_status),

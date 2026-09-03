@@ -308,6 +308,25 @@ const migrations = [
       WHERE jsonb_typeof(requests.default_desired_app_server->'configOverrides') = 'array';
     `,
   },
+  {
+    version: 8,
+    name: "node-build-metadata",
+    sql: `
+      ALTER TABLE codex_nodes
+        ADD COLUMN IF NOT EXISTS node_build JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+      ALTER TABLE mira_node_enrollment_requests
+        ADD COLUMN IF NOT EXISTS node_build JSONB NOT NULL DEFAULT '{}'::jsonb;
+
+      UPDATE codex_nodes
+        SET node_build = jsonb_build_object('version', node_version, 'protocolVersion', 1)
+        WHERE node_build = '{}'::jsonb;
+
+      UPDATE mira_node_enrollment_requests
+        SET node_build = jsonb_build_object('version', node_version, 'protocolVersion', 1)
+        WHERE node_build = '{}'::jsonb;
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

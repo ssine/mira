@@ -7,8 +7,6 @@ import (
 	"time"
 )
 
-const nodeVersion = "0.8.0"
-
 func Log(message string, fields map[string]any) {
 	value := map[string]any{
 		"time":    time.Now().UTC().Format(time.RFC3339Nano),

@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
+      - name: Validate unified version
+        shell: bash
+        run: |
+          node scripts/check-version.mjs
+          version=$(<VERSION)
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match VERSION ${version}" >&2
+            exit 1
+          fi
+
+      - name: Build desktop Node and CLI artifacts
+        run: |
+          go -C node test ./...
+          ./scripts/build-release.sh dist
+          node tests/installers_e2e.mjs
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Build signed Android APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.MIRA_ANDROID_KEYSTORE_BASE64 }}
+          MIRA_ANDROID_STORE_PASSWORD: ${{ secrets.MIRA_ANDROID_STORE_PASSWORD }}
+          MIRA_ANDROID_KEY_ALIAS: ${{ secrets.MIRA_ANDROID_KEY_ALIAS }}
+          MIRA_ANDROID_KEY_PASSWORD: ${{ secrets.MIRA_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "${ANDROID_KEYSTORE_BASE64}" ]]; then
+            echo "MIRA_ANDROID_KEYSTORE_BASE64 is required" >&2
+            exit 1
+          fi
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/mira-release.jks"
+          export MIRA_ANDROID_KEYSTORE="${RUNNER_TEMP}/mira-release.jks"
+          sdkmanager "platforms;android-35" "build-tools;35.0.0"
+          gradle -p node/android --no-daemon assembleRelease
+          version=$(<VERSION)
+          cp node/android/app/build/outputs/apk/release/app-release.apk "dist/mira_${version}_android_arm64.apk"
+          (cd dist && sha256sum "mira_${version}_android_arm64.apk" >> SHA256SUMS)
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version=$(<VERSION)
+          tag="v${version}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
+            git tag "${tag}"
+            git push origin "${tag}"
+          fi
+          gh release create "${tag}" dist/* \
+            --verify-tag \
+            --generate-notes \
+            --title "Mira ${version}"

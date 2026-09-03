@@ -53,6 +53,18 @@
           <article><span>存储后端</span><strong class="word">PG</strong><small>唯一事实来源</small></article>
         </div>
 
+        <details class="panel install-panel">
+          <summary><span>＋ 添加设备</span><span class="hint">一条命令安装 · APK · 版本更新</span></summary>
+          <p class="muted">在设备上安装后，回到下面的「接入申请」核对验证码并批准。安装器不会索取管理员密码。</p>
+          <div class="install-grid">
+            <article><h3>Linux / WSL / NAS</h3><p class="muted">amd64、arm64；按当前用户安装。</p><pre><code id="installLinux"></code></pre><button class="secondary" type="button" data-copy-install="installLinux">复制安装命令</button></article>
+            <article><h3>Windows PowerShell</h3><p class="muted">Windows 10 1809+ / 11 x64；原生 ConPTY。</p><pre><code id="installWindows"></code></pre><button class="secondary" type="button" data-copy-install="installWindows">复制安装命令</button></article>
+            <article><h3>Android</h3><p class="muted">Android 8+ arm64，root / 非 root 共用 APK。安装后填写此 Server 地址：</p><pre><code id="installServer"></code></pre><a id="installAndroid" class="secondary" href="https://github.com/ssine/mira/releases/latest" target="_blank" rel="noopener noreferrer">下载签名 APK</a></article>
+          </div>
+          <p class="muted">后续更新：桌面 / Linux 执行 <code>mira update</code>；Android 在 APP 内「Check for updates」下载并确认安装。保留设备身份和配置，无需重新审批。更新前关闭运行中的会话。</p>
+          <a href="https://github.com/ssine/mira/blob/main/INSTALL.md" target="_blank" rel="noopener noreferrer">完整安装与更新说明 ↗</a>
+        </details>
+
         <section class="panel">
           <div class="panel-head"><div><p class="eyebrow">ENROLLMENTS</p><h2>接入申请</h2></div><span class="hint">核对设备上显示的六位验证码</span></div>
           <div id="enrollmentList" class="enrollment-list"></div>

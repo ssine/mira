@@ -69,6 +69,8 @@ func parseGlobalCLI(args []string) (cliOptions, []string, error) {
 		switch {
 		case arg == "--json":
 			options.JSON = true
+		case arg == "--version" && len(remaining) == 0:
+			remaining = append(remaining, "version")
 		case arg == "--timeout":
 			if index+1 >= len(args) {
 				return options, nil, fmt.Errorf("%s requires a value", arg)
@@ -83,6 +85,10 @@ func parseGlobalCLI(args []string) (cliOptions, []string, error) {
 				return options, nil, fmt.Errorf("parse --timeout: %w", err)
 			}
 		case arg == "--server" || strings.HasPrefix(arg, "--server="):
+			if len(remaining) > 0 && remaining[0] == "setup" {
+				remaining = append(remaining, arg)
+				continue
+			}
 			return options, nil, fmt.Errorf("--server is not supported: a Node credential is bound to the Server URL in its identity file")
 		default:
 			remaining = append(remaining, arg)
@@ -645,14 +651,18 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 	if len(args) > 0 && args[0] == "--" {
 		args = args[1:]
 	}
-	command := exec.CommandContext(ctx, "codex", args...)
+	candidates := codexCandidatePaths(os.Getenv("CODEX_BINARY"))
+	if len(candidates) == 0 {
+		return fmt.Errorf("no Codex executable found; install Codex or set CODEX_BINARY")
+	}
+	command := exec.CommandContext(ctx, candidates[0], args...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	command.Env = append(os.Environ(), "MIRA_NODE_TOKEN="+client.identity.Token, "MIRA_SERVER_URL="+client.identity.ServerURL)
 	return command.Run()
 }
 
 func cliUsage() string {
-	return "usage: mira [--json] [--timeout 30s] <identity|nodes|file|process|pty|screen|app-server|codex> ..."
+	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex> ..."
 }
 
 func cliExitCode(err error) int {
@@ -703,6 +713,58 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		printCLIError(stderr, options, fmt.Errorf("command is required"))
 		fmt.Fprintln(stderr, cliUsage())
 		return 64
+	}
+	if remaining[0] == "version" && len(remaining) == 1 {
+		if !options.JSON {
+			fmt.Fprintf(stdout, "mira %s (%s, %s/%s)\n", Version, Commit, CurrentBuild().Platform, CurrentBuild().Architecture)
+			return 0
+		}
+		value := map[string]any{"program": "mira", "build": CurrentBuild()}
+		if err := printResult(stdout, options, value); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" {
+		var value any
+		var localErr error
+		switch remaining[0] {
+		case "setup":
+			value, localErr = runSetup(remaining[1:])
+		case "status":
+			value, localErr = localStatus(ctx, options)
+		case "update":
+			value, localErr = runUpdate(ctx, options, remaining[1:], stdin, stdout, stderr)
+		}
+		if localErr != nil {
+			printCLIError(stderr, options, localErr)
+			return cliExitCode(localErr)
+		}
+		if !options.JSON && remaining[0] == "status" {
+			view, _ := value.(map[string]any)
+			fmt.Fprintf(stdout, "Mira %s\nServer: %v\nEnrollment: %v\n", Version, view["serverUrl"], view["status"])
+			if code, ok := view["verificationCode"].(string); ok && code != "" {
+				fmt.Fprintf(stdout, "Verification code: %s\n", code)
+			}
+			if state, ok := view["connectionStatus"]; ok {
+				fmt.Fprintf(stdout, "Connection: %v\n", state)
+			}
+			if hint, ok := view["hint"]; ok {
+				fmt.Fprintln(stdout, hint)
+			}
+			if connectionError, ok := view["connectionError"]; ok {
+				fmt.Fprintf(stdout, "Server error: %v\n", connectionError)
+			}
+			return 0
+		}
+		if value != nil {
+			if err := printResult(stdout, options, value); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+		}
+		return 0
 	}
 	if remaining[0] == "identity" && len(remaining) == 2 && remaining[1] == "show" {
 		state, err := loadIdentity(options.Identity)
