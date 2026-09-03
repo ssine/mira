@@ -59,19 +59,24 @@ jobs:
           docker compose -f compose.yaml config --quiet
           docker compose -f compose.homeserver.yaml config --quiet
 
-      - name: Test authentication and Node enrollment
+      - name: Build production Server container
+        run: docker build -t mira-control:ci ./server
+
+      - name: Test authentication and Node enrollment through the container
         env:
           MIRA_SECURE_COOKIES: "false"
         run: |
           docker compose -f compose.yaml up -d --wait postgres
           trap 'docker compose -f compose.yaml down -v' EXIT
           printf '%s\n' 'mira-local-admin-password' | npm run admin --prefix server -- set-password admin
-          npm start --prefix server > /tmp/mira-server.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true; docker compose -f compose.yaml down -v' EXIT
+          docker run -d --name mira-ci-control --network host \
+            -e DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira \
+            -e MIRA_SECURE_COOKIES=false -e LISTEN_HOST=127.0.0.1 \
+            mira-control:ci
+          trap 'docker rm -f mira-ci-control >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
           for attempt in $(seq 1 40); do
             if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
-            if [ "$attempt" -eq 40 ]; then cat /tmp/mira-server.log; exit 1; fi
+            if [ "$attempt" -eq 40 ]; then docker logs mira-ci-control; exit 1; fi
             sleep 0.5
           done
           node tests/auth_enrollment_e2e.mjs
