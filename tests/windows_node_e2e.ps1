@@ -1,7 +1,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$BinaryDirectory,
     [string]$ServerUrl = "http://127.0.0.1:18787",
-    [string]$ExpectedVersion = "0.9.2",
+    [string]$ExpectedVersion = "0.9.3",
   [switch]$TestAppServer
 )
 

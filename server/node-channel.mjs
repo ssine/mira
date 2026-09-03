@@ -48,6 +48,7 @@ export class NodeChannel {
     this.authService = authService;
     this.capabilityService = null;
     this.nodes = new Map();
+    this.statusWrites = new Map();
     this.pending = new Map();
     this.proxies = new Map();
     this.wss = new WebSocketServer({
@@ -121,36 +122,57 @@ export class NodeChannel {
 
   attachNode(nodeId, ws) {
     const previous = this.nodes.get(nodeId);
-    if (previous?.readyState === WebSocket.OPEN) previous.close(1012, "replaced");
+    if (previous) this.rejectNodeWork(nodeId);
     this.nodes.set(nodeId, ws);
-    void setNodeChannelStatus(this.pool, nodeId, {
+    if (previous?.readyState === WebSocket.OPEN) previous.close(1012, "replaced");
+    this.writeNodeStatus(nodeId, {
       connected: true, connectedAt: new Date().toISOString(), protocolVersion: 1,
     });
     ws.on("message", (data) => {
+      if (this.nodes.get(nodeId) !== ws) return;
       void this.handleNodeMessage(nodeId, ws, data).catch((error) => {
         console.error("node channel message failed", error);
         ws.close(1011, "node channel message failed");
       });
     });
     ws.on("close", () => {
-      if (this.nodes.get(nodeId) === ws) this.nodes.delete(nodeId);
-      void setNodeChannelStatus(this.pool, nodeId, {
+      // A replaced connection can finish closing after its successor is live.
+      // It must not mark the new channel offline or reject its in-flight work.
+      if (this.nodes.get(nodeId) !== ws) return;
+      this.nodes.delete(nodeId);
+      this.writeNodeStatus(nodeId, {
         connected: false, disconnectedAt: new Date().toISOString(), protocolVersion: 1,
       });
-      for (const [requestId, pending] of this.pending) {
-        if (pending.nodeId === nodeId) {
-          clearTimeout(pending.timeout);
-          pending.reject(channelError("target Node disconnected", 503, "node_offline"));
-          this.pending.delete(requestId);
-        }
-      }
-      for (const [sessionId, proxy] of this.proxies) {
-        if (proxy.targetNodeId === nodeId) {
-          proxy.ws.close(1011, "node disconnected");
-          this.proxies.delete(sessionId);
-        }
-      }
+      this.rejectNodeWork(nodeId);
     });
+  }
+
+  writeNodeStatus(nodeId, status) {
+    // Serialize this Node's writes: pooled database connections may otherwise
+    // commit a slow old disconnect after a newer connect. Remove settled queues.
+    const write = (this.statusWrites.get(nodeId) ?? Promise.resolve())
+      .then(() => setNodeChannelStatus(this.pool, nodeId, status))
+      .catch((error) => console.error("node channel status update failed", error));
+    this.statusWrites.set(nodeId, write);
+    void write.then(() => {
+      if (this.statusWrites.get(nodeId) === write) this.statusWrites.delete(nodeId);
+    });
+  }
+
+  rejectNodeWork(nodeId) {
+    for (const [requestId, pending] of this.pending) {
+      if (pending.nodeId === nodeId) {
+        clearTimeout(pending.timeout);
+        pending.reject(channelError("target Node disconnected", 503, "node_offline"));
+        this.pending.delete(requestId);
+      }
+    }
+    for (const [sessionId, proxy] of this.proxies) {
+      if (proxy.targetNodeId === nodeId) {
+        proxy.ws.close(1011, "node disconnected");
+        this.proxies.delete(sessionId);
+      }
+    }
   }
 
   async handleNodeMessage(nodeId, ws, data) {

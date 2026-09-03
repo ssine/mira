@@ -31,6 +31,7 @@ jobs:
         run: |
           npm run check --prefix server
           for file in tests/*.mjs; do node --check "$file"; done
+          node --test tests/node_channel_test.mjs
 
       - name: Check Python
         run: python3 -m compileall -q tests

@@ -1,4 +1,4 @@
-# Windows and release acceptance — 0.9.0
+# Windows and release acceptance — 0.9.x
 
 0.9.1 follow-up: real GitHub installation exposed MSIX AppData/HKCU virtualization when launched
 from the packaged Codex app. New Windows installs now use `%USERPROFILE%\.mira`; user PATH is
@@ -10,6 +10,12 @@ this independent directory. Existing device identity was retained during the acc
 The reverse-channel dialer now clones the configuration and advertises HTTP/1.1 only. The automated
 regression test first negotiates HTTP/2 with a TLS test server and then requires a successful WSS
 hello exchange; it runs on Linux and Windows.
+
+0.9.3 follow-up: reinstalling the real Windows login task found a Server reconnect race: the old
+socket's delayed close marked its replacement offline despite fresh heartbeats. Stale sockets can
+no longer change successor state or consume its responses, old work is rejected at replacement,
+and per-Node status writes are serialized. Regression tests cover delayed close, active requests,
+App Server proxies and delayed database completion (`node --test tests/node_channel_test.mjs`).
 
 Verified on native Windows 11 x64 from WSL → Windows PowerShell, not Windows binaries running
 inside a Linux compatibility shim:
