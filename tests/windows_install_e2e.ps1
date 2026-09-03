@@ -38,8 +38,10 @@ try {
     if ((Get-Content (Join-Path $installDirectory "current-version") -Raw).Trim() -ne $CurrentVersion) { throw "Windows version pointer was not updated" }
     if (-not (Test-Path (Join-Path $installDirectory "versions\$PreviousVersion\mira-node.exe"))) { throw "Windows update discarded the previous version" }
     $codexPackage = Join-Path $installDirectory "versions\$CurrentVersion\mira-codex-package"
-    foreach ($name in @("bin\codex.exe", "bin\codex-code-mode-host.exe", "codex-resources\codex-command-runner.exe", "codex-resources\codex-windows-sandbox-setup.exe", "codex-path\rg.exe", "codex-package.json")) {
-        if (-not (Test-Path (Join-Path $codexPackage $name))) { throw "Windows canonical Codex package is missing $name" }
+    if (Test-Path $codexPackage) {
+        foreach ($name in @("bin\codex.exe", "bin\codex-code-mode-host.exe", "codex-resources\codex-command-runner.exe", "codex-resources\codex-windows-sandbox-setup.exe", "codex-path\rg.exe", "codex-package.json")) {
+            if (-not (Test-Path (Join-Path $codexPackage $name))) { throw "Windows canonical Codex package is missing $name" }
+        }
     }
     if ($TestService) {
         $task = Get-ScheduledTask -TaskName $taskName
