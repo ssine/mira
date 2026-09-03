@@ -3,15 +3,30 @@
 package node
 
 import (
-	pty "github.com/aymanbagabas/go-pty"
-	"golang.org/x/sys/windows"
+	"io"
 	"os"
 	"os/exec"
 	"unsafe"
+
+	pty "github.com/aymanbagabas/go-pty"
+	"golang.org/x/sys/windows"
 )
 
 func configureSSHCommand(cmd *exec.Cmd) {}
 func configureSSHPTY(cmd *pty.Cmd)      {}
+
+func sshPTYReader(terminal pty.Pty) (io.Reader, func(), error) {
+	// go-pty closes its output handle immediately after ClosePseudoConsole.
+	// Keep a duplicate read handle until EOF so final buffered output cannot
+	// race that close when a command exits before the reader is scheduled.
+	console := terminal.(pty.ConPty)
+	var handle windows.Handle
+	if err := windows.DuplicateHandle(windows.CurrentProcess(), windows.Handle(console.OutputPipe().Fd()), windows.CurrentProcess(), &handle, 0, false, windows.DUPLICATE_SAME_ACCESS); err != nil {
+		return nil, nil, err
+	}
+	reader := os.NewFile(uintptr(handle), "ssh-conpty-output")
+	return reader, func() { reader.Close() }, nil
+}
 func signalSSHProcess(process *os.Process, name string) error {
 	return terminateProcess(process, "SIG"+name)
 }

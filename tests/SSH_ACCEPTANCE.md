@@ -8,6 +8,7 @@ Verified on 2026-09-04. This is a candidate branch, not a production Server depl
 | Linux/WSL | 9 MiB binary SFTP upload/download, byte equality, no-overwrite default, root policy, revocation closes live connection and reaps child | Passed |
 | Standard OpenSSH client | Real SSH handshake, fixed host key, public-key auth and exec against Mira's Go server | Passed |
 | Native Windows desktop | Built-in Windows CLI through local Server to native worker, ConPTY, exit code, 5 MiB SFTP, Windows → Linux exec | Passed |
+| Native Windows desktop | 100 fast-exit ConPTY sessions retain their final output | Passed after output-handle lifetime fix; repeated in CI |
 | Windows CI runner | Native unit tests, including SFTP using Windows short/long temporary-directory aliases | Passed after namespace fix |
 | Android 15 arm64, real APK root mode | Actual UID 0, native PTY, 5 MiB binary SFTP roundtrip, APK's built-in client → Linux | Passed |
 | Android 15 arm64, real APK app-only mode | Actual app UID/untrusted_app SELinux domain, same SSH/PTY/SFTP checks; `/data/system` access denied | Passed |

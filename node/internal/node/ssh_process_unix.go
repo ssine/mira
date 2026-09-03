@@ -3,10 +3,12 @@
 package node
 
 import (
-	pty "github.com/aymanbagabas/go-pty"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
+
+	pty "github.com/aymanbagabas/go-pty"
 )
 
 func configureSSHCommand(cmd *exec.Cmd) {
@@ -16,6 +18,8 @@ func configureSSHCommand(cmd *exec.Cmd) {
 func configureSSHPTY(cmd *pty.Cmd) {
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 }
+
+func sshPTYReader(terminal pty.Pty) (io.Reader, func(), error) { return terminal, func() {}, nil }
 func signalSSHProcess(process *os.Process, name string) error {
 	sig := syscall.SIGTERM
 	if name == "INT" {

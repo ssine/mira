@@ -89,3 +89,6 @@ jobs:
       - name: Test native Windows capabilities and ConPTY
         working-directory: node
         run: go test -v ./...
+      - name: Repeat fast-exit SSH ConPTY output regression
+        working-directory: node
+        run: go test -run '^TestSSHNativePTY$' -count 100 -timeout 120s ./internal/node

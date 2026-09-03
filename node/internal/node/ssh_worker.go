@@ -342,10 +342,17 @@ func startSSHProcess(ctx context.Context, channel ssh.Channel, text string, term
 	if unixTTY, ok := tty.(pty.UnixPty); ok {
 		_ = unixTTY.Slave().Close()
 	}
+	reader, closeReader, err := sshPTYReader(tty)
+	if err != nil {
+		closeTTY()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, err
+	}
 	stopClose := context.AfterFunc(ctx, closeTTY)
 	go func() { _, _ = io.Copy(tty, channel) }()
 	drained := make(chan struct{})
-	go func() { _, _ = io.Copy(channel, tty); close(drained) }()
+	go func() { _, _ = io.Copy(channel, reader); close(drained) }()
 	return &sshRunningProcess{
 		resize: func(cols, rows int) error {
 			mu.Lock()
@@ -357,6 +364,7 @@ func startSSHProcess(ctx context.Context, channel ssh.Channel, text string, term
 		},
 		signal: func(s string) error { return signalSSHProcess(cmd.Process, s) },
 		wait: func() int {
+			defer closeReader()
 			err := cmd.Wait()
 			if runtime.GOOS == "windows" {
 				closeTTY()
