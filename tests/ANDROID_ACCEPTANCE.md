@@ -44,5 +44,17 @@ Stopped by user. Save and start explicitly resumed it. Root capability calls als
 the Activity was in the background. ColorOS's per-app background battery restriction was relaxed
 through its normal confirmation UI; this alone did not unblock the separate upgrade broadcast.
 
+## Published artifact verification
+
+The public `v0.9.4` APK (`b79e472`) was downloaded from GitHub Releases after publication. All
+release asset checksums and the existing APK signing certificate were verified; the packaged Go
+binary passed the native-DNS build check. In-place installation retained the same approved Node,
+and the full root suite passed again. The app's Check for updates displayed **Mira 0.9.4 is up to
+date**. The candidate's full root suite also passed with the ADB connection explicitly disconnected.
+
+The deployed Server reported 0.9.4/schema 8 through both TLS ingress paths. Android 0.9.4 and the
+existing Windows/Linux 0.9.3 Nodes all reconnected after the control-plane restart; desktop Nodes
+were not unnecessarily upgraded for these Android-only fixes.
+
 Not claimed by this run: reboot recovery, indefinite background survival, cellular/Wi-Fi handoff,
 non-root Accessibility/MediaProjection end-to-end, all Android OEMs or all root providers.
