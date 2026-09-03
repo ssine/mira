@@ -24,6 +24,10 @@ services:
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: "8787"
       MIRA_SECURE_COOKIES: "true"
+      # Managed App Servers run on remote Nodes, so they must receive the
+      # externally reachable ThreadStore endpoint rather than this container's
+      # loopback/default listen address.
+      MIRA_CODEX_STORE_ENDPOINT: https://mira.ssine.cc
       # Safe because the published port below is loopback-only and Caddy is the
       # only network-facing caller. Never enable this on a directly exposed port.
       MIRA_TRUST_PROXY_HEADERS: "true"
