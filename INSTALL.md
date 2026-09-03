@@ -1,6 +1,6 @@
 # 安装、接入与更新
 
-Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.9.1**，发布来源为
+Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.9.2**，发布来源为
 [GitHub Releases](https://github.com/ssine/mira/releases)。无需安装 Go、Node.js 或 Termux。
 官方 Codex 是独立软件，它的版本号不与 Mira 绑定。
 
@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 ```
 
 支持 Linux amd64、arm64；WSL 使用 Linux 版本。需要 `curl`、`tar`、`sha256sum`。
-去掉 `--server` 参数会交互询问 Server URL。支持 `--version 0.9.0` 固定版本。
+去掉 `--server` 参数会交互询问 Server URL。支持 `--version 0.9.2` 固定版本。
 脚本会下载 GitHub Release、核对 SHA-256，然后按当前用户安装，不使用 `sudo`。
 如希望先审查脚本，下载并阅读后执行 `sh install.sh --server ...`。
 
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 & ([scriptblock]::Create((irm https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1))) -Server https://mira.ssine.cc
 ```
 
-去掉 `-Server` 会询问地址；`-Version 0.9.0` 固定版本。无需 Node.js、Python 或编译工具。
+去掉 `-Server` 会询问地址；`-Version 0.9.2` 固定版本。无需 Node.js、Python 或编译工具。
 安装器创建当前用户的登录计划任务，不以 SYSTEM 运行；不需要给 Mira 全机管理员权限。
 如果组织策略禁止创建任务，可使用 `-NoService`，然后手工启动 `mira-node`。
 
@@ -103,10 +103,10 @@ mira update
 此检查是尽力而为，不是分布式 drain/锁，检查后仍应避免开始新任务。
 不要从同一个 Node 的远程 shell 中更新它本身；请从本机终端执行。
 
-显式回退到已有正式版本：
+显式选择某个已发布的兼容版本（也可用于回退）：
 
 ```sh
-mira update --version 0.9.0
+mira update --version 0.9.2
 ```
 
 已安装相同版本时默认不重启；加 `--force` 可重装同一正式版。版本目录内容不同会拒绝覆盖。
@@ -117,6 +117,7 @@ Home Server 上由 Nix/systemd/Compose 管理的 Server 与 Node，应继续由�
 目前是**每台设备一个更新命令**，不是自动批量更新所有设备。各 Node 可以滚动更新，不必同一
 时刻升级；当前 wire protocol 仍是 v1，Server 接受未携带新 build metadata 的旧 Node。
 旧 Node 不会因为 Server 升级就获得新的 ConPTY 等能力。
+HTTPS/WSS 接入建议使用 0.9.2 或更新版本；它修复了 HTTP/2 注册后 WebSocket TLS 协商失败的问题。
 
 ## 发布维护
 

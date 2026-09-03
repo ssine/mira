@@ -331,7 +331,11 @@ func (client *controlClient) serve(ctx context.Context) error {
 		return err
 	}
 	dialer := *websocket.DefaultDialer
-	dialer.TLSClientConfig = client.http.Transport.(*http.Transport).TLSClientConfig
+	// net/http adds h2 to its TLS config after the first HTTPS request. Gorilla
+	// uses an HTTP/1.1 Upgrade handshake, so sharing that config breaks WSS after
+	// enrollment against an HTTP/2-enabled reverse proxy such as Caddy.
+	dialer.TLSClientConfig = client.http.Transport.(*http.Transport).TLSClientConfig.Clone()
+	dialer.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	dialer.Subprotocols = []string{
 		"mira-node-v1",
 		"auth." + base64.RawURLEncoding.EncodeToString([]byte(client.token)),

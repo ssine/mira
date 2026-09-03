@@ -6,6 +6,11 @@ persisted by a temporary, non-elevated task outside that virtualization. Environ
 is bounded, and the temporary task is removed. The native Node login task successfully runs from
 this independent directory. Existing device identity was retained during the acceptance migration.
 
+0.9.2 follow-up: domain enrollment exposed shared TLS configuration between net/http and Gorilla.
+The reverse-channel dialer now clones the configuration and advertises HTTP/1.1 only. The automated
+regression test first negotiates HTTP/2 with a TLS test server and then requires a successful WSS
+hello exchange; it runs on Linux and Windows.
+
 Verified on native Windows 11 x64 from WSL → Windows PowerShell, not Windows binaries running
 inside a Linux compatibility shim:
 
