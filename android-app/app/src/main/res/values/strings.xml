@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Mira Node</string>
+    <string name="accessibility_description">Lets Mira inspect the current UI and perform user-requested gestures in non-root mode.</string>
+</resources>

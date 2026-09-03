@@ -1,0 +1,32 @@
+# The patched Codex checkout has its own Git history.
+/codex/
+
+# Project-local build toolchains and caches.
+/.cargo/
+/.rustup/
+/server/node_modules/
+/android-native-agent/dist/
+/.android-sdk/
+/android-app/.gradle/
+/android-app/build/
+/android-app/app/build/
+/android-app/local.properties
+
+# Local service configuration and logs.
+.env
+.env.*
+!.env.example
+*.log
+/node-agent/state.json
+
+# End-to-end test state. Client homes can contain auth tokens and shell snapshots.
+/runtime/client-*/
+/runtime/workspace/
+/runtime/*.dump
+__pycache__/
+*.py[cod]
+
+# Editor and operating-system metadata.
+.idea/
+.vscode/
+.DS_Store

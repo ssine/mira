@@ -1,0 +1,51 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.ssine.codexnode"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.ssine.codexnode"
+        minSdk 26
+        targetSdk 35
+        versionCode 7
+        versionName "0.7.0"
+    }
+
+    sourceSets {
+        main.jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs"))
+    }
+
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+def nativeBinary = file("../../android-native-agent/dist/codex-android-agent-arm64")
+
+tasks.register("buildNativeAgent", Exec) {
+    workingDir file("../../android-native-agent")
+    commandLine "./build-android.sh"
+    inputs.files(fileTree("../../android-native-agent") {
+        include "*.go", "go.mod", "go.sum", "build-android.sh"
+    })
+    outputs.file(nativeBinary)
+}
+
+tasks.register("copyNativeAgent", Copy) {
+    dependsOn("buildNativeAgent")
+    from(nativeBinary)
+    into(layout.buildDirectory.dir("generated/jniLibs/arm64-v8a"))
+    rename { "libcodex_agent.so" }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("copyNativeAgent")
+}

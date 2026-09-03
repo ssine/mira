@@ -1,0 +1,14 @@
+{
+  "name": "mira-control-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs && node --check db.mjs && node --check thread-store.mjs && node --check node-registry.mjs && node --check node-channel.mjs && node --check dynamic-tools.mjs"
+  },
+  "dependencies": {
+    "pg": "^8.16.3",
+    "ws": "^8.18.3"
+  }
+}
