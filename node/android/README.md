@@ -71,3 +71,8 @@ Android cross-compile remains useful only as a shared-code compile check, not a 
 The Release workflow can be dispatched with `publish=false` to produce signed acceptance artifacts
 without a tag/release; install those on a real device before tagging the release. Verify a domain
 Server URL, not just an IP address, along with screen/file/process capabilities and in-place update.
+
+Root-created Node identities inherit the app-private directory's owner and SELinux label, retaining
+0600 permissions. Switching root/app mode must keep the same credential and approval; never solve
+ownership failures by making credentials world-readable or disabling SELinux. A root launch also
+repairs identities created by earlier builds without replacing their content.

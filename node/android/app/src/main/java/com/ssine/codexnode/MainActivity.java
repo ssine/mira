@@ -230,6 +230,13 @@ public final class MainActivity extends Activity {
         SharedPreferences prefs = getSharedPreferences(NodeConfig.PREFS, MODE_PRIVATE);
         String status = prefs.getString(NodeConfig.KEY_STATUS, "Stopped");
         String mode = prefs.getString(NodeConfig.KEY_EFFECTIVE_MODE, "none");
+        if (mode.equals("root")) {
+            statusView.setText("Status: " + status + "\nEffective mode: root"
+                    + "\nScreen / input: authorized root"
+                    + "\nFiles / processes: root access"
+                    + "\nNon-root Android permissions are not required in this mode.");
+            return;
+        }
         statusView.setText("Status: " + status + "\nEffective mode: " + mode
                 + "\nAccessibility: " + (MiraAccessibilityService.isConnected() ? "ready" : "permission required")
                 + "\nScreen capture: " + (ScreenCaptureController.isReady() ? "ready" : "permission required")

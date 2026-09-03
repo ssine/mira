@@ -122,6 +122,9 @@ func loadOrCreateNodeState(configuration config, identity nodeIdentity) (*persis
 		if state.ServerURL != configuration.ServerURL || state.NodeKey != identity.NodeKey {
 			return nil, fmt.Errorf("Mira identity belongs to %s / %s; use a different MIRA_IDENTITY_FILE", state.ServerURL, state.NodeKey)
 		}
+		if err := repairIdentityPermissions(configuration.IdentityFile); err != nil {
+			return nil, fmt.Errorf("repair Mira identity permissions: %w", err)
+		}
 		return state, nil
 	}
 	if !os.IsNotExist(err) {

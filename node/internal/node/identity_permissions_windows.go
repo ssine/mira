@@ -9,6 +9,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func repairIdentityPermissions(string) error { return nil }
+
 func protectIdentityFile(file *os.File) error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
