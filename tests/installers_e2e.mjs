@@ -69,7 +69,7 @@ try {
   try { await fs.access(powershell); } catch { /* Linux CI has no Windows interop. */ }
   if (await fs.stat(powershell).catch(() => null)) {
     const windowsPath = (value) => command("wslpath", ["-w", value]).trim();
-    const result = command(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsPath(path.join(root, "tests/windows_install_e2e.ps1")), "-Installer", windowsPath(path.join(root, "scripts/install.ps1")), "-ReleaseDirectory", windowsPath(releases), "-CurrentVersion", current, "-PreviousVersion", previous]);
+    const result = command(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsPath(path.join(root, "tests/windows_install_e2e.ps1")), "-Installer", windowsPath(path.join(root, "scripts/install.ps1")), "-ReleaseDirectory", windowsPath(releases), "-CurrentVersion", current, "-PreviousVersion", previous, "-TestPath"], { timeout: 120_000 });
     assert.match(result, /WINDOWS_INSTALL_UPDATE_OK/);
     if (process.env.MIRA_TEST_WINDOWS_SERVICE === "1") {
       const serviceResult = command(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsPath(path.join(root, "tests/windows_install_e2e.ps1")), "-Installer", windowsPath(path.join(root, "scripts/install.ps1")), "-ReleaseDirectory", windowsPath(releases), "-CurrentVersion", current, "-PreviousVersion", previous, "-TestService"]);

@@ -3,7 +3,8 @@ param(
     [string]$ReleaseDirectory,
     [string]$CurrentVersion,
     [string]$PreviousVersion,
-    [switch]$TestService
+    [switch]$TestService,
+    [switch]$TestPath
 )
 $ErrorActionPreference = "Stop"
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("mira-install-e2e-" + [Guid]::NewGuid().ToString("N"))
@@ -20,7 +21,8 @@ if ($TestService -and (Get-ScheduledTask -TaskName $taskName -ErrorAction Silent
 }
 try {
     $createdTask = [bool]$TestService
-    & $Installer -Version $PreviousVersion -Server "http://127.0.0.1:9" -ReleaseDirectory $ReleaseDirectory -InstallDirectory $installDirectory -NoService:(!$TestService) -NoPath
+    & $Installer -Version $PreviousVersion -Server "http://127.0.0.1:9" -ReleaseDirectory $ReleaseDirectory -InstallDirectory $installDirectory -NoService:(!$TestService) -NoPath:(!$TestPath)
+    if ($TestPath -and ([Environment]::GetEnvironmentVariable("Path", "User") -split ";") -notcontains (Join-Path $installDirectory "bin")) { throw "Installer did not persist PATH" }
     if (-not $TestService) {
         $nodeProcess = Start-Process -FilePath (Join-Path $installDirectory "versions\$PreviousVersion\mira-node.exe") -WindowStyle Hidden -PassThru
     }
@@ -48,6 +50,14 @@ try {
         Start-Sleep -Milliseconds 500
     }
     if ($nodeProcess -and -not $nodeProcess.HasExited) { Stop-Process -Id $nodeProcess.Id -ErrorAction SilentlyContinue }
+    if ($TestPath) {
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+        try {
+            $rawPath = [string]$key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $cleanPath = (($rawPath -split ";") | Where-Object { $_ -ne (Join-Path $installDirectory "bin") }) -join ";"
+            $key.SetValue("Path", $cleanPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+        } finally { $key.Close() }
+    }
     $env:MIRA_IDENTITY_FILE = $previousIdentity
     $env:CODEX_BINARY = $previousCodex
     if (Test-Path $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }

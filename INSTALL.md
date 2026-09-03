@@ -1,6 +1,6 @@
 # 安装、接入与更新
 
-Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.9.0**，发布来源为
+Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.9.1**，发布来源为
 [GitHub Releases](https://github.com/ssine/mira/releases)。无需安装 Go、Node.js 或 Termux。
 官方 Codex 是独立软件，它的版本号不与 Mira 绑定。
 
@@ -38,9 +38,10 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 安装器创建当前用户的登录计划任务，不以 SYSTEM 运行；不需要给 Mira 全机管理员权限。
 如果组织策略禁止创建任务，可使用 `-NoService`，然后手工启动 `mira-node`。
 
-- 程序与旧版本：`%LOCALAPPDATA%\Mira\versions\<version>\`。
-- PATH 入口：`%LOCALAPPDATA%\Mira\bin`，安装后新开终端使用 `mira`。
-- 身份与配置：`%LOCALAPPDATA%\Mira\identity.json`、`node.json`。
+- 程序与旧版本：`%USERPROFILE%\.mira\versions\<version>\`。
+- PATH 入口：`%USERPROFILE%\.mira\bin`，安装器同时更新当前 PowerShell 的 PATH。
+  对其他窗口的更新通知最多等待两秒；已有终端可能需要重启启动器或重新登录 Windows。
+- 身份与配置：`%USERPROFILE%\.mira\identity.json`、`node.json`。
   凭据 DACL 只允许当前用户、SYSTEM 和管理员，移除继承的宽泛访问权限。
 - 计划任务：`MiraNode-<用户名>`，登录后启动；不承诺用户注销后继续运行。
 - 终端是真实 ConPTY，支持 VT、交互输入、Ctrl-C、窗口尺寸同步。
@@ -49,6 +50,9 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 - `-NoService` / `-NoPath` 支持便携运行，后续更新保留设置。
 
 Windows 与 WSL 是两个独立 Node，各安装一次即可；二者不会共享一个设备身份。
+0.9.1 避开了 MSIX 打包终端对 AppData 的重定向，安装不会落入 Codex 的私有缓存。
+安装器通过一个临时、非提权的计划任务写入真实用户 PATH，完成后移除该辅助任务。
+旧版 `%LOCALAPPDATA%\Mira\identity.json` 仍能识别；不应复制成第二个同时运行的 Node。
 
 ## Android
 
@@ -95,6 +99,7 @@ mira update
 
 更新前检查当前 Node 上的运行中托管进程、PTY、Codex App Server；存在活跃会话或无法确认
 状态时拒绝更新。关闭会话后重试；明确接受中断时可用 `mira update --force`。
+已批准但离线的 Node 也会拒绝普通更新，因为无法确认其本地会话是否仍在运行。
 此检查是尽力而为，不是分布式 drain/锁，检查后仍应避免开始新任务。
 不要从同一个 Node 的远程 shell 中更新它本身；请从本机终端执行。
 

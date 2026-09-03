@@ -2,10 +2,16 @@ package node
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestReleaseVersionComparison(t *testing.T) {
@@ -76,5 +82,52 @@ func TestOutputPreservesSplitUTF8(t *testing.T) {
 	}
 	if output.String() != expected {
 		t.Fatalf("UTF-8 corrupted: %q", output.String())
+	}
+}
+
+func TestUpdatePreflightRequiresKnownIdleState(t *testing.T) {
+	for _, test := range []struct {
+		name, status, appServer, want string
+		busy                          bool
+	}{
+		{"offline", "offline", "stopped", "offline", false},
+		{"app-server", "online", "running", "App Server is active", false},
+		{"process", "online", "stopped", "active process", true},
+		{"idle", "online", "stopped", "", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var nodeID string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				if r.URL.Path == "/v1/nodes" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"nodeId": nodeID, "nodeKey": "preflight-test", "status": test.status}}})
+					return
+				}
+				if r.Method == http.MethodGet {
+					_ = json.NewEncoder(w).Encode(map[string]any{"status": test.status, "reportedAppServer": map[string]any{"status": test.appServer}})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"processes": []map[string]any{{"running": test.busy}}, "sessions": []any{}}})
+			}))
+			defer server.Close()
+			identity := filepath.Join(t.TempDir(), "identity.json")
+			state, err := loadOrCreateNodeState(config{ServerURL: server.URL, IdentityFile: identity}, nodeIdentity{NodeKey: "preflight-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.NodeID, _ = randomUUID()
+			nodeID = state.NodeID
+			state.Enrollment.Status = "approved"
+			if err := state.save(identity); err != nil {
+				t.Fatal(err)
+			}
+			err = updatePreflight(context.Background(), cliOptions{Identity: identity, Timeout: time.Second})
+			if test.want == "" && err != nil {
+				t.Fatal(err)
+			}
+			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
+				t.Fatalf("wanted %q, got %v", test.want, err)
+			}
+		})
 	}
 }

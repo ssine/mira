@@ -42,12 +42,24 @@ func DefaultIdentityFile() (string, error) {
 		}
 		return value, nil
 	}
-	if runtime.GOOS == "windows" && os.Getenv("LOCALAPPDATA") != "" {
-		return filepath.Join(os.Getenv("LOCALAPPDATA"), "Mira", "identity.json"), nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("determine user home directory: %w", err)
+	}
+	if runtime.GOOS == "windows" {
+		preferred := filepath.Join(home, ".mira", "identity.json")
+		if _, err := os.Stat(preferred); err == nil {
+			return preferred, nil
+		}
+		// Keep existing non-virtualized 0.9.0 identities usable. New installations
+		// avoid AppData, which MSIX-hosted shells can redirect into app-private data.
+		if local := os.Getenv("LOCALAPPDATA"); local != "" {
+			legacy := filepath.Join(local, "Mira", "identity.json")
+			if _, err := os.Stat(legacy); err == nil {
+				return legacy, nil
+			}
+		}
+		return preferred, nil
 	}
 	return filepath.Join(home, ".config", "mira", "identity.json"), nil
 }

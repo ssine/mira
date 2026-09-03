@@ -5,7 +5,7 @@ param(
     [switch]$NoService,
     [switch]$NoPath,
     [string]$ReleaseDirectory,
-    [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA "Mira")
+    [string]$InstallDirectory = (Join-Path $env:USERPROFILE ".mira")
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,7 +13,10 @@ $ErrorActionPreference = "Stop"
 $installRoot = $InstallDirectory
 $binDirectory = Join-Path $installRoot "bin"
 $taskName = "MiraNode-$env:USERNAME"
-$identityPath = if ($env:MIRA_IDENTITY_FILE) { $env:MIRA_IDENTITY_FILE } else { Join-Path $env:LOCALAPPDATA "Mira\identity.json" }
+$identityPath = if ($env:MIRA_IDENTITY_FILE) { $env:MIRA_IDENTITY_FILE } else { Join-Path $env:USERPROFILE ".mira\identity.json" }
+if (-not $env:MIRA_IDENTITY_FILE -and -not (Test-Path $identityPath) -and (Test-Path (Join-Path $env:LOCALAPPDATA "Mira\identity.json"))) {
+    $identityPath = Join-Path $env:LOCALAPPDATA "Mira\identity.json"
+}
 $configPath = Join-Path (Split-Path $identityPath) "node.json"
 $utf8 = New-Object Text.UTF8Encoding($false)
 $stage = Join-Path ([IO.Path]::GetTempPath()) ("mira-install-" + [Guid]::NewGuid().ToString("N"))
@@ -78,6 +81,58 @@ function Set-VersionLaunchers([string]$SelectedVersion) {
     [IO.File]::WriteAllText($versionFile, $SelectedVersion, $utf8)
 }
 
+function Add-MiraPath {
+    # SetEnvironmentVariable(..., User) broadcasts synchronously to every desktop
+    # window. A hung window can stall installation for minutes. Persist first,
+    # then perform a best-effort notification in a strictly bounded child process.
+    if (($env:Path -split ";") -notcontains $binDirectory) { $env:Path += ";" + $binDirectory }
+    $pathUpdate = @'
+$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey("Environment")
+try {
+    $rawPath = [string]$key.GetValue("Path", "", [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    if (($rawPath -split ";") -notcontains $binDirectory) {
+        $key.SetValue("Path", ($rawPath.TrimEnd(";") + ";" + $binDirectory), [Microsoft.Win32.RegistryValueKind]::ExpandString)
+    }
+} finally { $key.Close() }
+'@
+    $notification = @'
+Add-Type -Namespace Mira -Name EnvironmentNotification -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", CharSet=System.Runtime.InteropServices.CharSet.Unicode)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr window, uint message, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);'
+[UIntPtr]$result = [UIntPtr]::Zero
+[void][Mira.EnvironmentNotification]::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, "Environment", 2, 100, [ref]$result)
+'@
+    if (-not $NoService) {
+        # A Scheduled Task executes outside a calling MSIX app's HKCU virtualization.
+        # Use the same ordinary user identity; never elevate or modify machine PATH.
+        $helperName = "MiraInstallPath-" + [Guid]::NewGuid().ToString("N")
+        $marker = Join-Path $installRoot ($helperName + ".done")
+        $code = '$ErrorActionPreference="Stop"; $binDirectory=' + "'" + $binDirectory.Replace("'", "''") + "';`n" + $pathUpdate + "`n[IO.File]::WriteAllText('" + $marker.Replace("'", "''") + "', 'updated')`n" + $notification
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+        try {
+            $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded" -WorkingDirectory $env:USERPROFILE
+            $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+            Register-ScheduledTask -TaskName $helperName -Action $action -Principal $principal | Out-Null
+            Start-ScheduledTask -TaskName $helperName
+            for ($attempt = 0; $attempt -lt 100 -and -not (Test-Path $marker); $attempt++) { Start-Sleep -Milliseconds 100 }
+            if (-not (Test-Path $marker)) { throw "User PATH helper did not complete" }
+            Start-Sleep -Seconds 2
+        } catch { Write-Warning "Could not persist user PATH; use $binDirectory\mira.cmd or add that directory from an ordinary PowerShell terminal." }
+        finally {
+            Stop-ScheduledTask -TaskName $helperName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $helperName -Confirm:$false -ErrorAction SilentlyContinue
+            if (Test-Path $marker) { Remove-Item -LiteralPath $marker }
+        }
+        return
+    }
+    & ([scriptblock]::Create($pathUpdate))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($notification))
+    $notifier = $null
+    try {
+        $notifier = Start-Process -FilePath (Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe") -WindowStyle Hidden -PassThru -ArgumentList @("-NoProfile", "-NonInteractive", "-EncodedCommand", $encoded)
+        if (-not $notifier.WaitForExit(2000)) { $notifier.Kill() }
+    } catch { Write-Warning "PATH saved. Other terminals may need their launcher restarted or a new Windows login." }
+    finally { if ($notifier) { $notifier.Dispose() } }
+}
+
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     Write-Host "Downloading Mira $Version for Windows amd64..."
@@ -104,15 +159,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $stage "install.ps1") -Destination (Join-Path $installRoot "install.ps1") -Force
     Set-VersionLaunchers $Version
 
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if (-not $NoPath -and ($userPath -split ";") -notcontains $binDirectory) {
-        [Environment]::SetEnvironmentVariable("Path", (([string]$userPath).TrimEnd(";") + ";" + $binDirectory), "User")
-    }
+    if (-not $NoPath) { Add-MiraPath }
     if (-not $NoService) {
         $previousTaskXml = if ($previousTask) { Export-ScheduledTask -TaskName $taskName } else { $null }
         if ($previousTask) { Stop-ScheduledTask -TaskName $taskName }
         try {
-            $action = New-ScheduledTaskAction -Execute (Join-Path $versionDirectory "mira-node.exe") -Argument ('--config "' + $configPath + '"')
+            $action = New-ScheduledTaskAction -Execute (Join-Path $versionDirectory "mira-node.exe") -Argument ('--config "' + $configPath + '"') -WorkingDirectory $env:USERPROFILE
             $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
             $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)

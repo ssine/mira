@@ -105,7 +105,7 @@ go -C node run ./cmd/mira-node
 ```
 
 Node 显示 enrollment ID 和六位验证码，等待网站批准。身份文件默认位于 Linux/WSL 的
-`~/.config/mira/identity.json`、Windows 的 `%LOCALAPPDATA%\\Mira\\identity.json`，Android 使用
+`~/.config/mira/identity.json`、Windows 的 `%USERPROFILE%\\.mira\\identity.json`，Android 使用
 APK 私有 no-backup 目录；`MIRA_IDENTITY_FILE` 可覆盖。写入采用临时文件、原子 rename 和用户
 Unix `0600` 权限；Windows 使用受保护的当前用户 / SYSTEM / Administrators DACL。
 

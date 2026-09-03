@@ -1,5 +1,11 @@
 # Windows and release acceptance — 0.9.0
 
+0.9.1 follow-up: real GitHub installation exposed MSIX AppData/HKCU virtualization when launched
+from the packaged Codex app. New Windows installs now use `%USERPROFILE%\.mira`; user PATH is
+persisted by a temporary, non-elevated task outside that virtualization. Environment notification
+is bounded, and the temporary task is removed. The native Node login task successfully runs from
+this independent directory. Existing device identity was retained during the acceptance migration.
+
 Verified on native Windows 11 x64 from WSL → Windows PowerShell, not Windows binaries running
 inside a Linux compatibility shim:
 

@@ -185,7 +185,7 @@ func updatePreflight(ctx context.Context, options cliOptions) error {
 		return fmt.Errorf("Codex App Server is active; stop it first or explicitly use --force")
 	}
 	if node["status"] != "online" {
-		return nil
+		return fmt.Errorf("Node is offline; cannot verify active sessions. Restore its connection or explicitly use --force")
 	}
 	for _, capability := range []string{"process", "pty"} {
 		result, _, err := client.invoke(ctx, client.identity.NodeID, capability, map[string]any{"action": "list"})
@@ -249,7 +249,11 @@ func runUpdate(ctx context.Context, options cliOptions, args []string, stdin io.
 	}
 	if runtime.GOOS == "windows" {
 		if installRoot == "" {
-			installRoot = filepath.Join(os.Getenv("LOCALAPPDATA"), "Mira")
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return nil, err
+			}
+			installRoot = filepath.Join(home, ".mira")
 		}
 		installer := filepath.Join(installRoot, "install.ps1")
 		if _, err := os.Stat(installer); err != nil {
