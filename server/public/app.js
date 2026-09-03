@@ -31,6 +31,17 @@ const workspace = {
   selectedDynamicTool: null,
 };
 
+const agent = {
+  socket: null,
+  socketNodeId: null,
+  pending: new Map(),
+  requestId: 0,
+  threadId: null,
+  turnId: null,
+  sessions: [],
+  threads: [],
+};
+
 async function api(path, options = {}) {
   const headers = { ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers ?? {}) };
   if (csrfToken && !["GET", "HEAD"].includes(options.method ?? "GET")) headers["x-mira-csrf"] = csrfToken;
@@ -59,10 +70,10 @@ function clear(value) {
 }
 
 function show(view) {
-  for (const id of ["loginView", "setupView", "dashboardView", "workspaceView"]) {
+  for (const id of ["loginView", "setupView", "dashboardView", "workspaceView", "agentView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
-  $("#logoutButton").classList.toggle("hidden", !["dashboardView", "workspaceView"].includes(view));
+  $("#logoutButton").classList.toggle("hidden", !["dashboardView", "workspaceView", "agentView"].includes(view));
 }
 
 function toast(message) {
@@ -1137,6 +1148,404 @@ async function leaveWorkspace() {
   await loadDashboard();
 }
 
+function setConversationNotice(message = "", kind = "") {
+  const notice = $("#conversationNotice");
+  notice.textContent = message;
+  notice.className = `workspace-notice${message ? "" : " hidden"}${kind ? ` ${kind}` : ""}`;
+}
+
+function setAgentRuntimeState(message, status = "offline") {
+  $("#agentRuntimeState").textContent = message;
+  $("#agentRuntimeBadge").textContent = status;
+  $("#agentRuntimeBadge").className = `badge ${status}`;
+}
+
+function closeAgentSocket() {
+  const socket = agent.socket;
+  agent.socket = null;
+  agent.socketNodeId = null;
+  for (const pending of agent.pending.values()) pending.reject(new Error("App Server connection closed"));
+  agent.pending.clear();
+  if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
+  $("#conversationSend").disabled = true;
+}
+
+function rpc(method, params = {}, timeoutMs = 60_000) {
+  if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("App Server 尚未连接"));
+  const id = ++agent.requestId;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      agent.pending.delete(id);
+      reject(new Error(`${method} 请求超时`));
+    }, timeoutMs);
+    agent.pending.set(id, {
+      resolve: (value) => { clearTimeout(timer); resolve(value); },
+      reject: (error) => { clearTimeout(timer); reject(error); },
+    });
+    agent.socket.send(JSON.stringify({ id, method, params }));
+  });
+}
+
+function traceText(value) {
+  if (typeof value === "string") return value;
+  if (!value) return "";
+  if (Array.isArray(value)) return value.map(traceText).filter(Boolean).join("\n");
+  if (typeof value === "object") {
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.inputText === "string") return value.inputText;
+    if (value.content) return traceText(value.content);
+  }
+  return "";
+}
+
+function upsertTrace(key, kind, title, body = "", status = "") {
+  const trace = $("#conversationTrace");
+  trace.querySelector(".conversation-empty")?.remove();
+  let card = key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null;
+  if (!card) {
+    card = element("article", `trace-card ${kind}`);
+    if (key) card.dataset.traceKey = key;
+    const head = element("div", "trace-head");
+    head.append(element("span", "trace-kind", title), element("span", "trace-status", status));
+    card.append(head, element("pre", "trace-body", body));
+    trace.append(card);
+  } else {
+    card.className = `trace-card ${kind}`;
+    card.querySelector(".trace-kind").textContent = title;
+    card.querySelector(".trace-status").textContent = status;
+    if (body !== undefined) card.querySelector(".trace-body").textContent = body;
+  }
+  trace.scrollTop = trace.scrollHeight;
+  return card;
+}
+
+function appendTraceText(key, kind, title, delta, status = "运行中") {
+  const card = upsertTrace(key, kind, title, undefined, status);
+  card.querySelector(".trace-body").textContent += delta;
+  $("#conversationTrace").scrollTop = $("#conversationTrace").scrollHeight;
+}
+
+function itemView(item) {
+  const type = item?.type ?? "item";
+  if (type === "userMessage") return { kind: "user", title: "你", body: traceText(item.content) };
+  if (type === "agentMessage") return { kind: "assistant", title: "Codex", body: item.text ?? traceText(item.content) };
+  if (type === "reasoning") return { kind: "reasoning", title: "推理摘要", body: traceText(item.summary ?? item.content ?? item.text) };
+  if (type === "commandExecution") return {
+    kind: "tool", title: `Shell · ${item.status ?? "运行"}`,
+    body: [item.command, item.aggregatedOutput ?? item.output].filter(Boolean).join("\n\n"),
+  };
+  if (type === "fileChange") return {
+    kind: "tool", title: `文件修改 · ${item.status ?? "运行"}`,
+    body: traceText(item.changes) || JSON.stringify(item.changes ?? item, null, 2),
+  };
+  if (["mcpToolCall", "dynamicToolCall", "toolCall"].includes(type)) return {
+    kind: "tool", title: `${item.server ?? item.namespace ?? "Tool"} · ${item.tool ?? item.name ?? type}`,
+    body: JSON.stringify(item.arguments ?? item.result ?? item, null, 2),
+  };
+  if (type === "plan") return { kind: "reasoning", title: "计划", body: traceText(item.text ?? item.plan) || JSON.stringify(item, null, 2) };
+  if (type === "contextCompaction") return { kind: "system", title: "上下文压缩", body: item.summary ?? "已压缩较早上下文" };
+  return { kind: "tool", title: type, body: JSON.stringify(item, null, 2) };
+}
+
+function renderThread(thread) {
+  const trace = clear($("#conversationTrace"));
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  for (const turn of turns) {
+    for (const item of turn.items ?? []) {
+      const view = itemView(item);
+      upsertTrace(`history-${turn.id}-${item.id ?? crypto.randomUUID?.() ?? Math.random()}`, view.kind, view.title, view.body, item.status ?? "");
+    }
+  }
+  if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
+}
+
+function handleAgentNotification(message) {
+  const method = message.method ?? "";
+  const params = message.params ?? {};
+  if (message.id !== undefined) {
+    upsertTrace(`request-${message.id}`, "system", method, "当前网页客户端未启用交互审批；本界面发起的 Turn 使用 never。", "等待处理");
+    agent.socket?.send(JSON.stringify({ id: message.id, error: { code: -32601, message: "interactive request is not supported by Mira Web" } }));
+    return;
+  }
+  if (method === "turn/started") {
+    agent.turnId = params.turn?.id ?? null;
+    $("#agentInterrupt").classList.remove("hidden");
+    upsertTrace(`turn-${agent.turnId ?? Date.now()}`, "system", "Turn", "Codex 正在处理…", "运行中");
+    return;
+  }
+  if (method === "turn/completed") {
+    const turn = params.turn ?? {};
+    upsertTrace(`turn-${turn.id ?? agent.turnId}`, "system", "Turn", turn.error?.message ?? "处理完成", turn.status ?? "完成");
+    agent.turnId = null;
+    $("#agentInterrupt").classList.add("hidden");
+    void loadAgentThreads();
+    return;
+  }
+  if (method === "item/started" || method === "item/completed") {
+    const item = params.item ?? {};
+    const view = itemView(item);
+    upsertTrace(`item-${item.id ?? method}`, view.kind, view.title, view.body, method.endsWith("started") ? "运行中" : (item.status ?? "完成"));
+    return;
+  }
+  if (method === "item/agentMessage/delta") {
+    appendTraceText(`item-${params.itemId ?? "assistant"}`, "assistant", "Codex", params.delta ?? "");
+    return;
+  }
+  if (["item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta"].includes(method)) {
+    appendTraceText(`item-${params.itemId ?? "reasoning"}`, "reasoning", method.includes("plan") ? "计划" : "推理摘要", params.delta ?? "");
+    return;
+  }
+  if (["item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/mcpToolCall/progress"].includes(method)) {
+    appendTraceText(`item-${params.itemId ?? "tool"}`, "tool", "工具输出", params.delta ?? params.message ?? "");
+    return;
+  }
+  if (method === "error" || method === "warning") {
+    upsertTrace(null, method === "error" ? "error" : "system", method === "error" ? "错误" : "警告", params.error?.message ?? params.message ?? JSON.stringify(params), "");
+  }
+}
+
+function onAgentSocketMessage(event) {
+  let message;
+  try { message = JSON.parse(event.data); } catch { return; }
+  if (message.id !== undefined && (Object.hasOwn(message, "result") || Object.hasOwn(message, "error"))) {
+    const pending = agent.pending.get(message.id);
+    if (!pending) return;
+    agent.pending.delete(message.id);
+    if (message.error) pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+    else pending.resolve(message.result);
+    return;
+  }
+  handleAgentNotification(message);
+}
+
+async function connectAgentSocket(nodeId) {
+  if (agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
+  closeAgentSocket();
+  setAgentRuntimeState("正在建立 App Server 通道…", "offline");
+  const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server`, ["mira-client-v1"]);
+  agent.socket = socket;
+  agent.socketNodeId = nodeId;
+  socket.addEventListener("message", onAgentSocketMessage);
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("App Server WebSocket 连接超时")), 15_000);
+    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("App Server WebSocket 连接失败")); }, { once: true });
+  });
+  socket.addEventListener("close", () => {
+    if (agent.socket !== socket) return;
+    closeAgentSocket();
+    setAgentRuntimeState("App Server 通道已断开", "offline");
+    setConversationNotice("运行节点或 App Server 已断开。重新连接后可继续同一 PostgreSQL thread。", "warning");
+  });
+  await rpc("initialize", {
+    clientInfo: { name: "mira_web", title: "Mira Web", version: "1" },
+    capabilities: { experimentalApi: true },
+  });
+  socket.send(JSON.stringify({ method: "initialized" }));
+  $("#conversationSend").disabled = false;
+  setConversationNotice();
+  const node = dashboardNodes.get(nodeId);
+  setAgentRuntimeState(`已连接 ${node?.hostname ?? nodeId}`, "online");
+}
+
+async function refreshAgentNodes() {
+  const response = await api("/v1/nodes");
+  const nodes = response.data ?? [];
+  dashboardNodes = new Map(nodes.map((node) => [node.nodeId, node]));
+  const runtimeSelect = $("#agentRuntimeNode");
+  const sourceSelect = $("#sessionSourceNode");
+  const previousRuntime = runtimeSelect.value;
+  const previousSource = sourceSelect.value;
+  clear(runtimeSelect);
+  clear(sourceSelect);
+  for (const node of nodes.filter((value) => value.capabilities?.appServer === true)) {
+    const option = element("option", "", `${node.hostname} · ${node.platform} · ${node.status}`);
+    option.value = node.nodeId;
+    runtimeSelect.append(option);
+  }
+  for (const node of nodes.filter((value) => value.capabilities?.codexSessions === true)) {
+    const option = element("option", "", `${node.hostname} · ${node.nodeMode} · ${node.status}`);
+    option.value = node.nodeId;
+    sourceSelect.append(option);
+  }
+  if ([...runtimeSelect.options].some((option) => option.value === previousRuntime)) runtimeSelect.value = previousRuntime;
+  if ([...sourceSelect.options].some((option) => option.value === previousSource)) sourceSelect.value = previousSource;
+  const selected = dashboardNodes.get(runtimeSelect.value);
+  if (selected && agent.socketNodeId !== selected.nodeId) {
+    setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
+  }
+}
+
+function renderAgentThreads() {
+  const list = clear($("#agentThreadList"));
+  if (!agent.threads.length) {
+    list.append(element("div", "agent-list-empty", "统一数据库里还没有会话"));
+    return;
+  }
+  for (const thread of agent.threads) {
+    const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
+    button.type = "button";
+    button.dataset.threadId = thread.threadId;
+    button.append(
+      element("strong", "", thread.title || "未命名会话"),
+      element("span", "", `${thread.itemCount} items · ${when(thread.updatedAt)}`),
+      element("small", "", thread.parentThreadId ? `subagent · ${thread.threadId}` : thread.threadId),
+    );
+    list.append(button);
+  }
+}
+
+async function loadAgentThreads() {
+  const response = await api("/v1/codex/threads?storeId=personal&limit=300");
+  agent.threads = response.data ?? [];
+  renderAgentThreads();
+}
+
+function renderLocalSessions() {
+  const list = clear($("#localSessionList"));
+  if (!agent.sessions.length) {
+    list.append(element("div", "agent-list-empty", "没有发现本地 Codex 会话"));
+    return;
+  }
+  for (const [index, session] of agent.sessions.entries()) {
+    const card = element("article", "local-session");
+    const copy = element("div");
+    copy.append(
+      element("strong", "", session.title || "未命名会话"),
+      element("span", "", `${formatBytes(session.sizeBytes)} · ${when(session.modifiedAt)}`),
+      element("small", "", session.threadId),
+    );
+    const button = element("button", session.import?.unchanged && session.import.status === "imported" ? "ghost" : "approve",
+      session.import?.unchanged && session.import.status === "imported" ? "已导入" : "导入");
+    button.type = "button";
+    button.dataset.sessionIndex = String(index);
+    button.disabled = session.import?.unchanged && session.import.status === "imported";
+    card.append(copy, button);
+    list.append(card);
+  }
+}
+
+async function scanLocalSessions() {
+  const nodeId = $("#sessionSourceNode").value;
+  if (!nodeId) throw new Error("没有支持本地会话发现的节点");
+  $("#sessionScanState").textContent = "正在扫描默认 CODEX_HOME…";
+  const response = await api(`/v1/nodes/${nodeId}/codex-sessions`);
+  agent.sessions = response.sessions ?? [];
+  renderLocalSessions();
+  $("#sessionScanState").textContent = `发现 ${agent.sessions.length} 个会话 · ${response.codexHomes?.length ?? 0} 个 CODEX_HOME`;
+}
+
+async function importLocalSession(index, button) {
+  const session = agent.sessions[index];
+  if (!session) return;
+  button.disabled = true;
+  button.textContent = "导入中…";
+  try {
+    const result = await api(`/v1/nodes/${$("#sessionSourceNode").value}/codex-session-imports`, {
+      method: "POST", body: JSON.stringify({ path: session.path, storeId: "personal" }),
+    });
+    toast(`已导入 ${result.itemCount} 条记录`);
+    await Promise.all([scanLocalSessions(), loadAgentThreads()]);
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = "重试";
+    throw error;
+  }
+}
+
+async function startAgentRuntime() {
+  const nodeId = $("#agentRuntimeNode").value;
+  if (!nodeId) throw new Error("没有可运行 Codex 的节点");
+  closeAgentSocket();
+  setAgentRuntimeState("正在启动受控 App Server…", "offline");
+  await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+  const deadline = Date.now() + 30_000;
+  let node;
+  let lastError = "";
+  let errorSince = 0;
+  while (Date.now() < deadline) {
+    node = await api(`/v1/nodes/${nodeId}`);
+    dashboardNodes.set(node.nodeId, node);
+    if (node.reportedAppServer?.status === "running") break;
+    const currentError = node.reportedAppServer?.lastError ?? "";
+    if (currentError !== lastError) {
+      lastError = currentError;
+      errorSince = currentError ? Date.now() : 0;
+    } else if (currentError && Date.now() - errorSince > 5_000) {
+      throw new Error(currentError);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  if (node?.reportedAppServer?.status !== "running") throw new Error("App Server 启动超时");
+  await connectAgentSocket(nodeId);
+}
+
+async function stopAgentRuntime() {
+  const nodeId = $("#agentRuntimeNode").value;
+  if (!nodeId) return;
+  closeAgentSocket();
+  await api(`/v1/codex/runtimes/${nodeId}/stop`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+  setAgentRuntimeState("已请求停止 App Server", "offline");
+}
+
+async function resumeAgentThread(threadId) {
+  if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
+  setConversationNotice("正在从 PostgreSQL 恢复会话…");
+  const params = { threadId };
+  const cwd = $("#conversationCwd").value.trim();
+  if (cwd) params.cwd = cwd;
+  const result = await rpc("thread/resume", params, 120_000);
+  agent.threadId = result.thread.id;
+  $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
+  $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${result.cwd ?? "默认目录"}`;
+  if (!$("#conversationCwd").value && result.cwd) $("#conversationCwd").value = result.cwd;
+  renderThread(result.thread);
+  renderAgentThreads();
+  setConversationNotice();
+}
+
+function newAgentThread() {
+  agent.threadId = null;
+  agent.turnId = null;
+  $("#conversationTitle").textContent = "新会话";
+  $("#conversationMeta").textContent = "第一条消息发送时在所选节点创建，并立即写入 PostgreSQL。";
+  clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
+  renderAgentThreads();
+}
+
+async function sendAgentMessage(text) {
+  if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
+  if (!agent.threadId) {
+    const params = { approvalPolicy: "never", sandbox: "workspace-write" };
+    const cwd = $("#conversationCwd").value.trim();
+    if (cwd) params.cwd = cwd;
+    const started = await rpc("thread/start", params, 120_000);
+    agent.threadId = started.thread.id;
+    $("#conversationTitle").textContent = "新会话";
+    $("#conversationMeta").textContent = `${agent.threadId} · ${started.model ?? "默认模型"} · ${(started.cwd ?? cwd) || "默认目录"}`;
+  }
+  upsertTrace(`user-${Date.now()}`, "user", "你", text, "已发送");
+  const result = await rpc("turn/start", {
+    threadId: agent.threadId,
+    input: [{ type: "text", text }],
+    approvalPolicy: "never",
+  }, 120_000);
+  agent.turnId = result.turn.id;
+  $("#agentInterrupt").classList.remove("hidden");
+}
+
+async function openAgentConsole() {
+  show("agentView");
+  await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+}
+
+async function leaveAgentConsole() {
+  closeAgentSocket();
+  show("dashboardView");
+  await loadDashboard();
+}
+
 $("#loginForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = event.currentTarget.querySelector("button");
@@ -1163,10 +1572,66 @@ $("#logoutButton").addEventListener("click", async () => {
     await api("/v1/admin/logout", { method: "POST", body: "{}" });
   } finally {
     csrfToken = null;
+    closeAgentSocket();
     disposeTerminal();
     workspace.node = null;
     show("loginView");
   }
+});
+
+$("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
+$("#agentBack").addEventListener("click", () => leaveAgentConsole().catch((error) => toast(error.message)));
+$("#agentRefresh").addEventListener("click", () => Promise.all([refreshAgentNodes(), loadAgentThreads()]).then(() => toast("Agent 状态已刷新")).catch((error) => toast(error.message)));
+$("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catch((error) => {
+  setAgentRuntimeState(`启动失败：${error.message}`, "offline");
+  setConversationNotice(error.message, "error");
+}));
+$("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
+$("#agentRuntimeNode").addEventListener("change", () => {
+  if (agent.socketNodeId !== $("#agentRuntimeNode").value) closeAgentSocket();
+  const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
+});
+$("#agentNewThread").addEventListener("click", newAgentThread);
+$("#agentThreadList").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-thread-id]");
+  if (button) resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
+});
+$("#sessionScan").addEventListener("click", () => scanLocalSessions().catch((error) => {
+  $("#sessionScanState").textContent = `扫描失败：${error.message}`;
+}));
+$("#localSessionList").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-session-index]");
+  if (button) importLocalSession(Number(button.dataset.sessionIndex), button).catch((error) => toast(error.message));
+});
+$("#conversationForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = $("#conversationInput").value.trim();
+  if (!text) return;
+  const button = $("#conversationSend");
+  button.disabled = true;
+  try {
+    $("#conversationInput").value = "";
+    await sendAgentMessage(text);
+  } catch (error) {
+    $("#conversationInput").value = text;
+    setConversationNotice(error.message, "error");
+  } finally {
+    button.disabled = !agent.socket || agent.socket.readyState !== WebSocket.OPEN;
+  }
+});
+$("#conversationInput").addEventListener("keydown", (event) => {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    $("#conversationForm").requestSubmit();
+  }
+});
+$("#agentInterrupt").addEventListener("click", () => {
+  if (!agent.threadId || !agent.turnId) return;
+  rpc("turn/interrupt", { threadId: agent.threadId, turnId: agent.turnId }).catch((error) => toast(error.message));
+});
+$("#conversationClear").addEventListener("click", () => {
+  clear($("#conversationTrace")).append(element("div", "conversation-empty", "当前视图已清空；数据库中的会话没有删除。"));
 });
 
 $("#refreshButton").addEventListener("click", () => loadDashboard().then(() => toast("状态已刷新")).catch((error) => toast(error.message)));

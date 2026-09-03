@@ -2,14 +2,25 @@
 
 package node
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+)
 
 func codexCandidatePaths(configured string) []string {
 	if configured != "" {
 		return []string{configured}
 	}
-	if candidate, err := exec.LookPath("codex"); err == nil {
-		return []string{candidate}
+	result := []string{}
+	if executable, err := os.Executable(); err == nil {
+		bundled := filepath.Join(filepath.Dir(executable), "mira-codex")
+		if info, statErr := os.Stat(bundled); statErr == nil && !info.IsDir() {
+			result = append(result, bundled)
+		}
 	}
-	return nil
+	if candidate, err := exec.LookPath("codex"); err == nil {
+		result = append(result, candidate)
+	}
+	return result
 }

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const version = fs.readFileSync(path.join(root, "VERSION"), "utf8").trim();
+const codexVersion = fs.readFileSync(path.join(root, "CODEX_VERSION"), "utf8").trim();
 if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) throw new Error(`VERSION is not a stable semantic version: ${version}`);
 const [major, minor, patch] = version.split(".").map(Number);
 if (minor >= 1000 || patch >= 1000 || major * 1_000_000 + minor * 1000 + patch > 2_100_000_000) {
@@ -26,5 +27,7 @@ for (const [name, value] of mirrors) {
 }
 if (!goVersion.includes(`Version   = "${version}"`)) throw new Error("Go default version does not match VERSION");
 if (!nodeDockerfile.includes(`ARG MIRA_VERSION=${version}`)) throw new Error("Node Docker default version does not match VERSION");
+if (!/^\d+\.\d+\.\d+$/.test(codexVersion)) throw new Error("CODEX_VERSION is not a semantic version");
+if (!nodeDockerfile.includes(`@openai/codex@${codexVersion}`)) throw new Error("Node Docker Codex version does not match CODEX_VERSION");
 
-process.stdout.write(`Mira version ${version} is consistent.\n`);
+process.stdout.write(`Mira version ${version} and Codex baseline ${codexVersion} are consistent.\n`);

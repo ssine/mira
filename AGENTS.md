@@ -130,6 +130,16 @@ plane. Do not introduce a separate Termux or ADB-specific Mira Node implementati
 Desktop/server nodes may discover and run Codex App Server. Android reports App Server as
 unsupported. Desired state comes from Mira Server; reported state describes what is actually
 running. Secrets such as server tokens stay local and must not be included in desired state.
+Nodes also discover rollout JSONL files under their configured, environment and default Codex homes.
+Discovery is read-only. Import is an explicit administrator action: preserve every original record in
+append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing
+divergent PostgreSQL history.
+
+amd64 Linux and Windows release packages include `mira-codex` plus `codex-code-mode-host`, built from
+the official tag pinned by `CODEX_VERSION` and the narrow patch under `patches/codex/`. Keep ordinary
+official Codex installations usable, but never select one for remote ThreadStore execution unless the
+Node's runtime probe confirms support. `mira codex` intentionally injects the current Server endpoint,
+store ID and Node credential so CLI and web/App Server sessions share PostgreSQL.
 
 Node capabilities must retain these safety properties:
 
@@ -235,7 +245,7 @@ POSTGRES_PASSWORD=ci-only-password docker compose -f compose.homeserver.yaml con
 
 The intended architecture still needs durable thread-to-node assignment, a task queue and scheduler,
 writer leases with fencing for network partitions, a multi-version Codex compatibility matrix,
-automatic fleet upgrades, scheduled credential rotation and hardware-backed key storage, distributed login
-limits for multi-Server deployments, Web/mobile task submission UI, backup/restore tooling, metrics
-and alerting. The current website is an administrator device console, not a full Codex task UI. Do
-not describe these as already implemented.
+server-orchestrated fleet upgrades, scheduled credential rotation and hardware-backed key storage,
+distributed login limits for multi-Server deployments, a dedicated mobile client, backup/restore tooling,
+metrics and alerting. The current Agent console is an administrator-facing single-user UI, not a
+multi-user collaboration product. Do not describe these gaps as already implemented.

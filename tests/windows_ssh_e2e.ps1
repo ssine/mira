@@ -40,7 +40,9 @@ try {
     New-Item -ItemType Directory $testRoot | Out-Null
     $identity = Join-Path $testRoot "identity.json"
     $configPath = Join-Path $testRoot "node.json"
-    $config = @{ serverUrl = $ServerUrl; nodeKey = $nodeKey; identityFile = $identity; appServerAutoStart = $false; allowedRoots = @($testRoot) }
+    # Use the product default (all visible drive roots) so Getwd exercises the
+    # Windows volume-root SFTP namespace before any command runs.
+    $config = @{ serverUrl = $ServerUrl; nodeKey = $nodeKey; identityFile = $identity; appServerAutoStart = $false; allowedRoots = @() }
     [IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json), $encoding)
     $login = Request "/v1/admin/login" "POST" @{ username = "admin"; password = "mira-local-admin-password" }; $csrf = $login.csrfToken
     $nodeProcess = Start-Process -FilePath (Join-Path $BinaryDirectory "mira-node.exe") -ArgumentList @("--config", "`"$configPath`"") -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $testRoot "node.out") -RedirectStandardError (Join-Path $testRoot "node.err")
@@ -62,6 +64,8 @@ try {
     Run-CLI @("scp", "`"$source`"", "${nodeKey}:$remote") | Out-Null
     Run-CLI @("scp", "${nodeKey}:$remote", "`"$restored`"") | Out-Null
     if ((Get-FileHash $source).Hash -ne (Get-FileHash $restored).Hash) { throw "Windows SFTP binary roundtrip failed" }
+    $output = Run-CLI @("sftp", $nodeKey, "pwd")
+    if ($output.Trim() -notmatch '^/[A-Za-z]:/$') { throw "Windows SFTP volume-root Getwd failed: $output" }
     $output = Run-CLI @("sftp", $nodeKey, "ls", ("/" + ($testRoot -replace '\\', '/')))
     if ($output -notmatch "remote.bin") { throw "Windows SFTP listing failed" }
     Write-Output "Windows SSH E2E passed: native CLI, reverse relay, isolated worker, ConPTY, exit code, 5 MiB SFTP, Windows-to-Linux exec."

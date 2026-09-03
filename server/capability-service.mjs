@@ -7,6 +7,7 @@ const actions = {
   process: new Set(["count", "list", "start", "poll", "signal"]),
   pty: new Set(["list", "open", "write", "poll", "resize", "close"]),
   screen: new Set(["display", "screenshot", "hierarchy", "tap", "swipe", "key", "text"]),
+  codexSessions: new Set(["list", "read"]),
 };
 
 function serviceError(message, statusCode, code) {
@@ -74,6 +75,14 @@ function validateParams(capability, params) {
     validateInteger(params.durationMs, "durationMs", 1, 60000);
     validateText(params.text, "text", { maximum: 4096 });
   }
+  if (capability === "codexSessions") {
+    validateText(params.path, "path");
+    validateInteger(params.cursor, "cursor", 0, Number.MAX_SAFE_INTEGER);
+    validateInteger(params.limit, "limit", 1, 8 * 1024 * 1024);
+    if (params.action === "read" && typeof params.path !== "string") {
+      throw serviceError("path is required", 400, "invalid_request");
+    }
+  }
   return params;
 }
 
@@ -83,6 +92,7 @@ function advertised(node, capability) {
   if (capability === "process") return node.capabilities?.processes === true;
   if (capability === "pty") return node.capabilities?.pty === true;
   if (capability === "screen") return node.capabilities?.screen === true || node.capabilities?.input === true;
+  if (capability === "codexSessions") return node.capabilities?.codexSessions === true;
   return false;
 }
 

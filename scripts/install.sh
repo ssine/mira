@@ -90,6 +90,10 @@ if [ -d "$install_root/versions/$version" ]; then
   # Version directories are immutable. Re-installing an identical release is safe.
   cmp "$package_dir/mira-node" "$install_root/versions/$version/mira-node" >/dev/null || { printf '%s\n' 'This version is already installed with different contents; refusing to overwrite it.' >&2; exit 1; }
   cmp "$package_dir/mira" "$install_root/versions/$version/mira" >/dev/null || { printf '%s\n' 'Installed CLI contents differ; refusing to overwrite.' >&2; exit 1; }
+  if [ -e "$package_dir/mira-codex" ]; then
+    cmp "$package_dir/mira-codex" "$install_root/versions/$version/mira-codex" >/dev/null 2>&1 || { printf '%s\n' 'Installed Mira Codex contents differ; refusing to overwrite.' >&2; exit 1; }
+    cmp "$package_dir/codex-code-mode-host" "$install_root/versions/$version/codex-code-mode-host" >/dev/null 2>&1 || { printf '%s\n' 'Installed Codex tool host contents differ; refusing to overwrite.' >&2; exit 1; }
+  fi
 else
   mv "$package_dir" "$install_root/versions/$version"
 fi

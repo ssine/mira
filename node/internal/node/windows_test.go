@@ -85,6 +85,21 @@ func TestWindowsNativeCapabilities(t *testing.T) {
 	t.Fatal("Windows process did not exit")
 }
 
+func TestWindowsSFTPDefaultRootRealPath(t *testing.T) {
+	fs, err := newSSHFileSystem(defaultAllowedRoots())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fs.runtime.close()
+	got, err := fs.RealPath(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 || got[0] != '/' || got[2] != ':' || got[3] != '/' {
+		t.Fatalf("unexpected Windows SFTP root: %q", got)
+	}
+}
+
 func outputTextForTest(output map[string]any) string {
 	var result strings.Builder
 	for _, chunk := range output["chunks"].([]outputChunk) {

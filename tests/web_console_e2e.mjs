@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -17,11 +18,36 @@ const fixturePath = path.join(temporary, fixtureName);
 const fixtureContent = `Mira console file browser ${process.pid}\n`;
 const processMarker = `MIRA_PROCESS_${process.pid}`;
 const terminalMarker = `MIRA_PTY_${process.pid}`;
+const codexHome = path.join(temporary, "codex-home");
+const importedThreadId = randomUUID();
+const importStoreId = `web-console-e2e-${process.pid}`;
 
 execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira-node"], {
   cwd: path.join(projectDirectory, "node"),
 });
 await fs.writeFile(fixturePath, fixtureContent);
+const sessionDirectory = path.join(codexHome, "sessions", "2026", "09", "04");
+await fs.mkdir(sessionDirectory, { recursive: true });
+const sessionPath = path.join(sessionDirectory, `rollout-2026-09-04-${importedThreadId}.jsonl`);
+await fs.writeFile(sessionPath, [
+  JSON.stringify({
+    timestamp: "2026-09-04T01:02:03.000Z",
+    type: "session_meta",
+    payload: {
+      id: importedThreadId,
+      cwd: temporary,
+      source: "cli",
+      cli_version: "0.151.0",
+      base_instructions: "Mira import fixture",
+    },
+  }),
+  JSON.stringify({
+    timestamp: "2026-09-04T01:02:04.000Z",
+    type: "event_msg",
+    payload: { type: "user_message", message: "Imported Mira session" },
+  }),
+  "",
+].join("\n"));
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -91,6 +117,12 @@ for (const wiring of [
 }
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
+}
+for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm"]) {
+  assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
+}
+for (const route of ["/v1/codex/threads", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
+  assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
@@ -209,6 +241,8 @@ const child = spawn(nodeBinary, [], {
     MIRA_NODE_KEY: nodeKey,
     MIRA_IDENTITY_FILE: identityFile,
     MIRA_NODE_ALLOWED_ROOTS: JSON.stringify([temporary]),
+    CODEX_HOME: codexHome,
+    HOME: temporary,
     MIRA_NODE_HEARTBEAT_SECONDS: "1",
     APP_SERVER_AUTO_START: "false",
     MIRA_NODE_TOKEN: "",
@@ -252,6 +286,29 @@ try {
     return result.body.data?.find((node) => node.nodeKey === nodeKey && node.channelStatus?.connected === true);
   }, "approved Node reverse channel");
   nodeId = online.nodeId;
+
+  const scanned = await admin(`/v1/nodes/${nodeId}/codex-sessions`);
+  assert(scanned.response.ok, `Codex session scan failed: ${scanned.response.status} ${JSON.stringify(scanned.body)}`);
+  const discovered = scanned.body.sessions?.find((item) => item.threadId === importedThreadId);
+  assert(discovered?.path === sessionPath, "Codex session discovery omitted the default CODEX_HOME fixture");
+  assert(discovered.title === "Imported Mira session", "Codex session discovery returned an incorrect title");
+  const imported = await admin(`/v1/nodes/${nodeId}/codex-session-imports`, {
+    method: "POST",
+    body: JSON.stringify({ path: sessionPath, storeId: importStoreId }),
+  });
+  assert(imported.response.ok && imported.body.threadId === importedThreadId,
+    `Codex session import failed: ${JSON.stringify(imported.body)}`);
+  assert(imported.body.itemCount === 2, "Codex session import did not preserve every rollout record");
+  const duplicateImport = await admin(`/v1/nodes/${nodeId}/codex-session-imports`, {
+    method: "POST",
+    body: JSON.stringify({ path: sessionPath, storeId: importStoreId }),
+  });
+  assert(duplicateImport.response.ok && duplicateImport.body.duplicate === true,
+    "Codex session import was not idempotent");
+  const threads = await admin(`/v1/codex/threads?storeId=${encodeURIComponent(importStoreId)}`);
+  const importedProjection = threads.body.data?.find((item) => item.threadId === importedThreadId);
+  assert(importedProjection?.title === "Imported Mira session" && importedProjection.itemCount === 2,
+    "unified Codex thread projection omitted the imported session");
 
   // The workbench's aggregate state is assembled from the trusted Node record and
   // the live status capability, using the same administrator session as the UI.
@@ -348,6 +405,9 @@ try {
     systemProcessCount: countedProcesses.processCount,
     managedProcessList: true,
     interactiveTerminal: true,
+    codexSessionDiscovery: true,
+    codexSessionImport: true,
+    codexSessionImportIdempotent: true,
     nodeId,
   }));
 } catch (error) {

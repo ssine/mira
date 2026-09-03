@@ -20,12 +20,13 @@ import (
 )
 
 type codexInstallation struct {
-	Path               string `json:"path"`
-	Version            string `json:"version,omitempty"`
-	SHA256             string `json:"sha256,omitempty"`
-	AppServerSupported bool   `json:"appServerSupported"`
-	ValidationError    string `json:"validationError,omitempty"`
-	ValidatedAt        string `json:"validatedAt"`
+	Path                       string `json:"path"`
+	Version                    string `json:"version,omitempty"`
+	SHA256                     string `json:"sha256,omitempty"`
+	AppServerSupported         bool   `json:"appServerSupported"`
+	RemoteThreadStoreSupported bool   `json:"remoteThreadStoreSupported"`
+	ValidationError            string `json:"validationError,omitempty"`
+	ValidatedAt                string `json:"validatedAt"`
 }
 
 type desiredAppServer struct {
@@ -95,7 +96,11 @@ func (manager *appServerManager) discover(ctx context.Context) error {
 		seen[absolute] = true
 		installation := inspectCodex(ctx, absolute)
 		installations = append(installations, installation)
-		Log("inspected Codex installation", map[string]any{"path": absolute, "version": installation.Version, "appServerSupported": installation.AppServerSupported})
+		Log("inspected Codex installation", map[string]any{
+			"path": absolute, "version": installation.Version,
+			"appServerSupported":         installation.AppServerSupported,
+			"remoteThreadStoreSupported": installation.RemoteThreadStoreSupported,
+		})
 	}
 	sort.Slice(installations, func(i, j int) bool { return installations[i].Path < installations[j].Path })
 	manager.mu.Lock()
@@ -117,6 +122,7 @@ func inspectCodex(parent context.Context, path string) codexInstallation {
 	installation.Version = strings.TrimSpace(string(versionOutput))
 	help := string(helpOutput)
 	installation.AppServerSupported = strings.Contains(help, "--listen") && strings.Contains(help, "generate-json-schema")
+	installation.RemoteThreadStoreSupported = supportsRemoteThreadStore(ctx, path)
 	file, err := os.Open(path)
 	if err == nil {
 		defer file.Close()
@@ -128,26 +134,62 @@ func inspectCodex(parent context.Context, path string) codexInstallation {
 	return installation
 }
 
+func supportsRemoteThreadStore(ctx context.Context, path string) bool {
+	probe := exec.CommandContext(ctx, path,
+		"-c", `experimental_thread_store.type="remote_http"`,
+		"-c", `experimental_thread_store.endpoint="http://127.0.0.1:9"`,
+		"-c", `experimental_thread_store.store_id="mira-probe"`,
+		"features", "list",
+	)
+	return probe.Run() == nil
+}
+
 func (manager *appServerManager) installationsView() []codexInstallation {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	return append([]codexInstallation(nil), manager.installations...)
 }
 
-func (manager *appServerManager) selectCodex(desired desiredAppServer) *codexInstallation {
+func (manager *appServerManager) selectCodex(ctx context.Context, desired desiredAppServer) *codexInstallation {
+	requiresRemoteStore := false
+	for _, override := range desired.ConfigOverrides {
+		if strings.HasPrefix(override, `experimental_thread_store.type="remote_http"`) {
+			requiresRemoteStore = true
+			break
+		}
+	}
+	eligible := func(installation *codexInstallation) bool {
+		return installation.AppServerSupported && (!requiresRemoteStore || installation.RemoteThreadStoreSupported)
+	}
 	if desired.CodexPath != "" {
 		absolute, err := filepath.Abs(desired.CodexPath)
 		if err == nil {
 			for index := range manager.installations {
 				if manager.installations[index].Path == absolute {
-					return &manager.installations[index]
+					if eligible(&manager.installations[index]) {
+						return &manager.installations[index]
+					}
+					return nil
+				}
+			}
+			installation := inspectCodex(ctx, absolute)
+			manager.installations = append(manager.installations, installation)
+			sort.Slice(manager.installations, func(i, j int) bool {
+				return manager.installations[i].Path < manager.installations[j].Path
+			})
+			for index := range manager.installations {
+				if manager.installations[index].Path == absolute {
+					if eligible(&manager.installations[index]) {
+						return &manager.installations[index]
+					}
+					return nil
 				}
 			}
 		}
 		return nil
 	}
 	for index := range manager.installations {
-		if manager.installations[index].AppServerSupported {
+		if eligible(&manager.installations[index]) {
 			return &manager.installations[index]
 		}
 	}
@@ -181,7 +223,7 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 	if !desired.Running {
 		return manager.stopLocked()
 	}
-	selected := manager.selectCodex(desired)
+	selected := manager.selectCodex(ctx, desired)
 	if selected == nil || !selected.AppServerSupported {
 		manager.lastError = "no validated Codex App Server installation found"
 		return fmt.Errorf("%s", manager.lastError)

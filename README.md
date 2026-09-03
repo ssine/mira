@@ -6,25 +6,31 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 持久化事实来源。
 
 当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
-管理员网站已连通。0.9.0 增加原生 Windows ConPTY、统一版本、安装器和签名 APK 发布。
-durable scheduler、writer lease、完整恢复演练和集群批量更新仍待完成。
+管理员网站已连通。durable scheduler、writer lease、完整恢复演练和服务端编排的集群批量更新仍待完成。
 
 0.10.1 加入真正的 SSH/SFTP 节点互连：`mira ssh <设备>`、`mira scp`、`mira sftp`。
 客户端内置，目标 Node 从同一二进制启动独立 SSH worker，通过单独的反向 WSS 数据流连接；
 不需要开放 22 端口或安装系统 sshd。权限沿用已批准的 Node 身份，具体功能、限制和使用方式见
 [SSH 协议与使用说明](./protocol/ssh-v1.md)。
 
+0.11.0 增加 Agent 控制台和本地会话迁移：Node 自动发现默认 `CODEX_HOME/sessions`，管理员可把
+本地 JSONL 会话导入 PostgreSQL，再选择任意兼容 Node 通过受控 App Server 继续。网页可以新建、
+恢复和中断 Turn，并实时展示 Agent 消息、推理摘要、文件修改和工具调用。Linux amd64 与 Windows
+amd64 发布包内置同一 `CODEX_VERSION` 基线的 Mira 版 Codex 及 code-mode host；Android 仍只提供
+设备能力，不在手机上运行 Codex。
+
 ## 安装与升级
 
 在管理员网站展开「添加设备」即可复制带当前 Server 地址的安装命令。
-Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。
+Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。amd64 桌面包同时安装
+支持 PostgreSQL ThreadStore 的 `mira-codex`，无需另外改写官方 Codex 安装。
 后续桌面端执行 `mira update`；Android 在 APP 内检查更新。身份和配置随升级保留。
 具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 
 ## 架构
 
 ```text
-Codex / mira CLI / Admin Web
+Codex / mira CLI / Admin Web + Agent Console
               │ HTTPS / WSS
               ▼
          Mira Server ───────── PostgreSQL
@@ -57,7 +63,9 @@ symlink、文件/输出/session 限制以及 Android 权限仍会独立执行。
 CLI 登录、Node ACL 或长期 token query parameter。
 
 详细协议见 [protocol/auth-v1.md](./protocol/auth-v1.md)，存储协议见
-[protocol/thread-store-v2.md](./protocol/thread-store-v2.md)，稳定架构结论见 [AGENTS.md](./AGENTS.md)。
+[protocol/thread-store-v2.md](./protocol/thread-store-v2.md)，本地会话迁移见
+[protocol/codex-session-import-v1.md](./protocol/codex-session-import-v1.md)，稳定架构结论见
+[AGENTS.md](./AGENTS.md)。
 
 ## 已实现组件
 
@@ -90,7 +98,9 @@ MIRA_SECURE_COOKIES=false npm start --prefix server
 ```
 
 打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。网站可登录、查看待审批申请、批准/拒绝、
-查看 Node 状态/能力、撤销设备并检查追加式审计记录。每台在线设备还提供独立工作台：只读文件
+查看 Node 状态/能力、撤销设备并检查追加式审计记录。Agent 控制台可选择 Codex 运行节点、扫描并
+导入节点默认位置的本地会话、新建或继续 PostgreSQL thread，并实时展示消息和工具轨迹。每台在线
+设备还提供独立工作台：只读文件
 浏览器默认从该 Node 运行身份可见的完整文件系统开始；交互式 Shell 复用带游标的 PTY session；概况页通过
 轻量 `process/count` 展示当前 Node 可见的系统进程数，并展示 OS/CPU 配置、CPU 采样、内存和
 各 allowed root 所在磁盘的用量、运行时间及网络接口。能力调试器直接读取注入 Codex 的
@@ -135,7 +145,7 @@ mira status
 mira version
 mira update --check
 mira nodes list --json
-mira codex                         # 本机 Codex 继承同一 Node credential
+mira codex                         # 本机 Mira Codex，默认读写 personal PostgreSQL store
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
 mira process count --node homeserver --json
 mira process run --node homeserver -- /usr/bin/git status --short
@@ -149,12 +159,13 @@ Node selector 可以是 UUID、精确 `nodeKey` 或唯一 hostname；歧义时�
 executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
 
 Windows 文件、系统进程数/列表、进程启动/终止、CPU/内存/磁盘/网络、真实 ConPTY 输入/VT/
-resize/Ctrl-C，以及本机官方 Codex 自动发现和 App Server 启停已在 Windows 11 实机验证。
-这不代表官方未修改 Codex 已接入 Mira ThreadStore；数据库唯一存储仍需要下面的 Codex 补丁。
+resize/Ctrl-C，以及 Codex 自动发现和 App Server 启停已在 Windows 11 实机验证。普通官方 Codex
+仍可独立使用；受控 App Server 和 `mira codex` 只选择通过远端 ThreadStore 探针的 Mira 兼容构建。
 
 ## Codex ThreadStore
 
-修改版 Codex 仍配置 endpoint 和 store ID。Node 启动 App Server 时通过环境继承同一 Node
+发布流程从根目录 `CODEX_VERSION` 指定的官方 tag 应用最小补丁，同时构建 `mira-codex` 和
+`codex-code-mode-host`。Node 启动 App Server 时通过环境继承同一 Node
 credential，不把 token 放入进程参数：
 
 ```toml
@@ -167,7 +178,8 @@ store_id = "personal"
 multi_agent_v2 = true
 ```
 
-本机直接运行时使用 `mira codex` 包装命令从 identity file 安全设置 `MIRA_NODE_TOKEN`；不要打印该变量。
+本机直接运行时使用 `mira codex`。包装器从 identity file 安全设置 `MIRA_NODE_TOKEN`，并自动注入
+当前 Server endpoint 与 `personal` store；`MIRA_CODEX_STORE_ID` 可选择其他 store。不要打印 token。
 补丁保留显式 `bearer_token` 仅用于受控开发兼容。
 
 ## Android APK
@@ -220,6 +232,10 @@ Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件�
 | `GET/POST` | `/v1/dynamic-tools[/call]` | 读取并调用注入 Codex 的最终 dynamicTools |
 | `POST` | `/v1/nodes/register`, `/v1/nodes/{id}/heartbeat` | 仅凭证对应的 Node 自身 |
 | `POST` | `/v1/nodes/{id}/invoke` | 可信身份经 CapabilityService 调用目标 |
+| `GET` | `/v1/nodes/{id}/codex-sessions` | 管理员扫描 Node 默认位置的本地 Codex 会话 |
+| `POST` | `/v1/nodes/{id}/codex-session-imports` | 管理员保存原始 JSONL 并导入统一 ThreadStore |
+| `GET` | `/v1/codex/threads` | 管理员读取统一 thread 投影和导入来源 |
+| `POST` | `/v1/codex/runtimes/{id}/start\|stop` | 管理员选择 Node 启停受控 App Server |
 | `PUT` | `/v1/nodes/{id}/desired-app-server` | 可信身份选择 App Server 状态 |
 | `WS` | `/v1/nodes/{id}/connect` | Node 反向通道，Node ID 严格绑定 |
 | `WS` | `/v1/nodes/{id}/app-server` | Cookie 或 `auth.*` subprotocol；无 token query |

@@ -656,7 +656,26 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 	if len(candidates) == 0 {
 		return fmt.Errorf("no Codex executable found; install Codex or set CODEX_BINARY")
 	}
-	command := exec.CommandContext(ctx, candidates[0], args...)
+	codexPath := ""
+	for _, candidate := range candidates {
+		if supportsRemoteThreadStore(ctx, candidate) {
+			codexPath = candidate
+			break
+		}
+	}
+	if codexPath == "" {
+		return fmt.Errorf("no Mira-compatible Codex found; run mira update or set CODEX_BINARY to a patched build")
+	}
+	storeID := os.Getenv("MIRA_CODEX_STORE_ID")
+	if storeID == "" {
+		storeID = "personal"
+	}
+	remoteArgs := []string{
+		"-c", `experimental_thread_store.type="remote_http"`,
+		"-c", "experimental_thread_store.endpoint=" + strconv.Quote(client.identity.ServerURL),
+		"-c", "experimental_thread_store.store_id=" + strconv.Quote(storeID),
+	}
+	command := exec.CommandContext(ctx, codexPath, append(remoteArgs, args...)...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	command.Env = append(os.Environ(), "MIRA_NODE_TOKEN="+client.identity.Token, "MIRA_SERVER_URL="+client.identity.ServerURL)
 	return command.Run()

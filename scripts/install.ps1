@@ -150,7 +150,11 @@ try {
     if ($Server) { Run-Mira (Join-Path $packageDirectory "mira.exe") @("setup", "--server", $Server) }
     $versionDirectory = Join-Path $installRoot "versions\$Version"
     if (Test-Path $versionDirectory) {
-        foreach ($name in @("mira.exe", "mira-node.exe")) {
+        $packageFiles = @("mira.exe", "mira-node.exe")
+        if (Test-Path (Join-Path $packageDirectory "mira-codex.exe")) {
+            $packageFiles += "mira-codex.exe", "codex-code-mode-host.exe"
+        }
+        foreach ($name in $packageFiles) {
             if ((Get-FileHash (Join-Path $versionDirectory $name)).Hash -ne (Get-FileHash (Join-Path $packageDirectory $name)).Hash) {
                 throw "This version is installed with different contents; refusing to overwrite it."
             }

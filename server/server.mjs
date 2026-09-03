@@ -7,6 +7,9 @@ import { Pool } from "pg";
 
 import { appendAudit, AuthService } from "./auth.mjs";
 import { CapabilityService } from "./capability-service.mjs";
+import {
+  defaultStoreId, importCodexSession, listImportedThreads, scanCodexSessions,
+} from "./codex-session-import.mjs";
 import { currentSchemaVersion, initializeDatabase } from "./db.mjs";
 import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
 import { NodeChannel } from "./node-channel.mjs";
@@ -25,6 +28,7 @@ import {
 const listenHost = process.env.LISTEN_HOST ?? "127.0.0.1";
 const listenPort = Number.parseInt(process.env.LISTEN_PORT ?? "8787", 10);
 const databaseUrl = process.env.DATABASE_URL ?? "postgresql://mira:mira-local@127.0.0.1:55432/mira";
+const codexStoreEndpoint = (process.env.MIRA_CODEX_STORE_ENDPOINT ?? `http://${listenHost}:${listenPort}`).replace(/\/$/, "");
 const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
 const serverPackage = JSON.parse(await fs.readFile(path.join(serverDirectory, "package.json"), "utf8"));
 const publicDirectory = path.join(serverDirectory, "public");
@@ -292,6 +296,75 @@ async function route(request, response) {
     const principal = await authorize(request, response, "trusted", { clientType: "codex" });
     if (!principal) return;
     sendJson(response, 200, { dynamicTools: dynamicToolSpecs() });
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/codex-sessions$/i);
+  if (request.method === "GET" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const result = await scanCodexSessions(pool, capabilityService, principal, match[1], request);
+    sendJson(response, 200, result);
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/codex-session-imports$/i);
+  if (request.method === "POST" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const result = await importCodexSession(
+      pool, capabilityService, principal, match[1], await readJson(request), request,
+    );
+    sendJson(response, result.status, result.body);
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/v1/codex/threads") {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const storeId = url.searchParams.get("storeId") ?? defaultStoreId;
+    const limit = boundedInteger(url.searchParams.get("limit"), 200, 1, 500);
+    sendJson(response, 200, { storeId, data: await listImportedThreads(pool, storeId, limit) });
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/codex\/runtimes\/([0-9a-f-]{36})\/(start|stop)$/i);
+  if (request.method === "POST" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const body = await readJson(request);
+    const node = await getNode(pool, match[1]);
+    if (!node) { errorJson(response, 404, "approved node not found", "not_found"); return; }
+    if (node.capabilities?.appServer !== true) {
+      errorJson(response, 409, "node cannot run Codex App Server", "capability_unavailable"); return;
+    }
+    const storeId = safeStoreId(body.storeId ?? defaultStoreId);
+    if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
+    const running = match[2] === "start";
+    if (running) {
+      const requestedPath = typeof body.codexPath === "string" ? body.codexPath : null;
+      const compatible = requestedPath || (node.codexInstallations ?? []).some((installation) =>
+        installation.remoteThreadStoreSupported === true);
+      if (!compatible) {
+        errorJson(response, 409,
+          "node has no Mira-compatible Codex with remote ThreadStore support",
+          "compatible_codex_unavailable");
+        return;
+      }
+    }
+    const configOverrides = running ? [
+      'experimental_thread_store.type="remote_http"',
+      `experimental_thread_store.endpoint=${JSON.stringify(codexStoreEndpoint)}`,
+      `experimental_thread_store.store_id=${JSON.stringify(storeId)}`,
+    ] : [];
+    const result = await setDesiredAppServer(pool, match[1], {
+      running,
+      listenUrl: node.desiredAppServer?.listenUrl ?? "ws://127.0.0.1:4510",
+      codexPath: typeof body.codexPath === "string" ? body.codexPath : node.desiredAppServer?.codexPath,
+      codexHome: typeof body.codexHome === "string" ? body.codexHome : node.desiredAppServer?.codexHome,
+      configOverrides,
+    });
+    if (result.status === 200) await appendAudit(pool, {
+      action: `codex_runtime.${running ? "started" : "stopped"}`, principal,
+      targetNodeId: match[1], request, metadata: { storeId },
+    });
+    sendJson(response, result.status, result.body);
     return;
   }
   if (request.method === "POST" && url.pathname === "/v1/dynamic-tools/call") {

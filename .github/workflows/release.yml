@@ -15,7 +15,108 @@ permissions:
   contents: write
 
 jobs:
+  codex:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: mira-codex-linux-amd64
+            host_artifact: codex-code-mode-host-linux-amd64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: mira-codex-windows-amd64.exe
+            host_artifact: codex-code-mode-host-windows-amd64.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Prepare patched Codex source
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex_version=$(<CODEX_VERSION)
+          git clone --depth 1 --branch "rust-v${codex_version}" https://github.com/openai/codex.git upstream-codex
+          git -C upstream-codex apply "$GITHUB_WORKSPACE/patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - if: runner.os == 'Linux'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install Linux MUSL toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash upstream-codex/.github/scripts/install-musl-build-tools.sh
+
+      - name: Configure verified Codex rusty_v8 artifacts
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=$(python upstream-codex/.github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)
+          base_url="https://github.com/openai/codex/releases/download/rusty-v8-v${version}"
+          artifact_dir="${RUNNER_TEMP}/mira-rusty-v8"
+          profile=ptrcomp_sandbox_release
+          mkdir -p "$artifact_dir"
+          if [[ "$TARGET" == *windows* ]]; then
+            archive="rusty_v8_${profile}_${TARGET}.lib.gz"
+          else
+            archive="librusty_v8_${profile}_${TARGET}.a.gz"
+          fi
+          binding="src_binding_${profile}_${TARGET}.rs"
+          checksums="rusty_v8_${profile}_${TARGET}.sha256"
+          curl -fsSL "$base_url/$archive" -o "$artifact_dir/$archive"
+          curl -fsSL "$base_url/$binding" -o "$artifact_dir/$binding"
+          curl -fsSL "$base_url/$checksums" -o "$artifact_dir/$checksums"
+          (cd "$artifact_dir" && tr -d '\r' < "$checksums" | sha256sum -c -)
+          echo "RUSTY_V8_ARCHIVE=$artifact_dir/$archive" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=$artifact_dir/$binding" >> "$GITHUB_ENV"
+
+      - name: Build Mira-compatible Codex
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          else
+            export AWS_LC_SYS_NO_JITTER_ENTROPY=1
+          fi
+          cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
+            --target "$TARGET" --release --locked --bin codex --bin codex-code-mode-host
+          source="upstream-codex/codex-rs/target/${TARGET}/release/codex"
+          host_source="upstream-codex/codex-rs/target/${TARGET}/release/codex-code-mode-host"
+          if [[ "$TARGET" == *windows* ]]; then source="${source}.exe"; fi
+          if [[ "$TARGET" == *windows* ]]; then host_source="${host_source}.exe"; fi
+          cp "$source" "${{ matrix.artifact }}"
+          cp "$host_source" "${{ matrix.host_artifact }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-codex-${{ matrix.target }}
+          path: |
+            ${{ matrix.artifact }}
+            ${{ matrix.host_artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
   release:
+    needs: codex
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -31,6 +132,12 @@ jobs:
           go-version-file: node/go.mod
           cache-dependency-path: node/go.sum
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mira-codex-*
+          path: codex-dist
+          merge-multiple: true
+
       - name: Validate unified version
         shell: bash
         run: |
@@ -42,6 +149,12 @@ jobs:
           fi
 
       - name: Build desktop Node and CLI artifacts
+        env:
+          MIRA_CODEX_LINUX_AMD64: ${{ github.workspace }}/codex-dist/mira-codex-linux-amd64
+          MIRA_CODEX_HOST_LINUX_AMD64: ${{ github.workspace }}/codex-dist/codex-code-mode-host-linux-amd64
+          MIRA_CODEX_WINDOWS_AMD64: ${{ github.workspace }}/codex-dist/mira-codex-windows-amd64.exe
+          MIRA_CODEX_HOST_WINDOWS_AMD64: ${{ github.workspace }}/codex-dist/codex-code-mode-host-windows-amd64.exe
+          MIRA_REQUIRE_CODEX_BUNDLE: "true"
         run: |
           go -C node test ./...
           ./scripts/build-release.sh dist

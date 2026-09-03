@@ -339,6 +339,56 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 10,
+    name: "codex-session-import-provenance",
+    sql: `
+      CREATE TABLE mira_codex_session_imports (
+        import_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        store_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        source_node_id UUID NOT NULL REFERENCES codex_nodes(node_id) ON DELETE RESTRICT,
+        source_path TEXT NOT NULL,
+        source_sha256 TEXT NOT NULL,
+        source_size_bytes BIGINT NOT NULL CHECK (source_size_bytes >= 0),
+        source_modified_at TIMESTAMPTZ,
+        source_codex_version TEXT,
+        source_item_count BIGINT NOT NULL CHECK (source_item_count > 0),
+        store_event_seq BIGINT,
+        status TEXT NOT NULL CHECK (status IN ('staged', 'imported', 'failed')),
+        error_code TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (source_node_id, source_path, source_sha256)
+      );
+
+      CREATE INDEX mira_codex_session_imports_thread_idx
+        ON mira_codex_session_imports(store_id, thread_id, created_at DESC);
+      CREATE INDEX mira_codex_session_imports_source_idx
+        ON mira_codex_session_imports(source_node_id, source_path, created_at DESC);
+
+      CREATE TABLE mira_codex_session_import_records (
+        import_id UUID NOT NULL REFERENCES mira_codex_session_imports(import_id) ON DELETE RESTRICT,
+        line_seq BIGINT NOT NULL CHECK (line_seq > 0),
+        raw_record JSONB NOT NULL,
+        raw_sha256 TEXT NOT NULL,
+        PRIMARY KEY (import_id, line_seq)
+      );
+
+      CREATE OR REPLACE FUNCTION mira_reject_import_record_mutation()
+      RETURNS TRIGGER
+      LANGUAGE plpgsql
+      AS $$
+      BEGIN
+        RAISE EXCEPTION 'mira_codex_session_import_records is append-only';
+      END;
+      $$;
+
+      CREATE TRIGGER mira_codex_session_import_records_append_only
+        BEFORE UPDATE OR DELETE ON mira_codex_session_import_records
+        FOR EACH ROW EXECUTE FUNCTION mira_reject_import_record_mutation();
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

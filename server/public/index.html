@@ -44,7 +44,7 @@
       <section id="dashboardView" class="dashboard hidden">
         <div class="hero-row">
           <div><p class="eyebrow">CONTROL PLANE</p><h1>设备网络</h1><p class="muted">批准接入、查看健康状态、选择 Codex 的运行位置。</p></div>
-          <button id="refreshButton" class="secondary" type="button">刷新状态</button>
+          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开 Agent 控制台</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
         </div>
         <div class="metrics" aria-label="设备摘要">
           <article><span>在线 Node</span><strong id="onlineCount">—</strong><small>Reverse channel</small></article>
@@ -79,6 +79,48 @@
           <div class="panel-head"><div><p class="eyebrow">AUDIT</p><h2>最近活动</h2></div><span class="hint">敏感内容不会进入审计 metadata</span></div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>动作</th><th>身份</th><th>目标</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
         </section>
+      </section>
+
+      <section id="agentView" class="agent-console hidden" aria-labelledby="agentTitle">
+        <div class="workspace-bar">
+          <button id="agentBack" class="back-button" type="button">← 返回设备网络</button>
+          <div class="workspace-identity"><span id="agentRuntimeBadge" class="badge">offline</span><div><h1 id="agentTitle">Agent 控制台</h1><p id="agentSubtitle" class="muted">PostgreSQL thread · 可选择原生运行节点</p></div></div>
+          <button id="agentRefresh" class="secondary" type="button">刷新</button>
+        </div>
+        <div class="agent-layout">
+          <aside class="agent-sidebar">
+            <section class="agent-side-card">
+              <p class="eyebrow">RUNTIME</p><h2>运行节点</h2>
+              <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
+              <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
+              <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
+            </section>
+            <section class="agent-side-card thread-browser">
+              <div class="agent-side-head"><div><p class="eyebrow">THREADS</p><h2>统一会话</h2></div><button id="agentNewThread" class="ghost" type="button">＋ 新建</button></div>
+              <div id="agentThreadList" class="agent-thread-list"></div>
+            </section>
+            <details class="agent-side-card import-card">
+              <summary>导入节点本地会话</summary>
+              <label>扫描节点<select id="sessionSourceNode"></select></label>
+              <button id="sessionScan" class="secondary" type="button">扫描默认 CODEX_HOME</button>
+              <p id="sessionScanState" class="muted">只读取 Node 自动发现的 sessions 目录。</p>
+              <div id="localSessionList" class="local-session-list"></div>
+            </details>
+          </aside>
+          <section class="conversation-card">
+            <header class="conversation-head">
+              <div><p class="eyebrow">LIVE APP SERVER</p><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted">消息、工具调用和状态会实时显示在这里。</p></div>
+              <div class="conversation-actions"><button id="agentInterrupt" class="danger hidden" type="button">中断</button><button id="conversationClear" class="ghost" type="button">清空视图</button></div>
+            </header>
+            <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
+            <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
+            <form id="conversationForm" class="conversation-composer">
+              <label class="composer-cwd">工作目录<input id="conversationCwd" type="text" placeholder="在运行节点上的绝对路径"></label>
+              <textarea id="conversationInput" rows="4" placeholder="给 Codex 发消息…" required></textarea>
+              <div><span id="conversationHint" class="muted">Ctrl/Cmd + Enter 发送</span><button id="conversationSend" class="primary" type="submit" disabled>发送 <span>→</span></button></div>
+            </form>
+          </section>
+        </div>
       </section>
 
       <section id="workspaceView" class="workspace hidden" aria-labelledby="workspaceTitle">

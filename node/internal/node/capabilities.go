@@ -110,6 +110,12 @@ func (runtime *capabilityRuntime) execute(
 			return nil, fmt.Errorf("decode PTY params: %w", err)
 		}
 		return runtime.pty(value)
+	case "codexSessions":
+		var value codexSessionsParams
+		if err := json.Unmarshal(params, &value); err != nil {
+			return nil, fmt.Errorf("decode Codex sessions params: %w", err)
+		}
+		return runtime.codexSessions(value)
 	default:
 		return nil, fmt.Errorf("unsupported capability: %s", capability)
 	}

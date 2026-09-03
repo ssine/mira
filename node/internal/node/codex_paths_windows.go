@@ -15,6 +15,12 @@ func codexCandidatePaths(configured string) []string {
 	if configured != "" {
 		candidates = append(candidates, configured)
 	} else {
+		if executable, err := os.Executable(); err == nil {
+			bundled := filepath.Join(filepath.Dir(executable), "mira-codex.exe")
+			if info, statErr := os.Stat(bundled); statErr == nil && !info.IsDir() {
+				candidates = append(candidates, bundled)
+			}
+		}
 		for _, name := range []string{"codex.exe", "codex.cmd", "codex"} {
 			if candidate, err := exec.LookPath(name); err == nil {
 				candidates = append(candidates, candidate)

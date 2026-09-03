@@ -61,13 +61,30 @@ func (fs *sshFileSystem) nativePath(value string, allowRoot bool) (string, error
 	// original path: unlink/rename must affect a symlink, not silently its target.
 	return filepath.Clean(value), nil
 }
+
+func cleanSFTPWirePath(value string) string {
+	cleaned := path.Clean(value)
+	// path.Clean("/C:/") removes the trailing slash and produces "/C:". That
+	// is not a valid path in Mira's Windows SFTP namespace.
+	if runtime.GOOS == "windows" && len(cleaned) == 3 && cleaned[0] == '/' && cleaned[2] == ':' {
+		cleaned += "/"
+	}
+	return cleaned
+}
+
 func (fs *sshFileSystem) RealPath(value string) (string, error) {
 	if value == "/" && runtime.GOOS == "windows" {
 		return "/", nil
 	}
 	if !strings.HasPrefix(value, "/") {
-		value = path.Join(fs.wirePath(fs.runtime.roots[0]), value)
+		base := cleanSFTPWirePath(fs.wirePath(fs.runtime.roots[0]))
+		if value == "." || value == "" {
+			value = base
+		} else {
+			value = path.Join(base, value)
+		}
 	}
+	value = cleanSFTPWirePath(value)
 	_, err := fs.nativePath(value, true)
 	if err != nil {
 		return "", err
@@ -75,7 +92,7 @@ func (fs *sshFileSystem) RealPath(value string) (string, error) {
 	// Keep the configured namespace, including Windows 8.3 aliases and Unix
 	// symlinked roots. Returning a resolved long path could fall outside the
 	// lexical configured root on the next request even though it is the same file.
-	return path.Clean(value), nil
+	return cleanSFTPWirePath(value), nil
 }
 
 type sshOpenFile struct {
