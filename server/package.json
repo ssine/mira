@@ -1,12 +1,12 @@
 {
   "name": "mira-control-server",
-  "version": "0.9.4",
+  "version": "0.10.0",
   "private": true,
   "type": "module",
   "scripts": {
     "admin": "node admin-cli.mjs",
     "start": "node server.mjs",
-    "check": "node ../scripts/check-version.mjs && node --check server.mjs && node --check admin-cli.mjs && node --check auth.mjs && node --check capability-service.mjs && node --check db.mjs && node --check thread-store.mjs && node --check node-enrollment.mjs && node --check node-registry.mjs && node --check node-channel.mjs && node --check dynamic-tools.mjs && node --check public/app.js"
+    "check": "node ../scripts/check-version.mjs && node --check server.mjs && node --check admin-cli.mjs && node --check auth.mjs && node --check capability-service.mjs && node --check db.mjs && node --check thread-store.mjs && node --check node-enrollment.mjs && node --check node-registry.mjs && node --check node-channel.mjs && node --check ssh-relay.mjs && node --check dynamic-tools.mjs && node --check public/app.js"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

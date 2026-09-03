@@ -327,6 +327,18 @@ const migrations = [
         WHERE node_build = '{}'::jsonb;
     `,
   },
+  {
+    version: 9,
+    name: "node-ssh-public-keys",
+    sql: `
+      CREATE TABLE mira_node_ssh_keys (
+        credential_id UUID PRIMARY KEY REFERENCES mira_node_credentials(credential_id) ON DELETE CASCADE,
+        host_key TEXT NOT NULL,
+        client_key TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

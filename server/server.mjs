@@ -10,6 +10,7 @@ import { CapabilityService } from "./capability-service.mjs";
 import { currentSchemaVersion, initializeDatabase } from "./db.mjs";
 import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
 import { NodeChannel } from "./node-channel.mjs";
+import { SSHRelay } from "./ssh-relay.mjs";
 import {
   approveEnrollment, createEnrollment, getEnrollment, listEnrollments, rejectEnrollment,
 } from "./node-enrollment.mjs";
@@ -460,6 +461,16 @@ async function route(request, response) {
     const result = await rebuildSnapshot(pool, storeId);
     sendJson(response, result.status, result.body); return;
   }
+  match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/ssh\/(keys|sessions)$/i);
+  if (match && request.method === "POST") {
+    const principal = await authorize(request, response, "node", { csrf: false, clientType: "ssh",
+      ...(match[2] === "keys" ? { nodeId: match[1] } : {}) });
+    if (!principal) return;
+    const result = match[2] === "keys"
+      ? await sshRelay.publish(principal, await readJson(request))
+      : await sshRelay.create(principal, match[1], request);
+    sendJson(response, result.status, result.body); return;
+  }
   errorJson(response, 404, "not found", "not_found");
 }
 
@@ -476,6 +487,8 @@ const server = http.createServer(async (request, response) => {
   }
 });
 const nodeChannel = new NodeChannel({ server, pool, authService });
+const sshRelay = new SSHRelay({ pool, authService, nodeChannel });
+nodeChannel.sshRelay = sshRelay;
 const capabilityService = new CapabilityService({ pool, nodeChannel });
 nodeChannel.setCapabilityService(capabilityService);
 

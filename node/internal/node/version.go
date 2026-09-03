@@ -13,7 +13,7 @@ const ProtocolVersion = 1
 // kept at the repository release version so local and platform builds report a
 // useful semantic version even when no Git metadata was injected.
 var (
-	Version   = "0.9.4"
+	Version   = "0.10.0"
 	Commit    = "unknown"
 	BuildTime = "unknown"
 )

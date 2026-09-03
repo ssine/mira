@@ -30,6 +30,8 @@ type controlClient struct {
 	connection    *websocket.Conn
 	tunnelsMu     sync.Mutex
 	tunnels       map[string]*websocket.Conn
+	sshMu         sync.Mutex
+	sshWorkers    map[string]context.CancelFunc
 }
 
 type registrationResponse struct {
@@ -63,12 +65,13 @@ func (value *controlHTTPError) Error() string {
 }
 
 type controlMessage struct {
-	Type       string          `json:"type"`
-	RequestID  string          `json:"requestId,omitempty"`
-	Capability string          `json:"capability,omitempty"`
-	Params     json.RawMessage `json:"params,omitempty"`
-	SessionID  string          `json:"sessionId,omitempty"`
-	Payload    string          `json:"payload,omitempty"`
+	Type            string          `json:"type"`
+	RequestID       string          `json:"requestId,omitempty"`
+	Capability      string          `json:"capability,omitempty"`
+	Params          json.RawMessage `json:"params,omitempty"`
+	SessionID       string          `json:"sessionId,omitempty"`
+	Payload         string          `json:"payload,omitempty"`
+	ClientPublicKey string          `json:"clientPublicKey,omitempty"`
 }
 
 func newControlClient(configuration config, runtimeValue *capabilityRuntime) *controlClient {
@@ -76,10 +79,11 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: platformCertificatePool()}
 	return &controlClient{
 		configuration: configuration, runtime: runtimeValue,
-		token:     configuration.Token,
-		appServer: newAppServerManager(configuration),
-		http:      &http.Client{Transport: transport, Timeout: 30 * time.Second},
-		tunnels:   make(map[string]*websocket.Conn),
+		token:      configuration.Token,
+		appServer:  newAppServerManager(configuration),
+		http:       &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		tunnels:    make(map[string]*websocket.Conn),
+		sshWorkers: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -269,6 +273,16 @@ func (client *controlClient) register(ctx context.Context) error {
 		return fmt.Errorf("control server returned an empty node ID")
 	}
 	client.nodeID = response.NodeID
+	keys, err := sshPublicKeys(client.token)
+	if err != nil {
+		return err
+	}
+	if err := client.postJSON(ctx, "/v1/nodes/"+client.nodeID+"/ssh/keys", keys, nil); err != nil {
+		// An older Server can still provide all pre-SSH capabilities during rolling updates.
+		if httpErr, ok := err.(*controlHTTPError); !ok || httpErr.status != http.StatusNotFound {
+			return err
+		}
+	}
 	client.desired = response.DesiredAppServer
 	if response.HeartbeatIntervalSeconds > 0 && firstEnv("MIRA_NODE_HEARTBEAT_SECONDS", "NODE_AGENT_HEARTBEAT_SECONDS") == "" {
 		client.configuration.HeartbeatInterval = time.Duration(response.HeartbeatIntervalSeconds) * time.Second
@@ -411,6 +425,10 @@ func (client *controlClient) heartbeatLoop(ctx context.Context) {
 
 func (client *controlClient) handleMessage(ctx context.Context, message controlMessage) {
 	switch message.Type {
+	case "ssh.open":
+		client.startSSH(ctx, message)
+	case "ssh.close":
+		client.stopSSH(message.SessionID)
 	case "request":
 		go func() {
 			result, err := client.runtime.execute(ctx, message.Capability, message.Params)

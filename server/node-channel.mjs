@@ -99,6 +99,8 @@ export class NodeChannel {
 
   async upgrade(request, socket, head) {
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+    const sshMatch = url.pathname.match(/^\/v1\/ssh\/sessions\/([0-9a-f-]{36})\/(source|target)$/i);
+    if (sshMatch && this.sshRelay) return this.sshRelay.upgrade(request, socket, head, sshMatch[1], sshMatch[2]);
     const nodeMatch = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/connect$/i);
     const proxyMatch = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/app-server$/i);
     if (!nodeMatch && !proxyMatch) {
@@ -160,6 +162,7 @@ export class NodeChannel {
   }
 
   rejectNodeWork(nodeId) {
+    this.sshRelay?.disconnectNode(nodeId);
     for (const [requestId, pending] of this.pending) {
       if (pending.nodeId === nodeId) {
         clearTimeout(pending.timeout);
@@ -341,6 +344,7 @@ export class NodeChannel {
   }
 
   disconnectNode(nodeId, reason = "revoked") {
+    this.sshRelay?.disconnectNode(nodeId);
     const ws = this.nodes.get(nodeId);
     if (ws?.readyState === WebSocket.OPEN) ws.close(1008, reason);
     for (const [sessionId, proxy] of this.proxies) {
@@ -352,6 +356,7 @@ export class NodeChannel {
   }
 
   close() {
+    this.sshRelay?.close();
     for (const ws of this.nodes.values()) ws.close(1001, "server shutting down");
     for (const proxy of this.proxies.values()) proxy.ws.close(1001, "server shutting down");
     this.wss.close();

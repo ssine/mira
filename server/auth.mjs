@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import argon2 from "argon2";
 
 const sessionLifetimeMs = 12 * 60 * 60 * 1000;
-const clientTypes = new Set(["node", "cli", "codex", "app-server"]);
+const clientTypes = new Set(["node", "cli", "codex", "app-server", "ssh"]);
 
 export function tokenHash(value) {
   return crypto.createHash("sha256").update(value).digest("hex");

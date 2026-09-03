@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/ssh"
 )
 
 type cliOptions struct {
@@ -662,7 +663,7 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 }
 
 func cliUsage() string {
-	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex> ..."
+	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|ssh|scp|sftp> ..."
 }
 
 func cliExitCode(err error) int {
@@ -795,6 +796,21 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 			var exitError *exec.ExitError
 			if errors.As(err, &exitError) {
 				return exitError.ExitCode()
+			}
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
+	if remaining[0] == "ssh" || remaining[0] == "scp" || remaining[0] == "sftp" {
+		if options.JSON {
+			fmt.Fprintln(stderr, "SSH commands use native streams, not --json")
+			return 64
+		}
+		if err := client.runSSHCommands(ctx, remaining[0], remaining[1:], stdin, stdout, stderr); err != nil {
+			var remoteExit *ssh.ExitError
+			if errors.As(err, &remoteExit) {
+				return remoteExit.ExitStatus()
 			}
 			fmt.Fprintln(stderr, err)
 			return 1

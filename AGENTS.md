@@ -50,9 +50,20 @@ Clients
             -> optional local Codex App Server
 ```
 
-Mira Server does not mount or directly SSH into user devices. Mira Nodes initiate and maintain the
-reverse channel. SSH may still be used manually for deployment or diagnostics, but it is not the
-runtime control protocol.
+Mira Server does not mount devices or initiate network connections into them. Mira Nodes maintain
+outbound control connections. SSH v1 is an additional end-to-end SSH byte transport over dedicated
+outbound WSS streams, not a replacement for the JSON control/App Server protocols. The Server
+coordinates connections and relays encrypted bytes; it does not log in through system sshd.
+See `protocol/ssh-v1.md` for identity, wire protocol, bounds and current feature limits.
+
+SSH architecture decisions: built-in Mira clients; one independently supervised worker per SSH
+connection, launched from the same Node binary; maintained SSH/SFTP libraries; no public port 22
+or external sshd requirement. Reuse the approved Node identity and derive purpose-separated local
+host/client keys; the database contains public keys only. Verify both host and caller keys. Revocation
+must close active connections and reap children. Worker process isolation is not a privilege sandbox.
+Bulk binary transfers must bypass JSON text buffers and apply bounded backpressure. Shell executes
+as the Node OS user, not an arbitrary SSH username. Do not claim full OpenSSH extension compatibility,
+automatic session recovery or Android PTY acceptance based only on cross-compilation.
 
 Codex remains a native process on the selected execution node. Mira does not reimplement Codex or
 turn model execution into a central monolith. The central service coordinates nodes and persists
