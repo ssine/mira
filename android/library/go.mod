@@ -1,4 +1,4 @@
-module github.com/ssine/mira/android-native-agent
+module github.com/ssine/mira/android/library
 
 go 1.23
 

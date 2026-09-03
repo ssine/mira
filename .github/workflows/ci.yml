@@ -21,8 +21,8 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: android-native-agent/go.mod
-          cache-dependency-path: android-native-agent/go.sum
+          go-version-file: android/library/go.mod
+          cache-dependency-path: android/library/go.sum
 
       - name: Install server dependencies
         run: npm ci --prefix server
@@ -36,8 +36,8 @@ jobs:
       - name: Check Python
         run: python3 -m compileall -q runtime
 
-      - name: Test Android native agent
-        working-directory: android-native-agent
+      - name: Test Android data plane
+        working-directory: android/library
         run: go test ./...
 
       - name: Validate Compose files

@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "start": "node agent.mjs",
-    "start:android-adb": "node android-adb-agent.mjs",
-    "check": "node --check agent.mjs && node --check capabilities.mjs && node --check android-adb-agent.mjs && node --check android-adb-capabilities.mjs"
+    "check": "node --check agent.mjs && node --check capabilities.mjs"
   }
 }

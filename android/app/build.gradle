@@ -28,12 +28,12 @@ android {
     }
 }
 
-def nativeBinary = file("../../android-native-agent/dist/codex-android-agent-arm64")
+def nativeBinary = file("../library/dist/codex-android-agent-arm64")
 
 tasks.register("buildNativeAgent", Exec) {
-    workingDir file("../../android-native-agent")
+    workingDir file("../library")
     commandLine "./build-android.sh"
-    inputs.files(fileTree("../../android-native-agent") {
+    inputs.files(fileTree("../library") {
         include "*.go", "go.mod", "go.sum", "build-android.sh"
     })
     outputs.file(nativeBinary)

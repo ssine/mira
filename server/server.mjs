@@ -102,7 +102,7 @@ async function route(request, response) {
       nodeCapabilityChannel: true,
       appServerProxy: true,
       dynamicTools: true,
-      androidAdbAgent: true,
+      androidNodeApp: true,
       imageToolResults: true,
       databaseIsSourceOfTruth: true,
     });

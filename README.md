@@ -66,9 +66,7 @@ delegate 会继承同一组动态工具。
 
 ### Android
 
-- ADB Agent：在连接手机的桌面/服务器上运行，支持 screenshot、display、UI hierarchy、
-  tap/swipe/key/text、受限文件与进程操作；
-- Mira Node APK：内置 ARM64 Go Agent，手机可脱离 ADB、Node.js 和 Termux 独立回连；
+- Mira Node APK：内置 ARM64 Go Agent，手机不依赖 ADB、Node.js 或 Termux 即可独立回连；
 - root 模式：APK 经用户授权使用 KernelSU、Magisk 或 APatch；
 - 非 root 模式：通过 Accessibility、MediaProjection 和应用/共享存储权限提供受限能力；
 - APK 管理原生子进程生命周期、自动重连、开机启动和私有配置文件。
@@ -76,14 +74,18 @@ delegate 会继承同一组动态工具。
 APK 不会自行取得 root。root 设备仍需安装 root provider 并由用户明确授权；Mira 不再需要额外
 安装 KernelSU module。
 
+`android/library/` 表示 APK 的内部 native 数据面。它目前不是 AAR/JNI 意义上的链接库，而是由
+Gradle 编译、打包并由前台服务启动的独立 Go executable；进程隔离使同一份 binary 可以在应用
+UID 或 `su` 授予的 root UID 下运行。
+
 ## 仓库布局
 
 | 路径 | 内容 |
 | --- | --- |
 | `server/` | Node.js Control Server、PostgreSQL schema 和 thread store |
-| `node-agent/` | Windows/WSL/Linux Agent 与 Android ADB Agent |
-| `android-native-agent/` | APK 内嵌的 Android ARM64 Go 数据面 |
-| `android-app/` | root/非 root 统一 Android APK |
+| `node-agent/` | Windows/WSL/Linux Agent |
+| `android/app/` | root/非 root 统一 Android 应用模块 |
+| `android/library/` | 随 APK 打包的 Android ARM64 Go 数据面 |
 | `runtime/` | 存储、App Server、subagent、多节点与 Android E2E |
 | `patches/codex/` | 针对官方 Codex 的可重放 ThreadStore 补丁 |
 | `ADAPTER_PROTOCOL_V2.md` | 细粒度存储 wire protocol |
@@ -138,24 +140,12 @@ node node-agent/agent.mjs
 `APP_SERVER_CONFIG_OVERRIDES` 是 JSON string array，会转换为重复的 Codex `-c` 参数。token 等
 秘密应仅保存在节点本地，中心只下发 endpoint、store ID 等非秘密运行选择。
 
-连接 ADB Android 设备：
-
-```bash
-CONTROL_SERVER_URL=http://127.0.0.1:8787 \
-CONTROL_SERVER_TOKEN=local-poc-token \
-ANDROID_ADB_SERIAL=<adb-serial> \
-ANDROID_ADB_ALLOWED_ROOTS='["/sdcard","/data/local/tmp"]' \
-node node-agent/android-adb-agent.mjs
-```
-
-`ANDROID_ADB_USE_ROOT=true` 会通过 `su -c` 执行并在注册前验证 uid 0；默认关闭。
-
 ## 构建 Android APK
 
 需要 Android SDK 35、JDK 17+、Gradle 8.13+ 和 Go 1.23+：
 
 ```bash
-cd android-app
+cd android
 ANDROID_HOME=/path/to/android-sdk gradle :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -211,7 +201,7 @@ Docker socket。
 ```bash
 npm run check --prefix server
 npm run check --prefix node-agent
-go test ./...            # 在 android-native-agent/ 中
+(cd android/library && go test ./...)
 
 node runtime/storage_v2_e2e.mjs
 node runtime/storage_e2e.mjs
@@ -222,7 +212,7 @@ node runtime/dynamic_tools_model_e2e.mjs
 ```
 
 需要远端节点或真机的测试会读取 `CONTROL_SERVER_URL`、`CONTROL_SERVER_TOKEN`、
-`CODEX_TEST_BINARY`、`ANDROID_ADB_SERIAL` 和相应 node key 环境变量。
+`CODEX_TEST_BINARY` 和相应 node key 环境变量。
 
 ## 安全边界与待办
 

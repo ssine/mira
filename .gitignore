@@ -5,12 +5,12 @@
 /.cargo/
 /.rustup/
 /server/node_modules/
-/android-native-agent/dist/
 /.android-sdk/
-/android-app/.gradle/
-/android-app/build/
-/android-app/app/build/
-/android-app/local.properties
+/android/library/dist/
+/android/.gradle/
+/android/build/
+/android/app/build/
+/android/local.properties
 
 # Local service configuration and logs.
 .env
