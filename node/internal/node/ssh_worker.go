@@ -366,9 +366,6 @@ func startSSHProcess(ctx context.Context, channel ssh.Channel, text string, term
 		wait: func() int {
 			defer closeReader()
 			err := cmd.Wait()
-			if runtime.GOOS == "windows" {
-				closeTTY()
-			}
 			select {
 			case <-drained:
 			case <-ctx.Done():

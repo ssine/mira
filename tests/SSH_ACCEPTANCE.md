@@ -8,7 +8,7 @@ Verified on 2026-09-04. This is a candidate branch, not a production Server depl
 | Linux/WSL | 9 MiB binary SFTP upload/download, byte equality, no-overwrite default, root policy, revocation closes live connection and reaps child | Passed |
 | Standard OpenSSH client | Real SSH handshake, fixed host key, public-key auth and exec against Mira's Go server | Passed |
 | Native Windows desktop | Built-in Windows CLI through local Server to native worker, ConPTY, exit code, 5 MiB SFTP, Windows → Linux exec | Passed |
-| Native Windows desktop | 100 fast-exit ConPTY sessions retain their final output | Passed after output-handle lifetime fix; repeated in CI |
+| Native Windows desktop | 100 fast-exit ConPTY sessions retain their final output | Passed locally; repeated on modern and legacy Windows CI |
 | Windows CI runner | Native unit tests, including SFTP using Windows short/long temporary-directory aliases | Passed after namespace fix |
 | Android 15 arm64, real APK root mode | Actual UID 0, native PTY, 5 MiB binary SFTP roundtrip, APK's built-in client → Linux | Passed |
 | Android 15 arm64, real APK app-only mode | Actual app UID/untrusted_app SELinux domain, same SSH/PTY/SFTP checks; `/data/system` access denied | Passed |
@@ -59,3 +59,11 @@ cleanup, and does not replace the APK's normal identity. A failed stop retains t
 Current non-goals: TCP/agent/X11 forwarding, multiuser OS login, recursive SCP, legacy SCP wire
 protocol, automatic session recovery and a terminal UI inside the Android app. Existing JSON PTY
 capability on Android is unchanged; Android's native PTY here is specifically the SSH path.
+
+Windows output lifetime uses feature-detected
+[ReleasePseudoConsole](https://learn.microsoft.com/windows/console/releasepseudoconsole) after
+starting the child, then drains output before closing the console. On pre-26100 Windows only, a
+small local-handle shim follows the [ConPTY maintainer's compatibility guidance](https://github.com/microsoft/terminal/discussions/19112).
+Duplicating the read handle alone did not fix fast-exit output loss on the modern CI runner;
+the console itself must also be allowed to finish naturally. No fixed sleep is used as an output
+completion detector. Cancellation and the existing bounded post-exit drain still cap cleanup time.
