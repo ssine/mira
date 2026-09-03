@@ -37,5 +37,12 @@ therefore did not imply automatic service recovery. Allow Auto-launch/background
 Android settings where needed. Mira also resumes when opened if auto-start is enabled and the
 user has not pressed Stop; absent services must not render a stale persisted Connected status.
 
+Candidate `d5360ef` verified that fallback: after in-place upgrade, opening Mira alone reconnected
+the same approved Node, and the full root capability suite passed again. Pressing Stop terminated
+the native process; leaving and reopening the Activity kept the Node offline and displayed
+Stopped by user. Save and start explicitly resumed it. Root capability calls also passed while
+the Activity was in the background. ColorOS's per-app background battery restriction was relaxed
+through its normal confirmation UI; this alone did not unblock the separate upgrade broadcast.
+
 Not claimed by this run: reboot recovery, indefinite background survival, cellular/Wi-Fi handoff,
 non-root Accessibility/MediaProjection end-to-end, all Android OEMs or all root providers.
