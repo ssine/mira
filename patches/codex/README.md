@@ -4,14 +4,14 @@ Mira currently needs a small patch on top of the official Codex source tree so t
 App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
-- Base tag: `rust-v0.151.0` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `78c2908`
-- Patch source commit: `defe5da`
+- Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
+- Base commit: `9856412`
+- Patch source commit: `538bb3f`
 
 Apply it to a clean checkout:
 
 ```bash
-git clone --branch rust-v0.151.0 https://github.com/openai/codex.git codex
+git clone --branch rust-v0.153.1 https://github.com/openai/codex.git codex
 git -C codex am ../patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch
 ```
 
