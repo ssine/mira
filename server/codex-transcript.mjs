@@ -36,6 +36,16 @@ function parseJsonString(value) {
   try { return JSON.parse(trimmed); } catch { return value; }
 }
 
+function projectedErrorMessage(value, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return "";
+  const parsed = parseJsonString(value);
+  if (typeof parsed === "string") return parsed;
+  if (typeof parsed !== "object" || Array.isArray(parsed)) return "";
+  return projectedErrorMessage(parsed.error, depth + 1) ||
+    projectedErrorMessage(parsed.message, depth + 1) ||
+    projectedErrorMessage(parsed.detail, depth + 1);
+}
+
 function printable(value) {
   const parsed = parseJsonString(value);
   const text = valueText(parsed);
@@ -227,6 +237,11 @@ export function projectCodexTranscript(items) {
     }
     if (record.type === "event_msg" && ["task_complete", "turn_complete", "turn_aborted"].includes(payload.type)) {
       currentTurnId = payload.turn_id ?? currentTurnId;
+      const failure = projectedErrorMessage(payload.error);
+      if (failure) push({
+        key: `history-${itemSeq}-turn-error`, turnId: currentTurnId ?? null, sourceItemSeq: itemSeq,
+        kind: "error", title: "Turn 失败", markdown: false, status: "失败", body: boundedText(failure),
+      });
       continue;
     }
     if (record.type === "event_msg" && payload.type === "item_completed") {

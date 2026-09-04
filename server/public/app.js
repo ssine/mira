@@ -110,6 +110,19 @@ const transcriptPageSize = 60;
 const replyProgress = new ReplyProgress();
 let replyProgressTimer = null;
 
+function readableErrorMessage(value, depth = 0) {
+  if (depth > 6 || value === null || value === undefined) return "";
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text.startsWith("{") && !text.startsWith("[")) return value;
+    try { return readableErrorMessage(JSON.parse(text), depth + 1) || value; } catch { return value; }
+  }
+  if (typeof value !== "object" || Array.isArray(value)) return "";
+  return readableErrorMessage(value.error, depth + 1) ||
+    readableErrorMessage(value.message, depth + 1) ||
+    readableErrorMessage(value.detail, depth + 1);
+}
+
 function renderReplyProgress() {
   const entry = replyProgress.current(agent.threadId);
   $("#conversationProgress").classList.toggle("hidden", !entry);
@@ -2019,9 +2032,10 @@ function handleAgentNotification(message) {
     void loadAgentThreads();
     if (threadId && threadId !== agent.threadId) return;
     const status = String(turn.status ?? "").toLowerCase();
-    if (turn.error?.message || ["failed", "error"].includes(status)) {
+    const turnError = readableErrorMessage(turn.error);
+    if (turnError || ["failed", "error"].includes(status)) {
       upsertTrace(`turn-${completedTurnId ?? Date.now()}`, "error", "Turn 失败",
-        turn.error?.message ?? "Codex Turn 执行失败", turn.status ?? "失败");
+        turnError || "Codex Turn 执行失败", turn.status ?? "失败");
     } else if (["interrupted", "cancelled", "canceled", "aborted"].includes(status)) {
       upsertTrace(`turn-${completedTurnId ?? Date.now()}`, "system", "Turn 已中断",
         "本次执行没有继续完成。", turn.status);
@@ -2067,7 +2081,8 @@ function handleAgentNotification(message) {
     return;
   }
   if (method === "error" || method === "warning") {
-    upsertTrace(null, method === "error" ? "error" : "system", method === "error" ? "错误" : "警告", params.error?.message ?? params.message ?? JSON.stringify(params), "");
+    upsertTrace(null, method === "error" ? "error" : "system", method === "error" ? "错误" : "警告",
+      readableErrorMessage(params.error ?? params.message ?? params) || JSON.stringify(params), "");
   }
 }
 
@@ -2078,7 +2093,7 @@ function onAgentSocketMessage(event) {
     const pending = agent.pending.get(message.id);
     if (!pending) return;
     agent.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error.message ?? JSON.stringify(message.error)));
+    if (message.error) pending.reject(new Error(readableErrorMessage(message.error) || JSON.stringify(message.error)));
     else pending.resolve(message.result);
     return;
   }

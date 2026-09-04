@@ -333,6 +333,13 @@ try {
   assert.equal(await page.locator(".tool .trace-kind img").count(), 0, "activity labels must render as text, not HTML");
   assert.equal(await page.evaluate(() => window.injected), undefined);
   assert.equal(await page.locator(".activity-failed").count(), 1);
+  await notify("turn/completed", { threadId: "thread-1", turn: { id: "turn-1", status: "failed", error: {
+    message: JSON.stringify({ type: "error", status: 400, error: {
+      message: "The requested model requires a newer version of Codex.",
+    } }),
+  } } });
+  assert.equal(await page.locator(".trace-card.error .trace-body").last().textContent(),
+    "The requested model requires a newer version of Codex.", "live nested Codex errors must be readable");
   assert.deepEqual(errors, [], "browser must have no uncaught errors");
   const screenshot = process.env.MIRA_TRACE_SCREENSHOT ?? process.argv[4];
   if (screenshot) await page.locator(".conversation-card").screenshot({ path: screenshot });

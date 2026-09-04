@@ -129,3 +129,26 @@ test("projects durable completion clocks and turn elapsed time for narrative mes
   assert.equal(result[1].completedAt, "2026-09-05T10:00:06.250Z");
   assert.equal(result[1].elapsedMs, 6250);
 });
+
+test("projects nested task completion errors as durable readable history", () => {
+  const turnId = "00000000-0000-4000-8000-000000000021";
+  const result = projectCodexTranscript([
+    { timestamp: "2026-09-05T11:00:00.000Z", ...record("event_msg", { type: "task_started", turn_id: turnId }) },
+    { timestamp: "2026-09-05T11:00:00.100Z", ...record("event_msg", { type: "user_message", turn_id: turnId, message: "Continue" }) },
+    { timestamp: "2026-09-05T11:00:00.400Z", ...record("event_msg", {
+      type: "task_complete", turn_id: turnId,
+      error: {
+        message: JSON.stringify({ type: "error", status: 400, error: {
+          type: "invalid_request_error",
+          message: "The requested model requires a newer version of Codex.",
+        } }),
+        codex_error_info: "other",
+      },
+    }) },
+  ]);
+
+  assert.deepEqual(result.map((item) => item.kind), ["user", "error"]);
+  assert.equal(result[1].body, "The requested model requires a newer version of Codex.");
+  assert.equal(result[1].turnId, turnId);
+  assert.equal(result[1].completedAt, "2026-09-05T11:00:00.400Z");
+});
