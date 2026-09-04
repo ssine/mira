@@ -143,8 +143,17 @@ try {
     Verify-Asset "install.ps1"
     Expand-Archive (Join-Path $stage $asset) -DestinationPath $stage
     $packageDirectory = Join-Path $stage "mira_${Version}_windows_amd64"
-    foreach ($name in @("mira.exe", "mira-node.exe")) {
+    foreach ($name in @("openssh.json", "mira-node.exe")) {
         if (-not (Test-Path (Join-Path $packageDirectory $name))) { throw "Release archive is incomplete" }
+    }
+    $nativeManifest = Get-Content (Join-Path $packageDirectory 'openssh.json') -Raw | ConvertFrom-Json
+    $nativeImage = Join-Path $packageDirectory 'mira-node.exe'
+    if ($nativeManifest.schemaVersion -ne 1 -or $nativeManifest.backend -ne 'embedded-openssh' -or $nativeManifest.platform -ne 'windows' -or $nativeManifest.arch -ne 'amd64' -or $nativeManifest.image -ne 'mira-node.exe' -or (Get-FileHash $nativeImage -Algorithm SHA256).Hash -ne $nativeManifest.sha256) { throw 'Invalid embedded OpenSSH manifest' }
+    Run-Mira $nativeImage @('--mira-openssh-build')
+    if (([IO.File]::ReadAllText((Join-Path $stage 'command.stdout'))).Trim() -ne 'MIRA_LINKED_OPENSSH_WINDOWS_FULL_V1') { throw 'Release has no embedded OpenSSH' }
+    # Fixed role names, never arbitrary manifest-supplied paths; no admin needed.
+    foreach ($role in @('mira','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen','ssh-shellhost','ssh-agent','ssh-add','ssh-keyscan','ssh-sk-helper','ssh-pkcs11-helper')) {
+        New-Item -ItemType HardLink -Path (Join-Path $packageDirectory ($role+'.exe')) -Target $nativeImage | Out-Null
     }
     New-Item -ItemType Directory -Path (Join-Path $installRoot "versions"), $binDirectory -Force | Out-Null
     if ($Server) { Run-Mira (Join-Path $packageDirectory "mira.exe") @("setup", "--server", $Server) }

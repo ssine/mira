@@ -559,6 +559,12 @@ async function route(request, response) {
     sendJson(response, result.status, result.body); return;
   }
   match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/ssh\/(keys|sessions)$/i);
+  if (match && request.method === "GET" && match[2] === "keys") {
+    const principal = await authorize(request, response, "node", { csrf: false, clientType: "ssh" });
+    if (!principal) return;
+    const result = await sshRelay.describe(match[1]);
+    sendJson(response, result.status, result.body); return;
+  }
   if (match && request.method === "POST") {
     const principal = await authorize(request, response, "node", { csrf: false, clientType: "ssh",
       ...(match[2] === "keys" ? { nodeId: match[1] } : {}) });

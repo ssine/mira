@@ -39,7 +39,7 @@ export class SSHRelay {
 
   async keys(nodeId) {
     const result = await this.pool.query(`SELECT keys.host_key, keys.client_key, credentials.credential_id,
-      nodes.capabilities->'ssh' AS ssh_enabled
+      nodes.capabilities->'ssh' AS ssh_enabled, nodes.machine_status->'ssh' AS ssh_runtime
       FROM mira_node_ssh_keys keys JOIN mira_node_credentials credentials USING (credential_id)
       JOIN codex_nodes nodes USING (node_id)
       WHERE nodes.node_id = $1 AND nodes.approval_status = 'approved' AND credentials.revoked_at IS NULL`, [nodeId]);
@@ -62,10 +62,20 @@ export class SSHRelay {
     return { status: 200, body: { status: "registered" } };
   }
 
+  async describe(targetNodeId) {
+    const target = await this.keys(targetNodeId);
+    if (!target || target.ssh_enabled !== true) return fail(409, "target Node does not support SSH yet");
+    const username = target.ssh_runtime?.backend === "openssh" ? target.ssh_runtime.username : "mira";
+    if (typeof username !== "string" || !username || username.length > 256 || /[\x00-\x1f\x7f"]/.test(username)) return fail(409, "target Node has an invalid SSH account");
+    return { status: 200, body: { hostKey: target.host_key, username, protocolVersion: 1, backend: target.ssh_runtime?.backend ?? "builtin" } };
+  }
+
   async create(principal, targetNodeId, request) {
     const [source, target] = await Promise.all([this.keys(principal.nodeId), this.keys(targetNodeId)]);
     if (!source || source.credential_id !== principal.credentialId) return fail(409, "publish this Node's SSH public keys first");
     if (!target || target.ssh_enabled !== true || !this.nodeChannel.isConnected(targetNodeId)) return fail(409, "target Node is offline or does not support SSH yet");
+    const username = target.ssh_runtime?.backend === "openssh" ? target.ssh_runtime.username : "mira";
+    if (typeof username !== "string" || !username || username.length > 256 || /[\x00-\x1f\x7f"]/.test(username)) return fail(409, "target Node has an invalid SSH account");
     const count = nodeId => [...this.sessions.values()].filter(s => s.sourceNodeId === nodeId || s.targetNodeId === nodeId).length;
     if (this.sessions.size >= this.maxSessions || count(principal.nodeId) >= this.maxPerNode || count(targetNodeId) >= this.maxPerNode) {
       return fail(429, "SSH session limit reached");
@@ -84,7 +94,7 @@ export class SSHRelay {
       if (this.sessions.get(sessionId) !== session) return fail(409, "SSH session cancelled");
       this.nodeChannel.sendToNode(targetNodeId, { type: "ssh.open", sessionId,
         sourceNodeId: principal.nodeId, clientPublicKey: source.client_key });
-      return { status: 201, body: { sessionId, hostKey: target.host_key, username: "mira", protocolVersion: 1 } };
+      return { status: 201, body: { sessionId, hostKey: target.host_key, username, protocolVersion: 1 } };
     } catch (error) { this.end(sessionId, "open failed"); throw error; }
   }
 

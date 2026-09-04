@@ -1,0 +1,69 @@
+[
+  {
+    "file": "openssh-10.5p1.tar.gz",
+    "url": "https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.5p1.tar.gz",
+    "algorithm": "sha256",
+    "digest": "d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11",
+    "platforms": [
+      "linux",
+      "android"
+    ]
+  },
+  {
+    "file": "openssl-3.5.5.tar.gz",
+    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.5/openssl-3.5.5.tar.gz",
+    "algorithm": "sha256",
+    "digest": "b28c91532a8b65a1f983b4c28b7488174e4a01008e29ce8e69bd789f28bc2a89",
+    "platforms": [
+      "linux",
+      "android"
+    ]
+  },
+  {
+    "file": "openssh-win32-dbc67119.tar.gz",
+    "url": "https://github.com/PowerShell/openssh-portable/archive/dbc67119fdc30422694971960e01f14d122b29e8.tar.gz",
+    "algorithm": "sha256",
+    "digest": "a66da6b8e5a33e61a24c1a9ad58431cf63630285808839eaa218c64ab817b333",
+    "note": "Immutable upstream commit; extracted tree verified identical to the previously accepted archive.",
+    "platforms": [
+      "windows"
+    ]
+  },
+  {
+    "file": "libressl-4.2.0.tar.gz",
+    "url": "https://cdn.openbsd.org/pub/OpenBSD/LibreSSL/libressl-4.2.0.tar.gz",
+    "algorithm": "sha512",
+    "digest": "b06eccff7b332da38efbc5a039d8ee54bd26437f3d5957f59ac2d93b4464f181c9a665a2c957272be5d9f91f447720f6dfa29b4b72407279ac8a7722c322dac0",
+    "platforms": [
+      "windows"
+    ]
+  },
+  {
+    "file": "zlib-1.3.2.tar.gz",
+    "url": "https://zlib.net/zlib-1.3.2.tar.gz",
+    "algorithm": "sha256",
+    "digest": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+    "platforms": [
+      "windows"
+    ]
+  },
+  {
+    "file": "libfido2-1.16.0.tar.gz",
+    "url": "https://github.com/Yubico/libfido2/archive/refs/tags/1.16.0.tar.gz",
+    "algorithm": "sha512",
+    "digest": "46ef14d9215d13608eb511ea4d63494758eb2464e75a00411e1afa2546f06e4cd142a08a59f1ee78967c962290c54889014f58608d4b58d48ba590e5805d3b04",
+    "platforms": [
+      "windows"
+    ]
+  },
+  {
+    "file": "libcbor-0.14.0.tar.gz",
+    "url": "https://github.com/PJK/libcbor/archive/refs/tags/v0.14.0.tar.gz",
+    "algorithm": "sha512",
+    "digest": "e580543d9cb567d484e14c3057c5c1672f012879abe3f04ead64bf0f14b95b986fcc26602b0ffc2b247e9bfbd8a914d676c25d4f62230ac8fd5a6727f7d34595",
+    "note": "Pinned official source archive.",
+    "platforms": [
+      "windows"
+    ]
+  }
+]

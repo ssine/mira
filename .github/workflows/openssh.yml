@@ -1,0 +1,99 @@
+name: Embedded OpenSSH
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+      - run: go -C node mod download
+      - name: Build single static image
+        run: |
+          MIRA_OPENSSH_OUTPUT="$RUNNER_TEMP/bundle" bash node/openssh/build.sh linux
+          node node/openssh/verify-package.mjs "$RUNNER_TEMP/bundle" linux '${{ matrix.arch }}'
+          tar -C "$RUNNER_TEMP/bundle" -czf "$RUNNER_TEMP/openssh-linux-${{ matrix.arch }}.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openssh-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/openssh-linux-${{ matrix.arch }}.tar.gz
+
+  windows-c:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Build native MSVC objects and static crypto
+        shell: pwsh
+        run: |
+          $cache=Join-Path $env:RUNNER_TEMP 'openssh-sources'
+          $work=Join-Path $env:RUNNER_TEMP 'mira-openssh-windows.ci'
+          node node/openssh/fetch-sources.mjs $cache windows
+          if ($LASTEXITCODE) { throw 'Source verification failed' }
+          & node/openssh/windows/build-native.ps1 -Workspace $work -Cache $cache -Phase extract
+          node node/openssh/windows/prepare.mjs (Join-Path $work 'source')
+          if ($LASTEXITCODE) { throw 'Source adaptation failed' }
+          & node/openssh/windows/build-native.ps1 -Workspace $work -Phase build
+          tar -czf "$env:RUNNER_TEMP/windows-native.tar.gz" -C $work source deps/install deps/libressl-4.2.0 deps/zlib-1.3.2 deps/libfido2-1.16.0 deps/libcbor-0.14.0 sdk-libs dispatcher.obj
+          if ($LASTEXITCODE) { throw 'Native artifact packaging failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openssh-windows-c-inputs
+          path: ${{ runner.temp }}/windows-native.tar.gz
+          retention-days: 2
+
+  windows-link:
+    needs: windows-c
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+      - uses: actions/download-artifact@v4
+        with:
+          name: openssh-windows-c-inputs
+          path: ${{ runner.temp }}/inputs
+      - name: Link one PE image, never ship SDK or dependency DLLs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 lld-18 gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+          work=$(mktemp -d /tmp/mira-openssh-windows.XXXXXX)
+          tar -xzf "$RUNNER_TEMP/inputs/windows-native.tar.gz" -C "$work"
+          MIRA_OPENSSH_GO_OUTPUT="$work/go-objects" bash node/openssh/windows/build-go.sh
+          node node/openssh/windows/combine.mjs "$work/source" "$work/combined"
+          node node/openssh/windows/link.mjs "$work"
+          mkdir "$work/bin"
+          cp "$work/mira-node.exe" "$work/bin/"
+          node node/openssh/manifest.mjs "$work/bin" windows amd64 "$work"
+          node node/openssh/verify-package.mjs "$work/bin" windows amd64
+          tar -C "$work/bin" -czf "$RUNNER_TEMP/openssh-windows-amd64.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openssh-windows-amd64
+          path: ${{ runner.temp }}/openssh-windows-amd64.tar.gz

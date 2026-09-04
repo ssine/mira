@@ -57,7 +57,7 @@ coordinates connections and relays encrypted bytes; it does not log in through s
 See `protocol/ssh-v1.md` for identity, wire protocol, bounds and current feature limits.
 
 SSH architecture decisions: built-in Mira clients; one independently supervised worker per SSH
-connection, launched from the same Node binary; maintained SSH/SFTP libraries; no public port 22
+connection, launched from the same Node binary; statically linked upstream OpenSSH roles; no public port 22
 or external sshd requirement. Reuse the approved Node identity and derive purpose-separated local
 host/client keys; the database contains public keys only. Verify both host and caller keys. Revocation
 must close active connections and reap children. Worker process isolation is not a privilege sandbox.
@@ -133,13 +133,16 @@ tree from durable metadata even if parent and child ran on different nodes.
 
 ## Mira Node design
 
-`node/` is one Go module and produces `mira-node` plus the `mira` control CLI for Windows, Linux and
-WSL. The Android APK embeds `mira-node` but does not need the control CLI.
+`node/` is one Go module. Release builds link it with OpenSSH into one executable; `mira-node`,
+`mira` and OpenSSH roles are aliases of that image. Android packages it in one APK.
+Keep shared Go sources directly in `node/internal/` and Android application sources directly in
+`node/android/src/main/`. The Android root project applies the application plugin itself; do not
+add redundant implementation or application-module directory layers.
 WSL uses the Linux build. Platform-specific behavior belongs behind build-tagged adapters under
-`node/internal/node/`; registration, heartbeat, reverse WebSocket, file/process operations, output
+`node/internal/`; registration, heartbeat, reverse WebSocket, file/process operations, output
 cursors and lifecycle rules stay shared.
 
-The Android APK under `node/android/app/` is a platform shell around the same Go binary. Java owns
+The Android APK under `node/android/` is a platform shell around the same Go binary. Java owns
 Android Framework responsibilities: Activity, foreground service, Accessibility, MediaProjection,
 permissions, boot recovery and child-process lifecycle. Go owns the Mira protocol and common data
 plane. Do not introduce a separate Termux or ADB-specific Mira Node implementation.
@@ -214,8 +217,9 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - `server/public/`: same-origin administrator device console served by Mira Server.
 - `node/cmd/mira-node/`: Go command entry point.
 - `node/cmd/mira/`: Go control CLI using the current machine's Node identity.
-- `node/internal/node/`: shared node runtime and platform adapters.
-- `node/android/app/`: Android application shell.
+- `node/internal/`: shared node runtime and platform adapters.
+- `node/android/`: Android application shell.
+- `node/openssh/`: the only SSH backend: native dispatch/linking, platform patches, source manifest and device regressions.
 - `protocol/`: versioned wire-protocol documentation.
 - `tests/`: JavaScript/Python integration and end-to-end scenarios.
 - `patches/codex/`: exportable patch against an explicit official Codex baseline.
@@ -245,7 +249,10 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   release checksums, refuse unrelated service replacement and avoid silently interrupting sessions.
 - Windows PTY uses real ConPTY behind a build-tagged adapter. Test native Windows, not just cross
   compilation. Keep UTF-8 decoding state across output chunks and bound all retained data.
-- For release changes, run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`.
+- Plain Go builds are compile/development checks, never release artifacts; there is no Go SSH/SFTP fallback.
+- Keep role aliases inside immutable version directories and verify they refer to the running image. Never install system SSH services or mutate user SSH config.
+- Narrow file roots disable native SSH instead of silently widening policy.
+- For release changes, first build native bundles via `node/openssh/build.sh`; then run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`. Test linked images with `node/openssh/tests/e2e.mjs`; see the component README for real Windows/Android hooks.
 
 Run the baseline checks from the repository root:
 

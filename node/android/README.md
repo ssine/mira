@@ -8,10 +8,10 @@ See [INSTALL.md](../../INSTALL.md) for the complete installation and update flow
 
 The Android distribution of Mira Node is one deployable APK with two internal components:
 
-- `app/` is the Android application module. It owns the Activity, foreground service,
+- `src/main/` is the Android application source in this single Gradle project. It owns the Activity, foreground service,
   AccessibilityService, MediaProjection permission flow, boot receiver, configuration UI and
   native process lifecycle.
-- `../internal/node/` is the shared Go data plane also used by Windows, WSL and Linux. It owns the
+- `../internal/` is the shared Go data plane also used by Windows, WSL and Linux. It owns the
   Mira control protocol, reverse WebSocket, heartbeat, status, file and process capability dispatch.
 
 The root `build-android.sh` cross-compiles the same `mira-node` command as an Android ARM64
@@ -54,11 +54,11 @@ JDK 17+, Gradle 8.13+, Node.js 22 and Go 1.26.6+:
 
 ```bash
 sdkmanager "ndk;$(cat NDK_VERSION)"
-ANDROID_HOME=/path/to/android-sdk gradle :app:assembleDebug
+ANDROID_HOME=/path/to/android-sdk gradle :assembleDebug
 ```
 
 The Gradle `preBuild` dependency compiles the shared Go module automatically and includes the
-resulting ARM64 binary in the APK. Build outputs under `app/build/`, `build/`, `.gradle/` and
+resulting ARM64 binary in the APK. Build outputs under `build/`, `.gradle/` and
 `../dist/` are ignored by Git.
 
 If `dl.google.com` fails during TLS negotiation, the pinned r27d NDK is also available from
@@ -91,3 +91,38 @@ allowed in system app settings. Opening Mira resumes an opted-in node when the s
 an explicit **Stop** remains stopped. The UI must not display a persisted "Connected" status when
 the service no longer exists. **Android app settings** opens the platform configuration page.
 This is not a promise that every OEM will keep an app alive indefinitely.
+
+## Embedded OpenSSH APK
+
+The APK always packages the linked Go + OpenSSH image. There is no builtin Go SSH
+fallback. Build normally with Gradle; to reuse a verified bundle and test without
+replacing the production application:
+
+```sh
+MIRA_ANDROID_OPENSSH_BUNDLE=/absolute/path/to/bundle \
+  gradle -PmiraTestApplicationId=com.ssine.mira.opensshpoc :assembleDebug
+```
+
+The application-ID override is debug-only. There is one application source; the
+independent ID protects the production app/identity during device tests. Native
+image checks require ARM64, native DNS, root-capable dispatch and a valid manifest.
+
+`OpenSSHRuntime.java` maintains app-private role symlinks to the single packaged
+ELF, replacing symlinks atomically when an APK upgrade changes nativeLibraryDir.
+Unexpected regular files/directories are rejected rather than overwritten. The
+Service enables the native backend explicitly for both ordinary and authorized
+root launches; it does not use a system sshd or install a root module.
+
+Both modes keep `no_backup/identity.json` app-owned and 0600. Root SSH uses a
+separate root-owned 0700 `no_backup/openssh-root-home`, with ephemeral session
+keys/config and an empty pre-auth chroot beneath it. StrictModes, public-key-only
+authentication, chroot and pre-auth nobody demotion stay enabled. App-mode SSH
+has only the app UID's permissions. This build still lacks an additional OpenSSH
+seccomp sandbox; Android SELinux is not disabled.
+
+Real-device acceptance in `node/openssh/tests/android.mjs` covers app/root/app
+identity continuity, SSH/PTY/SCP/SFTP, native reverse client, existing status/file/
+process APIs, root screenshots and revocation cleanup. It uses a temporary test
+Server and an explicitly selected test phone. Optional APK reinstall verifies
+identity preservation and role-link retargeting. ADB configures/inspects that
+test package only; all tested SSH traffic uses Mira enrollment and reverse relay.

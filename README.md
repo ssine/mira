@@ -8,6 +8,9 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
 管理员网站已连通。durable scheduler、writer lease、完整恢复演练和服务端编排的集群批量更新仍待完成。
 
+0.12.0 统一使用内嵌 OpenSSH，支持原生递归 SCP、SFTP 批处理、连接复用和端口转发；Go 共享实现
+直接位于 `node/internal/`，Android 是 `node/android/` 下的单一应用项目。节点升级保留身份和配置。
+
 0.11.4 将 Mira 管理的 Codex 默认执行策略统一为 YOLO：新建和恢复 App Server thread，以及本机
 `mira codex`，均默认使用 `approvalPolicy: never` 与 `danger-full-access`。显式传入的更严格策略
 仍可覆盖默认值；Codex 不再额外限制联网和跨目录操作，但仍受运行 Node 的操作系统身份约束。
@@ -16,6 +19,9 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 客户端内置，目标 Node 从同一二进制启动独立 SSH worker，通过单独的反向 WSS 数据流连接；
 不需要开放 22 端口或安装系统 sshd。权限沿用已批准的 Node 身份，具体功能、限制和使用方式见
 [SSH 协议与使用说明](./protocol/ssh-v1.md)。
+
+当前源码已统一到 [Node 内嵌 OpenSSH](./node/openssh/README.md)，旧 Go SSH/SFTP 后端和独立原型已移除。
+发布构建只接受完整原生链接包；普通 `go build` 用于开发检查，不包含可用 SSH。
 
 0.11.3 让受控 App Server 在每次新建或恢复 thread 时，把当前执行 Node 上 `mira` CLI 的绝对
 路径和 `ssh`/`scp`/`sftp` 用法合并进 Codex 开发者说明。SSH 族保持普通 CLI，不注册为
@@ -102,8 +108,9 @@ CLI 登录、Node ACL 或长期 token query parameter。
 | `server/public/` | Server 同源提供的管理员设备控制台，无独立前端构建链 |
 | `node/cmd/mira-node/` | Windows/Linux/WSL/Android 共用的常驻 Node |
 | `node/cmd/mira/` | 人类和 Codex 共用的远程控制 CLI |
-| `node/internal/node/` | 身份、接入、反向通道、文件、进程、PTY、屏幕和平台适配 |
-| `node/android/app/` | root/非 root 统一 APK 外壳和 Android Framework bridge |
+| `node/internal/` | 身份、接入、反向通道、文件、进程、PTY、屏幕和平台适配 |
+| `node/android/` | root/非 root 统一 APK 外壳和 Android Framework bridge |
+| `node/openssh/` | 单文件内嵌 OpenSSH：平台构建、补丁、分发清单和真实节点回归 |
 | `patches/codex/` | 官方 Codex ThreadStore HTTP 适配与 subagent dynamicTools 补丁 |
 | `skills/mira/` | 可安装的 Codex 使用说明，不包含任何 credential 或固定设备信息 |
 | `tests/` | 存储、认证、Node、App Server、subagent、多节点与 Android E2E |
@@ -230,8 +237,8 @@ Accessibility、MediaProjection、权限与子进程生命周期；Go 负责共�
 
 ```bash
 cd node/android
-ANDROID_HOME=/path/to/android-sdk gradle :app:assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+ANDROID_HOME=/path/to/android-sdk gradle :assembleDebug
+adb install -r build/outputs/apk/debug/mira-node-debug.apk
 ```
 
 ## Home Server Compose

@@ -1,0 +1,3 @@
+# Unified patches contain context prefixes before upstream tabs and blank lines.
+# Preserve these exact bytes; whitespace checking still applies to source files.
+*.patch -whitespace

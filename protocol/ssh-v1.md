@@ -1,192 +1,138 @@
-# Mira SSH v1 (0.10.0)
+# Mira SSH v1 — embedded OpenSSH
 
-## Scope and trust
+Mira embeds OpenSSH and the shared Go Node runtime in one linked executable.
+There is no alternate Go SSH/SFTP implementation, extracted executable payload,
+system sshd dependency, system SSH config mutation, extra password or public port 22.
+`mira ssh`, `mira scp` and `mira sftp` are CLI commands, not dynamic tools.
 
-SSH is an additional **real SSH-2** transport, not a translation into JSON capability calls.
-`mira ssh`, `mira scp` and `mira sftp` include the client. No external `ssh` installation,
-port 22, system sshd, Tailscale, extra password, or extra APK is required.
-It does not replace Mira's Node control channel or App Server protocol.
-
-All approved Nodes retain the existing mutual-trust policy. An administrator manages enrollment
-and revocation, but an administrator browser session alone is not an SSH client identity.
-The only SSH username is `mira`: commands execute as the **target Node's OS user**. This is not
-an OS-account login service and does not grant root. Android runs as app UID or the already
-authorized root identity. Worker process separation is fault isolation, **not privilege separation**.
-
-The Server is the trusted public-key authority and connection coordinator. SSH encrypts the
-data end-to-end between CLI and worker; the relay does not decrypt terminal/file contents.
-This does not protect against a compromised key authority, nor against an already trusted Node
-executing commands to access another Node's files. Audit records contain session metadata only,
-not commands, output, filenames, private keys or full Node credentials.
-
-## Topology
+## Identity and transport
 
 ```text
-mira CLI on approved Node A
-  -- authenticated HTTPS: discover B, publish A's keys, request session --> Server + PostgreSQL
-  -- dedicated outbound WSS: SSH bytes --> Server relay <-- dedicated outbound WSS -- Node B
-                                                                  Node B supervisor
-                                                                    | private stdio pipes
-                                                                    + same binary: --internal-ssh-worker
-                                                                        SSH handshake/session/SFTP
-                                                                        native PTY or child process
+approved Node A: Mira CLI → embedded ssh → Mira ssh-proxy
+                                             │ outbound WSS
+                                   Mira Server byte relay
+                                             │ outbound WSS
+approved Node B: supervisor → private worker → embedded sshd
+                                                 ├─ shell / PTY
+                                                 └─ native SFTP
 ```
 
-One worker per SSH connection, up to four SSH `session` channels per worker. Worker bootstrap is
-passed through an anonymous pipe, not argv or a file. Only the supervisor has a network connection
-to the relay. The worker has no TCP listening port and cannot take over the control channel.
+Each connection has an independently supervised worker. Linux and Android use
+sshd inetd stdio. Win32 OpenSSH uses a random **127.0.0.1-only** listener per worker
+because its pipe-based inetd path did not pass validation. It is not LAN-accessible.
+The Server coordinates identity and relays encrypted bytes; it does not decrypt
+file/terminal contents or log into an operating-system SSH service.
 
-## Credentials and key continuity
+Both ends use the existing approved Node credential. HKDF-SHA256 derives distinct
+Ed25519 seeds: IKM is the decoded 32-byte secret, salt the lowercase credential UUID,
+info `mira/ssh/v1/host` or `mira/ssh/v1/client`, output 32 bytes. These domains must
+not change when updating or switching Android app/root mode. PostgreSQL stores
+immutable public keys only (migration 9). Keys rotate with the Node credential.
 
-Each approved Node's existing protected credential contains a 32-byte random secret and UUID.
-Generate distinct Ed25519 host/client seeds with HKDF-SHA256:
+The CLI pins the exact target host key returned by the authenticated Server. The
+target accepts only the exact approved caller public key and proof of possession.
+The SSH account is the **target Node's current OS account**, not a selectable user.
+Public-key-only authentication and StrictModes stay enabled. No password/PAM login,
+user RC or X11 is enabled. The approved Nodes remain mutually trusted; this is not
+a multiuser account-login service or a privilege sandbox. A compromised Server key
+authority or approved Node remains in the trust boundary.
 
-- IKM: decoded Node credential secret (not the printable bearer token).
-- Salt: lowercase ASCII credential UUID.
-- Info: `mira/ssh/v1/host` or `mira/ssh/v1/client`.
-- Output: 32 bytes, used as an Ed25519 seed.
+Mira generates owner-private temporary keys/config per invocation/session. The
+durable source of those keys remains the protected Node identity. Temporary files
+are removed on orderly completion, but a hard crash can leave private session state;
+do not describe this as secret-free disk storage. Secrets never enter argv, URLs,
+Server audit records or the public-key registry.
 
-This is domain-separated derivation, not using a bearer token itself as a signing key. Reinstalling
-or switching Android privilege mode while preserving identity preserves both keys. A newly approved
-credential rotates both. No additional private-key files are necessary; backing up the identity
-also backs up these keys. Never export private seeds to Server/database/logs.
+## HTTP and WebSocket API
 
-Database migration 9 adds `mira_node_ssh_keys(credential_id, host_key, client_key, created_at)`.
-Keys are immutable for a credential. Registration rejects silent key replacement. Revoking the
-Node revokes its credential and consequently both keys; historical public keys may remain stored.
-CLI verifies the exact target host public key from the authenticated Server response. Worker
-requires the exact caller public key supplied over its authenticated control connection, username
-`mira`, and SSH proof of possession. Neither side uses password auth or skips host-key verification.
+All SSH HTTP endpoints require an approved **Node** bearer credential, not an admin cookie.
 
-## HTTP API
+| Method / path | Purpose |
+| --- | --- |
+| `POST /v1/nodes/{ownNodeId}/ssh/keys` | Register `{hostKey, clientKey}` idempotently; reject changes for the same credential |
+| `GET /v1/nodes/{targetNodeId}/ssh/keys` | Return `{hostKey, username, protocolVersion: 1, backend}` without creating a session |
+| `POST /v1/nodes/{targetNodeId}/ssh/sessions` | Create `{sessionId, hostKey, username, protocolVersion: 1}` and send `ssh.open` to the target |
 
-All endpoints require an approved Node bearer token. URLs never contain credentials.
+Registration rejects invalid/noncanonical/non-Ed25519 or overlapping keys (`400`),
+wrong/revoked credentials (`403`) and silent key changes (`409`). Session creation
+requires registered keys and an online target; unavailable targets return `409`,
+capacity exhaustion `429`. Server validates the reported OS account before dispatch.
 
-`POST /v1/nodes/{ownNodeId}/ssh/keys`
+`ssh.open` contains `{sessionId, sourceNodeId, clientPublicKey}`. Target and source
+connect to `/v1/ssh/sessions/{sessionId}/target` and `/source`, with subprotocols
+`mira-ssh-v1` and `auth.<base64url(full-node-token)>`. Session IDs route streams;
+they are not bearer credentials. Each side authenticates its exact Node/credential
+and can attach once. The worker bootstrap arrives over a private anonymous pipe.
 
-```json
-{"hostKey":"ssh-ed25519 <base64>","clientKey":"ssh-ed25519 <different-base64>"}
-```
+- Binary WSS frames, maximum 64 KiB; boundaries have no SSH protocol meaning.
+- Bounded streaming/backpressure. Bulk data bypasses JSON control buffers.
+- WSS compression is disabled; native SSH compression is available with `-C`.
+- Both sides must attach within 30 seconds; SSH LoginGraceTime is 15 seconds.
+- Relay defaults: 128 global connections, 32 involving one Node. Configure with
+  `MIRA_SSH_MAX_SESSIONS` and `MIRA_SSH_MAX_SESSIONS_PER_NODE`.
+- The Node also bounds independently supervised inbound workers. OpenSSH owns
+  per-connection channels and its own limits; limits are not unbounded.
+- Native keepalive options can be supplied with `-o`; do not assume the old Go
+  client's keepalive behavior applies.
+- Control disconnect/replacement, revocation, Server shutdown or data failure
+  closes the stream. `ssh.close` cancels the worker. Windows Job Objects and Linux
+  subreaper handling reap descendants. No transport replay or resumable session queue.
 
-Only canonical comment-free Ed25519 public keys are accepted. Credential ID is taken from the
-authenticated principal, not the request. Returns `200 {"status":"registered"}` idempotently;
-`400` invalid keys, `403` wrong/revoked identity, `409` an existing key differs. An older Server's
-`404` lets a new Node continue providing pre-SSH capabilities during rolling updates.
+SSH owns EOF, stderr, exit status, PTY resize and channel flow control. A broken
+upload may leave a partial file. Retry deliberately. Audit records retain session
+metadata, not commands, file names, terminal output or private credentials.
 
-`POST /v1/nodes/{targetNodeId}/ssh/sessions` (no body)
+## Filesystem and CLI semantics
 
-Caller must first publish its keys; target must have published keys and an online control channel.
-Returns `201`:
-
-```json
-{"sessionId":"UUID","hostKey":"ssh-ed25519 <base64>","username":"mira","protocolVersion":1}
-```
-
-Returns `409` for missing keys/offline target, `429` for concurrency limits. The Server sends:
-
-```json
-{"type":"ssh.open","sessionId":"UUID","sourceNodeId":"UUID","clientPublicKey":"ssh-ed25519 <base64>"}
-```
-
-Target starts its worker and opens the target-side WSS. Caller opens source-side WSS. Session IDs
-are routing identifiers, **not bearer credentials**. Each side must authenticate its precise Node
-and credential, and can claim that side once only.
-
-## Dedicated WebSocket transport
-
-- Paths: `/v1/ssh/sessions/{sessionId}/source` and `/target`.
-- Subprotocols: `mira-ssh-v1`, `auth.<base64url(full-node-token)>` (same credential framing as control).
-- Binary messages only, maximum 64 KiB per message; message boundaries have no SSH meaning.
-- No compression. Node/CLI split writes into bounded frames. Server uses bounded streaming pipes
-  with backpressure in both directions, not an unbounded application queue.
-- Bulk SSH bytes never enter the shared JSON control channel.
-- By default, at most 128 relay sessions globally and 32 involving any individual Node (including
-  pending). Operators may lower or raise these bounded limits with `MIRA_SSH_MAX_SESSIONS` and
-  `MIRA_SSH_MAX_SESSIONS_PER_NODE`; the per-Node value is capped by the global value.
-- Both sides must attach within 30 seconds. Worker SSH handshake is limited to 15 seconds.
-- CLI sends SSH keepalives every 20 seconds, disconnecting after a 15-second reply timeout.
-- Control replacement/disconnect, Node revocation, Server shutdown or data-stream failure closes
-  the session. Server sends `{"type":"ssh.close","sessionId":"UUID"}` to the target.
-- Closing transport cancels worker sessions and reaps children before forced termination.
-  Windows supervisor also assigns the worker tree to a kill-on-close Job Object.
-- No replay, reconnect-resume, durable session recovery or offline command queue. A failed upload
-  may leave a partial destination file; retry deliberately, not automatically.
-
-SSH owns channel EOF, separate stderr, exit status, resize and channel flow control. A WebSocket
-closure terminates the whole SSH connection; it is not used as an individual channel EOF.
-
-## Session features
-
-- `shell`, `exec`, `pty-req`, `window-change`, `signal`, SFTP subsystem.
-- Native Unix PTY and Windows ConPTY through `go-pty`; terminal modes through its SSH adapter.
-- Unix commands use the Node's `$SHELL` (fallback `/bin/sh`); Android `/system/bin/sh`;
-  Windows `%COMSPEC%` (fallback `cmd.exe`). An explicit exec string uses that shell's syntax.
-- PTY sizes: 1–1000 columns, 1–500 rows. Session request payloads at most 32 KiB.
-- SSH signals INT/TERM/KILL are accepted where supported; Ctrl-C in a PTY uses terminal input.
-- Arbitrary environment requests, agent forwarding, X11, TCP forwarding, multiuser login and
-  legacy SCP wire protocol are not supported in v1. `mira scp` deliberately uses SFTP.
-- Not a full OpenSSH daemon. Mature libraries provide SSH cryptography/protocol and SFTP protocol;
-  Mira implements identity, transport coordination and OS adapters.
-
-## SFTP paths and bounds
-
-SFTP follows the existing configured file roots and OS permissions. Defaults remain full local
-filesystems; optional narrow roots are compatibility policy, not a security sandbox (shell/exec
-has the Node user's full access). Paths resolving outside configured roots are rejected. Removing
-or renaming a configured root is rejected. No rootless Android permission bypass is implied.
-
-Unix/Android use absolute POSIX paths. Windows uses `/C:/Users/...`; `/` is a virtual volume list.
-UNC, drive-relative and alternate-data-stream paths are rejected. Rootless Android retains normal
-app/filesystem/SELinux restrictions even when a path starts at `/`.
-
-Regular-file reads/writes stream without a total-file-size ceiling; no 4 MiB JSON cap. Up to 64
-open file/directory handles per SFTP subsystem, at most 10,000 entries per directory listing.
-Support: listing/stat/lstat/readlink, read/write, mkdir, remove/rmdir, non-overwriting rename, size/mode/time
-updates. Append, ownership changes, symlink/hardlink creation and extended OpenSSH filesystem
-operations are not implemented. One-shot stat does not consume a persistent handle slot.
-Unlink and rename operate on a symlink itself, never silently on its target. A configured root's
-real path remains protected from destructive operations through aliases.
-
-## CLI
+Native SFTP has the Node OS user's filesystem scope. If `allowedRoots` is explicitly
+narrowed, **SSH is rejected**, rather than silently bypassing that setting. Mira's
+JSON file capabilities still honor the narrower roots. Rootless Android still has
+Android permissions/SELinux restrictions; `/` does not imply root privileges.
 
 ```sh
-mira ssh homeserver
 mira ssh homeserver -- 'uname -a'
-mira ssh -t windows-node -- 'powershell.exe -NoLogo'
-mira scp ./large.bin phone:/sdcard/Download/
-mira scp phone:/sdcard/Download/large.bin ./copy.bin
-mira scp --overwrite ./large.bin phone:/sdcard/Download/large.bin
-mira sftp nas
-mira sftp nas ls /srv
-# Full nodeKeys can contain colons; use :: to separate such selectors from paths:
+mira ssh -tt windows-node -- 'powershell.exe -NoLogo'
+mira ssh -N -L 18080:127.0.0.1:8080 homeserver
+mira ssh -M -S /tmp/mira-control -o ControlPersist=60 homeserver
+mira scp -rp ./folder phone:/sdcard/Download/
+mira scp phone:/sdcard/Download/file ./copy
+mira sftp -b commands.sftp nas
 mira scp ./file 'android:phone::/sdcard/Download/file'
 ```
 
-Global `--timeout` limits establishment, not session duration. `--json` is rejected for SSH stream
-commands. `ssh -t` forces PTY; `-T` disables it. Without an exec command, an interactive local TTY
-automatically requests a remote PTY, enters raw mode, restores the terminal on exit and forwards
-resizes. Remote exit status becomes CLI exit status. Existing files are not overwritten by default.
-Recursive copies and remote-to-remote operands are not yet supported.
+Native SCP/SFTP overwrite, recursion, batch and metadata semantics apply; the old
+`scp --overwrite` and `sftp <node> ls ...` forms are removed. Use interactive SFTP
+or `sftp -b`. Windows remote paths use `/C:/Users/...`; Windows command strings use
+the target shell's syntax. Native SSH options are accepted except Mira-owned
+identity/account/host-key/config/ProxyCommand/endpoint settings. Combined flags
+cannot bypass these restrictions. Transfers cannot address two different Mira
+Nodes in a single SCP command; run from the source Node or stage locally.
 
-The Node executable also supports `mira-node cli ...`. Android's APK-packaged executable can use
-this entry point with `MIRA_IDENTITY_FILE` set to its protected APK identity path; it does not require
-a separate CLI binary or Termux. This is a command-line entry point, not a new Android terminal UI.
+The default shell/home come from the native OS account and OpenSSH platform port.
+This is independent of managed Codex `defaultCwd`. `-t/-T`, exit status and terminal
+mode/resize handling are native OpenSSH behavior. `--json` is not a stream format.
+`mira-node cli ...` is the same embedded CLI entry point, also available inside the
+Android image; no Termux or second Go binary is required.
 
-Interactive SFTP: `pwd`, `ls`, `cd`, `stat`, `mkdir`, `rm`, `get`, `put`, `help`, `exit`.
-Single/double quotes group paths containing spaces. The SFTP prompt is intentionally minimal.
+TCP forwarding and Unix ControlPersist are tested. This does not promise every
+OpenSSH extension, agent forwarding, PKCS#11/FIDO device, Windows multiplexing,
+system `~/.ssh/config` integration or SSH ecosystem wrapper has been validated.
 
-## Validation and upgrades
+## Packaging and upgrades
 
-Use `go -C node test -race ./internal/node -run SSH`, native Windows `go test`, and
-`node tests/ssh_e2e.mjs` (isolated local database/Server/two approved Nodes).
-The E2E checks binary stdin/EOF, stderr/exit, PTY, >4 MiB binary SFTP roundtrip, file policy,
-revocation and child cleanup. Platform compile checks alone are not Android APK acceptance.
+Source/build/patch/test ownership is [node/openssh](../node/openssh/README.md).
+All role names must resolve to the same running image. Desktop role links live
+inside an immutable version directory; only Mira's two public launchers enter PATH.
+Windows ZIP contains one PE; installation creates NTFS hard links. Android retargets
+private role symlinks after an APK upgrade. No system sshd or system SSH config is changed.
 
-Upgrade Server first (append-only migration 9), then Node/CLI pairs. Old Nodes remain usable for
-their existing capabilities; SSH needs the new target Node and caller CLI. No existing identity
-or conversation data is deleted, and no Caddy port/SSH listener must be opened.
+Native package manifests include image SHA-256, platform, role list and pinned
+source digests; dependency notices accompany releases and the APK. Packaging refuses
+plain Go development binaries. A plain `go build` remains useful for common-node
+development and cross-compilation, but advertises no usable embedded SSH.
 
-Since 0.10.1, Node detail/list responses include `sshSessionCount`, counting pending and attached
-relay sessions where the Node is either endpoint (self-connections count once). `mira update`
-refuses a nonzero count unless explicitly forced. Like the existing process/PTY preflight, this
-is an advisory check, not an atomic drain or distributed update lock.
+Update Server first, then linked Node packages. The Server retains old v1 wire
+metadata compatibility for rolling upgrades, not an old SSH implementation. Existing
+identity/configuration and old version directories are retained. `mira update`
+checks pending/active SSH at both endpoints along with process/PTY/App Server state;
+this remains an advisory preflight, not an atomic distributed drain lock.

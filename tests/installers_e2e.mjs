@@ -30,16 +30,17 @@ async function waitFile(file) {
 
 try {
   await fs.mkdir(releases);
-  for (const file of await fs.readdir(path.join(root, "dist"))) await fs.copyFile(path.join(root, "dist", file), path.join(releases, file));
+  const releaseSource = process.env.MIRA_TEST_RELEASE_DIRECTORY ?? path.join(root, "dist");
+  for (const file of await fs.readdir(releaseSource)) await fs.copyFile(path.join(releaseSource, file), path.join(releases, file));
   for (const platform of ["linux", "windows"]) {
     const packageName = `mira_${previous}_${platform}_amd64`;
     const packageDirectory = path.join(temporary, packageName);
     await fs.mkdir(packageDirectory);
-    for (const name of ["mira", "mira-node"]) {
-      command("go", ["build", "-trimpath", "-ldflags", `-s -w -X github.com/ssine/mira/node/internal/node.Version=${previous}`, "-o", path.join(packageDirectory, name + (platform === "windows" ? ".exe" : "")), `./cmd/${name}`], {
-        cwd: path.join(root, "node"), env: { ...process.env, CGO_ENABLED: "0", GOOS: platform, GOARCH: "amd64" },
-      });
-    }
+    const currentName = `mira_${current}_${platform}_amd64`;
+    const archive = path.join(releases, currentName + (platform === "windows" ? ".zip" : ".tar.gz"));
+    if (platform === "windows") command("unzip", ["-q", archive, "-d", temporary]);
+    else command("tar", ["-xzf", archive, "-C", temporary]);
+    await fs.cp(path.join(temporary, currentName), packageDirectory, { recursive: true, verbatimSymlinks: true });
     const filename = packageName + (platform === "windows" ? ".zip" : ".tar.gz");
     if (platform === "windows") command("zip", ["-qr", path.join(releases, filename), packageName], { cwd: temporary });
     else command("tar", ["-czf", path.join(releases, filename), packageName], { cwd: temporary });

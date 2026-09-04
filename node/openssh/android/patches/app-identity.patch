@@ -1,0 +1,30 @@
+--- a/sshd.c
++++ b/sshd.c
+@@ -1762,7 +1762,7 @@
+ 	 * to create a file, and we can't control the code in every
+ 	 * module which might be used).
+ 	 */
+-	if (setgroups(0, NULL) < 0)
++	if (geteuid() == 0 && setgroups(0, NULL) < 0)
+ 		debug("setgroups() failed: %.200s", strerror(errno));
+ 
+ 	/* Prepare arguments for sshd-session */
+--- a/uidswap.c
++++ b/uidswap.c
+@@ -179,6 +179,16 @@
+ void
+ permanently_set_uid(struct passwd *pw)
+ {
++#ifdef __ANDROID__
++	/* App seccomp forbids changing UID/GID, including redundant same-ID calls.
++	 * Preserve the Android-granted groups; never permit another OS account. */
++	if (geteuid() != 0) {
++		if (pw->pw_uid != getuid() || pw->pw_uid != geteuid() ||
++		    pw->pw_gid != getgid() || pw->pw_gid != getegid())
++			fatal("Android app SSH cannot change OS identity");
++		return;
++	}
++#endif
+ #ifndef NO_UID_RESTORATION_TEST
+ 	uid_t old_uid = getuid();
+ 	gid_t old_gid = getgid();

@@ -1,3 +1,87 @@
 plugins {
-    id "com.android.application" version "8.13.0" apply false
+    id "com.android.application" version "8.13.0"
+}
+
+def miraVersion = file("../../VERSION").text.trim()
+def versionParts = miraVersion.split("\\.").collect { Integer.parseInt(it) }
+def testApplicationId = providers.gradleProperty("miraTestApplicationId").orNull
+if (testApplicationId != null && testApplicationId != "com.ssine.mira.opensshpoc") {
+    throw new GradleException("Only the isolated OpenSSH test package may override applicationId")
+}
+gradle.taskGraph.whenReady { graph ->
+    if (testApplicationId != null && graph.allTasks.any { it.name.toLowerCase().contains("release") }) {
+        throw new GradleException("The isolated applicationId is debug-only")
+    }
+}
+
+android {
+    namespace "com.ssine.codexnode"
+    compileSdk 35
+    ndkVersion file("NDK_VERSION").text.trim()
+
+    defaultConfig {
+        applicationId testApplicationId ?: "com.ssine.codexnode"
+        minSdk 26
+        targetSdk 35
+        versionCode versionParts[0] * 1000000 + versionParts[1] * 1000 + versionParts[2]
+        versionName miraVersion
+        manifestPlaceholders = [miraAppLabel: testApplicationId != null ? "Mira OpenSSH Test" : "@string/app_name"]
+    }
+    buildFeatures { buildConfig true }
+
+    signingConfigs {
+        if (System.getenv("MIRA_ANDROID_KEYSTORE")) {
+            release {
+                storeFile file(System.getenv("MIRA_ANDROID_KEYSTORE"))
+                storePassword System.getenv("MIRA_ANDROID_STORE_PASSWORD")
+                keyAlias System.getenv("MIRA_ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("MIRA_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (signingConfigs.findByName("release")) signingConfig signingConfigs.release
+        }
+    }
+
+    sourceSets {
+        main.jniLibs.srcDir(layout.buildDirectory.dir("generated/jniLibs"))
+        main.assets.srcDir("../dist/openssh-notices")
+    }
+
+    packaging {
+        jniLibs.useLegacyPackaging = true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+def nativeBinary = file("../dist/mira-node-android-arm64")
+
+tasks.register("buildMiraNode", Exec) {
+    workingDir file("..")
+    commandLine "./build-android.sh"
+    inputs.files(fileTree("..") {
+        include "cmd/**/*.go", "internal/**/*.go", "go.mod", "go.sum", "build-android.sh", "openssh/**"
+    })
+    outputs.file(nativeBinary)
+    // Build metadata includes the Git commit even when Go sources are unchanged.
+    outputs.upToDateWhen { false }
+}
+
+tasks.register("copyMiraNode", Sync) {
+    dependsOn("buildMiraNode")
+    from(nativeBinary)
+    into(layout.buildDirectory.dir("generated/jniLibs/arm64-v8a"))
+    rename { "libmira_node.so" }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("copyMiraNode")
 }

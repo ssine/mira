@@ -81,7 +81,8 @@ function miraCLIInstructions(target) {
     `Open an interactive remote shell: ${executable} ssh -t <node-id-or-exact-node-key>`,
     `Upload one regular file: ${executable} scp <local-path> <node-id>::<absolute-remote-path>`,
     `Download one regular file: ${executable} scp <node-id>::<absolute-remote-path> <local-path>`,
-    `Use SFTP interactively or with one operation: ${executable} sftp <node-id> [ls|stat|mkdir|rm|get|put ...]`,
+    `Copy a directory with native SCP: ${executable} scp -rp <local-directory> <node-id>::<absolute-remote-directory>`,
+    `Use SFTP interactively: ${executable} sftp <node-id>; batch: ${executable} sftp -b <commands-file> <node-id>. Native SCP/SFTP overwrite semantics apply.`,
     "Use a Node ID or exact nodeKey returned by nodes list; do not guess selectors. Never read or expose the Mira identity credential.",
     "MIRA_CLI_INSTRUCTIONS_V1_END",
   ].join("\n");

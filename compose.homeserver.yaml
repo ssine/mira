@@ -51,7 +51,9 @@ services:
       retries: 20
 
   node:
-    build: ./node
+    build:
+      context: .
+      dockerfile: node/Dockerfile
     profiles: ["container-node"]
     restart: unless-stopped
     environment:

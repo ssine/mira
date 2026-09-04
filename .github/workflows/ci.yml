@@ -8,7 +8,10 @@ permissions:
   contents: read
 
 jobs:
+  embedded-openssh:
+    uses: ./.github/workflows/openssh.yml
   checks:
+    needs: embedded-openssh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -47,6 +50,22 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira.exe ./cmd/mira
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/mira-node-android ./cmd/mira-node
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: openssh-*-amd64
+          path: ${{ runner.temp }}/native
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: openssh-linux-arm64
+          path: ${{ runner.temp }}/native
+      - name: Stage verified native bundles
+        shell: bash
+        run: |
+          for target in linux-amd64 linux-arm64 windows-amd64; do
+            mkdir -p "node/openssh/out/$target"
+            tar -xzf "$RUNNER_TEMP/native/openssh-$target.tar.gz" -C "node/openssh/out/$target"
+          done
       - name: Build release archives
         run: |
           ./scripts/build-release.sh dist
@@ -81,7 +100,7 @@ jobs:
           done
           node tests/auth_enrollment_e2e.mjs
           node tests/web_console_e2e.mjs
-          node tests/ssh_e2e.mjs
+          MIRA_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira MIRA_TEST_LINUX_SINGLEFILE="$PWD/node/openssh/out/linux-amd64/mira-node" node node/openssh/tests/e2e.mjs
 
   windows-native:
     strategy:
@@ -97,6 +116,3 @@ jobs:
       - name: Test native Windows capabilities and ConPTY
         working-directory: node
         run: go test -v ./...
-      - name: Repeat fast-exit SSH ConPTY output regression
-        working-directory: node
-        run: go test -run '^TestSSHNativePTY$' -count 100 -timeout 120s ./internal/node

@@ -12,6 +12,23 @@ test("only canonical Ed25519 public keys can enter the registry", () => {
   const key = publicKey(); assert(validSSHKey(key));
   for (const invalid of [null, {}, "", "PRIVATE KEY", key+" comment", key+"\n", key.replace("ed25519", "rsa"), "ssh-ed25519 "+Buffer.alloc(51).toString("base64")]) assert.equal(validSSHKey(invalid), false);
 });
+test("native OS account discovery is approval-bound and validates before spawning", async () => {
+  let sends=0;
+  const row={host_key:publicKey(),client_key:publicKey(),credential_id:'source-credential',ssh_enabled:true,ssh_runtime:{backend:'openssh',username:'domain\\user'}};
+  const relay=new SSHRelay({pool:{query:async()=>({rows:[row]})},authService:{},nodeChannel:{isConnected:()=>true,sendToNode:()=>sends++,trySendToNode:()=>true}});
+  try{
+    assert.equal((await relay.describe('target')).body.username,'domain\\user');
+    for(const username of ['',null,'x\nAllowUsers root','x" y', 'x'.repeat(257)]){
+      row.ssh_runtime.username=username;
+      assert.equal((await relay.describe('target')).status,409);
+      assert.equal((await relay.create({nodeId:'source',credentialId:'source-credential'},'target',{})).status,409);
+    }
+    assert.equal(sends,0);assert.equal(relay.sessions.size,0);
+    row.ssh_runtime=undefined;
+    assert.equal((await relay.describe('target')).body.username,'mira');
+    row.ssh_enabled=false;assert.equal((await relay.describe('target')).status,409);
+  }finally{relay.close()}
+});
 test("key publication is credential-bound and immutable", async () => {
   const hostKey = publicKey(), clientKey = publicKey(); const calls = [];
   const relay = new SSHRelay({ pool: { query: async (sql, values) => { calls.push({ sql, values }); return { rows: [{ host_key: hostKey, client_key: clientKey }] }; } }, nodeChannel: {}, authService: {} });

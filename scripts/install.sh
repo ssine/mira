@@ -75,6 +75,10 @@ verify install.sh
 tar -xzf "$stage/$asset" -C "$stage"
 package_dir="$stage/mira_${version}_linux_${architecture}"
 [ -x "$package_dir/mira" ] && [ -x "$package_dir/mira-node" ] || { printf '%s\n' 'Release archive is incomplete' >&2; exit 1; }
+[ -f "$package_dir/openssh.json" ] && [ "$("$package_dir/mira-node" --mira-openssh-build)" = MIRA_LINKED_OPENSSH_LINUX_STATIC_V1 ] || { printf '%s\n' 'Release has no embedded OpenSSH' >&2; exit 1; }
+for role in mira ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen; do
+  [ "$(readlink "$package_dir/$role")" = mira-node ] || { printf 'Invalid embedded role: %s\n' "$role" >&2; exit 1; }
+done
 
 mkdir -p "$install_root/versions" "$bin_dir"
 for name in mira mira-node; do

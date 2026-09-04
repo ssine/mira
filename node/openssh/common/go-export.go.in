@@ -1,0 +1,32 @@
+package main
+
+import "C"
+import (
+	"os"
+	"strings"
+	"unsafe"
+)
+
+// The Android toolchain supports c-shared, not c-archive. Its relocatable link
+// inputs are linked into the Node; pass argv explicitly at the C boundary.
+//export mira_node_main
+func mira_node_main(argc C.int, argv **C.char, envc C.int, envp **C.char) C.int {
+	args := unsafe.Slice(argv, int(argc))
+	os.Args = make([]string, len(args))
+	for i, arg := range args {
+		os.Args[i] = C.GoString(arg)
+	}
+	// Android's c-shared entry deliberately starts with synthetic argv and an
+	// empty Go environment. Snapshot C strings before Setenv can reallocate it.
+	environment := make([]string, int(envc))
+	for i, entry := range unsafe.Slice(envp, int(envc)) {
+		environment[i] = C.GoString(entry)
+	}
+	for _, entry := range environment {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			if err := os.Setenv(key, value); err != nil { return 70 }
+		}
+	}
+	main()
+	return 0
+}

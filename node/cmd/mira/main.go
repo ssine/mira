@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	miranode "github.com/ssine/mira/node/internal/node"
+	miranode "github.com/ssine/mira/node/internal"
 )
 
 func main() {

@@ -1,0 +1,24 @@
+--- a/misc.c
++++ b/misc.c
+@@ -546,7 +546,20 @@
+ #ifdef HAVE_STRUCT_PASSWD_PW_CLASS
+ 	copy->pw_class = xstrdup(pw->pw_class == NULL ? "" : pw->pw_class);
+ #endif
+-	copy->pw_dir = xstrdup(pw->pw_dir == NULL ? "" : pw->pw_dir);
++	const char *directory = pw->pw_dir;
++#ifdef __ANDROID__
++	/* Bionic gives every application /data as its home. Mira supplies its
++	 * private application directory, not a writable system-wide passwd file. */
++	const char *app_directory = getenv("MIRA_OPENSSH_APP_HOME");
++	if ((geteuid() >= 10000 || (geteuid() == 0 && getenv("MIRA_NODE_OPENSSH_ANDROID_ROOT") != NULL && strcmp(getenv("MIRA_NODE_OPENSSH_ANDROID_ROOT"), "1") == 0)) && pw->pw_uid == geteuid() && app_directory != NULL) {
++		struct stat st;
++		if (app_directory[0] != '/' || stat(app_directory, &st) != 0 ||
++		    !S_ISDIR(st.st_mode) || st.st_uid != geteuid() || (st.st_mode & 022) != 0)
++			fatal("Mira Android SSH home is not an owner-private directory");
++		directory = app_directory;
++	}
++#endif
++	copy->pw_dir = xstrdup(directory == NULL ? "" : directory);
+ 	copy->pw_shell = xstrdup(pw->pw_shell == NULL ? "" : pw->pw_shell);
+ 	return copy;
+ }

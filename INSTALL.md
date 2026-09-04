@@ -1,6 +1,6 @@
 # 安装、接入与更新
 
-Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.10.1**，发布来源为
+Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.12.0**，发布来源为
 [GitHub Releases](https://github.com/ssine/mira/releases)。无需安装 Go、Node.js 或 Termux。
 官方 Codex 是独立软件，它的版本号不与 Mira 绑定。
 
@@ -135,5 +135,18 @@ Release workflow 构建桌面归档及正式签名 APK，再发布 GitHub Releas
 Secrets 注入：`MIRA_ANDROID_KEYSTORE_BASE64`、`MIRA_ANDROID_STORE_PASSWORD`、
 `MIRA_ANDROID_KEY_ALIAS`、`MIRA_ANDROID_KEY_PASSWORD`，不得进入 Git 或构建日志。
 
+仅更新 Mira 而未改变 Codex 时，手动 Release workflow 可指定 `codex_release` 复用已有正式版
+中的 Codex 包。工作流先核对该 tag 的 `CODEX_VERSION` 和完整 `patches/codex/` 与当前提交完全
+一致，再验证归档 SHA-256；不一致直接失败，不会把旧 Codex 混入新补丁。留空则从源码构建。
+发布前使用 `publish=false` 验收签名产物，再为同一提交创建正式 tag 和 Release。
+
 SHA-256 用于检测传输/文件损坏；发行信任边界是固定 GitHub 仓库与 HTTPS，不是独立离线签名
 的软件供应链。发布权限和 Android 签名私钥应严格保管。
+
+## 内嵌 OpenSSH 的安装布局
+
+当前源码只保留内嵌 OpenSSH。Linux 版本目录保存一个主程序和角色软链接；Windows 安装器从 ZIP 中的一份 EXE 建立 NTFS 硬链接，无需管理员权限，硬链接失败则中止安装。不会覆盖系统 ssh，也不会修改 SSH 配置或安装 sshd 服务。Android APK 内仅一份原生程序，升级后自动重建角色链接。
+
+新版安装器拒绝旧的非内嵌归档。升级会保留已经安装的旧程序；若需下载更早的非内嵌版本进行回退，应使用那个版本随附的安装器，不能混用新版安装器。
+
+更新仍保留节点身份、配置和旧版本。SCP/SFTP 现在使用原生覆盖、递归和批处理语义；旧 `--overwrite` 选项不再使用。发布打包需要先构建完整内嵌包，见 [构建说明](node/openssh/README.md)。这不代表当前 GitHub 已发布的旧版本会自动改变。

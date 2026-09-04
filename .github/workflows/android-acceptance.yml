@@ -56,7 +56,7 @@ jobs:
           gradle -p node/android --no-daemon assembleRelease
           version=$(<VERSION)
           mkdir -p dist
-          cp node/android/app/build/outputs/apk/release/app-release.apk "dist/mira_${version}_android_arm64.apk"
+          cp node/android/build/outputs/apk/release/mira-node-release.apk "dist/mira_${version}_android_arm64.apk"
           (cd dist && sha256sum "mira_${version}_android_arm64.apk" > SHA256SUMS.android)
 
       - uses: actions/upload-artifact@v4

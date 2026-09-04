@@ -1,0 +1,20 @@
+--- a/sshd.c
++++ b/sshd.c
+@@ -68,6 +68,7 @@
+ #include "sshkey.h"
+ #include "authfile.h"
+ #include "pathnames.h"
++#include "mira-root-path.h"
+ #include "canohost.h"
+ #include "hostfile.h"
+ #include "auth.h"
+--- a/sshd-auth.c
++++ b/sshd-auth.c
+@@ -75,6 +75,7 @@
+ #include "kex.h"
+ #include "authfile.h"
+ #include "pathnames.h"
++#include "mira-root-path.h"
+ #include "atomicio.h"
+ #include "canohost.h"
+ #include "hostfile.h"

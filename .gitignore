@@ -7,11 +7,12 @@
 /server/node_modules/
 /.android-sdk/
 /node/dist/
+/node/openssh/.cache/
+/node/openssh/out/
 /dist/
 /node/mira-node
 /node/android/.gradle/
 /node/android/build/
-/node/android/app/build/
 /node/android/local.properties
 
 # Local service configuration and logs.

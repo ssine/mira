@@ -14,7 +14,7 @@ if (minor >= 1000 || patch >= 1000 || major * 1_000_000 + minor * 1000 + patch >
 
 const serverPackage = JSON.parse(fs.readFileSync(path.join(root, "server/package.json"), "utf8"));
 const serverLock = JSON.parse(fs.readFileSync(path.join(root, "server/package-lock.json"), "utf8"));
-const goVersion = fs.readFileSync(path.join(root, "node/internal/node/version.go"), "utf8");
+const goVersion = fs.readFileSync(path.join(root, "node/internal/version.go"), "utf8");
 const nodeDockerfile = fs.readFileSync(path.join(root, "node/Dockerfile"), "utf8");
 
 const mirrors = [
