@@ -1,0 +1,10 @@
+# This Dockerfile uses the repository root as context, but only needs a bundle.
+**
+!VERSION
+!node/
+!node/openssh/
+!node/openssh/verify-package.mjs
+!node/openssh/stage-package.mjs
+!node/openssh/out/
+!node/openssh/out/linux-*/
+!node/openssh/out/linux-*/**
