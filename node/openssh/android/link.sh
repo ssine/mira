@@ -13,7 +13,7 @@ CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$cc" go -C "$work/node" build \
   -buildmode=c-shared -tags=netcgo -ldflags="-tmpdir=$work/go-link $metadata" \
   -o "$work/libnode-not-shipped.so" ./cmd/mira-node > "$work/go-build.log" 2>&1
 # Reuse unlinked object files, never embed/extract a prelinked shared library.
-mapfile -t go_objects < <(rg --files "$work/go-link" -g '*.o' | sort)
+mapfile -t go_objects < <(find "$work/go-link" -type f -name '*.o' | sort)
 ((${#go_objects[@]} > 0))
 for object in "${go_objects[@]}"; do
   "$toolchain/llvm-objcopy" --rename-section .init_array=mira_go_init,alloc,load,data,contents "$object" "$work/combined/go-$(basename "$object")"
