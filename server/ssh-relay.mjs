@@ -2,10 +2,15 @@ import crypto from "node:crypto";
 import { WebSocket, WebSocketServer, createWebSocketStream } from "ws";
 import { appendAudit } from "./auth.mjs";
 
-const maxSessions = 128;
-const maxPerNode = 8;
+const defaultMaxSessions = 128;
+const defaultMaxPerNode = 32;
 const frameLimit = 64 * 1024;
 const fail = (status, error) => ({ status, body: { error, code: "ssh_unavailable" } });
+
+function sessionLimit(value, fallback, ceiling) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= ceiling ? parsed : fallback;
+}
 
 // Only canonical, comment-free Ed25519 public keys. No private material is accepted.
 export function validSSHKey(value) {
@@ -17,8 +22,16 @@ export function validSSHKey(value) {
 }
 
 export class SSHRelay {
-  constructor({ pool, authService, nodeChannel }) {
+  constructor({
+    pool,
+    authService,
+    nodeChannel,
+    maxSessions = sessionLimit(process.env.MIRA_SSH_MAX_SESSIONS, defaultMaxSessions, 4_096),
+    maxPerNode = sessionLimit(process.env.MIRA_SSH_MAX_SESSIONS_PER_NODE, defaultMaxPerNode, 4_096),
+  }) {
     Object.assign(this, { pool, authService, nodeChannel });
+    this.maxSessions = maxSessions;
+    this.maxPerNode = Math.min(maxPerNode, maxSessions);
     this.sessions = new Map();
     this.wss = new WebSocketServer({ noServer: true, maxPayload: frameLimit,
       perMessageDeflate: false, handleProtocols: protocols => protocols.has("mira-ssh-v1") ? "mira-ssh-v1" : false });
@@ -54,7 +67,7 @@ export class SSHRelay {
     if (!source || source.credential_id !== principal.credentialId) return fail(409, "publish this Node's SSH public keys first");
     if (!target || target.ssh_enabled !== true || !this.nodeChannel.isConnected(targetNodeId)) return fail(409, "target Node is offline or does not support SSH yet");
     const count = nodeId => [...this.sessions.values()].filter(s => s.sourceNodeId === nodeId || s.targetNodeId === nodeId).length;
-    if (this.sessions.size >= maxSessions || count(principal.nodeId) >= maxPerNode || count(targetNodeId) >= maxPerNode) {
+    if (this.sessions.size >= this.maxSessions || count(principal.nodeId) >= this.maxPerNode || count(targetNodeId) >= this.maxPerNode) {
       return fail(429, "SSH session limit reached");
     }
     const sessionId = crypto.randomUUID();

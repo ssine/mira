@@ -100,7 +100,9 @@ and credential, and can claim that side once only.
 - No compression. Node/CLI split writes into bounded frames. Server uses bounded streaming pipes
   with backpressure in both directions, not an unbounded application queue.
 - Bulk SSH bytes never enter the shared JSON control channel.
-- At most 128 relay sessions globally and 8 involving any individual Node (including pending).
+- By default, at most 128 relay sessions globally and 32 involving any individual Node (including
+  pending). Operators may lower or raise these bounded limits with `MIRA_SSH_MAX_SESSIONS` and
+  `MIRA_SSH_MAX_SESSIONS_PER_NODE`; the per-Node value is capped by the global value.
 - Both sides must attach within 30 seconds. Worker SSH handshake is limited to 15 seconds.
 - CLI sends SSH keepalives every 20 seconds, disconnecting after a 15-second reply timeout.
 - Control replacement/disconnect, Node revocation, Server shutdown or data-stream failure closes

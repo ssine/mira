@@ -15,6 +15,40 @@ class Socket extends EventEmitter {
   }
 }
 
+class ThreadStartPool {
+  records = new Map();
+  runtimeWrites = [];
+
+  async query(sql, params = []) {
+    const key = params.length >= 3 ? params.slice(0, 3).join("\n") : null;
+    if (sql.includes("INSERT INTO mira_appserver_thread_start_requests")) {
+      if (this.records.has(key)) return { rowCount: 0, rows: [] };
+      this.records.set(key, { request_sha256: params[4], status: "pending", thread_id: null, response: null });
+      return { rowCount: 1, rows: [{ client_request_id: params[2] }] };
+    }
+    if (sql.includes("FROM mira_appserver_thread_start_requests")) {
+      const row = this.records.get(key);
+      return { rowCount: row ? 1 : 0, rows: row ? [row] : [] };
+    }
+    if (sql.includes("SET status = 'completed'")) {
+      Object.assign(this.records.get(key), {
+        status: "completed", thread_id: params[3], response: JSON.parse(params[4]),
+      });
+      return { rowCount: 1, rows: [] };
+    }
+    if (sql.includes("SET status = 'failed'")) {
+      Object.assign(this.records.get(key), { status: "failed", thread_id: null, response: null });
+      return { rowCount: 1, rows: [] };
+    }
+    if (sql.includes("SET target_node_id") && this.records.get(key)?.status === "failed") {
+      Object.assign(this.records.get(key), { status: "pending", thread_id: null, response: null });
+      return { rowCount: 1, rows: [{ client_request_id: params[2] }] };
+    }
+    if (sql.includes("INSERT INTO mira_codex_thread_runtimes")) this.runtimeWrites.push(params);
+    return { rowCount: 1, rows: [] };
+  }
+}
+
 test("late replaced close cannot disconnect the successor or reject its requests/proxies", async () => {
   const statuses = [];
   const channel = new NodeChannel({server: new EventEmitter(), authService: {}, pool: {
@@ -182,6 +216,60 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   assert.equal(explicit.params.approvalPolicy, "on-request");
   assert.equal(explicit.params.sandbox, "read-only");
 
+  channel.close();
+});
+
+test("App Server proxy coalesces and durably replays idempotent thread/start requests", async () => {
+  const pool = new ThreadStartPool();
+  const channel = new NodeChannel({ server: new EventEmitter(), authService: {}, pool });
+  const node = new Socket();
+  channel.attachNode("node-1", node);
+  const caller = { kind: "admin", subjectId: "admin-1" };
+  const first = new Socket();
+  channel.attachProxy("node-1", first, caller, "personal");
+  const firstSessionId = node.sent.at(-1).sessionId;
+  const requestId = "8c043d32-a487-4b37-959f-4ec51673b1eb";
+  first.emit("message", JSON.stringify({
+    id: 10, method: "thread/start", params: { cwd: "/work", miraRequestId: requestId },
+  }));
+  await setImmediate();
+  const forwarded = node.sent.filter((message) => message.type === "appserver.message");
+  assert.equal(forwarded.length, 1);
+  assert.equal(JSON.parse(forwarded[0].payload).params.miraRequestId, undefined);
+
+  const second = new Socket();
+  channel.attachProxy("node-1", second, caller, "personal");
+  second.emit("message", JSON.stringify({
+    id: 20, method: "thread/start", params: { miraRequestId: requestId, cwd: "/work" },
+  }));
+  await setImmediate();
+  assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 1,
+    "a concurrent duplicate reached Codex");
+
+  first.finishClose();
+  assert.equal(channel.proxies.has(firstSessionId), true,
+    "the App Server tunnel was not retained long enough to capture a lost response");
+  node.emit("message", JSON.stringify({
+    type: "appserver.message",
+    sessionId: firstSessionId,
+    payload: JSON.stringify({ id: 10, result: { thread: { id: "thread-1" }, cwd: "/work" } }),
+  }));
+  await setImmediate();
+  await setImmediate();
+  assert.equal(first.sent.length, 0, "a closed client unexpectedly received the response");
+  assert.equal(second.sent.at(-1).id, 20);
+  assert.equal(second.sent.at(-1).result.thread.id, "thread-1");
+
+  const third = new Socket();
+  channel.attachProxy("node-1", third, caller, "personal");
+  third.emit("message", JSON.stringify({
+    id: 30, method: "thread/start", params: { cwd: "/work", miraRequestId: requestId },
+  }));
+  await setImmediate();
+  assert.equal(third.sent.at(-1).id, 30);
+  assert.equal(third.sent.at(-1).result.thread.id, "thread-1");
+  assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 1,
+    "a completed duplicate was not replayed from the idempotency record");
   channel.close();
 });
 

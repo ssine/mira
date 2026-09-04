@@ -23,6 +23,10 @@ dynamicTools；旧 Node 可从随包 Codex 路径兼容推导，更新后的 Nod
 Codex 运行节点还可在网页保存自己的默认工作目录；它只填充新 thread，恢复时仍使用 thread 原始
 `cwd`，并允许在发送前临时覆盖。
 
+网页发送消息时会把“连接 App Server、创建 thread、启动 turn”作为一个不可重入操作。新 thread
+还带有浏览器生成的 `miraRequestId`；Server 将成功结果持久化到 PostgreSQL，并合并并发请求或重放
+断线后使用同一参数的重试，避免产生不可见的孤立 thread。
+
 0.11.2 让 Web 控制台从 PostgreSQL 权威事件生成完整历史轨迹，补齐导入/原生会话的工具调用，
 并使用经过净化的 GitHub Flavored Markdown 渲染用户与 Agent 消息。会话中的节点文件链接可从
 实际运行 Node 分块读取：图片、PDF、音视频和文本直接预览，其他格式下载。消息框支持选择、拖入
@@ -188,6 +192,8 @@ mira app-server connect --node wsl-main
 
 Node selector 可以是 UUID、精确 `nodeKey` 或唯一 hostname；歧义时失败。进程命令始终使用
 executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
+SSH relay 默认允许全局 128 路、每个相关 Node 32 路并发连接；可用
+`MIRA_SSH_MAX_SESSIONS` 和 `MIRA_SSH_MAX_SESSIONS_PER_NODE` 调整，但始终保留有界保护。
 
 Windows 文件、系统进程数/列表、进程启动/终止、CPU/内存/磁盘/网络、真实 ConPTY 输入/VT/
 resize/Ctrl-C，以及 Codex 自动发现和 App Server 启停已在 Windows 11 实机验证。普通官方 Codex

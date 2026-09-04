@@ -36,3 +36,30 @@ test("disconnect/revocation closes both caller and target sessions, idempotently
   assert.equal(relay.sessions.size, 1); assert.equal(destroyed, 2); assert.equal(terminated, 2); assert.equal(notified, 2);
   relay.close();
 });
+test("per-Node SSH concurrency is configurable and releases slots on close", async () => {
+  const hostKey = publicKey(), clientKey = publicKey();
+  const pool = { query: async (sql, values = []) => {
+    if (sql.includes("FROM mira_node_ssh_keys")) return { rows: [{
+      host_key: hostKey,
+      client_key: clientKey,
+      credential_id: values[0] === "source" ? "source-credential" : `${values[0]}-credential`,
+      ssh_enabled: true,
+    }] };
+    return { rows: [], rowCount: 1 };
+  } };
+  const relay = new SSHRelay({
+    pool,
+    authService: {},
+    nodeChannel: { isConnected: () => true, sendToNode: () => {}, trySendToNode: () => true },
+    maxSessions: 10,
+    maxPerNode: 2,
+  });
+  const principal = { kind: "node", nodeId: "source", credentialId: "source-credential" };
+  const first = await relay.create(principal, "target-a", {});
+  assert.equal(first.status, 201);
+  assert.equal((await relay.create(principal, "target-b", {})).status, 201);
+  assert.equal((await relay.create(principal, "target-c", {})).status, 429);
+  relay.end(first.body.sessionId);
+  assert.equal((await relay.create(principal, "target-c", {})).status, 201);
+  relay.close();
+});

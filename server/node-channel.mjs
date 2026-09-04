@@ -112,6 +112,27 @@ function safeStoreId(value) {
   return typeof value === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(value) ? value : null;
 }
 
+function validClientRequestId(value) {
+  return typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function canonicalJSON(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJSON).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJSON(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function requestDigest(value) {
+  return crypto.createHash("sha256").update(canonicalJSON(value)).digest("hex");
+}
+
+function proxyActorKey(caller) {
+  return `${caller.kind}:${caller.subjectId ?? caller.nodeId ?? "unknown"}`;
+}
+
 export class NodeChannel {
   constructor({ server, pool, authService }) {
     this.pool = pool;
@@ -121,6 +142,7 @@ export class NodeChannel {
     this.statusWrites = new Map();
     this.pending = new Map();
     this.proxies = new Map();
+    this.threadStarts = new Map();
     this.wss = new WebSocketServer({
       noServer: true,
       maxPayload: 16 * 1024 * 1024,
@@ -248,7 +270,15 @@ export class NodeChannel {
     for (const [sessionId, proxy] of this.proxies) {
       if (proxy.targetNodeId === nodeId) {
         proxy.ws.close(1011, "node disconnected");
-        this.proxies.delete(sessionId);
+        proxy.clientClosed = true;
+        if (proxy.idempotentThreadStarts.size > 0) {
+          void this.abandonProxyThreadStarts(proxy).catch((error) => {
+            console.error("failed to abandon disconnected thread/start", error);
+            this.cleanupProxy(proxy);
+          });
+        } else {
+          this.cleanupProxy(proxy);
+        }
       }
     }
   }
@@ -278,13 +308,162 @@ export class NodeChannel {
     }
     if (message.type === "appserver.error") {
       const proxy = this.proxies.get(message.sessionId);
-      if (proxy) proxy.ws.close(1011, String(message.error ?? "app-server tunnel failed"));
+      if (proxy) {
+        proxy.ws.close(1011, String(message.error ?? "app-server tunnel failed"));
+        proxy.clientClosed = true;
+        if (proxy.idempotentThreadStarts.size > 0) {
+          await this.abandonProxyThreadStarts(proxy);
+        }
+      }
       return;
     }
     if (message.type === "appserver.closed") {
       const proxy = this.proxies.get(message.sessionId);
-      if (proxy) proxy.ws.close(1000, "app-server closed");
+      if (proxy) {
+        proxy.ws.close(1000, "app-server closed");
+        proxy.clientClosed = true;
+        if (proxy.idempotentThreadStarts.size > 0) {
+          await this.abandonProxyThreadStarts(proxy);
+        }
+      }
     }
+  }
+
+  threadStartKey(proxy, clientRequestId) {
+    return `${proxy.storeId}\n${proxy.actorKey}\n${clientRequestId}`;
+  }
+
+  sendProxyResult(proxy, id, result) {
+    if (proxy.ws.readyState === WebSocket.OPEN) {
+      proxy.ws.send(JSON.stringify({ id, result }));
+    }
+  }
+
+  sendProxyError(proxy, id, message, code = -32602) {
+    if (proxy.ws.readyState === WebSocket.OPEN) {
+      proxy.ws.send(JSON.stringify({ id, error: { code, message } }));
+    }
+  }
+
+  async reserveThreadStart(proxy, message) {
+    const clientRequestId = message.params?.miraRequestId;
+    if (clientRequestId === undefined) return { action: "forward" };
+    delete message.params.miraRequestId;
+    if (message.id === undefined || !validClientRequestId(clientRequestId)) {
+      this.sendProxyError(proxy, message.id ?? null, "miraRequestId must be a UUID on a thread/start request");
+      return { action: "handled" };
+    }
+    const digest = requestDigest(message.params);
+    const key = this.threadStartKey(proxy, clientRequestId);
+    const inserted = await this.pool.query(
+      `INSERT INTO mira_appserver_thread_start_requests (
+         store_id, actor_key, client_request_id, target_node_id, request_sha256, status
+       ) VALUES ($1, $2, $3, $4, $5, 'pending')
+       ON CONFLICT (store_id, actor_key, client_request_id) DO NOTHING
+       RETURNING client_request_id`,
+      [proxy.storeId, proxy.actorKey, clientRequestId, proxy.targetNodeId, digest],
+    );
+    if (inserted.rowCount > 0) {
+      this.threadStarts.set(key, { owner: proxy, waiters: [] });
+      proxy.idempotentThreadStarts.set(String(message.id), key);
+      return { action: "forward" };
+    }
+
+    const existing = await this.pool.query(
+      `SELECT request_sha256, status, thread_id, response
+       FROM mira_appserver_thread_start_requests
+       WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3`,
+      [proxy.storeId, proxy.actorKey, clientRequestId],
+    );
+    const row = existing.rows[0];
+    if (!row || row.request_sha256 !== digest) {
+      this.sendProxyError(proxy, message.id, "miraRequestId was reused with different thread/start parameters");
+      return { action: "handled" };
+    }
+    if (row.status === "completed") {
+      this.bindProxyThread(proxy, row.thread_id);
+      this.sendProxyResult(proxy, message.id, row.response);
+      return { action: "handled" };
+    }
+    const active = this.threadStarts.get(key);
+    if (row.status === "pending" && active) {
+      active.waiters.push({ proxy, id: message.id });
+      return { action: "handled" };
+    }
+
+    const claimed = await this.pool.query(
+      `UPDATE mira_appserver_thread_start_requests
+       SET target_node_id = $4, status = 'pending', thread_id = NULL, response = NULL, updated_at = NOW()
+       WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3
+         AND (status = 'failed' OR updated_at < NOW() - INTERVAL '30 seconds')
+       RETURNING client_request_id`,
+      [proxy.storeId, proxy.actorKey, clientRequestId, proxy.targetNodeId],
+    );
+    if (claimed.rowCount === 0) {
+      this.sendProxyError(proxy, message.id, "thread/start with this miraRequestId is still in progress", -32001);
+      return { action: "handled" };
+    }
+    this.threadStarts.set(key, { owner: proxy, waiters: [] });
+    proxy.idempotentThreadStarts.set(String(message.id), key);
+    return { action: "forward" };
+  }
+
+  async finishThreadStart(proxy, message) {
+    if (message.id === undefined) return;
+    const key = proxy.idempotentThreadStarts.get(String(message.id));
+    if (!key) return;
+    proxy.idempotentThreadStarts.delete(String(message.id));
+    const [storeId, actorKey, clientRequestId] = key.split("\n");
+    const threadId = message.error ? null : message.result?.thread?.id;
+    if (typeof threadId === "string") {
+      await this.pool.query(
+        `UPDATE mira_appserver_thread_start_requests
+         SET status = 'completed', thread_id = $4, response = $5::jsonb, updated_at = NOW()
+         WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3`,
+        [storeId, actorKey, clientRequestId, threadId, JSON.stringify(message.result)],
+      );
+    } else {
+      await this.pool.query(
+        `UPDATE mira_appserver_thread_start_requests
+         SET status = 'failed', thread_id = NULL, response = NULL, updated_at = NOW()
+         WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3`,
+        [storeId, actorKey, clientRequestId],
+      );
+    }
+    const active = this.threadStarts.get(key);
+    this.threadStarts.delete(key);
+    for (const waiter of active?.waiters ?? []) {
+      if (typeof threadId === "string") this.bindProxyThread(waiter.proxy, threadId);
+      const replay = { ...message, id: waiter.id };
+      if (waiter.proxy.ws.readyState === WebSocket.OPEN) waiter.proxy.ws.send(JSON.stringify(replay));
+    }
+    if (proxy.clientClosed && proxy.idempotentThreadStarts.size === 0) this.cleanupProxy(proxy);
+  }
+
+  cleanupProxy(proxy) {
+    if (this.proxies.get(proxy.sessionId) !== proxy) return;
+    clearTimeout(proxy.detachTimer);
+    this.proxies.delete(proxy.sessionId);
+    this.trySendToNode(proxy.targetNodeId, { type: "appserver.close", sessionId: proxy.sessionId });
+  }
+
+  async abandonProxyThreadStarts(proxy) {
+    for (const key of proxy.idempotentThreadStarts.values()) {
+      const [storeId, actorKey, clientRequestId] = key.split("\n");
+      await this.pool.query(
+        `UPDATE mira_appserver_thread_start_requests
+         SET status = 'failed', thread_id = NULL, response = NULL, updated_at = NOW()
+         WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3 AND status = 'pending'`,
+        [storeId, actorKey, clientRequestId],
+      );
+      const active = this.threadStarts.get(key);
+      this.threadStarts.delete(key);
+      for (const waiter of active?.waiters ?? []) {
+        this.sendProxyError(waiter.proxy, waiter.id, "original thread/start connection was lost", -32002);
+      }
+    }
+    proxy.idempotentThreadStarts.clear();
+    this.cleanupProxy(proxy);
   }
 
   async forwardAppServerMessage(proxy, payload) {
@@ -295,6 +474,7 @@ export class NodeChannel {
       if (proxy.ws.readyState === WebSocket.OPEN) proxy.ws.send(payload);
       return;
     }
+    await this.finishThreadStart(proxy, message);
     const observedThreadId = message.params?.threadId ?? message.params?.thread?.id ?? null;
     if (typeof message.method === "string" && /^(?:thread|turn|item)\//.test(message.method) &&
         typeof observedThreadId === "string") {
@@ -357,6 +537,50 @@ export class NodeChannel {
     ).catch((error) => console.error("thread runtime binding failed", error));
   }
 
+  async forwardProxyClientMessage(proxy, data) {
+    let payload = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
+    let message;
+    try {
+      message = JSON.parse(payload);
+    } catch {
+      if (!this.trySendToNode(proxy.targetNodeId, {
+        type: "appserver.message", sessionId: proxy.sessionId, payload,
+      })) proxy.ws.close(1011, "node disconnected");
+      return;
+    }
+    if (message.method === "initialize") {
+      message.params ??= {};
+      message.params.capabilities ??= {};
+      message.params.capabilities.experimentalApi = true;
+    }
+    if (message.method === "thread/start" || message.method === "thread/resume") {
+      message.params ??= {};
+      if (message.method === "thread/start" && message.params.miraRequestId !== undefined) {
+        const reservation = await this.reserveThreadStart(proxy, message);
+        if (reservation.action === "handled") return;
+      }
+      message.params.approvalPolicy ??= "never";
+      message.params.sandbox ??= "danger-full-access";
+      message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
+      if (message.method === "thread/start" &&
+          (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {
+        message.params.cwd = targetDefaultCwd(proxy.target) ?? message.params.cwd;
+      }
+      message.params.developerInstructions = mergeDeveloperInstructions(
+        message.params.developerInstructions,
+        miraCLIInstructions(proxy.target),
+      );
+    }
+    if (["thread/start", "thread/resume", "turn/start"].includes(message.method) && message.id !== undefined) {
+      proxy.threadRequestBindings.set(String(message.id),
+        typeof message.params?.threadId === "string" ? message.params.threadId : null);
+    }
+    payload = JSON.stringify(message);
+    if (!this.trySendToNode(proxy.targetNodeId, {
+      type: "appserver.message", sessionId: proxy.sessionId, payload,
+    })) proxy.ws.close(1011, "node disconnected");
+  }
+
   attachProxy(targetNodeId, ws, caller, storeId = "personal", target = null) {
     if (!this.isConnected(targetNodeId)) {
       ws.close(1013, "node capability channel is offline");
@@ -365,7 +589,9 @@ export class NodeChannel {
     const sessionId = crypto.randomUUID();
     const proxy = {
       targetNodeId, callerNodeId: caller.kind === "node" ? caller.nodeId : null,
-      sessionId, ws, storeId, target, threadId: null, threadRequestBindings: new Map(), boundThreadIds: new Set(),
+      actorKey: proxyActorKey(caller), sessionId, ws, storeId, target, threadId: null,
+      threadRequestBindings: new Map(), idempotentThreadStarts: new Map(), boundThreadIds: new Set(),
+      clientClosed: false, detachTimer: null,
     };
     this.proxies.set(sessionId, proxy);
     if (!this.trySendToNode(targetNodeId, { type: "appserver.open", sessionId })) {
@@ -374,43 +600,24 @@ export class NodeChannel {
       return;
     }
     ws.on("message", (data) => {
-      let payload = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
-      try {
-        const message = JSON.parse(payload);
-        if (message.method === "initialize") {
-          message.params ??= {};
-          message.params.capabilities ??= {};
-          message.params.capabilities.experimentalApi = true;
-        }
-        if (message.method === "thread/start" || message.method === "thread/resume") {
-          message.params ??= {};
-          message.params.approvalPolicy ??= "never";
-          message.params.sandbox ??= "danger-full-access";
-          message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
-          if (message.method === "thread/start" &&
-              (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {
-            message.params.cwd = targetDefaultCwd(proxy.target) ?? message.params.cwd;
-          }
-          message.params.developerInstructions = mergeDeveloperInstructions(
-            message.params.developerInstructions,
-            miraCLIInstructions(proxy.target),
-          );
-        }
-        if (["thread/start", "thread/resume", "turn/start"].includes(message.method) && message.id !== undefined) {
-          proxy.threadRequestBindings.set(String(message.id),
-            typeof message.params?.threadId === "string" ? message.params.threadId : null);
-        }
-        payload = JSON.stringify(message);
-      } catch {
-        // The upstream App Server reports malformed JSON-RPC payloads.
-      }
-      if (!this.trySendToNode(targetNodeId, { type: "appserver.message", sessionId, payload })) {
-        ws.close(1011, "node disconnected");
-      }
+      void this.forwardProxyClientMessage(proxy, data).catch((error) => {
+        console.error("App Server client message failed", error);
+        this.sendProxyError(proxy, null, "Mira could not process the App Server request", -32603);
+      });
     });
     ws.on("close", () => {
-      this.proxies.delete(sessionId);
-      this.trySendToNode(targetNodeId, { type: "appserver.close", sessionId });
+      proxy.clientClosed = true;
+      if (proxy.idempotentThreadStarts.size > 0) {
+        proxy.detachTimer = setTimeout(() => {
+          void this.abandonProxyThreadStarts(proxy).catch((error) => {
+            console.error("failed to abandon detached thread/start", error);
+            this.cleanupProxy(proxy);
+          });
+        }, 30_000);
+        proxy.detachTimer.unref?.();
+      } else {
+        this.cleanupProxy(proxy);
+      }
     });
   }
 
@@ -454,7 +661,15 @@ export class NodeChannel {
     for (const [sessionId, proxy] of this.proxies) {
       if (proxy.targetNodeId === nodeId || proxy.callerNodeId === nodeId) {
         proxy.ws.close(1008, reason);
-        this.proxies.delete(sessionId);
+        proxy.clientClosed = true;
+        if (proxy.idempotentThreadStarts.size > 0) {
+          void this.abandonProxyThreadStarts(proxy).catch((error) => {
+            console.error("failed to abandon revoked thread/start", error);
+            this.cleanupProxy(proxy);
+          });
+        } else {
+          this.cleanupProxy(proxy);
+        }
       }
     }
   }
@@ -462,7 +677,15 @@ export class NodeChannel {
   close() {
     this.sshRelay?.close();
     for (const ws of this.nodes.values()) ws.close(1001, "server shutting down");
-    for (const proxy of this.proxies.values()) proxy.ws.close(1001, "server shutting down");
+    for (const proxy of this.proxies.values()) {
+      proxy.ws.close(1001, "server shutting down");
+      proxy.clientClosed = true;
+      if (proxy.idempotentThreadStarts.size > 0) {
+        void this.abandonProxyThreadStarts(proxy).catch(() => this.cleanupProxy(proxy));
+      } else {
+        this.cleanupProxy(proxy);
+      }
+    }
     this.wss.close();
   }
 }

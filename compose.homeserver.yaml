@@ -31,6 +31,8 @@ services:
       # Safe because the published port below is loopback-only and Caddy is the
       # only network-facing caller. Never enable this on a directly exposed port.
       MIRA_TRUST_PROXY_HEADERS: "true"
+      MIRA_SSH_MAX_SESSIONS: "128"
+      MIRA_SSH_MAX_SESSIONS_PER_NODE: "32"
     ports:
       - "127.0.0.1:8787:8787"
     depends_on:

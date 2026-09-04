@@ -405,6 +405,29 @@ const migrations = [
         ON mira_codex_thread_runtimes(node_id, bound_at DESC);
     `,
   },
+  {
+    version: 12,
+    name: "appserver-thread-start-idempotency",
+    sql: `
+      CREATE TABLE mira_appserver_thread_start_requests (
+        store_id TEXT NOT NULL,
+        actor_key TEXT NOT NULL,
+        client_request_id UUID NOT NULL,
+        target_node_id UUID NOT NULL REFERENCES codex_nodes(node_id) ON DELETE RESTRICT,
+        request_sha256 TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+        thread_id TEXT,
+        response JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (store_id, actor_key, client_request_id),
+        CHECK ((status = 'completed') = (thread_id IS NOT NULL AND response IS NOT NULL))
+      );
+
+      CREATE INDEX mira_appserver_thread_start_requests_updated_idx
+        ON mira_appserver_thread_start_requests(updated_at DESC);
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

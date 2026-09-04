@@ -64,6 +64,8 @@ must close active connections and reap children. Worker process isolation is not
 Bulk binary transfers must bypass JSON text buffers and apply bounded backpressure. Shell executes
 as the Node OS user, not an arbitrary SSH username. Do not claim full OpenSSH extension compatibility,
 automatic session recovery or Android PTY acceptance based only on cross-compilation.
+The SSH relay defaults to 128 global connections and 32 connections involving one Node. Keep both
+limits bounded and configurable; one source Node may legitimately fan out concurrent Agent work.
 `mira ssh`, `mira scp` and `mira sftp` remain ordinary CLI commands rather than dynamic tools. A
 managed App Server receives the local CLI's absolute path and concise usage through merged developer
 instructions on every thread start/resume, so Codex and subagents can use the CLI without relying on
@@ -75,6 +77,10 @@ older thread is resumed. Preserve an explicit client override. This policy remov
 it does not elevate beyond the Mira Node process' operating-system identity.
 The `mira codex` wrapper applies the same defaults as early `-c` overrides, before user arguments, so
 later explicit Codex CLI/config arguments retain precedence.
+Web message submission is single-flight across App Server connection, thread creation and turn start.
+Web-created threads carry a UUID `miraRequestId`; the broker strips the Mira-only field before Codex,
+coalesces an in-flight duplicate, and persists successful replay data in PostgreSQL. Do not weaken
+this to a button-only debounce: retries after a lost response must resolve to the original thread.
 
 Codex remains a native process on the selected execution node. Mira does not reimplement Codex or
 turn model execution into a central monolith. The central service coordinates nodes and persists

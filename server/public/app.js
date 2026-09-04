@@ -57,6 +57,9 @@ const agent = {
   previousRuntimeNodeId: null,
   attachments: [],
   fileObjectUrl: null,
+  sendPromise: null,
+  newThreadRequestId: null,
+  newThreadRequestSignature: null,
 };
 
 const transcriptPageSize = 60;
@@ -1227,6 +1230,15 @@ function syncActiveTurnUi() {
   $("#agentInterrupt").classList.toggle("hidden", !agent.turnId);
 }
 
+function syncConversationSendUi() {
+  const selectedNode = $("#agentRuntimeNode")?.value;
+  const busy = Boolean(agent.sendPromise);
+  $("#conversationSend").disabled = busy || !selectedNode;
+  $("#agentRuntimeNode").disabled = busy;
+  $("#agentNewThread").disabled = busy;
+  for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
+}
+
 function closeAgentSocket() {
   const socket = agent.socket;
   agent.socket = null;
@@ -1237,7 +1249,7 @@ function closeAgentSocket() {
   agent.turnThreads.clear();
   syncActiveTurnUi();
   if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
-  $("#conversationSend").disabled = true;
+  syncConversationSendUi();
 }
 
 function rpc(method, params = {}, timeoutMs = 60_000) {
@@ -1878,7 +1890,7 @@ async function connectAgentSocket(nodeId) {
     capabilities: { experimentalApi: true },
   });
   socket.send(JSON.stringify({ method: "initialized" }));
-  $("#conversationSend").disabled = false;
+  syncConversationSendUi();
   setConversationNotice();
   const node = dashboardNodes.get(nodeId);
   setAgentRuntimeState(`已连接 ${node?.hostname ?? nodeId}`, "online");
@@ -1913,6 +1925,7 @@ async function refreshAgentNodes() {
   if (selected && agent.socketNodeId !== selected.nodeId) {
     setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
   }
+  syncConversationSendUi();
 }
 
 async function saveAgentRuntimeDefaultCwd() {
@@ -1943,6 +1956,7 @@ function renderAgentThreads() {
   for (const thread of agent.threads) {
     const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
     button.type = "button";
+    button.disabled = Boolean(agent.sendPromise);
     button.dataset.threadId = thread.threadId;
     button.append(
       element("strong", "", thread.title || "未命名会话"),
@@ -2047,6 +2061,7 @@ async function stopAgentRuntime() {
 }
 
 async function resumeAgentThread(threadId) {
+  if (agent.sendPromise) return;
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   setConversationNotice("正在从 PostgreSQL 恢复会话…");
   const projectedThread = agent.threads.find((thread) => thread.threadId === threadId);
@@ -2070,7 +2085,10 @@ async function resumeAgentThread(threadId) {
 }
 
 function newAgentThread() {
+  if (agent.sendPromise) return;
   agent.threadId = null;
+  agent.newThreadRequestId = null;
+  agent.newThreadRequestSignature = null;
   agent.threadRuntimeNodeId = null;
   agent.previousRuntimeNodeId = null;
   syncActiveTurnUi();
@@ -2203,11 +2221,22 @@ function addComposerFiles(files) {
 async function sendAgentMessage(text, attachments = []) {
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   if (!agent.threadId) {
-    const params = { approvalPolicy: "never", sandbox: "danger-full-access" };
+    const params = {
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+    };
     const cwd = $("#conversationCwd").value.trim();
     if (cwd) params.cwd = cwd;
+    const signature = JSON.stringify(params);
+    if (!agent.newThreadRequestId || agent.newThreadRequestSignature !== signature) {
+      agent.newThreadRequestId = crypto.randomUUID();
+      agent.newThreadRequestSignature = signature;
+    }
+    params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    agent.newThreadRequestId = null;
+    agent.newThreadRequestSignature = null;
     agent.threadRuntimeNodeId = agent.socketNodeId;
     agent.previousRuntimeNodeId = null;
     $("#conversationTitle").textContent = "新会话";
@@ -2296,6 +2325,7 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   if (!agent.threadId) $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
+  syncConversationSendUi();
 });
 $("#agentNewThread").addEventListener("click", newAgentThread);
 $("#agentThreadList").addEventListener("click", (event) => {
@@ -2326,13 +2356,15 @@ $("#localSessionList").addEventListener("click", (event) => {
 });
 $("#conversationForm").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (agent.sendPromise) return;
   const text = $("#conversationInput").value.trim();
   const attachments = [...agent.attachments];
   if (!text && !attachments.length) return;
-  const button = $("#conversationSend");
-  button.disabled = true;
+  const operation = sendAgentMessage(text, attachments);
+  agent.sendPromise = operation;
+  syncConversationSendUi();
   try {
-    await sendAgentMessage(text, attachments);
+    await operation;
     $("#conversationInput").value = "";
     agent.attachments = [];
     renderComposerAttachments();
@@ -2341,13 +2373,14 @@ $("#conversationForm").addEventListener("submit", async (event) => {
     setConversationNotice(error.message, "error");
     $("#conversationHint").textContent = "发送失败；附件仍保留，可重试";
   } finally {
-    button.disabled = !agent.socket || agent.socket.readyState !== WebSocket.OPEN;
+    if (agent.sendPromise === operation) agent.sendPromise = null;
+    syncConversationSendUi();
   }
 });
 $("#conversationInput").addEventListener("keydown", (event) => {
   if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
     event.preventDefault();
-    $("#conversationForm").requestSubmit();
+    if (!agent.sendPromise) $("#conversationForm").requestSubmit();
   }
 });
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());

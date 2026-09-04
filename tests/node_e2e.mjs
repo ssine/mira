@@ -1,4 +1,5 @@
 import path from "node:path";
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import { execFileSync, spawn } from "node:child_process";
@@ -91,24 +92,32 @@ async function initializeAppServer(nodeId) {
   });
   socket.send(JSON.stringify({ method: "initialized", params: {} }));
   if (response.error) throw new Error(`initialize failed: ${JSON.stringify(response.error)}`);
-  socket.send(
-    JSON.stringify({
-      method: "thread/start",
-      id: 2,
-      params: {},
-    }),
-  );
-  const started = await new Promise((resolve, reject) => {
+  const miraRequestId = crypto.randomUUID();
+  socket.send(JSON.stringify({
+    method: "thread/start", id: 2, params: { miraRequestId },
+  }));
+  socket.send(JSON.stringify({
+    method: "thread/start", id: 22, params: { miraRequestId },
+  }));
+  const starts = await new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("thread/start timed out")), 20_000);
+    const responses = new Map();
     socket.addEventListener("message", (event) => {
       const message = JSON.parse(event.data);
-      if (message.id === 2) {
+      if (message.id === 2 || message.id === 22) responses.set(message.id, message);
+      if (responses.size === 2) {
         clearTimeout(timeout);
-        resolve(message);
+        resolve(responses);
       }
     });
   });
+  const started = starts.get(2);
+  const duplicate = starts.get(22);
   if (started.error) throw new Error(`thread/start failed: ${JSON.stringify(started.error)}`);
+  if (duplicate.error) throw new Error(`duplicate thread/start failed: ${JSON.stringify(duplicate.error)}`);
+  if (duplicate.result.thread.id !== started.result.thread.id) {
+    throw new Error("idempotent thread/start created two threads");
+  }
   socket.send(JSON.stringify({
     method: "thread/resume",
     id: 3,
