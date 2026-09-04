@@ -57,6 +57,15 @@ function normalizedToolTitle(item) {
   return namespace ? `${namespace} · ${name}` : String(name);
 }
 
+function visibleResponseMessage(payload) {
+  if (!payload || !["user", "assistant"].includes(payload.role)) return false;
+  if (payload.role !== "user") return true;
+  const kinds = payload.internal_chat_message_metadata_passthrough?.content_item_kinds;
+  // Codex persists environment/permission injections as role=user response
+  // items as well. They are model context, not messages authored by the user.
+  return !Array.isArray(kinds) || kinds.length === 0 || kinds.some((kind) => String(kind).startsWith("user."));
+}
+
 function projectedMaterializedItem(item, context) {
   const type = String(item?.type ?? "").replaceAll("_", "").toLowerCase();
   const base = {
@@ -139,24 +148,37 @@ function responseToolCall(payload, itemSeq, index, turnId) {
  */
 export function projectCodexTranscript(items) {
   const records = Array.isArray(items) ? items : [];
-  const hasMaterializedMessages = records.some((record) => {
-    const payload = record?.payload;
-    const item = payload?.type === "item_completed" ? payload.item : null;
-    return record?.type === "event_msg" && ["UserMessage", "AgentMessage"].includes(item?.type);
-  });
-  const hasLegacyMessages = records.some((record) =>
-    record?.type === "event_msg" && ["user_message", "agent_message"].includes(record?.payload?.type));
-  const hasResponseToolCalls = records.some((record) =>
-    record?.type === "response_item" && [
+  const responseToolTurns = new Set();
+  let scannedTurnId = null;
+  for (const record of records) {
+    const payload = record?.payload ?? {};
+    if (record?.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type)) {
+      scannedTurnId = payload.turn_id ?? scannedTurnId;
+    }
+    const turnId = payload.turn_id ?? payload.internal_chat_message_metadata_passthrough?.turn_id ?? scannedTurnId;
+    if (record?.type === "response_item" && [
       "custom_tool_call", "function_call", "local_shell_call", "tool_search_call", "web_search_call",
-    ].includes(record?.payload?.type));
+    ].includes(payload.type)) responseToolTurns.add(turnId ?? "unscoped");
+  }
   const trace = [];
   const projectedById = new Map();
+  const projectedNarratives = new Map();
   const toolCalls = new Map();
   let currentTurnId = null;
 
   function push(entry) {
     if (!entry || (!entry.body && entry.kind !== "tool")) return;
+    if (["user", "assistant", "reasoning"].includes(entry.kind)) {
+      const signature = JSON.stringify([
+        entry.turnId ?? null, entry.kind, entry.phase ?? null, entry.body,
+      ]);
+      const previous = projectedNarratives.get(signature);
+      // A single Codex message can be persisted as item_completed,
+      // event_msg and response_item records. Deduplicate those representations
+      // without collapsing equal messages from different turns.
+      if (previous && (entry.turnId || entry.sourceItemSeq - previous.sourceItemSeq <= 3)) return;
+      projectedNarratives.set(signature, entry);
+    }
     const existing = projectedById.get(entry.key);
     if (existing) Object.assign(existing, entry);
     else {
@@ -182,14 +204,15 @@ export function projectCodexTranscript(items) {
       const materializedType = String(materialized?.type ?? "").replaceAll("_", "").toLowerCase();
       // Response tool call/output pairs carry the exact model-facing input and
       // output. Prefer them over their CommandExecution duplicate.
-      if (!(hasResponseToolCalls && materializedType === "commandexecution")) {
+      const materializedTurnId = payload.turn_id ?? recordTurnId;
+      if (!(materializedType === "commandexecution" && responseToolTurns.has(materializedTurnId ?? "unscoped"))) {
         push(projectedMaterializedItem(materialized, {
-          itemSeq, index, turnId: payload.turn_id ?? recordTurnId,
+          itemSeq, index, turnId: materializedTurnId,
         }));
       }
       continue;
     }
-    if (record.type === "event_msg" && !hasMaterializedMessages) {
+    if (record.type === "event_msg") {
       if (payload.type === "user_message") push({
         key: `history-${itemSeq}-user`, turnId: recordTurnId ?? null, sourceItemSeq: itemSeq,
         kind: "user", title: "你", markdown: true, status: "", body: boundedText(payload.message ?? valueText(payload)),
@@ -227,12 +250,12 @@ export function projectCodexTranscript(items) {
       state.entry.body = toolBody(state.input, state.output);
       continue;
     }
-    if (payload.type === "reasoning" && !hasMaterializedMessages) push({
+    if (payload.type === "reasoning") push({
       key: `history-${itemSeq}-${payload.id ?? "reasoning"}`, turnId: recordTurnId ?? null, sourceItemSeq: itemSeq,
       kind: "reasoning", title: "推理摘要", markdown: true, status: "",
       body: boundedText(valueText(payload.summary ?? payload.content)),
     });
-    if (payload.type === "message" && !hasMaterializedMessages && !hasLegacyMessages && ["user", "assistant"].includes(payload.role)) push({
+    if (payload.type === "message" && visibleResponseMessage(payload)) push({
       key: `history-${itemSeq}-${payload.id ?? payload.role}`, turnId: recordTurnId ?? null, sourceItemSeq: itemSeq,
       kind: payload.role === "user" ? "user" : "assistant",
       title: payload.role === "user" ? "你" : "Codex", markdown: true, status: "", phase: payload.phase ?? null,

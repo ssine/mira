@@ -43,6 +43,8 @@ const agent = {
   requestId: 0,
   threadId: null,
   turnId: null,
+  activeTurns: new Map(),
+  turnThreads: new Map(),
   sessions: [],
   threads: [],
   transcriptThreadId: null,
@@ -1197,12 +1199,30 @@ function setAgentRuntimeState(message, status = "offline") {
   $("#agentRuntimeBadge").className = `badge ${status}`;
 }
 
+function notificationThreadId(params = {}) {
+  const turnId = params.turnId ?? params.turn?.id ?? null;
+  return params.threadId ?? (turnId ? agent.turnThreads.get(turnId) : null) ?? null;
+}
+
+function notificationIsForOpenThread(params = {}) {
+  const threadId = notificationThreadId(params);
+  return !threadId || threadId === agent.threadId;
+}
+
+function syncActiveTurnUi() {
+  agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
+  $("#agentInterrupt").classList.toggle("hidden", !agent.turnId);
+}
+
 function closeAgentSocket() {
   const socket = agent.socket;
   agent.socket = null;
   agent.socketNodeId = null;
   for (const pending of agent.pending.values()) pending.reject(new Error("App Server connection closed"));
   agent.pending.clear();
+  agent.activeTurns.clear();
+  agent.turnThreads.clear();
+  syncActiveTurnUi();
   if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
   $("#conversationSend").disabled = true;
 }
@@ -1516,31 +1536,46 @@ function handleAgentNotification(message) {
   const method = message.method ?? "";
   const params = message.params ?? {};
   if (message.id !== undefined) {
-    upsertTrace(`request-${message.id}`, "system", method, "当前网页客户端未启用交互审批；本界面发起的 Turn 使用 never。", "等待处理");
+    if (notificationIsForOpenThread(params)) {
+      upsertTrace(`request-${message.id}`, "system", method,
+        "当前网页客户端未启用交互审批；本界面发起的 Turn 使用 never。", "等待处理");
+    }
     agent.socket?.send(JSON.stringify({ id: message.id, error: { code: -32601, message: "interactive request is not supported by Mira Web" } }));
     return;
   }
   if (method === "turn/started") {
-    agent.turnId = params.turn?.id ?? null;
-    $("#agentInterrupt").classList.remove("hidden");
+    const turnId = params.turn?.id ?? null;
+    const threadId = params.threadId ?? agent.threadId;
+    if (threadId && turnId) {
+      agent.activeTurns.set(threadId, turnId);
+      agent.turnThreads.set(turnId, threadId);
+    }
+    syncActiveTurnUi();
     return;
   }
   if (method === "turn/completed") {
     const turn = params.turn ?? {};
+    const completedTurnId = turn.id ?? params.turnId ?? null;
+    const threadId = notificationThreadId(params) ?? agent.threadId;
+    if (threadId && (!completedTurnId || agent.activeTurns.get(threadId) === completedTurnId)) {
+      agent.activeTurns.delete(threadId);
+    }
+    if (completedTurnId) agent.turnThreads.delete(completedTurnId);
+    syncActiveTurnUi();
+    void loadAgentThreads();
+    if (threadId && threadId !== agent.threadId) return;
     const status = String(turn.status ?? "").toLowerCase();
     if (turn.error?.message || ["failed", "error"].includes(status)) {
-      upsertTrace(`turn-${turn.id ?? agent.turnId ?? Date.now()}`, "error", "Turn 失败",
+      upsertTrace(`turn-${completedTurnId ?? Date.now()}`, "error", "Turn 失败",
         turn.error?.message ?? "Codex Turn 执行失败", turn.status ?? "失败");
     } else if (["interrupted", "cancelled", "canceled", "aborted"].includes(status)) {
-      upsertTrace(`turn-${turn.id ?? agent.turnId ?? Date.now()}`, "system", "Turn 已中断",
+      upsertTrace(`turn-${completedTurnId ?? Date.now()}`, "system", "Turn 已中断",
         "本次执行没有继续完成。", turn.status);
     }
-    agent.turnId = null;
-    $("#agentInterrupt").classList.add("hidden");
-    void loadAgentThreads();
-    if (agent.threadId) void refreshCompletedTranscript(agent.threadId);
+    if (threadId) void refreshCompletedTranscript(threadId);
     return;
   }
+  if (!notificationIsForOpenThread(params)) return;
   if (method === "item/started" || method === "item/completed") {
     const item = params.item ?? {};
     const view = itemView(item);
@@ -1766,6 +1801,7 @@ async function resumeAgentThread(threadId) {
   const result = await rpc("thread/resume", params, 120_000);
   agent.threadId = result.thread.id;
   resetAgentTranscript(agent.threadId);
+  syncActiveTurnUi();
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
   const resumedCwd = result.cwd ?? projectedCwd;
   $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${resumedCwd || "默认目录"}`;
@@ -1777,7 +1813,7 @@ async function resumeAgentThread(threadId) {
 
 function newAgentThread() {
   agent.threadId = null;
-  agent.turnId = null;
+  syncActiveTurnUi();
   resetAgentTranscript();
   $("#conversationTitle").textContent = "新会话";
   $("#conversationMeta").textContent = "第一条消息发送时在所选节点创建，并立即写入 PostgreSQL。";
@@ -1799,10 +1835,11 @@ async function sendAgentMessage(text) {
   }
   const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", text, "已发送");
   optimistic.dataset.pendingUser = "true";
+  const turnThreadId = agent.threadId;
   let result;
   try {
     result = await rpc("turn/start", {
-      threadId: agent.threadId,
+      threadId: turnThreadId,
       input: [{ type: "text", text }],
       approvalPolicy: "never",
     }, 120_000);
@@ -1810,8 +1847,11 @@ async function sendAgentMessage(text) {
     if (optimistic.dataset.pendingUser === "true") optimistic.remove();
     throw error;
   }
-  agent.turnId = result.turn.id;
-  $("#agentInterrupt").classList.remove("hidden");
+  if (result.turn?.id) {
+    agent.activeTurns.set(turnThreadId, result.turn.id);
+    agent.turnThreads.set(result.turn.id, turnThreadId);
+  }
+  syncActiveTurnUi();
 }
 
 async function openAgentConsole() {

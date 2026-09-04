@@ -57,6 +57,45 @@ test("projects legacy messages, reasoning, and paired custom tool output", () =>
   assert.equal(result[3].body, "**Finished.**");
 });
 
+test("projects resumed mixed-format turns and deduplicates parallel message records", () => {
+  const oldTurnId = "00000000-0000-4000-8000-000000000010";
+  const resumedTurnId = "00000000-0000-4000-8000-000000000011";
+  const result = projectCodexTranscript([
+    record("event_msg", { type: "task_started", turn_id: oldTurnId }),
+    record("event_msg", { type: "item_completed", turn_id: oldTurnId, item: {
+      id: "old-user", type: "UserMessage", content: [{ type: "text", text: "Old imported request" }],
+    } }),
+    record("event_msg", { type: "item_completed", turn_id: oldTurnId, item: {
+      id: "old-agent", type: "AgentMessage", content: [{ type: "text", text: "Old imported response" }],
+    } }),
+    record("event_msg", { type: "task_started", turn_id: resumedTurnId }),
+    record("response_item", {
+      id: "environment", role: "user", type: "message",
+      content: [{ type: "input_text", text: "<environment_context>hidden</environment_context>" }],
+      internal_chat_message_metadata_passthrough: {
+        turn_id: resumedTurnId, content_item_kinds: ["environment_context"],
+      },
+    }),
+    record("response_item", {
+      id: "new-user", role: "user", type: "message",
+      content: [{ type: "input_text", text: "New resumed request" }],
+      internal_chat_message_metadata_passthrough: { turn_id: resumedTurnId, content_item_kinds: ["user.text"] },
+    }),
+    record("event_msg", { type: "user_message", message: "New resumed request" }),
+    record("event_msg", { type: "agent_message", phase: "final_answer", message: "New resumed response" }),
+    record("response_item", {
+      id: "new-agent", role: "assistant", type: "message", phase: "final_answer",
+      content: [{ type: "output_text", text: "New resumed response" }],
+      internal_chat_message_metadata_passthrough: { turn_id: resumedTurnId },
+    }),
+  ]);
+
+  assert.deepEqual(result.map((item) => item.body), [
+    "Old imported request", "Old imported response", "New resumed request", "New resumed response",
+  ]);
+  assert.deepEqual(result.map((item) => item.kind), ["user", "assistant", "user", "assistant"]);
+});
+
 test("paginates newest transcript items backwards without reordering", () => {
   const trace = Array.from({ length: 125 }, (_value, index) => ({ key: `item-${index}` }));
   const newest = paginateCodexTranscript(trace, null, 60);
