@@ -139,7 +139,7 @@ async function servePublic(response, relativePath) {
     response.writeHead(200, {
       "content-type": asset[1], "content-length": payload.length,
       "cache-control": "no-cache",
-      "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
       "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
     });
     response.end(payload);

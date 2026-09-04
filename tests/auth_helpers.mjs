@@ -57,9 +57,10 @@ export async function approvePendingNode(
   throw new Error(`timed out waiting for enrollment request from ${nodeKey}`);
 }
 
-export function appServerWebSocket(serverUrl, nodeToken, nodeId) {
+export function appServerWebSocket(serverUrl, nodeToken, nodeId, storeId = null) {
+  const query = storeId ? `?storeId=${encodeURIComponent(storeId)}` : "";
   return new WebSocket(
-    `${serverUrl.replace(/^http/, "ws")}/v1/nodes/${nodeId}/app-server`,
+    `${serverUrl.replace(/^http/, "ws")}/v1/nodes/${nodeId}/app-server${query}`,
     ["mira-client-v1", `auth.${Buffer.from(nodeToken).toString("base64url")}`],
   );
 }

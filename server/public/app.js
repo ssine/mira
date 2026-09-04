@@ -53,9 +53,17 @@ const agent = {
   transcriptCursor: null,
   transcriptTotal: 0,
   transcriptLoadingOlder: false,
+  threadRuntimeNodeId: null,
+  previousRuntimeNodeId: null,
+  attachments: [],
+  fileObjectUrl: null,
 };
 
 const transcriptPageSize = 60;
+const maximumAttachmentBytes = 4 * 1024 * 1024;
+const maximumAttachmentTotalBytes = 8 * 1024 * 1024;
+const maximumConversationFileBytes = 128 * 1024 * 1024;
+const nodeFileChunkBytes = 4 * 1024 * 1024;
 
 async function refreshAdminCsrf() {
   if (!csrfRefreshPromise) {
@@ -259,13 +267,18 @@ async function revoke(id) {
   await loadDashboard();
 }
 
-async function invoke(capability, params, timeoutMs = 30000) {
-  if (!workspace.node) throw new Error("尚未选择节点");
-  const response = await api(`/v1/nodes/${workspace.node.nodeId}/invoke`, {
+async function invokeNode(nodeId, capability, params, timeoutMs = 30000) {
+  if (!nodeId) throw new Error("尚未选择节点");
+  const response = await api(`/v1/nodes/${nodeId}/invoke`, {
     method: "POST",
     body: JSON.stringify({ capability, params, timeoutMs }),
   });
   return response.result;
+}
+
+async function invoke(capability, params, timeoutMs = 30000) {
+  if (!workspace.node) throw new Error("尚未选择节点");
+  return invokeNode(workspace.node.nodeId, capability, params, timeoutMs);
 }
 
 async function callDynamicTool(tool, arguments_, timeoutMs = 30000) {
@@ -1259,13 +1272,100 @@ function traceUsesMarkdown(kind) {
   return ["user", "assistant", "reasoning"].includes(kind);
 }
 
+function currentAgentThread() {
+  return agent.threads.find((thread) => thread.threadId === agent.threadId) ?? null;
+}
+
+function conversationNodeCandidates() {
+  const thread = currentAgentThread();
+  return [...new Set([
+    agent.threadRuntimeNodeId,
+    agent.previousRuntimeNodeId,
+    thread?.runtimeNodeId,
+    thread?.sourceNodeId,
+    agent.socketNodeId,
+    $("#agentRuntimeNode")?.value,
+  ].filter(Boolean))];
+}
+
+function resolveNodeFileReference(value) {
+  let reference = String(value ?? "").trim();
+  if (!reference || reference.startsWith("#") || /^(?:https?|mailto|tel|data|blob|javascript):/i.test(reference)) return null;
+  try { reference = decodeURIComponent(reference); } catch { /* retain malformed percent escapes */ }
+  if (reference.startsWith("<") && reference.endsWith(">")) reference = reference.slice(1, -1).trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(reference) && !/^file:/i.test(reference) && !/^[A-Za-z]:[\\/]/.test(reference)) return null;
+  if (/^file:/i.test(reference)) {
+    try {
+      const url = new URL(reference);
+      reference = decodeURIComponent(url.pathname);
+      if (/^\/[A-Za-z]:\//.test(reference)) reference = reference.slice(1);
+      if (url.hostname && url.hostname !== "localhost") reference = `\\\\${url.hostname}${reference.replaceAll("/", "\\")}`;
+    } catch { return null; }
+  }
+  const lineMatch = reference.match(/:(\d+)(?::(\d+))?$/);
+  const line = lineMatch ? Number(lineMatch[1]) : null;
+  const column = lineMatch?.[2] ? Number(lineMatch[2]) : null;
+  if (lineMatch) reference = reference.slice(0, -lineMatch[0].length);
+  const cwd = $("#conversationCwd")?.value.trim() ?? "";
+  const absolute = reference.startsWith("/") || /^[A-Za-z]:[\\/]/.test(reference) || reference.startsWith("\\\\");
+  const pathLike = absolute || reference.startsWith("./") || reference.startsWith("../") ||
+    reference.includes("/") || reference.includes("\\") || /\.[\p{L}][\p{L}\p{N}._-]{0,15}$/u.test(reference);
+  if (!pathLike || (!absolute && !cwd)) return null;
+  if (!absolute) {
+    const separator = pathSeparator(cwd);
+    reference = joinPath(cwd, reference.replace(/[\\/]/g, separator));
+  }
+  return { path: reference, line, column };
+}
+
+function decorateTraceFileReferences(root) {
+  for (const anchor of root.querySelectorAll("a[href]")) {
+    const reference = resolveNodeFileReference(anchor.getAttribute("href"));
+    if (reference) {
+      anchor.dataset.nodeFilePath = reference.path;
+      if (reference.line) anchor.dataset.nodeFileLine = String(reference.line);
+      if (reference.column) anchor.dataset.nodeFileColumn = String(reference.column);
+      anchor.classList.add("node-file-link");
+      anchor.title = `从 Mira Node 打开 ${reference.path}`;
+      anchor.setAttribute("href", "#");
+    } else {
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+    }
+  }
+  for (const image of root.querySelectorAll("img[src]")) {
+    const reference = resolveNodeFileReference(image.getAttribute("src"));
+    if (!reference) continue;
+    const button = element("button", "node-file-image-link", `▧ ${image.alt || baseName(reference.path)}`);
+    button.type = "button";
+    button.dataset.nodeFilePath = reference.path;
+    if (reference.line) button.dataset.nodeFileLine = String(reference.line);
+    image.replaceWith(button);
+  }
+  for (const code of root.querySelectorAll("code")) {
+    if (code.closest("pre, a, button")) continue;
+    const reference = resolveNodeFileReference(code.textContent);
+    if (!reference) continue;
+    const button = element("button", "node-file-code-link");
+    button.type = "button";
+    button.dataset.nodeFilePath = reference.path;
+    if (reference.line) button.dataset.nodeFileLine = String(reference.line);
+    button.title = `从 Mira Node 打开 ${reference.path}`;
+    button.append(code.cloneNode(true));
+    code.replaceWith(button);
+  }
+}
+
 function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const value = body ?? "";
   const node = card.querySelector(".trace-body");
   node._miraSource = value;
   const markdown = traceUsesMarkdown(kind);
   node.classList.toggle("markdown-body", markdown);
-  if (markdown) node.innerHTML = DOMPurify.sanitize(marked.parse(value));
+  if (markdown) {
+    node.innerHTML = DOMPurify.sanitize(marked.parse(value));
+    decorateTraceFileReferences(node);
+  }
   else node.textContent = value;
   node.hidden = value.length === 0;
   card.classList.toggle("trace-card-empty", value.length === 0);
@@ -1334,6 +1434,140 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   updateToolGroup(card.closest(".tool-group"));
   if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
   return card;
+}
+
+function nodeFileMimeType(path) {
+  const extension = String(path).split(/[?#]/, 1)[0].split(".").at(-1)?.toLowerCase() ?? "";
+  const types = {
+    png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+    svg: "image/svg+xml", bmp: "image/bmp", ico: "image/x-icon", avif: "image/avif",
+    pdf: "application/pdf", txt: "text/plain", md: "text/markdown", markdown: "text/markdown",
+    json: "application/json", jsonl: "application/x-ndjson", csv: "text/csv", log: "text/plain",
+    js: "text/javascript", mjs: "text/javascript", cjs: "text/javascript", ts: "text/plain", tsx: "text/plain",
+    jsx: "text/plain", css: "text/css", html: "text/html", htm: "text/html", xml: "application/xml",
+    yaml: "text/yaml", yml: "text/yaml", toml: "text/plain", ini: "text/plain", conf: "text/plain",
+    sh: "text/x-shellscript", zsh: "text/x-shellscript", bash: "text/x-shellscript", py: "text/x-python",
+    go: "text/plain", rs: "text/plain", java: "text/plain", kt: "text/plain", nix: "text/plain",
+    mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime", mp3: "audio/mpeg",
+    wav: "audio/wav", ogg: "audio/ogg", m4a: "audio/mp4",
+  };
+  return types[extension] ?? "application/octet-stream";
+}
+
+function base64Bytes(value) {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function bytesBase64(bytes) {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32 * 1024) {
+    binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 32 * 1024, bytes.length)));
+  }
+  return btoa(binary);
+}
+
+async function readNodeFile(nodeId, path, stat) {
+  const size = Number(stat.size ?? 0);
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error("Node 返回了无效的文件大小");
+  if (size > maximumConversationFileBytes) {
+    throw new Error(`网页端单次最多读取 ${formatBytes(maximumConversationFileBytes)}；此文件为 ${formatBytes(size)}`);
+  }
+  const chunks = [];
+  for (let offset = 0; offset < size;) {
+    $("#nodeFileLoading").textContent = `正在从 Node 读取 ${formatBytes(offset)} / ${formatBytes(size)}…`;
+    const result = await invokeNode(nodeId, "file", {
+      action: "read", path, offset, length: Math.min(nodeFileChunkBytes, size - offset), encoding: "base64",
+    }, 60_000);
+    if (result.encoding !== "base64") throw new Error("Node 没有返回预期的二进制文件数据");
+    const chunk = base64Bytes(result.content ?? "");
+    if (!chunk.length && !result.eof) throw new Error("Node 文件读取没有取得进展");
+    chunks.push(chunk);
+    offset += chunk.length;
+    if (result.eof) break;
+  }
+  return new Blob(chunks, { type: nodeFileMimeType(path) });
+}
+
+function resetNodeFileDialog() {
+  if (agent.fileObjectUrl) URL.revokeObjectURL(agent.fileObjectUrl);
+  agent.fileObjectUrl = null;
+  for (const selector of ["#nodeFileImage", "#nodeFileVideo", "#nodeFileAudio", "#nodeFileFrame"]) {
+    const media = $(selector);
+    media.classList.add("hidden");
+    media.removeAttribute("src");
+  }
+  $("#nodeFileText").classList.add("hidden");
+  $("#nodeFileText").textContent = "";
+  $("#nodeFileUnsupported").classList.add("hidden");
+  $("#nodeFileDownload").classList.add("hidden");
+  $("#nodeFileDownload").removeAttribute("href");
+  $("#nodeFileLoading").classList.remove("hidden");
+  $("#nodeFileLoading").textContent = "正在从 Node 读取文件…";
+}
+
+async function openNodeFile(path, line = null) {
+  const dialog = $("#nodeFileDialog");
+  resetNodeFileDialog();
+  $("#nodeFileTitle").textContent = baseName(path);
+  $("#nodeFileMeta").textContent = "正在查找包含此文件的节点…";
+  $("#nodeFilePath").textContent = path;
+  if (!dialog.open) dialog.showModal();
+  const candidates = conversationNodeCandidates();
+  if (!candidates.length) throw new Error("这个会话没有可用于读取文件的节点");
+  let selectedNode = null;
+  let stat = null;
+  let lastError = null;
+  for (const nodeId of candidates) {
+    try {
+      const candidate = await invokeNode(nodeId, "file", { action: "stat", path }, 30_000);
+      if (candidate.type !== "file") throw new Error("路径不是普通文件");
+      selectedNode = nodeId;
+      stat = candidate;
+      break;
+    } catch (error) { lastError = error; }
+  }
+  if (!selectedNode) throw new Error(`无法从会话关联的节点读取此文件：${lastError?.message ?? "文件不存在"}`);
+  const blob = await readNodeFile(selectedNode, path, stat);
+  const mime = blob.type || "application/octet-stream";
+  const node = dashboardNodes.get(selectedNode);
+  $("#nodeFileMeta").textContent = `${formatBytes(blob.size)} · ${mime} · ${node?.hostname ?? selectedNode}${line ? ` · 第 ${line} 行` : ""}`;
+  $("#nodeFileLoading").classList.add("hidden");
+  agent.fileObjectUrl = URL.createObjectURL(blob);
+  const download = $("#nodeFileDownload");
+  download.href = agent.fileObjectUrl;
+  download.download = baseName(path);
+  download.classList.remove("hidden");
+  if (mime.startsWith("image/")) {
+    $("#nodeFileImage").src = agent.fileObjectUrl;
+    $("#nodeFileImage").classList.remove("hidden");
+  } else if (mime.startsWith("video/")) {
+    $("#nodeFileVideo").src = agent.fileObjectUrl;
+    $("#nodeFileVideo").classList.remove("hidden");
+  } else if (mime.startsWith("audio/")) {
+    $("#nodeFileAudio").src = agent.fileObjectUrl;
+    $("#nodeFileAudio").classList.remove("hidden");
+  } else if (mime === "application/pdf") {
+    $("#nodeFileFrame").src = agent.fileObjectUrl;
+    $("#nodeFileFrame").classList.remove("hidden");
+  } else if (mime.startsWith("text/") || ["application/json", "application/xml", "application/x-ndjson"].includes(mime)) {
+    const preview = $("#nodeFileText");
+    if (blob.size <= 4 * 1024 * 1024) {
+      preview.textContent = await blob.text();
+      preview.classList.remove("hidden");
+      if (line) requestAnimationFrame(() => {
+        const lineHeight = Number.parseFloat(getComputedStyle(preview).lineHeight) || 20;
+        preview.scrollTop = Math.max(0, (line - 3) * lineHeight);
+      });
+    } else {
+      $("#nodeFileUnsupported").textContent = "文本文件超过 4 MiB；为避免卡住页面，请直接下载查看。";
+      $("#nodeFileUnsupported").classList.remove("hidden");
+    }
+  } else {
+    $("#nodeFileUnsupported").classList.remove("hidden");
+  }
 }
 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
@@ -1624,7 +1858,7 @@ async function connectAgentSocket(nodeId) {
   closeAgentSocket();
   setAgentRuntimeState("正在建立 App Server 通道…", "offline");
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server`, ["mira-client-v1"]);
+  const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
   agent.socket = socket;
   agent.socketNodeId = nodeId;
   socket.addEventListener("message", onAgentSocketMessage);
@@ -1794,12 +2028,14 @@ async function resumeAgentThread(threadId) {
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   setConversationNotice("正在从 PostgreSQL 恢复会话…");
   const projectedThread = agent.threads.find((thread) => thread.threadId === threadId);
+  agent.previousRuntimeNodeId = projectedThread?.runtimeNodeId ?? projectedThread?.sourceNodeId ?? null;
   const projectedCwd = typeof projectedThread?.cwd === "string" ? projectedThread.cwd.trim() : "";
   $("#conversationCwd").value = projectedCwd;
   const params = { threadId };
   if (projectedCwd) params.cwd = projectedCwd;
   const result = await rpc("thread/resume", params, 120_000);
   agent.threadId = result.thread.id;
+  agent.threadRuntimeNodeId = agent.socketNodeId;
   resetAgentTranscript(agent.threadId);
   syncActiveTurnUi();
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
@@ -1813,6 +2049,8 @@ async function resumeAgentThread(threadId) {
 
 function newAgentThread() {
   agent.threadId = null;
+  agent.threadRuntimeNodeId = null;
+  agent.previousRuntimeNodeId = null;
   syncActiveTurnUi();
   resetAgentTranscript();
   $("#conversationTitle").textContent = "新会话";
@@ -1822,7 +2060,124 @@ function newAgentThread() {
   renderAgentThreads();
 }
 
-async function sendAgentMessage(text) {
+function nativeImageAttachment(file) {
+  return /^(?:image\/(?:png|jpeg|webp|gif))$/i.test(file.type || nodeFileMimeType(file.name));
+}
+
+function safeAttachmentName(value, index) {
+  const normalized = String(value || `attachment-${index + 1}`)
+    .normalize("NFKC").replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_").replace(/\s+/g, " ").trim();
+  const limited = normalized.slice(0, 140).replace(/[. ]+$/g, "");
+  return `${String(index + 1).padStart(2, "0")}-${limited || "attachment"}`;
+}
+
+function uploadDirectoryCandidates(node, cwd, batchId) {
+  const suffix = ["mira-web-uploads", agent.threadId, batchId];
+  const candidates = [];
+  const add = (root) => {
+    if (!root) return;
+    let result = root;
+    for (const part of suffix) result = joinPath(result, part);
+    if (!candidates.includes(result)) candidates.push(result);
+  };
+  if (String(node?.platform).toLowerCase() === "windows") {
+    const userHome = cwd.match(/^([A-Za-z]:\\Users\\[^\\]+)/i)?.[1];
+    if (userHome) add(joinPath(joinPath(joinPath(userHome, "AppData"), "Local"), "Temp"));
+    add(cwd);
+  } else {
+    add("/tmp");
+    add(cwd);
+  }
+  return candidates;
+}
+
+async function prepareUploadDirectory(nodeId, cwd) {
+  const node = dashboardNodes.get(nodeId);
+  if (node?.capabilities?.files !== true) throw new Error("当前 Codex 运行节点没有提供文件能力，无法上传普通文件");
+  const batchId = `${Date.now()}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+  let lastError = null;
+  for (const candidate of uploadDirectoryCandidates(node, cwd, batchId)) {
+    try {
+      await invokeNode(nodeId, "file", { action: "mkdir", path: candidate, recursive: true }, 60_000);
+      return candidate;
+    } catch (error) { lastError = error; }
+  }
+  throw new Error(`无法在运行节点创建附件暂存目录：${lastError?.message ?? "没有可写目录"}`);
+}
+
+async function fileDataUrl(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return `data:${file.type || nodeFileMimeType(file.name)};base64,${bytesBase64(bytes)}`;
+}
+
+async function prepareTurnInput(text, attachments) {
+  const images = attachments.filter(nativeImageAttachment);
+  const files = attachments.filter((file) => !nativeImageAttachment(file));
+  const annotations = [];
+  const inputs = [];
+  if (images.length) {
+    annotations.push(`已附加图片：${images.map((file) => `\`${String(file.name).replaceAll("`", "'")}\``).join("、")}`);
+  }
+  if (files.length) {
+    const nodeId = agent.socketNodeId;
+    const cwd = $("#conversationCwd").value.trim();
+    $("#conversationHint").textContent = `正在上传 ${files.length} 个文件到运行节点…`;
+    const directory = await prepareUploadDirectory(nodeId, cwd);
+    const staged = [];
+    for (const [index, file] of files.entries()) {
+      $("#conversationHint").textContent = `正在上传文件 ${index + 1} / ${files.length}…`;
+      const path = joinPath(directory, safeAttachmentName(file.name, index));
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      await invokeNode(nodeId, "file", {
+        action: "write", path, encoding: "base64", content: bytesBase64(bytes), overwrite: false,
+      }, 60_000);
+      staged.push({ file, path });
+    }
+    annotations.push([
+      "已附加文件（暂存在当前运行节点）：",
+      ...staged.map(({ file, path }) => `- \`${String(file.name).replaceAll("`", "'")}\`：\`${path}\``),
+    ].join("\n"));
+  }
+  const message = [text, ...annotations].filter(Boolean).join("\n\n");
+  if (message) inputs.push({ type: "text", text: message });
+  for (const image of images) inputs.push({ type: "image", url: await fileDataUrl(image) });
+  return { inputs, message };
+}
+
+function renderComposerAttachments() {
+  const target = clear($("#conversationAttachments"));
+  target.classList.toggle("hidden", agent.attachments.length === 0);
+  for (const [index, file] of agent.attachments.entries()) {
+    const item = element("div", "conversation-attachment");
+    item.append(
+      element("span", "attachment-kind", nativeImageAttachment(file) ? "图片" : "文件"),
+      element("span", "attachment-name", file.name),
+      element("small", "", formatBytes(file.size)),
+    );
+    const remove = element("button", "attachment-remove", "×");
+    remove.type = "button";
+    remove.dataset.attachmentIndex = String(index);
+    remove.setAttribute("aria-label", `移除 ${file.name}`);
+    item.append(remove);
+    target.append(item);
+  }
+}
+
+function addComposerFiles(files) {
+  let total = agent.attachments.reduce((sum, file) => sum + file.size, 0);
+  const rejected = [];
+  for (const file of files) {
+    if (agent.attachments.length >= 8) { rejected.push(`${file.name}：最多 8 个附件`); continue; }
+    if (file.size > maximumAttachmentBytes) { rejected.push(`${file.name}：超过 4 MiB`); continue; }
+    if (total + file.size > maximumAttachmentTotalBytes) { rejected.push(`${file.name}：附件合计超过 8 MiB`); continue; }
+    agent.attachments.push(file);
+    total += file.size;
+  }
+  renderComposerAttachments();
+  if (rejected.length) toast(rejected.join("；"));
+}
+
+async function sendAgentMessage(text, attachments = []) {
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   if (!agent.threadId) {
     const params = { approvalPolicy: "never", sandbox: "workspace-write" };
@@ -1830,17 +2185,22 @@ async function sendAgentMessage(text) {
     if (cwd) params.cwd = cwd;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    agent.threadRuntimeNodeId = agent.socketNodeId;
+    agent.previousRuntimeNodeId = null;
     $("#conversationTitle").textContent = "新会话";
-    $("#conversationMeta").textContent = `${agent.threadId} · ${started.model ?? "默认模型"} · ${(started.cwd ?? cwd) || "默认目录"}`;
+    const startedCwd = started.cwd ?? cwd;
+    $("#conversationMeta").textContent = `${agent.threadId} · ${started.model ?? "默认模型"} · ${startedCwd || "默认目录"}`;
+    $("#conversationCwd").value = startedCwd ?? "";
   }
-  const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", text, "已发送");
+  const prepared = await prepareTurnInput(text, attachments);
+  const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", prepared.message, "已发送");
   optimistic.dataset.pendingUser = "true";
   const turnThreadId = agent.threadId;
   let result;
   try {
     result = await rpc("turn/start", {
       threadId: turnThreadId,
-      input: [{ type: "text", text }],
+      input: prepared.inputs,
       approvalPolicy: "never",
     }, 120_000);
   } catch (error) {
@@ -1917,8 +2277,19 @@ $("#agentThreadList").addEventListener("click", (event) => {
   if (button) resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
 });
 $("#conversationTrace").addEventListener("click", (event) => {
-  if (!event.target.closest("button[data-load-older]")) return;
-  loadOlderAgentTranscript().catch((error) => toast(error.message));
+  const file = event.target.closest("[data-node-file-path]");
+  if (file) {
+    event.preventDefault();
+    openNodeFile(file.dataset.nodeFilePath, Number(file.dataset.nodeFileLine) || null).catch((error) => {
+      $("#nodeFileMeta").textContent = "读取失败";
+      $("#nodeFileLoading").textContent = error.message;
+      toast(error.message);
+    });
+    return;
+  }
+  if (event.target.closest("button[data-load-older]")) {
+    loadOlderAgentTranscript().catch((error) => toast(error.message));
+  }
 });
 $("#sessionScan").addEventListener("click", () => scanLocalSessions().catch((error) => {
   $("#sessionScanState").textContent = `扫描失败：${error.message}`;
@@ -1930,15 +2301,19 @@ $("#localSessionList").addEventListener("click", (event) => {
 $("#conversationForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const text = $("#conversationInput").value.trim();
-  if (!text) return;
+  const attachments = [...agent.attachments];
+  if (!text && !attachments.length) return;
   const button = $("#conversationSend");
   button.disabled = true;
   try {
+    await sendAgentMessage(text, attachments);
     $("#conversationInput").value = "";
-    await sendAgentMessage(text);
+    agent.attachments = [];
+    renderComposerAttachments();
+    $("#conversationHint").textContent = "可粘贴或拖入 · 单个 4 MiB，合计 8 MiB";
   } catch (error) {
-    $("#conversationInput").value = text;
     setConversationNotice(error.message, "error");
+    $("#conversationHint").textContent = "发送失败；附件仍保留，可重试";
   } finally {
     button.disabled = !agent.socket || agent.socket.readyState !== WebSocket.OPEN;
   }
@@ -1949,6 +2324,36 @@ $("#conversationInput").addEventListener("keydown", (event) => {
     $("#conversationForm").requestSubmit();
   }
 });
+$("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
+$("#conversationFileInput").addEventListener("change", (event) => {
+  addComposerFiles(event.target.files ?? []);
+  event.target.value = "";
+});
+$("#conversationAttachments").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-attachment-index]");
+  if (!button) return;
+  agent.attachments.splice(Number(button.dataset.attachmentIndex), 1);
+  renderComposerAttachments();
+});
+$("#conversationInput").addEventListener("paste", (event) => {
+  const files = [...(event.clipboardData?.files ?? [])];
+  if (!files.length) return;
+  event.preventDefault();
+  addComposerFiles(files);
+});
+$("#conversationDropZone").addEventListener("dragover", (event) => {
+  if (!event.dataTransfer?.types.includes("Files")) return;
+  event.preventDefault();
+  event.currentTarget.classList.add("dragging");
+});
+$("#conversationDropZone").addEventListener("dragleave", (event) => event.currentTarget.classList.remove("dragging"));
+$("#conversationDropZone").addEventListener("drop", (event) => {
+  event.preventDefault();
+  event.currentTarget.classList.remove("dragging");
+  addComposerFiles(event.dataTransfer?.files ?? []);
+});
+$("#nodeFileClose").addEventListener("click", () => $("#nodeFileDialog").close());
+$("#nodeFileDialog").addEventListener("close", resetNodeFileDialog);
 $("#agentInterrupt").addEventListener("click", () => {
   if (!agent.threadId || !agent.turnId) return;
   rpc("turn/interrupt", { threadId: agent.threadId, turnId: agent.turnId }).catch((error) => toast(error.message));

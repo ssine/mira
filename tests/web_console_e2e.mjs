@@ -97,6 +97,12 @@ for (const [pathname, contentType] of [
 }
 assert(assets["/"].includes("/app.js") && assets["/"].includes("/styles.css"), "website shell does not load its assets");
 assert(assets["/"].includes("/vendor/xterm.css"), "website shell does not load xterm styles");
+const shellResponse = await fetch(`${serverUrl}/`);
+const contentSecurityPolicy = shellResponse.headers.get("content-security-policy") ?? "";
+assert(contentSecurityPolicy.includes("img-src 'self' data: blob:") &&
+  contentSecurityPolicy.includes("media-src 'self' blob:") &&
+  contentSecurityPolicy.includes("frame-src 'self' blob:"),
+"website CSP does not permit locally constructed Node file previews");
 assert(assets["/app.js"].includes('from "/vendor/xterm.js"'), "website does not load the xterm terminal emulator");
 assert(assets["/app.js"].includes('from "/vendor/marked.js"'), "website does not load the Markdown renderer");
 assert(assets["/app.js"].includes('from "/vendor/dompurify.js"'), "website does not sanitize rendered Markdown");
@@ -130,13 +136,13 @@ for (const wiring of [
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
 }
-for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm"]) {
+for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "notificationIsForOpenThread", "activeTurns", "turnThreads"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"image\"", "url: await fileDataUrl(image)", "?storeId=personal"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
 assert(!assets["/app.js"].includes('"Turn", "Codex 正在处理…", "运行中"'),
@@ -331,6 +337,8 @@ try {
     "unified Codex thread projection omitted the imported session");
   assert(importedProjection.cwd === temporary,
     "unified Codex thread projection did not preserve the imported working directory");
+  assert(importedProjection.runtimeNodeId === null && importedProjection.sourceNodeId === nodeId,
+    "imported thread did not preserve a source-node fallback before its first runtime binding");
   const transcript = await admin(
     `/v1/codex/threads/${importedThreadId}/transcript?storeId=${encodeURIComponent(importStoreId)}`,
   );

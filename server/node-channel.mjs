@@ -42,6 +42,11 @@ function channelError(message, statusCode, code) {
   return error;
 }
 
+function safeStoreId(value) {
+  if (value === null) return "personal";
+  return typeof value === "string" && /^[a-zA-Z0-9._-]{1,128}$/.test(value) ? value : null;
+}
+
 export class NodeChannel {
   constructor({ server, pool, authService }) {
     this.pool = pool;
@@ -107,6 +112,11 @@ export class NodeChannel {
       rejectUpgrade(socket, 404, "Not Found");
       return;
     }
+    const storeId = proxyMatch ? safeStoreId(url.searchParams.get("storeId")) : null;
+    if (proxyMatch && !storeId) {
+      rejectUpgrade(socket, 400, "Bad Request");
+      return;
+    }
     // Durable credentials are never accepted from the URL/query string.
     const authorization = nodeMatch
       ? await this.nodeAuthorization(request, nodeMatch[1])
@@ -118,7 +128,7 @@ export class NodeChannel {
     }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
       if (nodeMatch) this.attachNode(nodeMatch[1], ws);
-      else this.attachProxy(proxyMatch[1], ws, authorization.principal);
+      else this.attachProxy(proxyMatch[1], ws, authorization.principal, storeId);
     });
   }
 
@@ -220,9 +230,16 @@ export class NodeChannel {
       if (proxy.ws.readyState === WebSocket.OPEN) proxy.ws.send(payload);
       return;
     }
-    if (message.id !== undefined && proxy.startRequestIds.has(String(message.id))) {
-      proxy.startRequestIds.delete(String(message.id));
-      if (typeof message.result?.thread?.id === "string") proxy.threadId = message.result.thread.id;
+    const observedThreadId = message.params?.threadId ?? message.params?.thread?.id ?? null;
+    if (typeof message.method === "string" && /^(?:thread|turn|item)\//.test(message.method) &&
+        typeof observedThreadId === "string") {
+      this.bindProxyThread(proxy, observedThreadId, false);
+    }
+    if (message.id !== undefined && proxy.threadRequestBindings.has(String(message.id))) {
+      const requestedThreadId = proxy.threadRequestBindings.get(String(message.id));
+      proxy.threadRequestBindings.delete(String(message.id));
+      const threadId = message.error ? null : message.result?.thread?.id ?? requestedThreadId;
+      if (typeof threadId === "string") this.bindProxyThread(proxy, threadId);
     }
     if (message.method === "item/tool/call" && message.params?.namespace === dynamicToolNamespace && message.id !== undefined) {
       const executionActor = {
@@ -261,7 +278,21 @@ export class NodeChannel {
     if (proxy.ws.readyState === WebSocket.OPEN) proxy.ws.send(payload);
   }
 
-  attachProxy(targetNodeId, ws, caller) {
+  bindProxyThread(proxy, threadId, primary = true) {
+    if (primary || !proxy.threadId) proxy.threadId = threadId;
+    proxy.boundThreadIds ??= new Set();
+    if (proxy.boundThreadIds.has(threadId)) return;
+    proxy.boundThreadIds.add(threadId);
+    void this.pool.query(
+      `INSERT INTO mira_codex_thread_runtimes (store_id, thread_id, node_id, bound_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (store_id, thread_id) DO UPDATE SET
+         node_id = EXCLUDED.node_id, bound_at = EXCLUDED.bound_at`,
+      [proxy.storeId, threadId, proxy.targetNodeId],
+    ).catch((error) => console.error("thread runtime binding failed", error));
+  }
+
+  attachProxy(targetNodeId, ws, caller, storeId = "personal") {
     if (!this.isConnected(targetNodeId)) {
       ws.close(1013, "node capability channel is offline");
       return;
@@ -269,7 +300,7 @@ export class NodeChannel {
     const sessionId = crypto.randomUUID();
     const proxy = {
       targetNodeId, callerNodeId: caller.kind === "node" ? caller.nodeId : null,
-      sessionId, ws, threadId: null, startRequestIds: new Set(),
+      sessionId, ws, storeId, threadId: null, threadRequestBindings: new Map(), boundThreadIds: new Set(),
     };
     this.proxies.set(sessionId, proxy);
     if (!this.trySendToNode(targetNodeId, { type: "appserver.open", sessionId })) {
@@ -290,11 +321,9 @@ export class NodeChannel {
           message.params ??= {};
           message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
         }
-        if (message.method === "thread/start" && message.id !== undefined) {
-          proxy.startRequestIds.add(String(message.id));
-        }
-        if (["thread/resume", "turn/start"].includes(message.method) && typeof message.params?.threadId === "string") {
-          proxy.threadId = message.params.threadId;
+        if (["thread/start", "thread/resume", "turn/start"].includes(message.method) && message.id !== undefined) {
+          proxy.threadRequestBindings.set(String(message.id),
+            typeof message.params?.threadId === "string" ? message.params.threadId : null);
         }
         payload = JSON.stringify(message);
       } catch {

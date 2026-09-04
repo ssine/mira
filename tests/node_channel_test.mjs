@@ -80,3 +80,37 @@ test("slow database disconnect commits before a subsequent connection and queues
   assert.equal(channel.isConnected("node-1"), true);
   channel.close();
 });
+
+test("App Server proxy persists its store-scoped thread runtime binding", async () => {
+  const writes = [];
+  const channel = new NodeChannel({
+    server: new EventEmitter(), authService: {},
+    pool: { query: async (sql, params) => writes.push({ sql, params }) },
+  });
+  const proxy = {
+    storeId: "team-store", targetNodeId: "00000000-0000-4000-8000-000000000001", ws: new Socket(),
+  };
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({
+    method: "turn/started",
+    params: { threadId: "01a06b06-41a3-7aa2-8c46-b406591f8f0a", turn: { id: "turn-1" } },
+  }));
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({
+    method: "item/started",
+    params: { threadId: "01a06b06-41a3-7aa2-8c46-b406591f8f0a", item: { id: "subagent-item" } },
+  }));
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({
+    method: "turn/started",
+    params: { threadId: "01a06b07-0000-7000-8000-000000000002", turn: { id: "subagent-turn" } },
+  }));
+  await setImmediate();
+  assert.equal(proxy.threadId, "01a06b06-41a3-7aa2-8c46-b406591f8f0a");
+  assert.match(writes[0].sql, /INSERT INTO mira_codex_thread_runtimes/);
+  assert.deepEqual(writes[0].params, [
+    "team-store", "01a06b06-41a3-7aa2-8c46-b406591f8f0a", "00000000-0000-4000-8000-000000000001",
+  ]);
+  assert.equal(writes.length, 2, "repeated events rewrote a binding or the subagent thread was not bound");
+  assert.deepEqual(writes[1].params, [
+    "team-store", "01a06b07-0000-7000-8000-000000000002", "00000000-0000-4000-8000-000000000001",
+  ]);
+  channel.close();
+});

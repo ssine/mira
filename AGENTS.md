@@ -244,7 +244,8 @@ POSTGRES_PASSWORD=ci-only-password docker compose -f compose.homeserver.yaml con
 
 ## Known gaps
 
-The intended architecture still needs durable thread-to-node assignment, a task queue and scheduler,
+The intended architecture records the most recent runtime Node for each thread, but still needs durable scheduled
+task-to-node assignment, a task queue and scheduler,
 writer leases with fencing for network partitions, a multi-version Codex compatibility matrix,
 server-orchestrated fleet upgrades, scheduled credential rotation and hardware-backed key storage,
 distributed login limits for multi-Server deployments, a dedicated mobile client, backup/restore tooling,

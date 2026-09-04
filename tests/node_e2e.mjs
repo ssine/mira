@@ -5,7 +5,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 
-import { appServerWebSocket, approvePendingNode, loginAdmin } from "./auth_helpers.mjs";
+import { adminRequest, appServerWebSocket, approvePendingNode, loginAdmin } from "./auth_helpers.mjs";
 
 const projectDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const controlUrl = "http://127.0.0.1:8787";
@@ -64,7 +64,7 @@ async function findNode() {
 }
 
 async function initializeAppServer(nodeId) {
-  const socket = appServerWebSocket(controlUrl, token, nodeId);
+  const socket = appServerWebSocket(controlUrl, token, nodeId, storeId);
   await new Promise((resolve, reject) => {
     socket.addEventListener("open", resolve, { once: true });
     socket.addEventListener("error", reject, { once: true });
@@ -180,6 +180,13 @@ try {
   }, "node registration and app-server startup");
   runningNode = running;
   const appServerResult = await initializeAppServer(running.nodeId);
+  const runtimeBinding = await waitFor(async () => {
+    const threads = await adminRequest(
+      controlUrl, adminSession, `/v1/codex/threads?storeId=${encodeURIComponent(storeId)}`,
+    );
+    return threads.data?.find((thread) =>
+      thread.threadId === appServerResult.threadId && thread.runtimeNodeId === running.nodeId) ?? null;
+  }, "durable thread runtime binding");
   const stored = await jsonRequest(`/v1/stores/${storeId}`);
   const dynamicTools = stored.snapshot.created_threads[appServerResult.threadId].dynamic_tools;
   if (!dynamicTools.some((tool) => tool.name === "home_nodes")) {
@@ -249,6 +256,7 @@ try {
       codexVersion: restarted.reportedAppServer.codexVersion,
       appServerInitialized: Boolean(appServerResult.initialized?.userAgent),
       appServerProxy: true,
+      runtimeNodeId: runtimeBinding.runtimeNodeId,
       dynamicToolsInjected: true,
       machineStatus: status.hostname === running.hostname,
       fileRoundTrip: file.content === "file-ok",

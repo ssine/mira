@@ -116,8 +116,15 @@
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             <form id="conversationForm" class="conversation-composer">
               <label class="composer-cwd">工作目录<input id="conversationCwd" type="text" placeholder="在运行节点上的绝对路径"></label>
-              <textarea id="conversationInput" rows="4" placeholder="给 Codex 发消息…" required></textarea>
-              <div><span id="conversationHint" class="muted">Ctrl/Cmd + Enter 发送</span><button id="conversationSend" class="primary" type="submit" disabled>发送 <span>→</span></button></div>
+              <div id="conversationDropZone" class="conversation-drop-zone">
+                <textarea id="conversationInput" rows="4" placeholder="给 Codex 发消息…"></textarea>
+                <div id="conversationAttachments" class="conversation-attachments hidden" aria-live="polite"></div>
+              </div>
+              <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
+              <div class="composer-actions">
+                <div class="composer-tools"><button id="conversationAttach" class="ghost" type="button">＋ 图片或文件</button><span id="conversationHint" class="muted">可粘贴或拖入 · 单个 4 MiB，合计 8 MiB</span></div>
+                <button id="conversationSend" class="primary" type="submit" disabled>发送 <span>→</span></button>
+              </div>
             </form>
           </section>
         </div>
@@ -227,6 +234,25 @@
         </section>
       </section>
     </main>
+    <dialog id="nodeFileDialog" class="node-file-dialog">
+      <div class="node-file-dialog-shell">
+        <header class="node-file-dialog-head">
+          <div><p class="eyebrow">NODE FILE</p><h2 id="nodeFileTitle">文件</h2><p id="nodeFileMeta" class="muted">正在准备…</p></div>
+          <button id="nodeFileClose" class="ghost" type="button" aria-label="关闭文件预览">关闭</button>
+        </header>
+        <div id="nodeFileLoading" class="node-file-loading">正在从 Node 读取文件…</div>
+        <img id="nodeFileImage" class="node-file-media hidden" alt="节点文件图片预览">
+        <video id="nodeFileVideo" class="node-file-media hidden" controls></video>
+        <audio id="nodeFileAudio" class="node-file-audio hidden" controls></audio>
+        <iframe id="nodeFileFrame" class="node-file-frame hidden" title="节点文件预览" sandbox></iframe>
+        <pre id="nodeFileText" class="node-file-text hidden"></pre>
+        <div id="nodeFileUnsupported" class="node-file-unsupported hidden">浏览器不支持直接预览这种文件，可以下载后用本地应用打开。</div>
+        <footer class="node-file-dialog-actions">
+          <span id="nodeFilePath" class="muted"></span>
+          <a id="nodeFileDownload" class="primary hidden" download>下载文件</a>
+        </footer>
+      </div>
+    </dialog>
     <div id="toast" class="toast hidden" role="status"></div>
   </body>
 </html>

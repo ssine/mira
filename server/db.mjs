@@ -389,6 +389,22 @@ const migrations = [
         FOR EACH ROW EXECUTE FUNCTION mira_reject_import_record_mutation();
     `,
   },
+  {
+    version: 11,
+    name: "codex-thread-runtime-bindings",
+    sql: `
+      CREATE TABLE mira_codex_thread_runtimes (
+        store_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        node_id UUID NOT NULL REFERENCES codex_nodes(node_id) ON DELETE CASCADE,
+        bound_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (store_id, thread_id)
+      );
+
+      CREATE INDEX mira_codex_thread_runtimes_node_idx
+        ON mira_codex_thread_runtimes(node_id, bound_at DESC);
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

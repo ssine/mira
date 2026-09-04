@@ -14,7 +14,10 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 [SSH 协议与使用说明](./protocol/ssh-v1.md)。
 
 0.11.2 让 Web 控制台从 PostgreSQL 权威事件生成完整历史轨迹，补齐导入/原生会话的工具调用，
-并使用经过净化的 GitHub Flavored Markdown 渲染用户与 Agent 消息。
+并使用经过净化的 GitHub Flavored Markdown 渲染用户与 Agent 消息。会话中的节点文件链接可从
+实际运行 Node 分块读取：图片、PDF、音视频和文本直接预览，其他格式下载。消息框支持选择、拖入
+或粘贴图片与文件；图片使用 App Server 原生输入，普通文件先暂存到当前 Codex 运行节点并把路径
+交给 Agent。
 
 0.11.1 修复 paginated 本地会话导入后的 App Server 恢复兼容性，并改进 Web 消息轨迹布局与流式输出。
 
@@ -53,7 +56,8 @@ Codex / mira CLI / Admin Web + Agent Console
 
 Server 在代理的 `thread/start` 和 `thread/resume` 中注入 `home_nodes`。运行在 Node A 的 Codex
 可调用 Node B；subagent 继承 dynamicTools，但仍作为独立 thread 保存，并保留父子关系。所有 HTTP
-CLI 调用和 dynamicTools 最终都经过同一个 `CapabilityService`。
+CLI 调用和 dynamicTools 最终都经过同一个 `CapabilityService`。Server 还记录每个 thread 最近一次
+实际运行的 Node；网页打开输出文件时优先使用当前运行节点，并以先前运行节点和导入来源节点回退。
 
 ## 身份和权限
 
@@ -110,7 +114,10 @@ MIRA_SECURE_COOKIES=false npm start --prefix server
 会话时，网页使用 PostgreSQL 投影保存的原始工作目录，不会用上一个会话的目录覆盖；正常 Turn
 生命周期和没有正文的推理事件只更新运行状态，不生成短暂的空消息卡片。恢复后的混合格式历史会
 按 Turn 去重并保留新消息，实时 App Server 事件只进入其所属会话，不会在切换会话后串台。每台在线设备
-还提供独立工作台：只读文件
+会话消息中的本机路径可点击；网页通过 Node 文件能力分块读取最多 128 MiB，支持常见媒体、PDF 和
+文本预览或原文件下载。消息输入支持最多 8 个、单个 4 MiB 且合计 8 MiB 的图片/文件附件。普通文件
+暂存于实际运行节点的系统临时目录（受限根配置下回退到 thread 工作目录）；它不是跨节点同步盘。
+每台在线设备还提供独立工作台：只读文件
 浏览器默认从该 Node 运行身份可见的完整文件系统开始；交互式 Shell 复用带游标的 PTY session；概况页通过
 轻量 `process/count` 展示当前 Node 可见的系统进程数，并展示 OS/CPU 配置、CPU 采样、内存和
 各 allowed root 所在磁盘的用量、运行时间及网络接口。能力调试器直接读取注入 Codex 的

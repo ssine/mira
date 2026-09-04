@@ -420,7 +420,8 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
             projections.title, projections.cwd, projections.item_count::text,
             projections.active_generation::text, projections.updated_at,
             imports.import_id, imports.source_node_id, imports.source_codex_version,
-            imports.created_at AS imported_at
+            imports.created_at AS imported_at, runtimes.node_id AS runtime_node_id,
+            runtimes.bound_at AS runtime_bound_at
      FROM codex_thread_projections projections
      LEFT JOIN LATERAL (
        SELECT import_id, source_node_id, source_codex_version, created_at
@@ -428,6 +429,8 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
        WHERE store_id = projections.store_id AND thread_id = projections.thread_id AND status = 'imported'
        ORDER BY created_at DESC LIMIT 1
      ) imports ON TRUE
+     LEFT JOIN mira_codex_thread_runtimes runtimes
+       ON runtimes.store_id = projections.store_id AND runtimes.thread_id = projections.thread_id
      WHERE projections.store_id = $1
      ORDER BY projections.updated_at DESC LIMIT $2`,
     [id, limit],
@@ -439,6 +442,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
     updatedAt: row.updated_at.toISOString(), importId: row.import_id,
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,
     importedAt: row.imported_at?.toISOString() ?? null,
+    runtimeNodeId: row.runtime_node_id, runtimeBoundAt: row.runtime_bound_at?.toISOString() ?? null,
   }));
 }
 
