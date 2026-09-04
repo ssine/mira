@@ -99,6 +99,21 @@ jobs:
         with:
           python-version: "3.13"
 
+      # Cache compiler outputs rather than the whole multi-gigabyte target tree.
+      # The pinned action uses GitHub Actions cache as sccache's remote backend.
+      - name: Enable shared Rust compilation cache
+        if: inputs.codex_release == ''
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: "v0.15.0"
+
+      - name: Configure Rust compilation cache
+        if: inputs.codex_release == ''
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+
       - if: runner.os == 'Linux' && inputs.codex_release == ''
         uses: mlugg/setup-zig@v2
         with:
