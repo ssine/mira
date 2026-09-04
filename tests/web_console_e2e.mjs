@@ -146,6 +146,8 @@ assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&
 "website conversation cards may shrink, nest scrollbars, or omit the history loader");
 assert(assets["/styles.css"].includes(".tool-group{") && assets["/styles.css"].includes(".tool-group-items{"),
   "website omitted collapsed tool-call groups");
+assert(assets["/styles.css"].includes('grid-template-areas:"conversation-head" "conversation-notice" "conversation-trace" "conversation-composer"'),
+  "website conversation rows can shift when the optional notice is hidden");
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
 }
