@@ -103,7 +103,8 @@ code, pre { font-family: var(--font-code); }
 main { width: 100%; min-width: 0; }
 .dashboard, .workspace, .agent-console { width: min(1440px, 100%); margin: 0 auto; }
 .dashboard { padding: 30px 28px 64px; }
-.workspace, .agent-console { padding: 0 24px 28px; }
+.workspace { padding: 0 24px 28px; }
+.agent-console { padding: 0 24px; }
 
 /* Shared typography, controls, and feedback */
 h1, h2, h3, p { overflow-wrap: anywhere; }
@@ -346,8 +347,8 @@ tbody tr:hover { background: var(--hover); }
 .debug-no-params { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
 
 /* Agent workspace */
-.agent-layout { display: grid; grid-template-columns: minmax(270px, 310px) minmax(0, 1fr); min-height: 0; gap: 0; border: 1px solid var(--line); border-top: 0; background: var(--surface-raised); }
-.agent-sidebar { display: flex; flex-direction: column; min-width: 0; height: calc(100dvh - var(--header-height) - 28px); min-height: 600px; overflow-y: auto; border-right: 1px solid var(--line); background: linear-gradient(155deg, var(--surface), var(--canvas) 78%); }
+.agent-layout { display: grid; grid-template-columns: minmax(270px, 310px) minmax(0, 1fr); height: calc(100dvh - var(--header-height)); min-height: 0; gap: 0; border: 1px solid var(--line); border-top: 0; background: var(--surface-raised); }
+.agent-sidebar { display: flex; flex-direction: column; min-width: 0; height: 100%; min-height: 0; overflow-y: auto; border-right: 1px solid var(--line); background: linear-gradient(155deg, var(--surface), var(--canvas) 78%); }
 .agent-side-card { min-width: 0; padding: 16px; border-bottom: 1px solid var(--line); }
 .agent-side-card h2 { margin: 4px 0 13px; font-size: 15px; font-weight: 600; }
 .agent-side-card label { display: grid; gap: 5px; margin-top: 9px; color: var(--muted); font-size: 9px; }
@@ -381,7 +382,7 @@ tbody tr:hover { background: var(--hover); }
 .local-session > div { display: grid; gap: 3px; min-width: 0; }
 .local-session button { padding: 5px 7px; }
 progress { width: 100%; accent-color: var(--accent); }
-.conversation-card { display: grid; grid-template-areas: "conversation-head" "conversation-notice" "conversation-trace" "conversation-composer"; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; height: calc(100dvh - var(--header-height) - 28px); min-height: 600px; overflow: hidden; background: var(--canvas); }
+.conversation-card { display: grid; grid-template-areas: "conversation-head" "conversation-notice" "conversation-trace" "conversation-composer"; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; height: 100%; min-height: 0; overflow: hidden; background: var(--canvas); }
 .conversation-head { grid-area: conversation-head; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; min-height: 68px; padding: 13px 18px; border-bottom: 1px solid var(--line); background: var(--surface-raised); }
 .conversation-head h2 { margin: 4px 0 3px; font-size: 16px; font-weight: 600; }
 .conversation-head p:last-child { margin: 0; color: var(--muted); font-size: 9px; }
@@ -568,10 +569,10 @@ progress { width: 100%; accent-color: var(--accent); }
   .shell-head, .debug-intro, .debug-card-head { flex-direction: column; }
   .terminal-output { min-height: 340px; height: 58vh; }
   .agent-console { padding: 0; }
-  .agent-layout { grid-template-columns: 1fr; border-right: 0; border-left: 0; }
+  .agent-layout { grid-template-columns: 1fr; height: auto; border-right: 0; border-left: 0; }
   .agent-sidebar { height: auto; min-height: 0; max-height: none; border-right: 0; border-bottom: 1px solid var(--line); }
   .thread-browser { flex-basis: auto; max-height: 310px; }
-  .conversation-card { height: calc(100dvh - var(--header-height)); min-height: 620px; }
+  .conversation-card { height: calc(100dvh - var(--header-height)); min-height: 0; }
   .conversation-head { padding: 12px; }
   .conversation-trace { padding: 18px 12px 28px; }
   .trace-card.user { max-width: 94%; }

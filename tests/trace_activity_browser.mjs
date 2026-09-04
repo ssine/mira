@@ -265,6 +265,12 @@ try {
     });
   });
   assert.ok(await page.locator("#conversationTrace").evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 2));
+  const agentViewport = await page.locator(".agent-layout").evaluate((node) => ({
+    bottom: node.getBoundingClientRect().bottom,
+    viewportBottom: window.innerHeight,
+  }));
+  assert.ok(Math.abs(agentViewport.bottom - agentViewport.viewportBottom) <= 1,
+    "desktop Agent workspace must reach the viewport bottom");
 
   if (process.env.MIRA_TRACE_WIDE_SCREENSHOT) {
     await page.screenshot({ path: process.env.MIRA_TRACE_WIDE_SCREENSHOT, fullPage: true });
