@@ -111,6 +111,7 @@ const agent = {
 const transcriptPageSize = 60;
 const replyProgress = new ReplyProgress();
 let replyProgressTimer = null;
+const traceStreamRenders = new WeakMap();
 
 function readableErrorMessage(value, depth = 0) {
   if (depth > 6 || value === null || value === undefined) return "";
@@ -1516,17 +1517,9 @@ function setTraceMetadata(card, options = {}) {
   elapsed.hidden = !duration;
 }
 
-function setTraceBody(card, body, kind = card.dataset.traceKind) {
-  const value = body ?? "";
+function updateTraceBodyState(card, value, kind) {
   const node = card.querySelector(".trace-body");
   node._miraSource = value;
-  const markdown = traceUsesMarkdown(kind);
-  node.classList.toggle("markdown-body", markdown);
-  if (markdown) {
-    node.innerHTML = DOMPurify.sanitize(marked.parse(value));
-    decorateTraceFileReferences(node);
-  }
-  else node.textContent = value;
   node.hidden = value.length === 0;
   card.classList.toggle("trace-card-empty", value.length === 0);
   const copy = card.querySelector(".trace-copy");
@@ -1534,6 +1527,51 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   if (kind === "reasoning" && card._miraExpandable) {
     card.querySelector(".trace-kind").textContent = reasoningHeading(value);
   }
+}
+
+function cancelTraceStreamRender(card) {
+  const pending = traceStreamRenders.get(card);
+  if (!pending) return;
+  cancelAnimationFrame(pending.frame);
+  traceStreamRenders.delete(card);
+}
+
+function setTraceBody(card, body, kind = card.dataset.traceKind) {
+  const value = body ?? "";
+  const node = card.querySelector(".trace-body");
+  cancelTraceStreamRender(card);
+  updateTraceBodyState(card, value, kind);
+  const markdown = traceUsesMarkdown(kind);
+  node.classList.toggle("markdown-body", markdown);
+  if (markdown) {
+    node.innerHTML = DOMPurify.sanitize(marked.parse(value));
+    decorateTraceFileReferences(node);
+  }
+  else node.textContent = value;
+}
+
+function queueTraceStreamRender(card, value, kind, follow) {
+  updateTraceBodyState(card, value, kind);
+  const queued = traceStreamRenders.get(card);
+  if (queued) {
+    queued.follow ||= follow;
+    return;
+  }
+  const pending = { follow, frame: null };
+  pending.frame = requestAnimationFrame(() => {
+    traceStreamRenders.delete(card);
+    if (!card.isConnected) return;
+    const trace = $("#conversationTrace");
+    const shouldFollow = pending.follow && traceNearBottom(trace);
+    const node = card.querySelector(".trace-body");
+    // Parsing and sanitizing the entire accumulated Markdown for every token is
+    // quadratic. Keep live output cheap and lossless, then fully typeset the
+    // authoritative item once item/completed arrives.
+    node.classList.remove("markdown-body");
+    node.textContent = node._miraSource ?? "";
+    if (shouldFollow) scrollTraceToBottom(trace);
+  });
+  traceStreamRenders.set(card, pending);
 }
 
 function traceNearBottom(trace = $("#conversationTrace"), threshold = 96) {
@@ -1797,8 +1835,7 @@ function appendTraceText(key, kind, title, delta, status = "运行中") {
   const effectiveTitle = existing?.dataset.traceTitle || title;
   const card = upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false, turnId: agent.turnId });
   const body = card.querySelector(".trace-body");
-  setTraceBody(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind);
-  if (follow) scrollTraceToBottom(trace);
+  queueTraceStreamRender(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind, follow);
 }
 
 function reconcilePendingUserTrace(key, body) {
@@ -1840,8 +1877,11 @@ function appendReasoningSummary(params) {
   parts[index] = `${parts[index] ?? ""}${params.delta}`;
   const body = parts.filter(Boolean).join("\n\n");
   if (!body.trim()) return;
-  const card = upsertTrace(key, "reasoning", "推理摘要", body, "", { turnId: params.turnId });
+  const trace = $("#conversationTrace");
+  const follow = traceNearBottom(trace);
+  const card = upsertTrace(key, "reasoning", "推理摘要", undefined, "", { autoScroll: false, turnId: params.turnId });
   card._miraSummaryParts = parts;
+  queueTraceStreamRender(card, body, "reasoning", follow);
 }
 
 function renderThread(thread) {
@@ -2080,7 +2120,10 @@ function handleAgentNotification(message) {
     const elapsedMs = completedAt && Number.isFinite(timing?.startedAt)
       ? Math.max(0, Date.parse(completedAt) - timing.startedAt)
       : undefined;
-    upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? undefined : view.body,
+    const completedStreamBody = method.endsWith("completed") && emptyNarrative
+      ? existing?.querySelector(".trace-body")?._miraSource
+      : undefined;
+    upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? completedStreamBody : view.body,
       method.endsWith("started") ? "运行中" : (item.status ?? "完成"), {
         activity: view.activity, summaryParts: view.summaryParts, turnId: params.turnId,
         ...(completedAt ? { completedAt, elapsedMs } : {}),

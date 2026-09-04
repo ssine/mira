@@ -28,6 +28,8 @@ function fixture(clipboard) {
     marked: { parse: (text) => `<p>${text}</p>` },
     DOMPurify: { sanitize: (html) => html },
     decorateTraceFileReferences: () => {},
+    traceStreamRenders: new WeakMap(),
+    cancelAnimationFrame: () => {},
   });
   vm.runInContext(app.slice(start, end), context);
   function card(kind, text) {

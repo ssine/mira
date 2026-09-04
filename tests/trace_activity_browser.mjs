@@ -125,6 +125,46 @@ try {
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy svg").count(), 1);
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy").getAttribute("aria-label"), "复制这条消息的原文");
 
+  const streamBenchmark = await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.clear();
+    h.agent.threadId = "stream-benchmark";
+    const chunk = "A short **streamed** sentence with `code`.\n";
+    const startedAt = performance.now();
+    for (let index = 0; index < 1_200; index += 1) {
+      h.notify({ method: "item/agentMessage/delta", params: {
+        threadId: "stream-benchmark", turnId: "stream-turn", itemId: "stream-item", delta: chunk,
+      } });
+    }
+    const dispatchMs = performance.now() - startedAt;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const body = document.querySelector(".trace-card.assistant .trace-body");
+    return {
+      dispatchMs,
+      sourceLength: body?._miraSource?.length ?? 0,
+      renderedLength: body?.textContent?.length ?? 0,
+      markdownDuringStream: body?.classList.contains("markdown-body") ?? false,
+    };
+  });
+  console.log(`TRACE_STREAM_BENCHMARK dispatch=${streamBenchmark.dispatchMs.toFixed(1)}ms bytes=${streamBenchmark.sourceLength}`);
+  assert.equal(streamBenchmark.sourceLength, 1_200 * "A short **streamed** sentence with `code`.\n".length);
+  assert.equal(streamBenchmark.renderedLength, streamBenchmark.sourceLength);
+  assert.equal(streamBenchmark.markdownDuringStream, false, "live deltas use the lossless lightweight renderer");
+  assert.ok(streamBenchmark.dispatchMs < 1_000,
+    `streaming 1,200 deltas blocked the browser for ${streamBenchmark.dispatchMs.toFixed(1)}ms`);
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    const body = document.querySelector(".trace-card.assistant .trace-body");
+    h.notify({ method: "item/completed", params: {
+      threadId: "stream-benchmark", turnId: "stream-turn",
+      item: { id: "stream-item", type: "agentMessage", text: body._miraSource, status: "completed" },
+    } });
+  });
+  assert.equal(await page.locator(".trace-card.assistant .trace-body").evaluate((node) => node.classList.contains("markdown-body")), true,
+    "completed messages receive the full Markdown renderer");
+  assert.equal(await page.locator(".trace-card.assistant strong").count(), 1_200);
+  await page.evaluate(() => { window.traceHarness.agent.threadId = "progress-thread"; window.traceHarness.clear(); });
+
   const uploaded = await page.evaluate(async () => {
     const h = window.traceHarness;
     h.nodes.set("test-node", { platform: "linux", capabilities: { files: true } });
