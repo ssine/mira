@@ -13,6 +13,7 @@ const assets = new Map([
   ["/app.js", ["public/app.js", "text/javascript"]],
   ["/trace-activity.js", ["public/trace-activity.js", "text/javascript"]],
   ["/conversation-progress.js", ["public/conversation-progress.js", "text/javascript"]],
+  ["/theme.js", ["public/theme.js", "text/javascript"]],
   ["/styles.css", ["public/styles.css", "text/css"]],
   ["/vendor/xterm.js", ["node_modules/@xterm/xterm/lib/xterm.mjs", "text/javascript"]],
   ["/vendor/xterm-addon-fit.js", ["node_modules/@xterm/addon-fit/lib/addon-fit.mjs", "text/javascript"]],
@@ -29,6 +30,7 @@ const server = http.createServer(async (request, response) => {
       show("agentView");
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
         upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
+        show, renderNodes, renderEnrollments, renderAudit,
         message: onAgentSocketMessage, nodes: dashboardNodes,
         setInvoke: (fn) => { invokeNode = fn; }, clear: () => clear($("#conversationTrace")) };
     `);
@@ -45,6 +47,25 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(() => !!window.traceHarness);
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+  assert.equal(await page.locator("#globalAgent").getAttribute("aria-current"), "page");
+  await page.locator("#themeToggle").click();
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
+  await page.locator("#themeToggle").click();
+  assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
+  assert.equal(await page.locator("#conversationCwd").getAttribute("type"), "hidden", "thread cwd must not look editable per message");
+  assert.equal(await page.locator("#conversationInput").getAttribute("rows"), "1");
+  const singleLineHeight = await page.locator("#conversationInput").evaluate((node) => node.getBoundingClientRect().height);
+  await page.locator("#conversationInput").fill(Array.from({ length: 12 }, (_, index) => `Line ${index}`).join("\n"));
+  const expandedInput = await page.locator("#conversationInput").evaluate((node) => ({
+    height: node.getBoundingClientRect().height, overflow: getComputedStyle(node).overflowY,
+  }));
+  assert.ok(expandedInput.height > singleLineHeight && expandedInput.height <= 144);
+  assert.equal(expandedInput.overflow, "auto", "long input scrolls after reaching its height cap");
+  assert.equal(await page.locator("#conversationAttach svg").count(), 1);
+  assert.equal(await page.locator("#conversationSend svg").count(), 1);
+  await page.locator("#conversationInput").fill("");
   await page.evaluate(() => {
     const h = window.traceHarness;
     document.querySelector("#agentRuntimeNode").append(new Option("Test runtime", "test-node"));
@@ -82,6 +103,17 @@ try {
   });
   assert.equal(await page.locator("#conversationProgress").isVisible(), false, "first prose clears hint even before turn/start acknowledgement");
   await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+  await page.evaluate(() => window.traceHarness.notify({
+    method: "item/completed",
+    params: { threadId: "progress-thread", turnId: "progress-turn", item: { id: "prose", type: "agentMessage", text: "First body" } },
+  }));
+  assert.equal(await page.locator(".trace-card.assistant .trace-head").count(), 0, "Codex messages have no redundant heading");
+  assert.equal(await page.locator(".trace-card.user .trace-head").count(), 0, "user identity is expressed by alignment and bubble only");
+  assert.equal(await page.locator(".trace-card.user .trace-footer").count(), 0, "user messages need no elapsed time or copy action");
+  assert.match(await page.locator(".trace-card.assistant .trace-completed").textContent(), /完成$/);
+  assert.match(await page.locator(".trace-card.assistant .trace-elapsed").textContent(), /^耗时 /);
+  assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy svg").count(), 1);
+  assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy").getAttribute("aria-label"), "复制这条消息的原文");
 
   const uploaded = await page.evaluate(async () => {
     const h = window.traceHarness;
@@ -213,20 +245,68 @@ try {
     const h = window.traceHarness;
     h.clear();
     for (let i = 0; i < 50; i += 1) h.upsertTrace(`message-${i}`, "assistant", "Codex", `Message ${i}\n\nA short update.`, "");
-    const trace = document.querySelector("#conversationTrace");
-    trace.scrollTop = 0;
-    h.upsertTrace("next-message", "assistant", "Codex", "Streaming update", "");
   });
+  await page.locator("#conversationTrace").evaluate((trace) => { trace.scrollTop = 0; });
+  await page.evaluate(() => window.traceHarness.upsertTrace("next-message", "assistant", "Codex", "Streaming update", ""));
   assert.equal(await page.locator("#conversationTrace").evaluate((node) => node.scrollTop), 0, "new activity must respect scrolling into history");
   await page.evaluate(() => {
     const h = window.traceHarness;
     const trace = document.querySelector("#conversationTrace");
     trace.scrollTop = trace.scrollHeight;
-    h.upsertTrace("bottom-message", "assistant", "Codex", "Follow newest update", "");
+    const now = Date.now();
+    h.upsertTrace("bottom-message", "assistant", "Codex", "Follow newest update", "", {
+      completedAt: new Date(now - 5200).toISOString(), elapsedMs: 4800,
+    });
+    h.upsertTrace("preview-user", "user", "你", "把消息元信息放到正文下面。", "", {
+      completedAt: new Date(now - 4300).toISOString(), elapsedMs: 180,
+    });
+    h.upsertTrace("preview-assistant", "assistant", "Codex", "已经调整：左侧正文不再显示身份标题，也不使用气泡。", "", {
+      completedAt: new Date(now).toISOString(), elapsedMs: 4100,
+    });
   });
   assert.ok(await page.locator("#conversationTrace").evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 2));
 
+  if (process.env.MIRA_TRACE_WIDE_SCREENSHOT) {
+    await page.screenshot({ path: process.env.MIRA_TRACE_WIDE_SCREENSHOT, fullPage: true });
+  }
+  if (process.env.MIRA_DASHBOARD_SCREENSHOT) {
+    await page.evaluate(() => {
+      const h = window.traceHarness;
+      h.show("dashboardView");
+      document.querySelector("#onlineCount").textContent = "3";
+      document.querySelector("#pendingCount").textContent = "1";
+      document.querySelector("#approvedCount").textContent = "4";
+      h.renderEnrollments([{ enrollmentId: "enrollment", hostname: "New NAS", nodeKey: "nas-lab",
+        verificationCode: "284 091", platform: "linux", architecture: "arm64",
+        requestedFrom: "192.168.2.19", expiresAt: new Date(Date.now() + 600000).toISOString() }]);
+      h.renderNodes([
+        { nodeId: "00000000-0000-0000-0000-000000000001", hostname: "Sine Desktop", nodeKey: "windows-main",
+          platform: "windows", architecture: "amd64", nodeVersion: "0.13.1", status: "online", approvalStatus: "approved",
+          lastSeenAt: new Date().toISOString(), capabilities: { files: true, processes: true, pty: true, appServer: true } },
+        { nodeId: "00000000-0000-0000-0000-000000000002", hostname: "Home Server", nodeKey: "homeserver",
+          platform: "linux", architecture: "amd64", nodeVersion: "0.13.1", status: "online", approvalStatus: "approved",
+          lastSeenAt: new Date().toISOString(), capabilities: { files: true, processes: true, pty: true, appServer: true } },
+        { nodeId: "00000000-0000-0000-0000-000000000003", hostname: "Android Lab", nodeKey: "android-lab",
+          platform: "android", architecture: "arm64", nodeVersion: "0.13.1", status: "online", approvalStatus: "approved",
+          lastSeenAt: new Date().toISOString(), capabilities: { files: true, processes: true, screen: true, input: true } },
+        { nodeId: "00000000-0000-0000-0000-000000000004", hostname: "Old WSL", nodeKey: "wsl-old",
+          platform: "linux", architecture: "amd64", nodeVersion: "0.12.0", status: "offline", approvalStatus: "approved",
+          lastSeenAt: new Date(Date.now() - 86400000).toISOString(), capabilities: { files: true, processes: true } },
+      ]);
+      h.renderAudit([
+        { createdAt: new Date().toISOString(), action: "node.connected", clientType: "node", targetNodeId: "android-lab", success: true },
+        { createdAt: new Date(Date.now() - 45000).toISOString(), action: "codex_runtime.started", clientType: "admin", targetNodeId: "windows-main", success: true },
+      ]);
+    });
+    await page.screenshot({ path: process.env.MIRA_DASHBOARD_SCREENSHOT, fullPage: true });
+    await page.evaluate(() => window.traceHarness.show("agentView"));
+  }
+
   await page.setViewportSize({ width: 390, height: 844 });
+  if (process.env.MIRA_TRACE_MOBILE_MESSAGES_SCREENSHOT) {
+    await page.locator("#conversationTrace").evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await page.locator(".conversation-card").screenshot({ path: process.env.MIRA_TRACE_MOBILE_MESSAGES_SCREENSHOT });
+  }
   await page.evaluate((history) => {
     const h = window.traceHarness;
     h.clear();

@@ -19,6 +19,7 @@ function fixture(clipboard) {
       tag, className, textContent, disabled: false,
       attributes: {},
       listeners: {},
+      innerHTML: "",
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, listener) { this.listeners[name] = listener; },
       click() { return this.listeners.click(); },
@@ -55,6 +56,7 @@ test("copy keeps raw Markdown, code blocks, paths and Unicode without rendering 
   assert.deepEqual(notices, ["消息原文已复制"]);
   assert.equal(button.type, "button");
   assert.equal(button.attributes["aria-label"], "复制这条消息的原文");
+  assert.match(button.innerHTML, /<svg/);
   assert.equal(button.disabled, false);
 });
 

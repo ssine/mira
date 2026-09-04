@@ -299,6 +299,29 @@ POSTGRES_PASSWORD=ci-only-password docker compose -f compose.yaml config --quiet
 POSTGRES_PASSWORD=ci-only-password docker compose -f compose.homeserver.yaml config --quiet
 ```
 
+## Web design language
+
+The administrator console uses one coherent visual language across device operations, Agent chat and
+long-form output: clear, lightweight and engineering-oriented without looking ornamental or dense by
+default. Preserve these rules when adding UI:
+
+- use semantic CSS tokens for canvas, surfaces, text, state and accent colors; light is the default and
+  dark is a first-class persisted theme;
+- keep the global shell compact, use small control radii and thin borders, and reserve translucent
+  material for narrow navigation or temporary floating feedback;
+- treat device lists, audit data and debuggers as high-density workbenches with continuous surfaces;
+  cards are for real objects such as one Node, not for every paragraph or metric;
+- treat conversation prose as a reading surface: an approximately 808 px measure, comfortable line
+  height, restrained user bubbles, collapsible tool evidence and a composer anchored to the workspace;
+- use list/detail or list/Inspector layouts for files and tools, and keep selection, hover, status and
+  focus meanings consistent across views;
+- responsive layouts must preserve primary navigation, logout, progress/cancel and destructive-action
+  access. Respect reduced motion, reduced transparency and forced-color preferences.
+
+The implementation is framework-independent HTML/CSS/JavaScript under `server/public/`; do not add a
+frontend framework solely to reproduce a component skin. Visual changes must retain stable control IDs,
+API behavior, CSP compatibility and the real-browser shell/activity regressions.
+
 ## Known gaps
 
 The intended architecture records the most recent runtime Node for each thread, but still needs durable scheduled

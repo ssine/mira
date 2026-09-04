@@ -39,6 +39,7 @@ const staticAssets = new Map([
   ["/app.js", [path.join(publicDirectory, "app.js"), "text/javascript; charset=utf-8"]],
   ["/trace-activity.js", [path.join(publicDirectory, "trace-activity.js"), "text/javascript; charset=utf-8"]],
   ["/conversation-progress.js", [path.join(publicDirectory, "conversation-progress.js"), "text/javascript; charset=utf-8"]],
+  ["/theme.js", [path.join(publicDirectory, "theme.js"), "text/javascript; charset=utf-8"]],
   ["/styles.css", [path.join(publicDirectory, "styles.css"), "text/css; charset=utf-8"]],
   ["/vendor/xterm.js", [path.join(serverDirectory, "node_modules/@xterm/xterm/lib/xterm.mjs"), "text/javascript; charset=utf-8"]],
   ["/vendor/xterm-addon-fit.js", [path.join(serverDirectory, "node_modules/@xterm/addon-fit/lib/addon-fit.mjs"), "text/javascript; charset=utf-8"]],

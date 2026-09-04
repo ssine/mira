@@ -3,6 +3,18 @@ import { toolItemView, responseToolView, reasoningText, reasoningParts } from ".
 
 const maximumProjectedTextBytes = 1024 * 1024;
 
+function recordTimestamp(record) {
+  const value = record?.timestamp ?? record?.payload?.timestamp;
+  const milliseconds = typeof value === "number" ? value : Date.parse(value ?? "");
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
+}
+
+function elapsedMilliseconds(startedAt, completedAt) {
+  const start = Date.parse(startedAt ?? "");
+  const end = Date.parse(completedAt ?? "");
+  return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+}
+
 function valueText(value) {
   if (typeof value === "string") return value;
   if (value === null || value === undefined) return "";
@@ -138,6 +150,7 @@ export function projectCodexTranscript(items) {
   const records = Array.isArray(items) ? items : [];
   const responseCalls = new Set();
   const materializedTools = new Map();
+  const turnTimings = new Map();
   const callKey = (turnId, id) => JSON.stringify([turnId ?? null, id]);
   let scannedTurnId = null;
   for (const [index, record] of records.entries()) {
@@ -146,6 +159,17 @@ export function projectCodexTranscript(items) {
       scannedTurnId = payload.turn_id ?? scannedTurnId;
     }
     const turnId = payload.turn_id ?? payload.internal_chat_message_metadata_passthrough?.turn_id ?? scannedTurnId;
+    const completedAt = recordTimestamp(record);
+    if (turnId && completedAt) {
+      const timing = turnTimings.get(turnId) ?? {};
+      if (record?.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type)) {
+        timing.startedAt ??= completedAt;
+      }
+      if (record?.type === "event_msg" && ["task_complete", "turn_complete", "turn_aborted"].includes(payload.type)) {
+        timing.completedAt = completedAt;
+      }
+      turnTimings.set(turnId, timing);
+    }
     if (record?.type === "response_item") {
       const tool = responseToolCall(payload, index + 1, index, turnId);
       if (tool?.isCall) responseCalls.add(callKey(turnId, tool.callId));
@@ -161,7 +185,18 @@ export function projectCodexTranscript(items) {
   const toolCalls = new Map();
   let currentTurnId = null;
 
+  function withTiming(entry) {
+    if (!entry) return entry;
+    const completedAt = entry.completedAt ?? recordTimestamp(records[(entry.sourceItemSeq ?? 1) - 1]);
+    if (completedAt) entry.completedAt = completedAt;
+    if (["user", "assistant"].includes(entry.kind) && entry.elapsedMs == null) {
+      entry.elapsedMs = elapsedMilliseconds(turnTimings.get(entry.turnId)?.startedAt, completedAt);
+    }
+    return entry;
+  }
+
   function push(entry) {
+    entry = withTiming(entry);
     if (!entry || (!entry.body && entry.kind !== "tool")) return;
     if (["user", "assistant", "reasoning"].includes(entry.kind)) {
       const signature = JSON.stringify([
@@ -229,7 +264,7 @@ export function projectCodexTranscript(items) {
       let state = toolCalls.get(key);
       if (!state) {
         const materialized = materializedTools.get(key);
-        state = { entry: { ...tool.entry, ...materialized, key: tool.entry.key, sourceItemSeq: itemSeq }, materialized,
+        state = { entry: withTiming({ ...tool.entry, ...materialized, key: tool.entry.key, sourceItemSeq: itemSeq }), materialized,
           input: undefined, output: undefined };
         toolCalls.set(key, state);
         trace.push(state.entry);

@@ -3,18 +3,23 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="color-scheme" content="dark">
+    <meta name="color-scheme" content="light dark">
     <title>Mira · 私有设备网络</title>
+    <script src="/theme.js"></script>
     <link rel="stylesheet" href="/vendor/xterm.css">
     <link rel="stylesheet" href="/styles.css">
     <script type="module" src="/app.js"></script>
   </head>
   <body>
-    <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
     <header class="topbar">
-      <a class="brand" href="/" aria-label="Mira 首页"><span class="mark">M</span><span>Mira</span></a>
+      <a class="brand" href="/" aria-label="Mira 首页"><span class="mark">M</span><span>Mira</span><span class="brand-section">Personal Compute Fabric</span></a>
+      <nav id="globalNav" class="global-nav hidden" aria-label="主要导航">
+        <button id="globalNodes" class="global-nav-item" type="button">设备</button>
+        <button id="globalAgent" class="global-nav-item" type="button">Agent</button>
+      </nav>
       <div class="server-state"><span id="healthDot" class="dot"></span><span id="healthText">正在连接 Server</span></div>
-      <button id="logoutButton" class="ghost hidden" type="button">退出</button>
+      <button id="themeToggle" class="topbar-action" type="button" aria-label="切换到深色主题" title="切换外观"><span aria-hidden="true">◐</span><span class="topbar-action-label">深色</span></button>
+      <button id="logoutButton" class="ghost hidden" type="button" aria-label="退出管理员账户">退出</button>
     </header>
 
     <main>
@@ -81,16 +86,15 @@
         </section>
       </section>
 
-      <section id="agentView" class="agent-console hidden" aria-labelledby="agentTitle">
-        <div class="workspace-bar">
-          <button id="agentBack" class="back-button" type="button">← 返回设备网络</button>
-          <div class="workspace-identity"><span id="agentRuntimeBadge" class="badge">offline</span><div><h1 id="agentTitle">Agent 控制台</h1><p id="agentSubtitle" class="muted">PostgreSQL thread · 可选择原生运行节点</p></div></div>
-          <button id="agentRefresh" class="secondary" type="button">刷新</button>
-        </div>
+      <section id="agentView" class="agent-console hidden" aria-label="Agent 控制台">
         <div class="agent-layout">
           <aside class="agent-sidebar">
             <section class="agent-side-card">
-              <p class="eyebrow">RUNTIME</p><h2>运行节点</h2>
+              <div class="agent-side-head">
+                <div><p class="eyebrow">RUNTIME</p><h2>运行节点</h2></div>
+                <div class="agent-runtime-controls"><span id="agentRuntimeBadge" class="badge">offline</span><button id="agentRefresh" class="ghost" type="button">刷新</button></div>
+              </div>
+              <p id="agentSubtitle" class="agent-side-caption">PostgreSQL thread · 可选择原生运行节点</p>
               <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
               <label>该节点的默认工作目录<input id="agentRuntimeDefaultCwd" type="text" placeholder="Unix /path 或 Windows C:\\path"></label>
               <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
@@ -123,17 +127,18 @@
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             <form id="conversationForm" class="conversation-composer">
-              <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span></div>
-              <label class="composer-cwd">工作目录<input id="conversationCwd" type="text" placeholder="在运行节点上的绝对路径"></label>
+              <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span><button id="conversationUploadCancel" class="composer-cancel hidden" type="button" aria-label="取消上传" title="取消上传">×</button></div>
+              <input id="conversationCwd" type="hidden">
               <div id="conversationDropZone" class="conversation-drop-zone">
-                <textarea id="conversationInput" rows="4" placeholder="给 Codex 发消息…"></textarea>
                 <div id="conversationAttachments" class="conversation-attachments hidden" aria-live="polite"></div>
+                <div class="composer-input-row">
+                  <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
+                  <textarea id="conversationInput" rows="1" aria-label="给 Codex 发消息" placeholder="给 Codex 发消息…"></textarea>
+                  <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>
+                </div>
               </div>
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
-              <div class="composer-actions">
-                <div class="composer-tools"><button id="conversationAttach" class="ghost" type="button">＋ 图片或文件</button><button id="conversationUploadCancel" class="ghost hidden" type="button">取消上传</button><span id="conversationHint" class="muted">可粘贴或拖入图片与文件 · 上传支持取消</span></div>
-                <button id="conversationSend" class="primary" type="submit" disabled>发送 <span>→</span></button>
-              </div>
+              <span id="conversationHint" class="visually-hidden" role="status" aria-live="polite">可粘贴或拖入图片与文件，上传支持取消</span>
             </form>
           </section>
         </div>

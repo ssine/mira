@@ -114,3 +114,18 @@ test("paginates newest transcript items backwards without reordering", () => {
   assert.deepEqual(oldest.trace.map((item) => item.key), ["item-0", "item-1", "item-2", "item-3", "item-4"]);
   assert.equal(oldest.nextCursor, null);
 });
+
+test("projects durable completion clocks and turn elapsed time for narrative messages", () => {
+  const turnId = "00000000-0000-4000-8000-000000000020";
+  const result = projectCodexTranscript([
+    { timestamp: "2026-09-05T10:00:00.000Z", ...record("event_msg", { type: "task_started", turn_id: turnId }) },
+    { timestamp: "2026-09-05T10:00:00.120Z", ...record("event_msg", { type: "user_message", turn_id: turnId, message: "Start" }) },
+    { timestamp: "2026-09-05T10:00:06.250Z", ...record("event_msg", { type: "agent_message", turn_id: turnId, message: "Finished" }) },
+    { timestamp: "2026-09-05T10:00:06.400Z", ...record("event_msg", { type: "task_complete", turn_id: turnId }) },
+  ]);
+
+  assert.equal(result[0].completedAt, "2026-09-05T10:00:00.120Z");
+  assert.equal(result[0].elapsedMs, 120);
+  assert.equal(result[1].completedAt, "2026-09-05T10:00:06.250Z");
+  assert.equal(result[1].elapsedMs, 6250);
+});

@@ -12,6 +12,38 @@ let csrfToken = null;
 let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
 
+const themeStorageKey = "mira.theme";
+
+function terminalTheme() {
+  if (document.documentElement.dataset.theme === "dark") {
+    return {
+      background: "#17191c", foreground: "#e9edf2", cursor: "#6cb8f6", cursorAccent: "#17191c",
+      selectionBackground: "#294b68", black: "#17191c", brightBlack: "#77818d",
+      green: "#75c890", brightGreen: "#9acaac",
+    };
+  }
+  return {
+    background: "#1f2226", foreground: "#eef2f6", cursor: "#6cb8f6", cursorAccent: "#1f2226",
+    selectionBackground: "#315b7b", black: "#17191c", brightBlack: "#83909d",
+    green: "#72c98f", brightGreen: "#a0d9b3",
+  };
+}
+
+function syncThemeControl() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  const button = $("#themeToggle");
+  button.setAttribute("aria-label", `切换到${dark ? "浅色" : "深色"}主题`);
+  button.querySelector(".topbar-action-label").textContent = dark ? "浅色" : "深色";
+  if (workspace.terminal) workspace.terminal.options.theme = terminalTheme();
+}
+
+function toggleTheme() {
+  const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem(themeStorageKey, theme); } catch { /* unavailable storage */ }
+  syncThemeControl();
+}
+
 const workspace = {
   node: null,
   status: null,
@@ -48,6 +80,7 @@ const agent = {
   turnId: null,
   activeTurns: new Map(),
   turnThreads: new Map(),
+  turnTimings: new Map(),
   sessions: [],
   sessionNodeId: null,
   sessionScanEpoch: 0,
@@ -149,7 +182,14 @@ function show(view) {
   for (const id of ["loginView", "setupView", "dashboardView", "workspaceView", "agentView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
-  $("#logoutButton").classList.toggle("hidden", !["dashboardView", "workspaceView", "agentView"].includes(view));
+  const authenticated = ["dashboardView", "workspaceView", "agentView"].includes(view);
+  $("#logoutButton").classList.toggle("hidden", !authenticated);
+  $("#globalNav").classList.toggle("hidden", !authenticated);
+  $("#globalNodes").classList.toggle("active", ["dashboardView", "workspaceView"].includes(view));
+  $("#globalNodes").setAttribute("aria-current", ["dashboardView", "workspaceView"].includes(view) ? "page" : "false");
+  $("#globalAgent").classList.toggle("active", view === "agentView");
+  $("#globalAgent").setAttribute("aria-current", view === "agentView" ? "page" : "false");
+  document.body.dataset.view = view;
 }
 
 function toast(message) {
@@ -1017,17 +1057,7 @@ function ensureTerminal() {
     lineHeight: 1.22,
     scrollback: 5000,
     scrollOnUserInput: true,
-    theme: {
-      background: "#050806",
-      foreground: "#d5e6dc",
-      cursor: "#98f0bd",
-      cursorAccent: "#07100b",
-      selectionBackground: "#315b47",
-      black: "#07100b",
-      brightBlack: "#607168",
-      green: "#28c875",
-      brightGreen: "#98f0bd",
-    },
+    theme: terminalTheme(),
   });
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
@@ -1279,6 +1309,7 @@ function closeAgentSocket({ preserveSubmission = false } = {}) {
   agent.pending.clear();
   agent.activeTurns.clear();
   agent.turnThreads.clear();
+  agent.turnTimings.clear();
   syncActiveTurnUi();
   if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
   syncConversationSendUi();
@@ -1401,10 +1432,11 @@ function decorateTraceFileReferences(root) {
 }
 
 function createTraceCopyButton(card) {
-  const button = element("button", "trace-copy", "复制");
+  const button = element("button", "trace-copy");
   button.type = "button";
   button.title = "复制消息原文（保留 Markdown）";
   button.setAttribute("aria-label", "复制这条消息的原文");
+  button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.25" y="5.25" width="8" height="8" rx="1.25"></rect><path d="M10.75 5.25V3.5c0-.69-.56-1.25-1.25-1.25h-6c-.69 0-1.25.56-1.25 1.25v6c0 .69.56 1.25 1.25 1.25h1.75"></path></svg>';
   button.addEventListener("click", async (event) => {
     event?.preventDefault();
     event?.stopPropagation();
@@ -1424,6 +1456,30 @@ function createTraceCopyButton(card) {
   return button;
 }
 
+const traceClockFormatter = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+
+function traceClock(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isFinite(date.getTime()) ? traceClockFormatter.format(date) : "";
+}
+
+function setTraceMetadata(card, options = {}) {
+  const footer = card.querySelector(".trace-footer");
+  if (!footer) return;
+  if (Object.hasOwn(options, "completedAt")) card._miraCompletedAt = options.completedAt;
+  if (Object.hasOwn(options, "elapsedMs")) card._miraElapsedMs = options.elapsedMs;
+  const completed = footer.querySelector(".trace-completed");
+  const elapsed = footer.querySelector(".trace-elapsed");
+  const clock = traceClock(card._miraCompletedAt);
+  completed.textContent = clock ? `${clock} 完成` : "";
+  completed.hidden = !clock;
+  const duration = formatActivityDuration(card._miraElapsedMs);
+  elapsed.textContent = duration ? `耗时 ${duration}` : "";
+  elapsed.hidden = !duration;
+}
+
 function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const value = body ?? "";
   const node = card.querySelector(".trace-body");
@@ -1437,7 +1493,8 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   else node.textContent = value;
   node.hidden = value.length === 0;
   card.classList.toggle("trace-card-empty", value.length === 0);
-  card.querySelector(".trace-copy").hidden = value.length === 0;
+  const copy = card.querySelector(".trace-copy");
+  if (copy) copy.hidden = value.length === 0;
   if (kind === "reasoning" && card._miraExpandable) {
     card.querySelector(".trace-kind").textContent = reasoningHeading(value);
   }
@@ -1489,16 +1546,30 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
     card._miraExpandable = ["tool", "reasoning"].includes(kind);
-    const head = element(card._miraExpandable ? "summary" : "div", "trace-head");
-    const actions = element("div", "trace-actions");
-    actions.append(element("span", "trace-status", status), createTraceCopyButton(card));
-    head.append(element("span", "trace-kind", title), actions);
+    const copy = kind === "user" ? null : createTraceCopyButton(card);
     if (card._miraExpandable) {
+      const head = element("summary", "trace-head");
+      const actions = element("div", "trace-actions");
+      actions.append(element("span", "trace-status", status), copy);
+      head.append(element("span", "trace-kind", title), actions);
       const details = element("details", "trace-detail");
       details.append(head, element("div", "trace-body"));
       card.append(details);
-    } else card.append(head, element("div", "trace-body"));
+    } else if (kind === "assistant") {
+      const footer = element("footer", "trace-footer");
+      footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), copy);
+      card.append(element("div", "trace-body"), footer);
+    } else if (kind === "user") {
+      card.append(element("div", "trace-body"));
+    } else {
+      const head = element("div", "trace-head");
+      const actions = element("div", "trace-actions");
+      actions.append(element("span", "trace-status", status), copy);
+      head.append(element("span", "trace-kind", title), actions);
+      card.append(head, element("div", "trace-body"));
+    }
     setTraceBody(card, body, kind);
+    setTraceMetadata(card, options);
     if (kind === "tool" && options.collapseTools !== false) {
       ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     } else {
@@ -1507,9 +1578,10 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   } else {
     card.className = `trace-card ${kind}`;
     card.dataset.traceKind = kind;
-    card.querySelector(".trace-kind").textContent = title;
-    card.querySelector(".trace-status").textContent = status;
+    if (card.querySelector(".trace-kind")) card.querySelector(".trace-kind").textContent = title;
+    if (card.querySelector(".trace-status")) card.querySelector(".trace-status").textContent = status;
     if (body !== undefined) setTraceBody(card, body, kind);
+    setTraceMetadata(card, options);
   }
   card.dataset.traceTitle = title;
   card.dataset.traceStatus = status;
@@ -1743,7 +1815,11 @@ function renderThread(thread) {
     for (const item of turn.items ?? []) {
       const view = itemView(item);
       if (["assistant", "reasoning"].includes(view.kind) && !view.body) continue;
-      upsertTrace(liveTraceKey({ turnId: turn.id }, item.id ?? crypto.randomUUID?.() ?? Math.random()), view.kind, view.title, view.body, item.status ?? "", { autoScroll: false, activity: view.activity, summaryParts: view.summaryParts, turnId: turn.id });
+      upsertTrace(liveTraceKey({ turnId: turn.id }, item.id ?? crypto.randomUUID?.() ?? Math.random()), view.kind, view.title, view.body, item.status ?? "", {
+        autoScroll: false, activity: view.activity, summaryParts: view.summaryParts, turnId: turn.id,
+        completedAt: item.completedAt ?? item.updatedAt ?? item.createdAt,
+        elapsedMs: item.elapsedMs ?? item.durationMs,
+      });
     }
   }
   if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
@@ -1789,7 +1865,10 @@ function renderTranscript(fallbackThread, options = {}) {
   renderHistoryLoader(trace);
   for (const item of agent.transcriptItems) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
-    const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", { autoScroll: false, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId });
+    const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
+      autoScroll: false, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId,
+      completedAt: item.completedAt, elapsedMs: item.elapsedMs,
+    });
     if (expandedItems.has(key) && card.querySelector(".trace-detail")) card.querySelector(".trace-detail").open = true;
     if (expandedGroups.has(key) && card.closest(".tool-group")) card.closest(".tool-group").open = true;
   }
@@ -1907,6 +1986,9 @@ function handleAgentNotification(message) {
     if (threadId && turnId) {
       agent.activeTurns.set(threadId, turnId);
       agent.turnThreads.set(turnId, threadId);
+      const timing = agent.turnTimings.get(turnId) ?? {};
+      timing.startedAt ??= replyProgress.current(threadId)?.startedAt ?? Date.now();
+      agent.turnTimings.set(turnId, timing);
     }
     syncActiveTurnUi();
     return;
@@ -1915,10 +1997,24 @@ function handleAgentNotification(message) {
     const turn = params.turn ?? {};
     const completedTurnId = turn.id ?? params.turnId ?? null;
     const threadId = notificationThreadId(params) ?? agent.threadId;
+    const completedAt = Date.now();
+    const timing = completedTurnId ? (agent.turnTimings.get(completedTurnId) ?? {}) : {};
+    timing.completedAt = completedAt;
+    if (completedTurnId) agent.turnTimings.set(completedTurnId, timing);
     if (threadId && (!completedTurnId || agent.activeTurns.get(threadId) === completedTurnId)) {
       agent.activeTurns.delete(threadId);
     }
     if (completedTurnId) agent.turnThreads.delete(completedTurnId);
+    if (completedTurnId && threadId === agent.threadId) {
+      for (const card of $("#conversationTrace").querySelectorAll(`.trace-card[data-turn-id="${CSS.escape(completedTurnId)}"]`)) {
+        if (!["user", "assistant"].includes(card.dataset.traceKind)) continue;
+        const itemCompletedAt = card._miraCompletedAt ?? completedAt;
+        const elapsedMs = Number.isFinite(timing.startedAt)
+          ? Math.max(0, new Date(itemCompletedAt).getTime() - timing.startedAt)
+          : null;
+        setTraceMetadata(card, { completedAt: itemCompletedAt, elapsedMs });
+      }
+    }
     syncActiveTurnUi();
     void loadAgentThreads();
     if (threadId && threadId !== agent.threadId) return;
@@ -1942,8 +2038,16 @@ function handleAgentNotification(message) {
     const existing = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(itemKey)}"]`);
     const emptyNarrative = ["assistant", "reasoning"].includes(view.kind) && !view.body;
     if (emptyNarrative && !existing) return;
+    const timing = agent.turnTimings.get(params.turnId);
+    const completedAt = method.endsWith("completed") ? new Date().toISOString() : undefined;
+    const elapsedMs = completedAt && Number.isFinite(timing?.startedAt)
+      ? Math.max(0, Date.parse(completedAt) - timing.startedAt)
+      : undefined;
     upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? undefined : view.body,
-      method.endsWith("started") ? "运行中" : (item.status ?? "完成"), { activity: view.activity, summaryParts: view.summaryParts, turnId: params.turnId });
+      method.endsWith("started") ? "运行中" : (item.status ?? "完成"), {
+        activity: view.activity, summaryParts: view.summaryParts, turnId: params.turnId,
+        ...(completedAt ? { completedAt, elapsedMs } : {}),
+      });
     return;
   }
   if (method === "item/agentMessage/delta") {
@@ -2427,6 +2531,15 @@ function renderComposerAttachments() {
   }
 }
 
+function resizeConversationInput() {
+  const input = $("#conversationInput");
+  const maximum = 144;
+  input.style.height = "36px";
+  const height = Math.min(maximum, Math.max(36, input.scrollHeight));
+  input.style.height = `${height}px`;
+  input.style.overflowY = input.scrollHeight > maximum ? "auto" : "hidden";
+}
+
 function addComposerFiles(files) {
   if (agent.sendPromise) { toast("请等待当前提交完成，或取消上传后修改附件"); return; }
   for (const file of files) {
@@ -2466,7 +2579,11 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
   updateReplyProgress(progress, { threadId: agent.threadId, phase: attachments.length ? "正在上传附件…" : "正在发送…" });
   const prepared = await prepareTurnInput(text, attachments, progress);
   updateReplyProgress(progress, { phase: "正在提交消息，等待 Codex 回复…" });
-  const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", prepared.message, "已发送");
+  const optimisticCompletedAt = new Date().toISOString();
+  const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", prepared.message, "已发送", {
+    completedAt: optimisticCompletedAt,
+    elapsedMs: Number.isFinite(progress?.startedAt) ? Math.max(0, Date.parse(optimisticCompletedAt) - progress.startedAt) : null,
+  });
   optimistic.dataset.pendingUser = "true";
   const turnThreadId = agent.threadId;
   let result;
@@ -2484,6 +2601,9 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     updateReplyProgress(progress, { turnId: result.turn.id });
     agent.activeTurns.set(turnThreadId, result.turn.id);
     agent.turnThreads.set(result.turn.id, turnThreadId);
+    const timing = agent.turnTimings.get(result.turn.id) ?? {};
+    timing.startedAt ??= progress?.startedAt ?? Date.now();
+    agent.turnTimings.set(result.turn.id, timing);
   }
   syncActiveTurnUi();
 }
@@ -2497,6 +2617,17 @@ async function leaveAgentConsole() {
   closeAgentSocket();
   show("dashboardView");
   await loadDashboard();
+}
+
+async function navigateGlobal(target) {
+  if (target === "agent") {
+    if (!$("#workspaceView").classList.contains("hidden")) await leaveWorkspace();
+    if ($("#agentView").classList.contains("hidden")) await openAgentConsole();
+    return;
+  }
+  if (!$("#workspaceView").classList.contains("hidden")) await leaveWorkspace();
+  else if (!$("#agentView").classList.contains("hidden")) await leaveAgentConsole();
+  else if (!$("#dashboardView").classList.contains("hidden")) await loadDashboard();
 }
 
 $("#loginForm").addEventListener("submit", async (event) => {
@@ -2532,8 +2663,11 @@ $("#logoutButton").addEventListener("click", async () => {
   }
 });
 
+$("#themeToggle").addEventListener("click", toggleTheme);
+$("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
+$("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
+
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
-$("#agentBack").addEventListener("click", () => leaveAgentConsole().catch((error) => toast(error.message)));
 $("#agentRefresh").addEventListener("click", () => Promise.all([refreshAgentNodes(), loadAgentThreads()]).then(() => toast("Agent 状态已刷新")).catch((error) => toast(error.message)));
 $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catch((error) => {
   setAgentRuntimeState(`启动失败：${error.message}`, "offline");
@@ -2604,7 +2738,10 @@ $("#conversationForm").addEventListener("submit", async (event) => {
   syncConversationSendUi();
   try {
     await operation;
-    if ($("#conversationInput").value.trim() === text) $("#conversationInput").value = "";
+    if ($("#conversationInput").value.trim() === text) {
+      $("#conversationInput").value = "";
+      resizeConversationInput();
+    }
     agent.attachments = agent.attachments.filter((file) => !attachments.includes(file));
     renderComposerAttachments();
     $("#conversationHint").textContent = "可粘贴或拖入图片与文件 · 上传支持取消";
@@ -2625,6 +2762,7 @@ $("#conversationInput").addEventListener("keydown", (event) => {
     if (!agent.sendPromise) $("#conversationForm").requestSubmit();
   }
 });
+$("#conversationInput").addEventListener("input", resizeConversationInput);
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
 $("#conversationUploadCancel").addEventListener("click", () => {
   agent.uploadController?.abort();
@@ -2814,4 +2952,5 @@ for (const button of document.querySelectorAll("[data-copy-install]")) {
   });
 }
 
+syncThemeControl();
 void bootstrap();

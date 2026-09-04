@@ -100,6 +100,7 @@ for (const [pathname, contentType] of [
   ["/", "text/html"],
   ["/app.js", "text/javascript"],
   ["/trace-activity.js", "text/javascript"],
+  ["/theme.js", "text/javascript"],
   ["/styles.css", "text/css"],
   ["/vendor/xterm.js", "text/javascript"],
   ["/vendor/xterm-addon-fit.js", "text/javascript"],
@@ -118,6 +119,7 @@ for (const [pathname, contentType] of [
 }
 assert(assets["/"].includes("/app.js") && assets["/"].includes("/styles.css"), "website shell does not load its assets");
 assert(assets["/"].includes("/vendor/xterm.css"), "website shell does not load xterm styles");
+assert(assets["/"].includes("/theme.js"), "website shell does not load its CSP-safe theme initializer");
 const shellResponse = await fetch(`${serverUrl}/`);
 const contentSecurityPolicy = shellResponse.headers.get("content-security-policy") ?? "";
 assert(contentSecurityPolicy.includes("img-src 'self' data: blob:") &&
@@ -128,6 +130,12 @@ assert(assets["/app.js"].includes('from "/vendor/xterm.js"'), "website does not 
 assert(assets["/app.js"].includes('from "/vendor/marked.js"'), "website does not load the Markdown renderer");
 assert(assets["/app.js"].includes('from "/vendor/dompurify.js"'), "website does not sanitize rendered Markdown");
 assert(assets["/"].includes("loginForm"), "website does not expose the administrator login view");
+for (const control of ["globalNav", "globalNodes", "globalAgent", "themeToggle"]) {
+  assert(assets["/"].includes(`id="${control}"`), `website omitted Nexus-style shell control ${control}`);
+}
+for (const wiring of ["themeStorageKey", "function terminalTheme()", "function toggleTheme()", "function navigateGlobal("]) {
+  assert(assets["/app.js"].includes(wiring), `website omitted shell behavior: ${wiring}`);
+}
 for (const control of ["installLinux", "installWindows", "installServer", "installAndroid"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted installer ${control}`);
 }
@@ -173,14 +181,15 @@ assert(assets["/app.js"].includes('sandbox: "danger-full-access"') &&
 "website does not start Codex in the default unrestricted sandbox mode");
 assert(!assets["/app.js"].includes('"Turn", "Codex 正在处理…", "运行中"'),
   "website still renders normal Turn lifecycle notifications as transcript cards");
-assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&
-  assets["/styles.css"].includes(".history-loader{flex:0 0 auto") &&
-  assets["/styles.css"].includes(".conversation-trace{max-height:68vh") &&
-  !/\.trace-body\{[^}]*max-height/.test(assets["/styles.css"]),
+const compactCss = assets["/styles.css"].replace(/\s+/g, "");
+assert(compactCss.includes(".trace-card{flex:00auto") &&
+  compactCss.includes(".history-loader{flex:00auto") &&
+  compactCss.includes(".conversation-trace{min-height:0;overflow-y:auto") &&
+  !/\.trace-body\{[^}]*max-height/.test(compactCss),
 "website conversation cards may shrink, nest scrollbars, or omit the history loader");
 assert(assets["/styles.css"].includes(".tool-group{") && assets["/styles.css"].includes(".tool-group-items{"),
   "website omitted collapsed tool-call groups");
-assert(assets["/styles.css"].includes('grid-template-areas:"conversation-head" "conversation-notice" "conversation-trace" "conversation-composer"'),
+assert(compactCss.includes('grid-template-areas:"conversation-head""conversation-notice""conversation-trace""conversation-composer"'),
   "website conversation rows can shift when the optional notice is hidden");
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
