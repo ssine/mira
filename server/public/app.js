@@ -2,6 +2,7 @@ import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/vendor/marked.js";
+import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -1373,7 +1374,9 @@ function createTraceCopyButton(card) {
   button.type = "button";
   button.title = "复制消息原文（保留 Markdown）";
   button.setAttribute("aria-label", "复制这条消息的原文");
-  button.addEventListener("click", async () => {
+  button.addEventListener("click", async (event) => {
+    event?.preventDefault();
+    event?.stopPropagation();
     // Read at click time: the same card may still be receiving streamed deltas.
     const source = card.querySelector(".trace-body")._miraSource ?? "";
     if (!source || button.disabled) return;
@@ -1404,6 +1407,9 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   node.hidden = value.length === 0;
   card.classList.toggle("trace-card-empty", value.length === 0);
   card.querySelector(".trace-copy").hidden = value.length === 0;
+  if (kind === "reasoning" && card._miraExpandable) {
+    card.querySelector(".trace-kind").textContent = reasoningHeading(value);
+  }
 }
 
 function traceNearBottom(trace = $("#conversationTrace"), threshold = 96) {
@@ -1417,25 +1423,26 @@ function scrollTraceToBottom(trace = $("#conversationTrace")) {
 function updateToolGroup(group) {
   if (!group) return;
   const cards = [...group.querySelectorAll(".trace-card.tool")];
-  const counts = new Map();
-  let running = 0;
-  for (const card of cards) {
-    const title = card.querySelector(".trace-kind")?.textContent || "工具";
-    counts.set(title, (counts.get(title) ?? 0) + 1);
-    if (/运行|等待/.test(card.querySelector(".trace-status")?.textContent ?? "")) running += 1;
-  }
+  const activities = cards.map((card) => card._miraActivity ?? {
+    status: activityStatus(card.dataset.traceStatus),
+    actions: [{ kind: "tool", label: card.dataset.traceTitle || "工具" }],
+  });
+  const running = activities.filter((activity) => activity.status === "running").length;
   group.querySelector(".tool-group-total").textContent = `工具调用 · ${cards.length} 次${running ? ` · ${running} 运行中` : ""}`;
-  group.querySelector(".tool-group-counts").textContent = [...counts]
-    .map(([title, count]) => `${title} × ${count}`)
-    .join(" · ");
+  group.querySelector(".tool-group-counts").textContent = summarizeActivities(activities);
+  const latest = activities.findLast((activity) => activity.status === "running") ?? activities.at(-1);
+  const duration = formatActivityDuration(latest?.durationMs);
+  group.querySelector(".tool-group-latest").textContent = `${activitySummary(latest)}${duration ? ` · ${duration}` : ""}`;
+  group.classList.toggle("has-running-tool", running > 0);
 }
 
-function ensureToolGroup(trace) {
+function ensureToolGroup(trace, turnId = "") {
   let group = trace.lastElementChild;
-  if (group?.classList.contains("tool-group")) return group;
+  if (group?.classList.contains("tool-group") && group.dataset.turnId === turnId) return group;
   group = element("details", "tool-group");
+  group.dataset.turnId = turnId;
   const summary = element("summary", "tool-group-summary");
-  summary.append(element("span", "tool-group-total"), element("span", "tool-group-counts"));
+  summary.append(element("span", "tool-group-total"), element("span", "tool-group-counts"), element("span", "tool-group-latest"));
   group.append(summary, element("div", "tool-group-items"));
   trace.append(group);
   return group;
@@ -1450,14 +1457,19 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card = element("article", `trace-card ${kind}`);
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
-    const head = element("div", "trace-head");
+    card._miraExpandable = ["tool", "reasoning"].includes(kind);
+    const head = element(card._miraExpandable ? "summary" : "div", "trace-head");
     const actions = element("div", "trace-actions");
     actions.append(element("span", "trace-status", status), createTraceCopyButton(card));
     head.append(element("span", "trace-kind", title), actions);
-    card.append(head, element("div", "trace-body"));
+    if (card._miraExpandable) {
+      const details = element("details", "trace-detail");
+      details.append(head, element("div", "trace-body"));
+      card.append(details);
+    } else card.append(head, element("div", "trace-body"));
     setTraceBody(card, body, kind);
     if (kind === "tool" && options.collapseTools !== false) {
-      ensureToolGroup(trace).querySelector(".tool-group-items").append(card);
+      ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     } else {
       trace.append(card);
     }
@@ -1467,6 +1479,19 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.querySelector(".trace-kind").textContent = title;
     card.querySelector(".trace-status").textContent = status;
     if (body !== undefined) setTraceBody(card, body, kind);
+  }
+  card.dataset.traceTitle = title;
+  card.dataset.traceStatus = status;
+  if (options.turnId) card.dataset.turnId = options.turnId;
+  if (options.activity !== undefined) card._miraActivity = options.activity;
+  if (options.summaryParts?.some((part) => part.trim())) card._miraSummaryParts = [...options.summaryParts];
+  if (card._miraActivity) {
+    card.querySelector(".trace-kind").textContent = activitySummary(card._miraActivity);
+    card.querySelector(".trace-status").textContent = formatActivityDuration(card._miraActivity.durationMs);
+    card.classList.toggle("activity-failed", ["failed", "declined", "interrupted"].includes(card._miraActivity.status));
+  } else if (kind === "reasoning") {
+    card.querySelector(".trace-kind").textContent = reasoningHeading(card.querySelector(".trace-body")._miraSource);
+    card.querySelector(".trace-status").textContent = "";
   }
   updateToolGroup(card.closest(".tool-group"));
   if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
@@ -1612,8 +1637,8 @@ function appendTraceText(key, kind, title, delta, status = "运行中") {
   const trace = $("#conversationTrace");
   const follow = traceNearBottom(trace);
   const existing = trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
-  const effectiveTitle = existing?.querySelector(".trace-kind")?.textContent || title;
-  const card = upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false });
+  const effectiveTitle = existing?.dataset.traceTitle || title;
+  const card = upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false, turnId: agent.turnId });
   const body = card.querySelector(".trace-body");
   setTraceBody(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind);
   if (follow) scrollTraceToBottom(trace);
@@ -1634,29 +1659,32 @@ function itemView(item) {
   const type = item?.type ?? "item";
   if (type === "userMessage") return { kind: "user", title: "你", body: traceText(item.content) };
   if (type === "agentMessage") return { kind: "assistant", title: "Codex", body: item.text ?? traceText(item.content) };
-  if (type === "reasoning") return { kind: "reasoning", title: "推理摘要", body: traceText(item.summary ?? item.content ?? item.text) };
-  if (type === "commandExecution") return {
-    kind: "tool", title: "Shell",
-    body: [traceText(item.command), item.cwd ? `cwd: ${item.cwd}` : "", item.aggregatedOutput ?? item.output]
-      .filter(Boolean).join("\n\n"),
-  };
-  if (type === "fileChange") return {
-    kind: "tool", title: "文件修改",
-    body: traceText(item.changes) || JSON.stringify(item.changes ?? item, null, 2),
-  };
-  if (["mcpToolCall", "dynamicToolCall", "toolCall"].includes(type)) return {
-    kind: "tool", title: `${item.server ?? item.namespace ?? "Tool"} · ${item.tool ?? item.name ?? type}`,
-    body: JSON.stringify({
-      arguments: item.arguments,
-      result: item.result,
-      contentItems: item.contentItems,
-      error: item.error,
-      success: item.success,
-    }, (_key, value) => value === undefined ? undefined : value, 2),
-  };
+  if (type === "reasoning") return { kind: "reasoning", title: "推理摘要", body: reasoningText(item), summaryParts: reasoningParts(item) };
+  const tool = toolItemView(item);
+  if (tool) return tool;
   if (type === "plan") return { kind: "reasoning", title: "计划", body: traceText(item.text ?? item.plan) || JSON.stringify(item, null, 2) };
   if (type === "contextCompaction") return { kind: "system", title: "上下文压缩", body: item.summary ?? "已压缩较早上下文" };
   return { kind: "tool", title: type, body: JSON.stringify(item, null, 2) };
+}
+
+function liveTraceKey(params, itemId) {
+  return `item-${JSON.stringify([params.threadId ?? notificationThreadId(params) ?? agent.threadId,
+    Object.hasOwn(params, "turnId") ? params.turnId : agent.turnId, itemId])}`;
+}
+
+function appendReasoningSummary(params) {
+  if (!params.delta) return;
+  const index = params.summaryIndex ?? 0;
+  if (!Number.isSafeInteger(index) || index < 0 || index > 1000) return;
+  const key = liveTraceKey(params, params.itemId ?? "reasoning");
+  const existing = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
+  const initial = existing?.querySelector(".trace-body")?._miraSource;
+  const parts = existing?._miraSummaryParts ?? (initial ? [initial] : []);
+  parts[index] = `${parts[index] ?? ""}${params.delta}`;
+  const body = parts.filter(Boolean).join("\n\n");
+  if (!body.trim()) return;
+  const card = upsertTrace(key, "reasoning", "推理摘要", body, "", { turnId: params.turnId });
+  card._miraSummaryParts = parts;
 }
 
 function renderThread(thread) {
@@ -1665,7 +1693,8 @@ function renderThread(thread) {
   for (const turn of turns) {
     for (const item of turn.items ?? []) {
       const view = itemView(item);
-      upsertTrace(`history-${turn.id}-${item.id ?? crypto.randomUUID?.() ?? Math.random()}`, view.kind, view.title, view.body, item.status ?? "", { autoScroll: false });
+      if (["assistant", "reasoning"].includes(view.kind) && !view.body) continue;
+      upsertTrace(liveTraceKey({ turnId: turn.id }, item.id ?? crypto.randomUUID?.() ?? Math.random()), view.kind, view.title, view.body, item.status ?? "", { autoScroll: false, activity: view.activity, summaryParts: view.summaryParts, turnId: turn.id });
     }
   }
   if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
@@ -1703,10 +1732,17 @@ function renderHistoryLoader(trace) {
 }
 
 function renderTranscript(fallbackThread, options = {}) {
+  const expandedItems = new Set([...$("#conversationTrace").querySelectorAll(".trace-detail[open]")]
+    .map((details) => details.closest(".trace-card").dataset.traceKey));
+  const expandedGroups = new Set([...$("#conversationTrace").querySelectorAll(".tool-group[open] .trace-card")]
+    .map((card) => card.dataset.traceKey));
   const trace = clear($("#conversationTrace"));
   renderHistoryLoader(trace);
   for (const item of agent.transcriptItems) {
-    upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", { autoScroll: false });
+    const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
+    const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", { autoScroll: false, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId });
+    if (expandedItems.has(key) && card.querySelector(".trace-detail")) card.querySelector(".trace-detail").open = true;
+    if (expandedGroups.has(key) && card.closest(".tool-group")) card.closest(".tool-group").open = true;
   }
   if (!agent.transcriptItems.length) {
     renderThread(fallbackThread);
@@ -1849,26 +1885,30 @@ function handleAgentNotification(message) {
   if (!notificationIsForOpenThread(params)) return;
   if (method === "item/started" || method === "item/completed") {
     const item = params.item ?? {};
-    const view = itemView(item);
-    const itemKey = `item-${item.id ?? (view.kind === "user" ? "current-user" : method)}`;
+    const view = itemView({ ...item, status: item.status ?? (method.endsWith("started") ? "inProgress" : "completed") });
+    const itemKey = liveTraceKey(params, item.id ?? (view.kind === "user" ? "current-user" : method));
     if (view.kind === "user") reconcilePendingUserTrace(itemKey, view.body);
     const existing = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(itemKey)}"]`);
     const emptyNarrative = ["assistant", "reasoning"].includes(view.kind) && !view.body;
     if (emptyNarrative && !existing) return;
     upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? undefined : view.body,
-      method.endsWith("started") ? "运行中" : (item.status ?? "完成"));
+      method.endsWith("started") ? "运行中" : (item.status ?? "完成"), { activity: view.activity, summaryParts: view.summaryParts, turnId: params.turnId });
     return;
   }
   if (method === "item/agentMessage/delta") {
-    appendTraceText(`item-${params.itemId ?? "assistant"}`, "assistant", "Codex", params.delta ?? "");
+    appendTraceText(liveTraceKey(params, params.itemId ?? "assistant"), "assistant", "Codex", params.delta ?? "");
     return;
   }
-  if (["item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta"].includes(method)) {
-    appendTraceText(`item-${params.itemId ?? "reasoning"}`, "reasoning", method.includes("plan") ? "计划" : "推理摘要", params.delta ?? "");
+  if (method === "item/reasoning/summaryTextDelta") {
+    appendReasoningSummary(params);
+    return;
+  }
+  if (method === "item/plan/delta") {
+    appendTraceText(liveTraceKey(params, params.itemId ?? "plan"), "reasoning", "计划", params.delta ?? "");
     return;
   }
   if (["item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/mcpToolCall/progress"].includes(method)) {
-    appendTraceText(`item-${params.itemId ?? "tool"}`, "tool", "工具输出", params.delta ?? params.message ?? "");
+    appendTraceText(liveTraceKey(params, params.itemId ?? "tool"), "tool", "工具输出", params.delta ?? params.message ?? "");
     return;
   }
   if (method === "error" || method === "warning") {

@@ -79,6 +79,7 @@ const assets = {};
 for (const [pathname, contentType] of [
   ["/", "text/html"],
   ["/app.js", "text/javascript"],
+  ["/trace-activity.js", "text/javascript"],
   ["/styles.css", "text/css"],
   ["/vendor/xterm.js", "text/javascript"],
   ["/vendor/xterm-addon-fit.js", "text/javascript"],

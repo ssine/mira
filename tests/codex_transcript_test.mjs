@@ -5,7 +5,7 @@ import { paginateCodexTranscript, projectCodexTranscript } from "../server/codex
 
 const record = (type, payload) => ({ type, payload });
 
-test("projects paginated item_completed history without duplicating command tools", () => {
+test("preserves nested command activities alongside distinct code-mode wrapper calls", () => {
   const turnId = "00000000-0000-4000-8000-000000000001";
   const result = projectCodexTranscript([
     record("event_msg", { type: "task_started", turn_id: turnId }),
@@ -28,12 +28,13 @@ test("projects paginated item_completed history without duplicating command tool
     } }),
   ]);
 
-  assert.deepEqual(result.map((item) => item.kind), ["user", "tool", "reasoning", "assistant"]);
-  assert.equal(result.filter((item) => item.kind === "tool").length, 1);
+  assert.deepEqual(result.map((item) => item.kind), ["user", "tool", "tool", "reasoning", "assistant"]);
+  assert.equal(result.filter((item) => item.kind === "tool").length, 2);
   assert.match(result[1].body, /text\(true\)/);
   assert.match(result[1].body, /Script completed/);
-  assert.equal(result[3].markdown, true);
-  assert.match(result[3].body, /^## Done/);
+  assert.equal(result[2].activity.actions[0].kind, "run");
+  assert.equal(result[4].markdown, true);
+  assert.match(result[4].body, /^## Done/);
 });
 
 test("projects legacy messages, reasoning, and paired custom tool output", () => {

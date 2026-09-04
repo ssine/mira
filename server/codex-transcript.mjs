@@ -1,4 +1,5 @@
 import { getStoreHead, getThreadHistory } from "./thread-store.mjs";
+import { toolItemView, responseToolView, reasoningText, reasoningParts } from "./public/trace-activity.js";
 
 const maximumProjectedTextBytes = 1024 * 1024;
 
@@ -72,8 +73,11 @@ function projectedMaterializedItem(item, context) {
     key: `history-${context.itemSeq}-${item?.id ?? context.index}`,
     turnId: context.turnId ?? null,
     sourceItemSeq: context.itemSeq,
+    itemId: item?.id ?? null,
     status: item?.status ?? "",
   };
+  const tool = toolItemView(item);
+  if (tool) return { ...base, ...tool, body: boundedText(tool.body) };
   if (type === "usermessage") return {
     ...base, kind: "user", title: "你", markdown: true, body: boundedText(valueText(item.content)),
   };
@@ -83,24 +87,7 @@ function projectedMaterializedItem(item, context) {
   };
   if (type === "reasoning") return {
     ...base, kind: "reasoning", title: "推理摘要", markdown: true,
-    body: boundedText(valueText(item.summary_text ?? item.summary ?? item.content ?? item.raw_content)),
-  };
-  if (type === "commandexecution") return {
-    ...base, kind: "tool", title: "Shell", markdown: false,
-    body: boundedText([
-      Array.isArray(item.command) ? item.command.join(" ") : printable(item.command),
-      item.cwd ? `cwd: ${item.cwd}` : "",
-      printable(item.aggregated_output ?? item.formatted_output ?? [item.stdout, item.stderr]),
-      item.exit_code === undefined || item.exit_code === null ? "" : `exit code: ${item.exit_code}`,
-    ].filter(Boolean).join("\n\n")),
-  };
-  if (type === "filechange") return {
-    ...base, kind: "tool", title: "文件修改", markdown: false,
-    body: boundedText([printable(item.changes), printable([item.stdout, item.stderr])].filter(Boolean).join("\n\n")),
-  };
-  if (["mcptoolcall", "dynamictoolcall", "toolcall", "collabagenttoolcall"].includes(type)) return {
-    ...base, kind: "tool", title: normalizedToolTitle(item), markdown: false,
-    body: toolBody(item.arguments ?? item.input ?? item.prompt, item.result ?? item.content_items ?? item.output ?? item.error),
+    body: boundedText(reasoningText(item)), summaryParts: reasoningParts(item).map(boundedText),
   };
   if (type === "plan") return {
     ...base, kind: "reasoning", title: "计划", markdown: true,
@@ -130,9 +117,10 @@ function responseToolCall(payload, itemSeq, index, turnId) {
     input: payload.input ?? payload.arguments ?? payload.command ?? payload.query,
     output: payload.output ?? payload.result,
     entry: {
-      key: `history-tool-${callId}`,
+      key: `history-tool-${turnId ?? "unscoped"}-${callId}`,
       turnId: turnId ?? null,
       sourceItemSeq: itemSeq,
+      itemId: callId,
       kind: "tool",
       title: isCall ? normalizedToolTitle(payload) : "工具输出",
       markdown: false,
@@ -148,17 +136,24 @@ function responseToolCall(payload, itemSeq, index, turnId) {
  */
 export function projectCodexTranscript(items) {
   const records = Array.isArray(items) ? items : [];
-  const responseToolTurns = new Set();
+  const responseCalls = new Set();
+  const materializedTools = new Map();
+  const callKey = (turnId, id) => JSON.stringify([turnId ?? null, id]);
   let scannedTurnId = null;
-  for (const record of records) {
+  for (const [index, record] of records.entries()) {
     const payload = record?.payload ?? {};
     if (record?.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type)) {
       scannedTurnId = payload.turn_id ?? scannedTurnId;
     }
     const turnId = payload.turn_id ?? payload.internal_chat_message_metadata_passthrough?.turn_id ?? scannedTurnId;
-    if (record?.type === "response_item" && [
-      "custom_tool_call", "function_call", "local_shell_call", "tool_search_call", "web_search_call",
-    ].includes(payload.type)) responseToolTurns.add(turnId ?? "unscoped");
+    if (record?.type === "response_item") {
+      const tool = responseToolCall(payload, index + 1, index, turnId);
+      if (tool?.isCall) responseCalls.add(callKey(turnId, tool.callId));
+    }
+    if (record?.type === "event_msg" && payload.type === "item_completed" && payload.item?.id) {
+      const entry = projectedMaterializedItem(payload.item, { itemSeq: index + 1, index, turnId });
+      if (entry?.kind === "tool") materializedTools.set(callKey(turnId, payload.item.id), entry);
+    }
   }
   const trace = [];
   const projectedById = new Map();
@@ -201,11 +196,11 @@ export function projectCodexTranscript(items) {
     }
     if (record.type === "event_msg" && payload.type === "item_completed") {
       const materialized = payload.item;
-      const materializedType = String(materialized?.type ?? "").replaceAll("_", "").toLowerCase();
-      // Response tool call/output pairs carry the exact model-facing input and
-      // output. Prefer them over their CommandExecution duplicate.
+      // Only deduplicate a proven counterpart. A code-mode wrapper and its
+      // nested command items are distinct; sharing a turn is not duplication.
       const materializedTurnId = payload.turn_id ?? recordTurnId;
-      if (!(materializedType === "commandexecution" && responseToolTurns.has(materializedTurnId ?? "unscoped"))) {
+      const key = callKey(materializedTurnId, materialized?.id);
+      if (!(materializedTools.has(key) && responseCalls.has(key))) {
         push(projectedMaterializedItem(materialized, {
           itemSeq, index, turnId: materializedTurnId,
         }));
@@ -222,7 +217,7 @@ export function projectCodexTranscript(items) {
         kind: "assistant", title: "Codex", markdown: true, status: "", phase: payload.phase ?? null,
         body: boundedText(payload.message ?? valueText(payload)),
       });
-      if (["agent_reasoning", "agent_reasoning_raw_content"].includes(payload.type)) push({
+      if (payload.type === "agent_reasoning") push({
         key: `history-${itemSeq}-reasoning`, turnId: recordTurnId ?? null, sourceItemSeq: itemSeq,
         kind: "reasoning", title: "推理摘要", markdown: true, status: "", body: boundedText(payload.text ?? valueText(payload)),
       });
@@ -230,30 +225,41 @@ export function projectCodexTranscript(items) {
     if (record.type !== "response_item") continue;
     const tool = responseToolCall(payload, itemSeq, index, recordTurnId);
     if (tool) {
-      let state = toolCalls.get(tool.callId);
+      const key = callKey(recordTurnId, tool.callId);
+      let state = toolCalls.get(key);
       if (!state) {
-        state = { entry: tool.entry, input: undefined, output: undefined };
-        toolCalls.set(tool.callId, state);
+        const materialized = materializedTools.get(key);
+        state = { entry: { ...tool.entry, ...materialized, key: tool.entry.key, sourceItemSeq: itemSeq }, materialized,
+          input: undefined, output: undefined };
+        toolCalls.set(key, state);
         trace.push(state.entry);
         projectedById.set(state.entry.key, state.entry);
       }
       if (tool.isCall) {
         state.input = tool.input;
-        state.entry.title = tool.entry.title;
-        state.entry.status = payload.status ?? state.entry.status;
+        state.payload = payload;
+        if (!state.materialized) {
+          state.entry.title = tool.entry.title;
+          state.entry.status = payload.status ?? state.entry.status;
+        }
         state.entry.sourceItemSeq = Math.min(state.entry.sourceItemSeq, itemSeq);
       }
       if (tool.isOutput) {
         state.output = tool.output;
-        state.entry.status = "完成";
+        if (!state.materialized) state.entry.status = "完成";
       }
-      state.entry.body = toolBody(state.input, state.output);
+      if (!state.materialized) {
+        const view = responseToolView(state.payload ?? {}, state.entry.status);
+        if (view) state.entry.activity = view.activity;
+      }
+      state.entry.body = state.materialized?.body || toolBody(state.input, state.output);
       continue;
     }
     if (payload.type === "reasoning") push({
       key: `history-${itemSeq}-${payload.id ?? "reasoning"}`, turnId: recordTurnId ?? null, sourceItemSeq: itemSeq,
+      itemId: payload.id ?? null, summaryParts: reasoningParts(payload).map(boundedText),
       kind: "reasoning", title: "推理摘要", markdown: true, status: "",
-      body: boundedText(valueText(payload.summary ?? payload.content)),
+      body: boundedText(reasoningText(payload)),
     });
     if (payload.type === "message" && visibleResponseMessage(payload)) push({
       key: `history-${itemSeq}-${payload.id ?? payload.role}`, turnId: recordTurnId ?? null, sourceItemSeq: itemSeq,
@@ -262,7 +268,7 @@ export function projectCodexTranscript(items) {
       body: boundedText(valueText(payload.content)),
     });
   }
-  return trace.filter((entry) => entry.body || entry.kind !== "tool");
+  return trace.filter((entry) => entry.body || entry.activity || entry.kind !== "tool");
 }
 
 export function paginateCodexTranscript(trace, cursor = null, limit = 60) {
