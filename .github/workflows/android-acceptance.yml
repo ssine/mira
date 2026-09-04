@@ -1,0 +1,67 @@
+name: Android acceptance
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/android-acceptance.yml"
+      - "VERSION"
+      - "node/**"
+
+permissions:
+  contents: read
+
+jobs:
+  signed-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Build signed APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.MIRA_ANDROID_KEYSTORE_BASE64 }}
+          MIRA_ANDROID_STORE_PASSWORD: ${{ secrets.MIRA_ANDROID_STORE_PASSWORD }}
+          MIRA_ANDROID_KEY_ALIAS: ${{ secrets.MIRA_ANDROID_KEY_ALIAS }}
+          MIRA_ANDROID_KEY_PASSWORD: ${{ secrets.MIRA_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${ANDROID_KEYSTORE_BASE64}" ]]; then
+            echo "MIRA_ANDROID_KEYSTORE_BASE64 is required" >&2
+            exit 1
+          fi
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/mira-release.jks"
+          export MIRA_ANDROID_KEYSTORE="${RUNNER_TEMP}/mira-release.jks"
+          ndk_version=$(<node/android/NDK_VERSION)
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${ndk_version}"
+          gradle -p node/android --no-daemon assembleRelease
+          version=$(<VERSION)
+          mkdir -p dist
+          cp node/android/app/build/outputs/apk/release/app-release.apk "dist/mira_${version}_android_arm64.apk"
+          (cd dist && sha256sum "mira_${version}_android_arm64.apk" > SHA256SUMS.android)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-android-signed-${{ github.run_id }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7

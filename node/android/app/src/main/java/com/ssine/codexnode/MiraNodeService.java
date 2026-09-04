@@ -35,6 +35,7 @@ public final class MiraNodeService extends Service {
 
     private final ExecutorService workers = Executors.newCachedThreadPool();
     private final AtomicInteger generation = new AtomicInteger();
+    private final Object nodeLifecycleLock = new Object();
     private final ScreenCaptureController capture = new ScreenCaptureController();
     private volatile Process nodeProcess;
     private volatile boolean desired;
@@ -164,8 +165,17 @@ public final class MiraNodeService extends Service {
                         configFile.getAbsolutePath());
             }
             builder.redirectErrorStream(true);
-            Process process = builder.start();
-            nodeProcess = process;
+            Process process;
+            synchronized (nodeLifecycleLock) {
+                // Package-replaced, accessibility and Activity recovery can all
+                // request a start within the same few milliseconds. Only the
+                // newest generation may cross the process-creation boundary.
+                if (!desired || currentGeneration != generation.get()) {
+                    return;
+                }
+                process = builder.start();
+                nodeProcess = process;
+            }
             publishStatus(this, "Running and connecting to " + config.serverUrl, effectiveMode);
             startForegroundForNode("Running in " + effectiveMode + " mode");
             try (BufferedReader lines = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
@@ -185,8 +195,10 @@ public final class MiraNodeService extends Service {
                 }
             }
             int exitCode = process.waitFor();
-            if (nodeProcess == process) {
-                nodeProcess = null;
+            synchronized (nodeLifecycleLock) {
+                if (nodeProcess == process) {
+                    nodeProcess = null;
+                }
             }
             if (desired && currentGeneration == generation.get()) {
                 publishStatus(this, "Mira Node exited with " + exitCode + "; reconnecting", effectiveMode);
@@ -255,8 +267,11 @@ public final class MiraNodeService extends Service {
     }
 
     private void stopNodeProcess() {
-        Process process = nodeProcess;
-        nodeProcess = null;
+        Process process;
+        synchronized (nodeLifecycleLock) {
+            process = nodeProcess;
+            nodeProcess = null;
+        }
         if (process != null && process.isAlive()) {
             Integer launcherPid = readRootLauncherPid();
             if (launcherPid != null) {
