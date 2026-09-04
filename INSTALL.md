@@ -2,7 +2,8 @@
 
 Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.12.0**，发布来源为
 [GitHub Releases](https://github.com/ssine/mira/releases)。无需安装 Go、Node.js 或 Termux。
-官方 Codex 是独立软件，它的版本号不与 Mira 绑定。
+Codex 运行包独立发行，其版本号由官方版本和 Mira 补丁修订号组成，例如 `0.151.0-mira.1`。
+以下拆分机制属于当前源码；已发布的 0.12.0 归档仍保持原样，需要发布新版 Mira 才会生效。
 
 ## Linux / WSL / NAS
 
@@ -135,9 +136,20 @@ Release workflow 构建桌面归档及正式签名 APK，再发布 GitHub Releas
 Secrets 注入：`MIRA_ANDROID_KEYSTORE_BASE64`、`MIRA_ANDROID_STORE_PASSWORD`、
 `MIRA_ANDROID_KEY_ALIAS`、`MIRA_ANDROID_KEY_PASSWORD`，不得进入 Git 或构建日志。
 
-仅更新 Mira 而未改变 Codex 时，手动 Release workflow 可指定 `codex_release` 复用已有正式版
-中的 Codex 包。工作流先核对该 tag 的 `CODEX_VERSION` 和完整 `patches/codex/` 与当前提交完全
-一致，再验证归档 SHA-256；不一致直接失败，不会把旧 Codex 混入新补丁。留空则从源码构建。
+Mira 的 Release workflow 只构建 Node/CLI/Server 对应产物与 APK，不再编译或附带 Codex。
+独立的 **Codex runtime release** workflow 使用 `codex-v<version>` tag，并始终以 `--latest=false`
+发布，不能抢占 Mira/Android 更新器的 `latest`。`node/internal/codex-runtime.json` 固定版本和
+补丁 SHA-256；更改 Codex 基线或补丁必须递增 `mira.N`，不得覆盖已有运行包。
+
+首次拆分可在 Codex workflow 指定 `codex_release=v0.12.0`，复用已经验收的完整 canonical package。
+它先验证对应 tag 的 `CODEX_VERSION`、全部 Codex 补丁和归档 SHA-256；不一致即失败。
+这种首次发行保留原始文件哈希，节点可直接从旧版本复制，避免重新下载大包。留空则从源码构建。
+`scripts/build-codex-release.mjs OUTPUT linux-amd64=PACKAGE windows-amd64=PACKAGE` 生成独立归档、
+逐文件哈希/大小清单与 SHA256SUMS；workflow 同时附带上游 LICENSE/NOTICE。
+
+发布顺序：先用 `publish=false` 验收 Codex 运行包，再发布独立 Codex tag；随后为 Mira 选择新的
+`VERSION`，验收 Node/APK 并发布 `v<VERSION>`。Mira 正式发布会检查固定 Codex release 已存在且
+不是草稿。普通 Mira 更新不需要重编 Codex，也不需要重发旧 Codex tag。
 发布前使用 `publish=false` 验收签名产物，再为同一提交创建正式 tag 和 Release。
 
 若本地上传较慢，可先创建指向已验收提交的 Release 草稿，再运行 `Publish verified release`
@@ -146,6 +158,37 @@ Secrets 注入：`MIRA_ANDROID_KEYSTORE_BASE64`、`MIRA_ANDROID_STORE_PASSWORD`�
 
 SHA-256 用于检测传输/文件损坏；发行信任边界是固定 GitHub 仓库与 HTTPS，不是独立离线签名
 的软件供应链。发布权限和 Android 签名私钥应严格保管。
+
+## 独立 Codex 运行包与缓存
+
+只有执行 Codex 的 Linux/WSL amd64、Windows amd64 节点需要运行包。文件、进程、PTY、SSH
+节点不下载；Android 不下载也不运行 Codex。Linux arm64 目前可通过显式路径提供兼容构建。
+
+```sh
+mira codex-runtime status             # 无需批准接入/联网，查看固定版本和本地缓存
+mira codex-runtime install            # 提前下载，亦可在节点获批前执行
+mira codex                           # 获批后，自动准备运行包，再启动共享 PostgreSQL 的 CLI
+mira codex-runtime install --release-directory /absolute/path/to/codex-release
+```
+
+离线目录需包含独立发行的 `codex-runtime.json` 和本平台归档；安装仍验证固定版本、补丁、
+归档与逐文件 SHA-256。不会改写系统官方 Codex 安装。Codex 的模型登录/凭据仍需单独配置。
+
+缓存位于 identity file 同级的 `runtimes/codex/<运行包版本>/<平台>/`，即 Linux 默认
+`~/.config/mira/runtimes/codex/`、Windows 默认 `%USERPROFILE%\.mira\runtimes\codex\`。
+自定义 `--identity` / `MIRA_IDENTITY_FILE` 沿用其目录；可用绝对路径 `MIRA_NODE_CODEX_CACHE`
+覆盖，CLI 与常驻 Node 应使用相同设置。缓存不放进 `versions/<Mira版本>`，不会随节点更新删除。
+
+第一次准备只请求小清单，再尝试从本机旧 Mira 版本的 `mira-codex-package` 校验并复制整包。
+只有每个文件都与固定发行完全一致才复用，否则下载；之后缓存完整时不访问网络。
+并发 CLI/App Server 共用操作系统文件锁，下载中断不发布半包，停止 App Server 会取消下载。
+网页会显示首次准备提示；失败保留具体原因，Node 的其他能力不受下载阻塞。
+
+App Server 默认选择固定运行包；显式 `CODEX_BINARY`、配置 `codexBinary` 或控制面 `codexPath`
+优先，不会自动换掉用户指定的构建，远端 ThreadStore 仍必须通过兼容性探针。
+切换 Codex 版本通过更新 Mira 的兼容锁完成，不提供任意追逐 Codex `latest` 的自动升级。
+旧缓存/旧 Mira 版本不会自动清理，便于回退；缓存损坏时会拒绝覆盖，先停用相关会话并手动将
+报错的精确版本目录移到备份位置，再安装，不要删除身份目录或整个 Mira 数据目录。
 
 ## 内嵌 OpenSSH 的安装布局
 

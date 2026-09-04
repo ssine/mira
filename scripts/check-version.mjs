@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import "./check-codex-runtime.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const version = fs.readFileSync(path.join(root, "VERSION"), "utf8").trim();
@@ -28,6 +29,5 @@ for (const [name, value] of mirrors) {
 if (!goVersion.includes(`Version   = "${version}"`)) throw new Error("Go default version does not match VERSION");
 if (!nodeDockerfile.includes(`ARG MIRA_VERSION=${version}`)) throw new Error("Node Docker default version does not match VERSION");
 if (!/^\d+\.\d+\.\d+$/.test(codexVersion)) throw new Error("CODEX_VERSION is not a semantic version");
-if (!nodeDockerfile.includes(`@openai/codex@${codexVersion}`)) throw new Error("Node Docker Codex version does not match CODEX_VERSION");
 
 process.stdout.write(`Mira version ${version} and Codex baseline ${codexVersion} are consistent.\n`);

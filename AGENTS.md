@@ -157,12 +157,28 @@ Discovery is read-only. Import is an explicit administrator action: preserve eve
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing
 divergent PostgreSQL history.
 
-amd64 Linux and Windows release packages include a canonical `mira-codex-package` with the Codex
-entrypoint, code-mode host, platform sandbox helpers, `rg`, resources and manifest, built from the
-official tag pinned by `CODEX_VERSION` and the narrow patch under `patches/codex/`. Keep ordinary
-official Codex installations usable, but never select one for remote ThreadStore execution unless the
-Node's runtime probe confirms support. `mira codex` intentionally injects the current Server endpoint,
-store ID and Node credential so CLI and web/App Server sessions share PostgreSQL.
+Mira Node/Server/APK releases (`v<VERSION>`) and optional Codex runtime releases
+(`codex-v<upstream>-mira.<revision>`) are independent. Never mark a Codex release as GitHub's latest
+Mira release. Node archives and the Node container must not bundle/download Codex during installation.
+`node/internal/codex-runtime.json` pins the upstream baseline, Mira patch revision and patch SHA-256;
+`CODEX_VERSION` and `patches/codex/` must agree with it. Keep the entire official canonical package
+(entrypoint, code-mode host, sandbox helpers, `rg`, resources, manifest) together in one runtime archive.
+Do not update companions independently. Released runtime tags/assets are immutable.
+
+On supported Linux/Windows amd64 nodes, `mira codex` and managed App Server download the pinned runtime
+on demand into `<identity-directory>/runtimes/codex/<runtime-version>/<platform>/`, optionally overridden
+by absolute `MIRA_NODE_CODEX_CACHE`. Runtime preparation must not block Node heartbeats; stop/shutdown
+cancels preparation. A valid cache is reused offline across Mira updates. Old bundled packages may be
+copied only after every canonical file matches the independent release manifest's size and SHA-256;
+retain old version directories for rollback. Checksums and source locks protect against corruption and
+wrong packages; the supply-chain trust anchor remains the fixed GitHub repository over HTTPS.
+
+Explicit `CODEX_BINARY`/local `codexBinary`/desired `codexPath` overrides remain supported and are never
+silently replaced by an automatic download. Keep ordinary official Codex installations usable, but
+remote ThreadStore execution must pass the Node's compatibility probe. `mira codex` injects the
+current Server endpoint, store ID and Node credential so CLI and web/App Server sessions share PostgreSQL.
+Android never downloads or executes the Codex runtime; Linux arm64 currently requires an explicit
+compatible build. Codex runtime installation does not grant model authentication.
 
 Node capabilities must retain these safety properties:
 

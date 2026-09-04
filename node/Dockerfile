@@ -16,8 +16,7 @@ FROM node:22-bookworm-slim
 
 RUN apt-get update \
   && apt-get install --yes --no-install-recommends ca-certificates procps util-linux \
-  && rm -rf /var/lib/apt/lists/* \
-  && npm install --global @openai/codex@0.151.0
+  && rm -rf /var/lib/apt/lists/*
 RUN install -d -o node -g node /home/node/.codex /home/node/.config/mira
 COPY --from=build /out/ /opt/mira/
 RUN ln -s /opt/mira/mira-node /usr/local/bin/mira-node \

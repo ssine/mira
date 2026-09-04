@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -52,22 +51,22 @@ try {
   const identityBefore = digest(await waitFile(identity));
   const configuration = path.join(path.dirname(identity), "node.json");
   const configBefore = digest(await fs.readFile(configuration));
+  const runtimeSentinel = path.join(path.dirname(identity), "runtimes", "codex", "retained-runtime.txt");
+  await fs.mkdir(path.dirname(runtimeSentinel), { recursive: true });
+  await fs.writeFile(runtimeSentinel, "Codex runtime cache is independent of Mira versions");
   child.kill("SIGTERM");
   await new Promise((resolve) => child.once("exit", resolve));
   child = null;
   command("sh", [...install, "--version", current, "--update"], { env: environment });
   assert.equal(digest(await fs.readFile(identity)), identityBefore);
   assert.equal(digest(await fs.readFile(configuration)), configBefore);
+  assert.equal(await fs.readFile(runtimeSentinel, "utf8"), "Codex runtime cache is independent of Mira versions");
   const version = JSON.parse(command(path.join(prefix, "bin/mira"), ["--json", "version"], { env: environment }));
   assert.equal(version.data.build.version, current);
   const codexPackage = path.join(prefix, "share/mira/versions", current, "mira-codex-package");
-  if (await fs.stat(codexPackage).catch(() => null)) {
-    await fs.access(path.join(codexPackage, "bin/codex"), fsConstants.X_OK);
-    await fs.access(path.join(codexPackage, "bin/codex-code-mode-host"), fsConstants.X_OK);
-    await fs.access(path.join(codexPackage, "codex-resources/bwrap"), fsConstants.X_OK);
-    await fs.access(path.join(codexPackage, "codex-path/rg"), fsConstants.X_OK);
-    await fs.access(path.join(codexPackage, "codex-package.json"));
-  }
+  assert.equal(await fs.stat(codexPackage).catch(() => null), null, "Mira Node archives must not bundle Codex");
+  const runtime = JSON.parse(command(path.join(prefix, "bin/mira"), ["--json", "codex-runtime", "status"], { env: environment }));
+  assert.equal(runtime.data.installed, false, "Node install/update must not download optional Codex");
   await fs.access(path.join(prefix, "share/mira/versions", previous, "mira-node"));
   const protectedInstall = await fs.readFile(path.join(prefix, "bin/mira-node"));
   await fs.appendFile(path.join(releases, `mira_${current}_linux_amd64.tar.gz`), "corruption");
@@ -77,7 +76,7 @@ try {
   let windows = false;
   const powershell = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe";
   try { await fs.access(powershell); } catch { /* Linux CI has no Windows interop. */ }
-  if (await fs.stat(powershell).catch(() => null)) {
+  if (process.env.MIRA_TEST_SKIP_WINDOWS !== "1" && await fs.stat(powershell).catch(() => null)) {
     const windowsPath = (value) => command("wslpath", ["-w", value]).trim();
     const result = command(powershell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", windowsPath(path.join(root, "tests/windows_install_e2e.ps1")), "-Installer", windowsPath(path.join(root, "scripts/install.ps1")), "-ReleaseDirectory", windowsPath(releases), "-CurrentVersion", current, "-PreviousVersion", previous, "-TestPath"], { timeout: 120_000 });
     assert.match(result, /WINDOWS_INSTALL_UPDATE_OK/);

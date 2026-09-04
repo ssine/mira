@@ -40,6 +40,7 @@ const workspace = {
 const agent = {
   socket: null,
   socketNodeId: null,
+  runtimeStartEpoch: 0,
   pending: new Map(),
   requestId: 0,
   threadId: null,
@@ -1241,6 +1242,7 @@ function syncConversationSendUi() {
 }
 
 function closeAgentSocket() {
+  agent.runtimeStartEpoch++;
   const socket = agent.socket;
   agent.socket = null;
   agent.socketNodeId = null;
@@ -2095,25 +2097,32 @@ async function startAgentRuntime() {
   if (!nodeId) throw new Error("没有可运行 Codex 的节点");
   closeAgentSocket();
   setAgentRuntimeState("正在启动受控 App Server…", "offline");
+  const epoch = agent.runtimeStartEpoch;
   await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
-  const deadline = Date.now() + 30_000;
+  // A fresh Node may need its independent Codex package before it can start.
+  // Keep the page responsive and show preparation instead of a 30-second timeout.
+  const deadline = Date.now() + (dashboardNodes.get(nodeId)?.capabilities?.codexRuntimeDownload ? 21 * 60_000 : 30_000);
   let node;
   let lastError = "";
   let errorSince = 0;
   while (Date.now() < deadline) {
+    if (epoch !== agent.runtimeStartEpoch || $("#agentRuntimeNode").value !== nodeId) throw new Error("已取消等待 App Server 启动");
     node = await api(`/v1/nodes/${nodeId}`);
     dashboardNodes.set(node.nodeId, node);
     if (node.reportedAppServer?.status === "running") break;
-    const currentError = node.reportedAppServer?.lastError ?? "";
+    const preparing = node.reportedAppServer?.runtimePreparing === true;
+    if (preparing) setAgentRuntimeState("首次准备 Codex 运行包，下载与校验可能需要几分钟；节点其他功能可继续使用…", "offline");
+    const currentError = preparing ? "" : (node.reportedAppServer?.lastError ?? "");
     if (currentError !== lastError) {
       lastError = currentError;
       errorSince = currentError ? Date.now() : 0;
     } else if (currentError && Date.now() - errorSince > 5_000) {
       throw new Error(currentError);
     }
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => setTimeout(resolve, preparing ? 2_000 : 500));
   }
   if (node?.reportedAppServer?.status !== "running") throw new Error("App Server 启动超时");
+  if (epoch !== agent.runtimeStartEpoch || $("#agentRuntimeNode").value !== nodeId) throw new Error("已取消等待 App Server 启动");
   await connectAgentSocket(nodeId);
 }
 

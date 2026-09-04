@@ -39,6 +39,13 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ steps.source.outputs.commit }}
+      - name: Check optional runtime is published for split-release builds
+        run: |
+          # Older acceptance runs bundled Codex and have no independent lock.
+          if [[ -f node/internal/codex-runtime.json ]]; then
+            tag="codex-v$(jq -r .version node/internal/codex-runtime.json)"
+            test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = false
+          fi
       - uses: actions/download-artifact@v4
         with:
           name: mira-signed-acceptance

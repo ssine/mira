@@ -1,0 +1,293 @@
+name: Codex runtime release
+
+on:
+  push:
+    tags:
+      - "codex-v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the pinned independent runtime (never mark as latest Mira)"
+        type: boolean
+        default: false
+      codex_release:
+        description: "Optional legacy Mira v0.12.0 package with identical baseline/patch for first split release"
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  codex:
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            package: mira-codex-package-linux-amd64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: mira-codex-package-windows-amd64
+    # Copying an existing package is platform-independent; avoid Windows ZIP
+    # attributes/path conversion when no Windows compiler is needed.
+    runs-on: ${{ inputs.codex_release != '' && 'ubuntu-latest' || matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Validate Codex runtime lock
+        run: node scripts/check-codex-runtime.mjs
+
+      - name: Reuse an unchanged, checksummed Codex package
+        if: inputs.codex_release != ''
+        shell: bash
+        env:
+          REUSE_TAG: ${{ inputs.codex_release }}
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$REUSE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          git fetch --no-tags --depth=1 origin "tag" "$REUSE_TAG"
+          git diff --exit-code "$REUSE_TAG" HEAD -- CODEX_VERSION patches/codex/
+          version=${REUSE_TAG#v}
+          platform=linux; extension=tar.gz
+          if [[ "$TARGET" == *windows* ]]; then platform=windows; extension=zip; fi
+          prefix="mira_${version}_${platform}_amd64"
+          asset="$prefix.$extension"
+          cache="$RUNNER_TEMP/mira-reuse-codex"
+          mkdir -p "$cache"
+          gh release download "$REUSE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$cache" \
+            --pattern "$asset" --pattern SHA256SUMS
+          expected=$(awk -v name="$asset" '$2 == name { print $1 }' "$cache/SHA256SUMS")
+          actual=$(sha256sum < "$cache/$asset" | awk '{print $1}')
+          [[ "$expected" =~ ^[a-f0-9]{64}$ && "$actual" == "$expected" ]] || exit 1
+          if [[ "$platform" == windows ]]; then
+            unzip -q "$cache/$asset" -d "$cache"
+          else
+            tar -xf "$cache/$asset" -C "$cache" "$prefix/mira-codex-package"
+          fi
+          test -f "$cache/$prefix/mira-codex-package/codex-package.json"
+          mv "$cache/$prefix/mira-codex-package" "$PACKAGE"
+          suffix=""; [[ "$platform" == windows ]] && suffix=.exe
+          for required in "bin/codex$suffix" "bin/codex-code-mode-host$suffix" "codex-path/rg$suffix"; do
+            test -s "$PACKAGE/$required" || { echo "Missing reused Codex file: $required" >&2; exit 1; }
+          done
+
+      - name: Prepare patched Codex source and upstream notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          codex_version=$(<CODEX_VERSION)
+          git clone --depth 1 --branch "rust-v${codex_version}" https://github.com/openai/codex.git upstream-codex
+          git -C upstream-codex apply "$GITHUB_WORKSPACE/patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: inputs.codex_release == ''
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: actions/setup-python@v6
+        if: inputs.codex_release == ''
+        with:
+          python-version: "3.13"
+
+      - if: runner.os == 'Linux' && inputs.codex_release == ''
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install Linux MUSL toolchain
+        if: runner.os == 'Linux' && inputs.codex_release == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils libcap-dev pkg-config
+          bash upstream-codex/.github/scripts/install-musl-build-tools.sh
+
+      - name: Configure verified Codex rusty_v8 artifacts
+        if: inputs.codex_release == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=$(python upstream-codex/.github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)
+          base_url="https://github.com/openai/codex/releases/download/rusty-v8-v${version}"
+          artifact_dir="${RUNNER_TEMP}/mira-rusty-v8"
+          profile=ptrcomp_sandbox_release
+          mkdir -p "$artifact_dir"
+          if [[ "$TARGET" == *windows* ]]; then
+            archive="rusty_v8_${profile}_${TARGET}.lib.gz"
+          else
+            archive="librusty_v8_${profile}_${TARGET}.a.gz"
+          fi
+          binding="src_binding_${profile}_${TARGET}.rs"
+          checksums="rusty_v8_${profile}_${TARGET}.sha256"
+          curl -fsSL "$base_url/$archive" -o "$artifact_dir/$archive"
+          curl -fsSL "$base_url/$binding" -o "$artifact_dir/$binding"
+          curl -fsSL "$base_url/$checksums" -o "$artifact_dir/$checksums"
+          (cd "$artifact_dir" && tr -d '\r' < "$checksums" | sha256sum -c -)
+          echo "RUSTY_V8_ARCHIVE=$artifact_dir/$archive" >> "$GITHUB_ENV"
+          echo "RUSTY_V8_SRC_BINDING_PATH=$artifact_dir/$binding" >> "$GITHUB_ENV"
+
+      - name: Build Linux sandbox resource
+        if: runner.os == 'Linux' && inputs.codex_release == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          export AWS_LC_SYS_NO_JITTER_ENTROPY=1
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
+          export "$target_no_jitter=1"
+          cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
+            --target "$TARGET" --release --locked --bin bwrap
+          bwrap="upstream-codex/codex-rs/target/${TARGET}/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap"
+          digest=$(sha256sum "$bwrap" | awk '{print $1}')
+          echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
+
+      - name: Build Mira-compatible Codex
+        if: inputs.codex_release == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          build_args=(--bin codex --bin codex-code-mode-host)
+          if [[ "$TARGET" == "x86_64-pc-windows-msvc" ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+            build_args+=(--bin codex-command-runner --bin codex-windows-sandbox-setup)
+          else
+            export AWS_LC_SYS_NO_JITTER_ENTROPY=1
+            target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
+            export "$target_no_jitter=1"
+          fi
+          cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
+            --target "$TARGET" --release --locked "${build_args[@]}"
+
+      - name: Strip Linux release binaries
+        if: runner.os == 'Linux' && inputs.codex_release == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          release_dir="upstream-codex/codex-rs/target/${TARGET}/release"
+          for binary in codex codex-code-mode-host; do
+            strip --strip-debug --strip-unneeded "$release_dir/$binary"
+          done
+
+      - name: Assemble canonical Codex package
+        if: inputs.codex_release == ''
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          PACKAGE: ${{ matrix.package }}
+          CODEX_REPO_ROOT: ${{ github.workspace }}/upstream-codex
+        run: |
+          set -euo pipefail
+          codex_version=$(<CODEX_VERSION)
+          release_dir="$GITHUB_WORKSPACE/upstream-codex/codex-rs/target/${TARGET}/release"
+          suffix=""
+          [[ "$TARGET" == *windows* ]] && suffix=".exe"
+          arguments=(
+            --target "$TARGET"
+            --package-version "$codex_version"
+            --package-dir "$GITHUB_WORKSPACE/$PACKAGE"
+            --entrypoint-bin "$release_dir/codex${suffix}"
+            --code-mode-host-bin "$release_dir/codex-code-mode-host${suffix}"
+          )
+          if [[ "$TARGET" == *windows* ]]; then
+            arguments+=(
+              --codex-command-runner-bin "$release_dir/codex-command-runner.exe"
+              --codex-windows-sandbox-setup-bin "$release_dir/codex-windows-sandbox-setup.exe"
+            )
+          else
+            arguments+=(--bwrap-bin "$release_dir/bwrap")
+          fi
+          python upstream-codex/scripts/build_codex_package.py "${arguments[@]}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-codex-${{ matrix.target }}
+          path: ${{ matrix.package }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        with:
+          name: codex-upstream-notices
+          path: |
+            upstream-codex/LICENSE
+            upstream-codex/NOTICE
+          if-no-files-found: error
+
+  release:
+    needs: codex
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mira-codex-*
+          path: codex-dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: codex-upstream-notices
+          path: notices
+      - name: Package independent runtimes
+        run: |
+          node scripts/build-codex-release.mjs codex-release \
+            linux-amd64=codex-dist/mira-codex-x86_64-unknown-linux-musl \
+            windows-amd64=codex-dist/mira-codex-x86_64-pc-windows-msvc
+          cp notices/LICENSE codex-release/LICENSE
+          cp notices/NOTICE codex-release/NOTICE
+          (cd codex-release && sha256sum LICENSE NOTICE >> SHA256SUMS)
+          version=$(node -p "require('./node/internal/codex-runtime.json').version")
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "codex-v$version" ]]; then
+            echo "Codex tag does not match runtime lock" >&2; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-codex-release
+          path: codex-release/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Publish immutable Codex runtime, separately from Mira latest
+        if: github.ref_type == 'tag' || inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./node/internal/codex-runtime.json').version")
+          tag="codex-v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Runtime already exists; bump the Mira patch revision, never overwrite" >&2; exit 1
+          fi
+          if git rev-parse "$tag" >/dev/null 2>&1; then
+            test "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse HEAD)"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+          gh release create "$tag" codex-release/* --verify-tag --latest=false \
+            --title "Mira-compatible Codex $version" \
+            --notes "Independent optional Codex runtime. Keep each complete canonical package together. This is not a Mira Node/Server/APK update. Upstream LICENSE and NOTICE accompany the assets; source baseline and patch are recorded in codex-runtime.json and this tag."

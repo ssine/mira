@@ -13,7 +13,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -51,13 +50,17 @@ type appServerInstance struct {
 }
 
 type appServerManager struct {
-	configuration config
-	mu            sync.Mutex
-	nodeToken     string
-	discovered    bool
-	installations []codexInstallation
-	instance      *appServerInstance
-	lastError     string
+	configuration    config
+	mu               sync.Mutex
+	nodeToken        string
+	discovered       bool
+	installations    []codexInstallation
+	instance         *appServerInstance
+	lastError        string
+	runtimePreparing bool
+	runtimeCancel    context.CancelFunc
+	runtimeRetryAt   time.Time
+	runtimeInstall   func(context.Context) (string, error) // injectable preparation for tests
 }
 
 func (manager *appServerManager) setNodeCredential(token string) {
@@ -85,7 +88,7 @@ func (manager *appServerManager) discover(ctx context.Context) error {
 	if !supportsAppServer() {
 		return nil
 	}
-	paths := codexCandidatePaths(manager.configuration.CodexBinary)
+	paths := managedCodexCandidates(manager.configuration.CodexBinary, manager.configuration.IdentityFile)
 	seen := map[string]bool{}
 	installations := []codexInstallation{}
 	for _, candidate := range paths {
@@ -102,7 +105,6 @@ func (manager *appServerManager) discover(ctx context.Context) error {
 			"remoteThreadStoreSupported": installation.RemoteThreadStoreSupported,
 		})
 	}
-	sort.Slice(installations, func(i, j int) bool { return installations[i].Path < installations[j].Path })
 	manager.mu.Lock()
 	manager.installations = installations
 	manager.mu.Unlock()
@@ -174,9 +176,6 @@ func (manager *appServerManager) selectCodex(ctx context.Context, desired desire
 			}
 			installation := inspectCodex(ctx, absolute)
 			manager.installations = append(manager.installations, installation)
-			sort.Slice(manager.installations, func(i, j int) bool {
-				return manager.installations[i].Path < manager.installations[j].Path
-			})
 			for index := range manager.installations {
 				if manager.installations[index].Path == absolute {
 					if eligible(&manager.installations[index]) {
@@ -221,7 +220,25 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 	defer manager.mu.Unlock()
 	desired = manager.effectiveDesired(desired)
 	if !desired.Running {
+		if manager.runtimeCancel != nil {
+			manager.runtimeCancel()
+		}
 		return manager.stopLocked()
+	}
+	if desired.CodexPath == "" && manager.configuration.CodexBinary == "" {
+		// Unconfigured managed execution always uses the pinned Mira runtime, not
+		// whichever unrelated Codex happens to sort first on PATH.
+		store, err := newCodexRuntimeStore(manager.configuration.IdentityFile)
+		if err != nil {
+			manager.lastError = err.Error()
+			return err
+		}
+		binary, err := store.cached()
+		if err != nil {
+			manager.prepareRuntimeLocked(ctx, store)
+			return nil
+		}
+		desired.CodexPath = binary
 	}
 	selected := manager.selectCodex(ctx, desired)
 	if selected == nil || !selected.AppServerSupported {
@@ -238,6 +255,44 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 		}
 	}
 	return manager.startLocked(ctx, desired, *selected)
+}
+
+// Do not hold the manager lock or delay the reverse-channel heartbeat while a
+// large optional runtime downloads. A later reconciliation starts the process.
+func (manager *appServerManager) prepareRuntimeLocked(parent context.Context, store *codexRuntimeStore) {
+	if manager.runtimePreparing || time.Now().Before(manager.runtimeRetryAt) {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	manager.runtimePreparing, manager.runtimeCancel = true, cancel
+	manager.lastError = "preparing Codex runtime " + store.identity.Version
+	install := manager.runtimeInstall
+	if install == nil {
+		install = func(ctx context.Context) (string, error) { return store.ensure(ctx, io.Discard) }
+	}
+	go func() {
+		defer cancel()
+		binary, err := install(ctx)
+		var installation codexInstallation
+		if err == nil {
+			installation = inspectCodex(ctx, binary)
+			if !installation.AppServerSupported || !installation.RemoteThreadStoreSupported {
+				err = fmt.Errorf("downloaded Codex failed App Server/remote ThreadStore validation: %s", installation.ValidationError)
+			}
+		}
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		manager.runtimePreparing, manager.runtimeCancel = false, nil
+		if err != nil {
+			manager.lastError = "Codex runtime: " + err.Error()
+			if ctx.Err() == nil {
+				manager.runtimeRetryAt = time.Now().Add(time.Minute)
+			}
+			return
+		}
+		manager.runtimeRetryAt, manager.lastError = time.Time{}, ""
+		manager.installations = append([]codexInstallation{installation}, manager.installations...)
+	}()
 }
 
 func channelClosed(channel <-chan struct{}) bool {
@@ -400,9 +455,14 @@ func (manager *appServerManager) report() map[string]any {
 	miraCLIPath := localMiraCLIPath()
 	instance := manager.instance
 	if instance == nil || channelClosed(instance.done) {
+		status := "stopped"
+		if manager.runtimePreparing {
+			status = "starting"
+		}
 		return map[string]any{
-			"status": "stopped", "lastError": manager.lastError,
-			"miraCliPath": miraCLIPath,
+			"status": status, "lastError": manager.lastError,
+			"runtimePreparing": manager.runtimePreparing,
+			"miraCliPath":      miraCLIPath,
 		}
 	}
 	status := "starting"
@@ -430,5 +490,8 @@ func (manager *appServerManager) readyListenURL() (string, bool) {
 func (manager *appServerManager) close() {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.runtimeCancel != nil {
+		manager.runtimeCancel()
+	}
 	_ = manager.stopLocked()
 }

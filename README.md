@@ -50,9 +50,10 @@ amd64 发布包内置同一 `CODEX_VERSION` 基线的 Mira 版 Codex 及 code-mo
 ## 安装与升级
 
 在管理员网站展开「添加设备」即可复制带当前 Server 地址的安装命令。
-Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。amd64 桌面包同时安装
-支持 PostgreSQL ThreadStore 的完整 Mira Codex package，包含平台 sandbox helper、code-mode host、
-`rg` 和官方 package manifest，无需另外改写官方 Codex 安装。
+Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。当前源码已将发行拆成
+**Mira 节点包**与**可选 Codex 运行包**：节点包只包含 Mira 和内嵌 OpenSSH；首次执行 `mira codex`
+或启动受控 App Server 时，按需安装固定兼容版本的完整 Codex package。缓存跨 Mira 版本复用，
+节点升级不会重复下载 Codex；Android 不下载 Codex。拆分不会自动改变已经发布的 0.12.0 包。
 后续桌面端执行 `mira update`；Android 在 APP 内检查更新。身份和配置随升级保留。
 具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 

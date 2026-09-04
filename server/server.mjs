@@ -362,7 +362,7 @@ async function route(request, response) {
     const running = match[2] === "start";
     if (running) {
       const requestedPath = typeof body.codexPath === "string" ? body.codexPath : null;
-      const compatible = requestedPath || (node.codexInstallations ?? []).some((installation) =>
+      const compatible = requestedPath || node.capabilities?.codexRuntimeDownload === true || (node.codexInstallations ?? []).some((installation) =>
         installation.remoteThreadStoreSupported === true);
       if (!compatible) {
         errorJson(response, 409,

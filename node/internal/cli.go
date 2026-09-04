@@ -652,8 +652,16 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 		args = args[1:]
 	}
 	candidates := codexCandidatePaths(os.Getenv("CODEX_BINARY"))
-	if len(candidates) == 0 {
-		return fmt.Errorf("no Codex executable found; install Codex or set CODEX_BINARY")
+	if os.Getenv("CODEX_BINARY") == "" {
+		store, err := newCodexRuntimeStore(client.options.Identity)
+		if err != nil {
+			return err
+		}
+		binary, err := store.ensure(ctx, stderr)
+		if err != nil {
+			return err
+		}
+		candidates = []string{binary}
 	}
 	codexPath := ""
 	for _, candidate := range candidates {
@@ -663,7 +671,7 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 		}
 	}
 	if codexPath == "" {
-		return fmt.Errorf("no Mira-compatible Codex found; run mira update or set CODEX_BINARY to a patched build")
+		return fmt.Errorf("selected Codex does not support Mira's remote ThreadStore; check CODEX_BINARY or mira codex-runtime status")
 	}
 	storeID := os.Getenv("MIRA_CODEX_STORE_ID")
 	if storeID == "" {
@@ -683,7 +691,7 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 }
 
 func cliUsage() string {
-	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|ssh|scp|sftp> ..."
+	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
 }
 
 func cliExitCode(err error) int {
@@ -747,7 +755,7 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 		return 0
 	}
-	if remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" {
+	if remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" || remaining[0] == "codex-runtime" {
 		var value any
 		var localErr error
 		switch remaining[0] {
@@ -757,6 +765,8 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 			value, localErr = localStatus(ctx, options)
 		case "update":
 			value, localErr = runUpdate(ctx, options, remaining[1:], stdin, stdout, stderr)
+		case "codex-runtime":
+			value, localErr = runCodexRuntime(ctx, options, remaining[1:], stderr)
 		}
 		if localErr != nil {
 			printCLIError(stderr, options, localErr)
