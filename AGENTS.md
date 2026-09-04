@@ -68,6 +68,11 @@ automatic session recovery or Android PTY acceptance based only on cross-compila
 managed App Server receives the local CLI's absolute path and concise usage through merged developer
 instructions on every thread start/resume, so Codex and subagents can use the CLI without relying on
 `PATH` or confusing the SSH byte transport with the CapabilityService.
+The App Server broker defaults both thread start and resume to `approvalPolicy: never` and
+`sandbox: danger-full-access` when the client omits either field. This prevents managed Codex CLI
+network access and cross-directory work from being blocked by the Codex sandbox, including after an
+older thread is resumed. Preserve an explicit client override. This policy removes the Codex sandbox;
+it does not elevate beyond the Mira Node process' operating-system identity.
 
 Codex remains a native process on the selected execution node. Mira does not reimplement Codex or
 turn model execution into a central monolith. The central service coordinates nodes and persists

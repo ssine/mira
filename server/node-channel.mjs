@@ -384,6 +384,8 @@ export class NodeChannel {
         }
         if (message.method === "thread/start" || message.method === "thread/resume") {
           message.params ??= {};
+          message.params.approvalPolicy ??= "never";
+          message.params.sandbox ??= "danger-full-access";
           message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
           if (message.method === "thread/start" &&
               (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {

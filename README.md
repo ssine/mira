@@ -64,6 +64,9 @@ Server 在代理的 `thread/start` 和 `thread/resume` 中注入 `home_nodes`。
 可调用 Node B；subagent 继承 dynamicTools，但仍作为独立 thread 保存，并保留父子关系。所有 HTTP
 CLI 调用和 dynamicTools 最终都经过同一个 `CapabilityService`。Server 还记录每个 thread 最近一次
 实际运行的 Node；网页打开输出文件时优先使用当前运行节点，并以先前运行节点和导入来源节点回退。
+受控 App Server 会话默认使用 `approvalPolicy: never` 和 `sandbox: danger-full-access`，避免 CLI
+联网和跨目录操作被 Codex 沙箱拦截；显式请求的更严格策略仍会保留。该模式不会提升操作系统权限，
+Codex 仍以 Mira Node 所在用户身份运行，因此应只在受信任的个人节点上启用。
 
 ## 身份和权限
 

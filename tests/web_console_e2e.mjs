@@ -145,6 +145,9 @@ for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessio
 for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"image\"", "url: await fileDataUrl(image)", "?storeId=personal"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
+assert(assets["/app.js"].includes('sandbox: "danger-full-access"') &&
+  !assets["/app.js"].includes('sandbox: "workspace-write"'),
+"website does not start Codex in the default unrestricted sandbox mode");
 assert(!assets["/app.js"].includes('"Turn", "Codex 正在处理…", "运行中"'),
   "website still renders normal Turn lifecycle notifications as transcript cards");
 assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&

@@ -143,6 +143,8 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   const start = JSON.parse(node.sent.at(-1).payload);
   assert.equal(start.method, "thread/start");
   assert.equal(start.params.cwd, "/srv/mira-workspace");
+  assert.equal(start.params.approvalPolicy, "never");
+  assert.equal(start.params.sandbox, "danger-full-access");
   assert.match(start.params.developerInstructions, /^Keep the user's existing instruction\./);
   assert.match(start.params.developerInstructions, /'\/opt\/mira\/versions\/0\.11\.2\/mira' nodes list --json/);
   assert.match(start.params.developerInstructions, /SSH, SCP, and SFTP are CLI-only operations/);
@@ -164,10 +166,21 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
     },
   }));
   const resume = JSON.parse(node.sent.at(-1).payload);
+  assert.equal(resume.params.approvalPolicy, "never");
+  assert.equal(resume.params.sandbox, "danger-full-access");
   assert.match(resume.params.developerInstructions, /^Keep this resume instruction\./);
   assert.equal(resume.params.cwd, undefined, "resume must preserve the thread's persisted cwd");
   assert.doesNotMatch(resume.params.developerInstructions, /obsolete path/);
   assert.equal(resume.params.developerInstructions.match(/MIRA_CLI_INSTRUCTIONS_V1_BEGIN/g)?.length, 1);
+
+  client.emit("message", JSON.stringify({
+    id: 3,
+    method: "thread/start",
+    params: { approvalPolicy: "on-request", sandbox: "read-only" },
+  }));
+  const explicit = JSON.parse(node.sent.at(-1).payload);
+  assert.equal(explicit.params.approvalPolicy, "on-request");
+  assert.equal(explicit.params.sandbox, "read-only");
 
   channel.close();
 });

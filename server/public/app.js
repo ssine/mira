@@ -2203,7 +2203,7 @@ function addComposerFiles(files) {
 async function sendAgentMessage(text, attachments = []) {
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   if (!agent.threadId) {
-    const params = { approvalPolicy: "never", sandbox: "workspace-write" };
+    const params = { approvalPolicy: "never", sandbox: "danger-full-access" };
     const cwd = $("#conversationCwd").value.trim();
     if (cwd) params.cwd = cwd;
     const started = await rpc("thread/start", params, 120_000);

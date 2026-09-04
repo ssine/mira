@@ -95,7 +95,7 @@ async function initializeAppServer(nodeId) {
     JSON.stringify({
       method: "thread/start",
       id: 2,
-      params: { approvalPolicy: "never", sandbox: "read-only" },
+      params: {},
     }),
   );
   const started = await new Promise((resolve, reject) => {
@@ -108,8 +108,27 @@ async function initializeAppServer(nodeId) {
       }
     });
   });
-  socket.close();
   if (started.error) throw new Error(`thread/start failed: ${JSON.stringify(started.error)}`);
+  socket.send(JSON.stringify({
+    method: "thread/resume",
+    id: 3,
+    params: { threadId: started.result.thread.id },
+  }));
+  const resumed = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("thread/resume timed out")), 20_000);
+    socket.addEventListener("message", (event) => {
+      const message = JSON.parse(event.data);
+      if (message.id === 3) {
+        clearTimeout(timeout);
+        resolve(message);
+      }
+    });
+  });
+  socket.close();
+  if (resumed.error) throw new Error(`thread/resume failed: ${JSON.stringify(resumed.error)}`);
+  if (resumed.result.thread.id !== started.result.thread.id) {
+    throw new Error("thread/resume returned a different thread");
+  }
   return { initialized: response.result, threadId: started.result.thread.id, cwd: started.result.cwd };
 }
 
