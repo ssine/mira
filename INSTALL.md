@@ -126,6 +126,11 @@ SSH/SFTP 需要 Server 与目标 Node 升级至 0.10.1；调用方 CLI 也需升
 
 ## 发布维护
 
+日常 Server/Web 改动走 **Server CI**，只构建 Server 镜像并验证 PostgreSQL、鉴权、Web API 与
+会话迁移；部署时只替换 `control` 服务，不需要重编或更新 Node、CLI、OpenSSH 和 Android APK。
+Node、安装器或 SSH 通道变更走 **Node CI**，才会执行多平台客户端构建。Android 签名验收只在
+`node/**` 变化时自动运行，也可手动触发。推送 `v<VERSION>` 仍表示一次完整客户端正式发布。
+
 `VERSION` 是版本事实源，Go 开发默认值、Server package/lock 与 Docker 默认值由
 `scripts/check-version.mjs` 检查一致性。Android versionName/versionCode 从 VERSION 派生；
 发布二进制同时携带 commit、buildTime、protocolVersion。SemVer 的 minor/patch 须小于 1000，

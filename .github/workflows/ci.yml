@@ -1,17 +1,31 @@
-name: CI
+name: Server CI
 
 on:
+  workflow_dispatch:
   push:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "CODEX_VERSION"
+      - "VERSION"
+      - "compose*.yaml"
+      - "scripts/check-version.mjs"
+      - "server/**"
+      - "tests/**"
   pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "CODEX_VERSION"
+      - "VERSION"
+      - "compose*.yaml"
+      - "scripts/check-version.mjs"
+      - "server/**"
+      - "tests/**"
 
 permissions:
   contents: read
 
 jobs:
-  embedded-openssh:
-    uses: ./.github/workflows/openssh.yml
   checks:
-    needs: embedded-openssh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -22,55 +36,16 @@ jobs:
           cache: npm
           cache-dependency-path: server/package-lock.json
 
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: node/go.mod
-          cache-dependency-path: node/go.sum
-
       - name: Install server dependencies
         run: npm ci --prefix server
 
-      - name: Check JavaScript
+      - name: Check Server and Web code
         run: |
           npm run check --prefix server
           for file in tests/*.mjs; do node --check "$file"; done
-          node --test tests/codex_release_test.mjs tests/codex_runtime_ui_test.mjs
-          node --test tests/node_channel_test.mjs tests/ssh_relay_test.mjs
 
-      - name: Check Python
+      - name: Check Python helpers
         run: python3 -m compileall -q tests
-
-      - name: Test Mira Node
-        working-directory: node
-        run: go test -race ./...
-
-      - name: Cross-compile Mira Node
-        working-directory: node
-        run: |
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira-node.exe ./cmd/mira-node
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira.exe ./cmd/mira
-          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/mira-node-android ./cmd/mira-node
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: openssh-*-amd64
-          path: ${{ runner.temp }}/native
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: openssh-linux-arm64
-          path: ${{ runner.temp }}/native
-      - name: Stage verified native bundles
-        shell: bash
-        run: |
-          for target in linux-amd64 linux-arm64 windows-amd64; do
-            mkdir -p "node/openssh/out/$target"
-            tar -xzf "$RUNNER_TEMP/native/openssh-$target.tar.gz" -C "node/openssh/out/$target"
-          done
-      - name: Build release archives
-        run: |
-          ./scripts/build-release.sh dist
-          node tests/installers_e2e.mjs
 
       - name: Validate Compose files
         env:
@@ -82,18 +57,17 @@ jobs:
       - name: Build production Server container
         run: docker build -t mira-control:ci ./server
 
-      - name: Test authentication and Node enrollment through the container
+      - name: Test Server, Web, authentication, and session transfer
         env:
           MIRA_SECURE_COOKIES: "false"
         run: |
           docker compose -f compose.yaml up -d --wait postgres
-          trap 'docker compose -f compose.yaml down -v' EXIT
+          trap 'docker rm -f mira-ci-control >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
           printf '%s\n' 'mira-local-admin-password' | npm run admin --prefix server -- set-password admin
           docker run -d --name mira-ci-control --network host \
             -e DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira \
             -e MIRA_SECURE_COOKIES=false -e LISTEN_HOST=127.0.0.1 \
             mira-control:ci
-          trap 'docker rm -f mira-ci-control >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
           for attempt in $(seq 1 40); do
             if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
             if [ "$attempt" -eq 40 ]; then docker logs mira-ci-control; exit 1; fi
@@ -102,19 +76,3 @@ jobs:
           node tests/auth_enrollment_e2e.mjs
           node tests/web_console_e2e.mjs
           MIRA_TRANSFER_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/session_transfer_e2e.mjs
-          MIRA_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira MIRA_TEST_LINUX_SINGLEFILE="$PWD/node/openssh/out/linux-amd64/mira-node" node node/openssh/tests/e2e.mjs
-
-  windows-native:
-    strategy:
-      matrix:
-        os: [windows-latest, windows-2022]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: node/go.mod
-          cache-dependency-path: node/go.sum
-      - name: Test native Windows capabilities and ConPTY
-        working-directory: node
-        run: go test -v ./...

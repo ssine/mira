@@ -284,6 +284,14 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - Keep role aliases inside immutable version directories and verify they refer to the running image. Never install system SSH services or mutate user SSH config.
 - Narrow file roots disable native SSH instead of silently widening policy.
 - For release changes, first build native bundles via `node/openssh/build.sh`; then run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`. Test linked images with `node/openssh/tests/e2e.mjs`; see the component README for real Windows/Android hooks.
+- `.github/workflows/ci.yml` is the Server/Web fast path: it validates the Server container,
+  PostgreSQL, authentication, Web APIs and session transfer without compiling Node/OpenSSH clients.
+- `.github/workflows/node-ci.yml` is the client path: Node, installer or SSH transport changes run
+  native Go tests, Windows/Android cross-compiles, embedded OpenSSH builds and linked-image E2E.
+  Android signed acceptance runs automatically only for `node/**` changes, or manually.
+- A Server/Web-only deployment rebuilds and replaces only the `control` service. It does not create a
+  `v<VERSION>` release, rebuild clients, restart native Nodes or alter the PostgreSQL volume. Tagged
+  Mira releases remain the full Node/CLI/APK distribution path.
 
 Run the baseline checks from the repository root:
 
