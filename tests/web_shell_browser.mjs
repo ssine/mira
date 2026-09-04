@@ -39,10 +39,16 @@ try {
   await page.locator("#globalAgent").click();
   await page.locator("#agentView:not(.hidden)").waitFor();
   assert.equal(await page.locator("#globalAgent").getAttribute("aria-current"), "page");
-  assert.equal(await page.locator(".agent-layout").count(), 1);
+  assert.equal(await page.locator(".chat-shell").count(), 1);
+  assert.equal(await page.locator(".topbar").isVisible(), false, "chat has its own dedicated shell");
+  assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
+  await page.locator("#agentThreadDrawerToggle").click();
+  assert.equal(await page.locator("#agentHome").isVisible(), true);
+  assert.equal(await page.locator("#agentManage").isVisible(), true);
+  await page.locator("#agentThreadDrawerClose").click();
   if (screenshotDirectory) await page.screenshot({ path: `${screenshotDirectory}/agent-light.png`, fullPage: true });
 
-  await page.locator("#themeToggle").click();
+  await page.locator("#agentThemeToggle").click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
   await page.reload({ waitUntil: "networkidle" });

@@ -49,10 +49,20 @@ try {
   await page.waitForFunction(() => !!window.traceHarness);
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   assert.equal(await page.locator("#globalAgent").getAttribute("aria-current"), "page");
-  await page.locator("#themeToggle").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
+  assert.equal(await page.locator("#agentRuntimeNode").evaluate((node) => node.closest("section[id]")?.id), "runtimeView",
+    "runtime selection belongs to its own management page");
+  assert.equal(await page.locator("#sessionSourceNode").evaluate((node) => node.closest("section[id]")?.id), "runtimeView",
+    "session import belongs to its own management page");
+  await page.locator("#agentThreadDrawerToggle").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
+  assert.equal(await page.locator("#agentThreadDrawerToggle").getAttribute("aria-expanded"), "true");
+  await page.keyboard.press("Escape");
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
+  await page.locator("#agentThemeToggle").click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
-  await page.locator("#themeToggle").click();
+  await page.locator("#agentThemeToggle").click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   assert.equal(await page.locator("#conversationCwd").getAttribute("type"), "hidden", "thread cwd must not look editable per message");
   assert.equal(await page.locator("#conversationInput").getAttribute("rows"), "1");
@@ -144,10 +154,10 @@ try {
   assert.match(cancellation.calls.find((p) => p.action === "remove").path, /^\/tmp\/mira-web-uploads\/progress-thread\//);
   await page.evaluate(() => {
     const h = window.traceHarness;
+    h.show("runtimeView");
     h.agent.sessions = Array.from({ length: 65 }, (_, index) => ({ threadId: `desktop-${index}`, title: `Desktop ${index}`, clientKind: "desktop", archived: index % 2 === 0, cwd: "C:\\project" }));
     h.agent.sessions.push({ threadId: "cli", title: "CLI", clientKind: "cli" });
     h.renderLocalSessions();
-    document.querySelector(".import-card").open = true;
   });
   assert.equal(await page.locator(".local-session").count(), 40);
   await page.locator("#sessionShowMore").click();
@@ -157,7 +167,7 @@ try {
   assert.equal(await page.locator(".local-session").count(), 33);
   await page.locator("#sessionSearch").fill("desktop-2");
   assert.equal(await page.locator(".local-session").count(), 6);
-  await page.evaluate(() => { document.querySelector(".import-card").open = false; });
+  await page.evaluate(() => window.traceHarness.show("agentView"));
   await page.evaluate(() => {
     const h = window.traceHarness;
     h.clear();
@@ -265,12 +275,17 @@ try {
     });
   });
   assert.ok(await page.locator("#conversationTrace").evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 2));
-  const agentViewport = await page.locator(".agent-layout").evaluate((node) => ({
+  const agentViewport = await page.locator(".chat-shell").evaluate((node) => ({
     bottom: node.getBoundingClientRect().bottom,
     viewportBottom: window.innerHeight,
+    documentHeight: document.documentElement.scrollHeight,
+    bodyOverflow: getComputedStyle(document.body).overflow,
   }));
   assert.ok(Math.abs(agentViewport.bottom - agentViewport.viewportBottom) <= 1,
     "desktop Agent workspace must reach the viewport bottom");
+  assert.ok(agentViewport.documentHeight <= agentViewport.viewportBottom + 1,
+    "dedicated conversation page must not leave document-level space below the viewport");
+  assert.equal(agentViewport.bodyOverflow, "hidden", "only the transcript may scroll in conversation mode");
 
   if (process.env.MIRA_TRACE_WIDE_SCREENSHOT) {
     await page.screenshot({ path: process.env.MIRA_TRACE_WIDE_SCREENSHOT, fullPage: true });
@@ -333,7 +348,7 @@ try {
   assert.equal(await page.locator(".tool .trace-kind img").count(), 0, "activity labels must render as text, not HTML");
   assert.equal(await page.evaluate(() => window.injected), undefined);
   assert.equal(await page.locator(".activity-failed").count(), 1);
-  await notify("turn/completed", { threadId: "thread-1", turn: { id: "turn-1", status: "failed", error: {
+  await notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-1", status: "failed", error: {
     message: JSON.stringify({ type: "error", status: 400, error: {
       message: "The requested model requires a newer version of Codex.",
     } }),

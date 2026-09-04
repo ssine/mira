@@ -15,7 +15,8 @@
       <a class="brand" href="/" aria-label="Mira 首页"><span class="mark">M</span><span>Mira</span><span class="brand-section">Personal Compute Fabric</span></a>
       <nav id="globalNav" class="global-nav hidden" aria-label="主要导航">
         <button id="globalNodes" class="global-nav-item" type="button">设备</button>
-        <button id="globalAgent" class="global-nav-item" type="button">Agent</button>
+        <button id="globalAgent" class="global-nav-item" type="button">对话</button>
+        <button id="globalRuntime" class="global-nav-item" type="button">运行</button>
       </nav>
       <div class="server-state"><span id="healthDot" class="dot"></span><span id="healthText">正在连接 Server</span></div>
       <button id="themeToggle" class="topbar-action" type="button" aria-label="切换到深色主题" title="切换外观"><span aria-hidden="true">◐</span><span class="topbar-action-label">深色</span></button>
@@ -49,7 +50,7 @@
       <section id="dashboardView" class="dashboard hidden">
         <div class="hero-row">
           <div><p class="eyebrow">CONTROL PLANE</p><h1>设备网络</h1><p class="muted">批准接入、查看健康状态、选择 Codex 的运行位置。</p></div>
-          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开 Agent 控制台</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
+          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开对话</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
         </div>
         <div class="metrics" aria-label="设备摘要">
           <article><span>在线 Node</span><strong id="onlineCount">—</strong><small>Reverse channel</small></article>
@@ -86,43 +87,33 @@
         </section>
       </section>
 
-      <section id="agentView" class="agent-console hidden" aria-label="Agent 控制台">
-        <div class="agent-layout">
-          <aside class="agent-sidebar">
-            <section class="agent-side-card">
-              <div class="agent-side-head">
-                <div><p class="eyebrow">RUNTIME</p><h2>运行节点</h2></div>
-                <div class="agent-runtime-controls"><span id="agentRuntimeBadge" class="badge">offline</span><button id="agentRefresh" class="ghost" type="button">刷新</button></div>
-              </div>
-              <p id="agentSubtitle" class="agent-side-caption">PostgreSQL thread · 可选择原生运行节点</p>
-              <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
-              <label>该节点的默认工作目录<input id="agentRuntimeDefaultCwd" type="text" placeholder="Unix /path 或 Windows C:\\path"></label>
-              <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
-              <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
-              <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
-            </section>
-            <section class="agent-side-card thread-browser">
+      <section id="agentView" class="agent-console hidden" aria-label="Codex 对话">
+        <div class="chat-shell">
+          <button id="agentThreadDrawerBackdrop" class="chat-drawer-backdrop" type="button" aria-label="关闭会话侧边栏" tabindex="-1"></button>
+          <aside id="agentThreadDrawer" class="chat-drawer" aria-label="会话侧边栏" aria-hidden="true" inert>
+            <div class="chat-drawer-nav">
+              <button id="agentHome" class="chat-nav-link" type="button" aria-label="返回 Mira 首页">
+                <span class="mark" aria-hidden="true">M</span><span>Mira 主页</span>
+              </button>
+              <button id="agentThreadDrawerClose" class="chat-icon-button" type="button" aria-label="关闭会话侧边栏" title="关闭侧边栏">×</button>
+            </div>
+            <section class="thread-browser">
               <div class="agent-side-head"><div><p class="eyebrow">THREADS</p><h2>统一会话</h2></div><button id="agentNewThread" class="ghost" type="button">＋ 新建</button></div>
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
-            <details class="agent-side-card import-card">
-              <summary>导入桌面 App / CLI 会话</summary>
-              <label>扫描节点<select id="sessionSourceNode"></select></label>
-              <button id="sessionScan" class="secondary" type="button">扫描桌面与 CLI 会话</button>
-              <p class="muted">选择桌面 App 所在节点。读取该用户的 CODEX_HOME / .codex（含归档），不会修改源文件；不包含云端 ChatGPT 聊天。</p>
-              <label>来源<select id="sessionSourceFilter"><option value="all">全部来源</option><option value="desktop">Codex Desktop</option><option value="cli">CLI</option><option value="ide">IDE 扩展</option><option value="subagent">子 Agent</option><option value="unknown">其他 / 旧节点</option></select></label>
-              <label>搜索<input id="sessionSearch" type="search" placeholder="标题、会话 ID 或工作目录"></label>
-              <label>范围<select id="sessionArchiveFilter"><option value="all">全部（含归档）</option><option value="active">未归档</option><option value="archived">仅归档</option></select></label>
-              <p id="sessionScanState" class="muted" role="status">点击扫描发现本地会话。</p>
-              <div id="sessionImportProgress" class="hidden"><p id="sessionImportState" role="status"></p><progress id="sessionImportMeter"></progress><button id="sessionImportCancel" class="ghost" type="button">取消导入</button></div>
-              <div id="localSessionList" class="local-session-list"></div>
-              <button id="sessionShowMore" class="ghost hidden" type="button">显示更多</button>
-            </details>
+            <footer class="chat-drawer-footer">
+              <button id="agentManage" class="chat-nav-link chat-manage-link" type="button">
+                <span aria-hidden="true">⚙</span><span><strong>运行节点与导入</strong><small>选择运行位置、扫描本地会话</small></span>
+              </button>
+            </footer>
           </aside>
           <section class="conversation-card">
             <header class="conversation-head">
-              <div><p class="eyebrow">LIVE APP SERVER</p><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted">消息、工具调用和状态会实时显示在这里。</p></div>
-              <div class="conversation-actions"><button id="agentInterrupt" class="danger hidden" type="button">中断</button><button id="conversationClear" class="ghost" type="button">清空视图</button></div>
+              <button id="agentThreadDrawerToggle" class="chat-icon-button drawer-toggle" type="button" aria-label="打开会话侧边栏" aria-expanded="false" title="会话">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13M3.5 10h13M3.5 15h13"></path></svg>
+              </button>
+              <div class="conversation-identity"><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted">消息、工具调用和状态会实时显示在这里。</p></div>
+              <div class="conversation-actions"><button id="agentThemeToggle" class="chat-icon-button" type="button" aria-label="切换外观" title="切换外观">◐</button><button id="agentInterrupt" class="danger hidden" type="button">中断</button><button id="conversationClear" class="ghost" type="button">清空视图</button></div>
             </header>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
@@ -140,6 +131,42 @@
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
               <span id="conversationHint" class="visually-hidden" role="status" aria-live="polite">可粘贴或拖入图片与文件，上传支持取消</span>
             </form>
+          </section>
+        </div>
+      </section>
+
+      <section id="runtimeView" class="runtime-console hidden" aria-labelledby="runtimePageTitle">
+        <div class="runtime-page-head">
+          <div><p class="eyebrow">CODEX OPERATIONS</p><h1 id="runtimePageTitle">运行节点与会话导入</h1><p class="muted">运行位置和本地会话来源彼此独立；导入后可在任意兼容节点继续。</p></div>
+          <div class="runtime-page-actions"><button id="runtimeOpenChat" class="approve" type="button">打开对话</button><button id="agentRefresh" class="secondary" type="button">刷新状态</button></div>
+        </div>
+        <div class="runtime-grid">
+          <section class="runtime-card">
+            <div class="agent-side-head">
+              <div><p class="eyebrow">RUNTIME</p><h2>运行节点</h2></div>
+              <span id="agentRuntimeBadge" class="badge">offline</span>
+            </div>
+            <p id="agentSubtitle" class="agent-side-caption">PostgreSQL thread · 可选择原生运行节点</p>
+            <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
+            <label>该节点的默认工作目录<input id="agentRuntimeDefaultCwd" type="text" placeholder="Unix /path 或 Windows C:\\path"></label>
+            <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
+            <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
+            <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
+          </section>
+          <section class="runtime-card import-card">
+            <div class="agent-side-head"><div><p class="eyebrow">IMPORT</p><h2>导入桌面 App / CLI 会话</h2></div></div>
+            <label>扫描节点<select id="sessionSourceNode"></select></label>
+            <button id="sessionScan" class="secondary" type="button">扫描桌面与 CLI 会话</button>
+            <p class="muted">选择桌面 App 所在节点。读取该用户的 CODEX_HOME / .codex（含归档），不会修改源文件；不包含云端 ChatGPT 聊天。</p>
+            <div class="session-filters">
+              <label>来源<select id="sessionSourceFilter"><option value="all">全部来源</option><option value="desktop">Codex Desktop</option><option value="cli">CLI</option><option value="ide">IDE 扩展</option><option value="subagent">子 Agent</option><option value="unknown">其他 / 旧节点</option></select></label>
+              <label>范围<select id="sessionArchiveFilter"><option value="all">全部（含归档）</option><option value="active">未归档</option><option value="archived">仅归档</option></select></label>
+              <label class="session-search">搜索<input id="sessionSearch" type="search" placeholder="标题、会话 ID 或工作目录"></label>
+            </div>
+            <p id="sessionScanState" class="muted" role="status">点击扫描发现本地会话。</p>
+            <div id="sessionImportProgress" class="hidden"><p id="sessionImportState" role="status"></p><progress id="sessionImportMeter"></progress><button id="sessionImportCancel" class="ghost" type="button">取消导入</button></div>
+            <div id="localSessionList" class="local-session-list"></div>
+            <button id="sessionShowMore" class="ghost hidden" type="button">显示更多</button>
           </section>
         </div>
       </section>

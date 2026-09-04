@@ -130,7 +130,7 @@ assert(assets["/app.js"].includes('from "/vendor/xterm.js"'), "website does not 
 assert(assets["/app.js"].includes('from "/vendor/marked.js"'), "website does not load the Markdown renderer");
 assert(assets["/app.js"].includes('from "/vendor/dompurify.js"'), "website does not sanitize rendered Markdown");
 assert(assets["/"].includes("loginForm"), "website does not expose the administrator login view");
-for (const control of ["globalNav", "globalNodes", "globalAgent", "themeToggle"]) {
+for (const control of ["globalNav", "globalNodes", "globalAgent", "globalRuntime", "themeToggle"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted Nexus-style shell control ${control}`);
 }
 for (const wiring of ["themeStorageKey", "function terminalTheme()", "function toggleTheme()", "function navigateGlobal("]) {
@@ -165,7 +165,7 @@ for (const wiring of [
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
 }
-for (const control of ["agentView", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
+for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentManage", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
@@ -191,6 +191,9 @@ assert(assets["/styles.css"].includes(".tool-group{") && assets["/styles.css"].i
   "website omitted collapsed tool-call groups");
 assert(compactCss.includes('grid-template-areas:"conversation-head""conversation-notice""conversation-trace""conversation-composer"'),
   "website conversation rows can shift when the optional notice is hidden");
+assert(compactCss.includes('body[data-view="agentView"]{height:100dvh;min-height:0;overflow:hidden;}') &&
+  compactCss.includes('.chat-shell{position:relative;display:grid;width:100%;height:100%;min-height:0;overflow:hidden'),
+"dedicated conversation shell can escape the viewport or leave document-level blank space");
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
 }

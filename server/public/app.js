@@ -34,6 +34,8 @@ function syncThemeControl() {
   const button = $("#themeToggle");
   button.setAttribute("aria-label", `切换到${dark ? "浅色" : "深色"}主题`);
   button.querySelector(".topbar-action-label").textContent = dark ? "浅色" : "深色";
+  const agentButton = $("#agentThemeToggle");
+  if (agentButton) agentButton.setAttribute("aria-label", `切换到${dark ? "浅色" : "深色"}主题`);
   if (workspace.terminal) workspace.terminal.options.theme = terminalTheme();
 }
 
@@ -192,17 +194,38 @@ function clear(value) {
 }
 
 function show(view) {
-  for (const id of ["loginView", "setupView", "dashboardView", "workspaceView", "agentView"]) {
+  for (const id of ["loginView", "setupView", "dashboardView", "workspaceView", "agentView", "runtimeView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
-  const authenticated = ["dashboardView", "workspaceView", "agentView"].includes(view);
+  const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView"].includes(view);
   $("#logoutButton").classList.toggle("hidden", !authenticated);
   $("#globalNav").classList.toggle("hidden", !authenticated);
   $("#globalNodes").classList.toggle("active", ["dashboardView", "workspaceView"].includes(view));
   $("#globalNodes").setAttribute("aria-current", ["dashboardView", "workspaceView"].includes(view) ? "page" : "false");
   $("#globalAgent").classList.toggle("active", view === "agentView");
   $("#globalAgent").setAttribute("aria-current", view === "agentView" ? "page" : "false");
+  $("#globalRuntime").classList.toggle("active", view === "runtimeView");
+  $("#globalRuntime").setAttribute("aria-current", view === "runtimeView" ? "page" : "false");
   document.body.dataset.view = view;
+  if (view !== "agentView") setAgentThreadDrawer(false);
+}
+
+function setAgentThreadDrawer(open) {
+  const drawer = $("#agentThreadDrawer");
+  const backdrop = $("#agentThreadDrawerBackdrop");
+  const toggle = $("#agentThreadDrawerToggle");
+  if (!drawer || !backdrop || !toggle) return;
+  drawer.classList.toggle("open", open);
+  drawer.toggleAttribute("inert", !open);
+  drawer.setAttribute("aria-hidden", String(!open));
+  backdrop.classList.toggle("open", open);
+  backdrop.tabIndex = open ? 0 : -1;
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.setAttribute("aria-label", open ? "关闭会话侧边栏" : "打开会话侧边栏");
+  if (open) $("#agentThreadDrawerClose").focus({ preventScroll: true });
+  else if (document.body.dataset.view === "agentView" && document.activeElement && drawer.contains(document.activeElement)) {
+    toggle.focus({ preventScroll: true });
+  }
 }
 
 function toast(message) {
@@ -2029,7 +2052,7 @@ function handleAgentNotification(message) {
       }
     }
     syncActiveTurnUi();
-    void loadAgentThreads();
+    void loadAgentThreads().catch((error) => console.warn("Unable to refresh thread list after turn completion", error));
     if (threadId && threadId !== agent.threadId) return;
     const status = String(turn.status ?? "").toLowerCase();
     const turnError = readableErrorMessage(turn.error);
@@ -2266,12 +2289,11 @@ async function scanLocalSessions() {
   $("#sessionScanState").title = (response.warnings ?? []).join("\n");
 }
 
-async function openImportedSession(threadId, nodeId) {
+async function openImportedSession(threadId) {
   if (agent.sendPromise) throw new Error("请等待当前消息提交完成");
-  if ([...$("#agentRuntimeNode").options].some((option) => option.value === nodeId)) {
-    $("#agentRuntimeNode").value = nodeId;
-    $("#agentRuntimeNode").dispatchEvent(new Event("change"));
-  } else throw new Error("源节点暂不能运行受控 Codex。会话已在统一数据库中，请选择合适的运行节点和工作目录后打开。");
+  if (!$("#agentRuntimeNode").value) throw new Error("请先选择一个 Codex 运行节点。导入来源与运行位置可以不同。");
+  show("agentView");
+  setAgentThreadDrawer(false);
   await resumeAgentThread(threadId);
 }
 
@@ -2280,7 +2302,7 @@ async function importLocalSession(index, button) {
   const session = agent.sessions[index];
   const nodeId = agent.sessionNodeId;
   if (!session || !nodeId) return;
-  if (button.dataset.importedThreadId) return openImportedSession(button.dataset.importedThreadId, nodeId);
+  if (button.dataset.importedThreadId) return openImportedSession(button.dataset.importedThreadId);
   button.disabled = true;
   button.textContent = "导入中…";
   const controller = new AbortController();
@@ -2628,6 +2650,11 @@ async function openAgentConsole() {
   await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
 }
 
+async function openRuntimeConsole() {
+  show("runtimeView");
+  await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+}
+
 async function leaveAgentConsole() {
   closeAgentSocket();
   show("dashboardView");
@@ -2640,8 +2667,13 @@ async function navigateGlobal(target) {
     if ($("#agentView").classList.contains("hidden")) await openAgentConsole();
     return;
   }
+  if (target === "runtime") {
+    if (!$("#workspaceView").classList.contains("hidden")) await leaveWorkspace();
+    await openRuntimeConsole();
+    return;
+  }
   if (!$("#workspaceView").classList.contains("hidden")) await leaveWorkspace();
-  else if (!$("#agentView").classList.contains("hidden")) await leaveAgentConsole();
+  else if (!$("#agentView").classList.contains("hidden") || !$("#runtimeView").classList.contains("hidden")) await leaveAgentConsole();
   else if (!$("#dashboardView").classList.contains("hidden")) await loadDashboard();
 }
 
@@ -2679,10 +2711,21 @@ $("#logoutButton").addEventListener("click", async () => {
 });
 
 $("#themeToggle").addEventListener("click", toggleTheme);
+$("#agentThemeToggle").addEventListener("click", toggleTheme);
 $("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
 $("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
+$("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
 
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
+$("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
+$("#agentHome").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
+$("#agentManage").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
+$("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
+$("#agentThreadDrawerClose").addEventListener("click", () => setAgentThreadDrawer(false));
+$("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && $("#agentThreadDrawer").classList.contains("open")) setAgentThreadDrawer(false);
+});
 $("#agentRefresh").addEventListener("click", () => Promise.all([refreshAgentNodes(), loadAgentThreads()]).then(() => toast("Agent 状态已刷新")).catch((error) => toast(error.message)));
 $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catch((error) => {
   setAgentRuntimeState(`启动失败：${error.message}`, "offline");
@@ -2698,10 +2741,13 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
   syncConversationSendUi();
 });
-$("#agentNewThread").addEventListener("click", newAgentThread);
+$("#agentNewThread").addEventListener("click", () => { newAgentThread(); setAgentThreadDrawer(false); });
 $("#agentThreadList").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-thread-id]");
-  if (button) resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
+  if (button) {
+    setAgentThreadDrawer(false);
+    resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
+  }
 });
 $("#conversationTrace").addEventListener("click", (event) => {
   const file = event.target.closest("[data-node-file-path]");
