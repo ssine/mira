@@ -3,6 +3,7 @@ import { Terminal } from "/vendor/xterm.js";
 
 const $ = (selector) => document.querySelector(selector);
 let csrfToken = null;
+let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
 
 const workspace = {
@@ -42,12 +43,36 @@ const agent = {
   threads: [],
 };
 
-async function api(path, options = {}) {
+async function refreshAdminCsrf() {
+  if (!csrfRefreshPromise) {
+    csrfRefreshPromise = (async () => {
+      const response = await fetch("/v1/admin/session", { credentials: "same-origin" });
+      let body = {};
+      try { body = await response.json(); } catch { /* empty response */ }
+      if (!response.ok || typeof body.csrfToken !== "string") {
+        const error = new Error(body.error ?? "管理员会话已经失效，请重新登录");
+        error.status = response.status;
+        error.code = body.code;
+        throw error;
+      }
+      csrfToken = body.csrfToken;
+      return csrfToken;
+    })().finally(() => { csrfRefreshPromise = null; });
+  }
+  return csrfRefreshPromise;
+}
+
+async function api(path, options = {}, retryCsrf = true) {
   const headers = { ...(options.body ? { "content-type": "application/json" } : {}), ...(options.headers ?? {}) };
-  if (csrfToken && !["GET", "HEAD"].includes(options.method ?? "GET")) headers["x-mira-csrf"] = csrfToken;
+  const mutation = !["GET", "HEAD"].includes(options.method ?? "GET");
+  if (csrfToken && mutation) headers["x-mira-csrf"] = csrfToken;
   const response = await fetch(path, { credentials: "same-origin", ...options, headers });
   let body = {};
   try { body = await response.json(); } catch { /* empty response */ }
+  if (!response.ok && response.status === 403 && body.code === "invalid_csrf" && mutation && retryCsrf) {
+    await refreshAdminCsrf();
+    return api(path, options, false);
+  }
   if (!response.ok) {
     const error = new Error(body.error ?? `HTTP ${response.status}`);
     error.status = response.status;

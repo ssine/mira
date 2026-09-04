@@ -101,6 +101,13 @@ for (const control of ["installLinux", "installWindows", "installServer", "insta
 }
 assert(assets["/app.js"].includes("/v1/dynamic-tools"), "website does not load the dynamic tool catalog");
 assert(assets["/app.js"].includes("/v1/dynamic-tools/call"), "website does not expose the dynamic tool debugger call");
+for (const wiring of [
+  "async function refreshAdminCsrf()",
+  'body.code === "invalid_csrf"',
+  "return api(path, options, false)",
+]) {
+  assert(assets["/app.js"].includes(wiring), `website omitted CSRF recovery wiring: ${wiring}`);
+}
 for (const control of ["debugPresetFields", "debugAdvanced", "debugArguments"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted friendly debugger control ${control}`);
 }

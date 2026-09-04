@@ -56,6 +56,13 @@ const session = {
   cookie: login.response.headers.get("set-cookie")?.split(";", 1)[0],
   csrf: login.body.csrfToken,
 };
+const firstSessionRefresh = await request("/v1/admin/session", { headers: { cookie: session.cookie } });
+const secondSessionRefresh = await request("/v1/admin/session", { headers: { cookie: session.cookie } });
+if (!firstSessionRefresh.response.ok || !secondSessionRefresh.response.ok ||
+    firstSessionRefresh.body.csrfToken !== session.csrf ||
+    secondSessionRefresh.body.csrfToken !== session.csrf) {
+  throw new Error("administrator CSRF token was not stable across tabs");
+}
 async function admin(pathname, options = {}) {
   return request(pathname, { ...options, headers: {
     cookie: session.cookie, "x-mira-csrf": session.csrf, "content-type": "application/json",

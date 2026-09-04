@@ -34,6 +34,14 @@ export function randomToken(prefix) {
   return `${prefix}_${crypto.randomBytes(32).toString("base64url")}`;
 }
 
+function sessionCsrfToken(sessionToken) {
+  const digest = crypto.createHash("sha256")
+    .update("mira-admin-csrf-v1\0")
+    .update(sessionToken)
+    .digest("base64url");
+  return `mcsrf_${digest}`;
+}
+
 function validUsername(value) {
   return typeof value === "string" && /^[a-zA-Z0-9._@-]{1,128}$/.test(value);
 }
@@ -178,6 +186,7 @@ export class AuthService {
     );
     if (result.rowCount === 0) return null;
     const row = result.rows[0];
+    const csrfToken = sessionCsrfToken(sessionToken);
     return {
       kind: "admin",
       clientType: "admin",
@@ -185,7 +194,9 @@ export class AuthService {
       subjectId: row.admin_user_id,
       username: row.username,
       sessionId: row.session_id,
-      csrfTokenHash: row.csrf_token_hash,
+      csrfToken,
+      csrfTokenHash: tokenHash(csrfToken),
+      legacyCsrfTokenHash: row.csrf_token_hash,
       expiresAt: row.expires_at,
       revoked: false,
     };
@@ -254,20 +265,21 @@ export class AuthService {
     if (principal?.kind !== "admin" || principal.transport !== "cookie") return true;
     const value = String(request.headers["x-mira-csrf"] ?? "");
     if (!value) return false;
-    const actual = Buffer.from(tokenHash(value), "hex");
-    const expected = Buffer.from(principal.csrfTokenHash, "hex");
-    return actual.length === expected.length && crypto.timingSafeEqual(actual, expected);
+    const actual = tokenHash(value);
+    return constantTimeHashEqual(actual, principal.csrfTokenHash) ||
+      constantTimeHashEqual(actual, principal.legacyCsrfTokenHash);
   }
 
   async refreshCsrf(principal) {
-    if (principal?.kind !== "admin" || !principal.sessionId) return null;
-    const csrfToken = randomToken("mcsrf");
+    if (principal?.kind !== "admin" || !principal.sessionId || !principal.csrfToken) return null;
+    const csrfToken = principal.csrfToken;
     await this.pool.query(
       `UPDATE mira_admin_sessions SET csrf_token_hash = $2, last_seen_at = NOW()
        WHERE session_id = $1 AND revoked_at IS NULL AND expires_at > NOW()`,
       [principal.sessionId, tokenHash(csrfToken)],
     );
     principal.csrfTokenHash = tokenHash(csrfToken);
+    principal.legacyCsrfTokenHash = principal.csrfTokenHash;
     return csrfToken;
   }
 
@@ -320,7 +332,7 @@ export class AuthService {
     }
     this.clearLoginFailures(request, username);
     const sessionToken = randomToken("mas");
-    const csrfToken = randomToken("mcsrf");
+    const csrfToken = sessionCsrfToken(sessionToken);
     const expiresAt = new Date(Date.now() + sessionLifetimeMs);
     const session = await this.pool.query(
       `INSERT INTO mira_admin_sessions (
