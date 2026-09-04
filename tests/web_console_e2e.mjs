@@ -136,13 +136,13 @@ for (const wiring of [
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
 }
-for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
+for (const control of ["agentView", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"image\"", "url: await fileDataUrl(image)", "?storeId=personal"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"image\"", "url: await fileDataUrl(image)", "?storeId=personal"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
 assert(!assets["/app.js"].includes('"Turn", "Codex 正在处理…", "运行中"'),
@@ -319,6 +319,22 @@ try {
   }, "approved Node reverse channel");
   nodeId = online.nodeId;
 
+  const configuredDefaultCwd = await admin(`/v1/nodes/${nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({ running: false, defaultCwd: temporary }),
+  });
+  assert(configuredDefaultCwd.response.ok && configuredDefaultCwd.body.desiredAppServer?.defaultCwd === temporary,
+    `default working directory was not persisted: ${JSON.stringify(configuredDefaultCwd.body)}`);
+  const relativeDefaultCwd = await admin(`/v1/nodes/${nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({ running: false, defaultCwd: "relative/path" }),
+  });
+  assert(relativeDefaultCwd.response.status === 400 && relativeDefaultCwd.body.code === "invalid_request",
+    "relative default working directory was accepted");
+  const configuredNode = await admin(`/v1/nodes/${nodeId}`);
+  assert(configuredNode.body.desiredAppServer?.defaultCwd === temporary,
+    "default working directory did not survive the rejected update");
+
   const scanned = await admin(`/v1/nodes/${nodeId}/codex-sessions`);
   assert(scanned.response.ok, `Codex session scan failed: ${scanned.response.status} ${JSON.stringify(scanned.body)}`);
   const discovered = scanned.body.sessions?.find((item) => item.threadId === importedThreadId);
@@ -486,6 +502,7 @@ try {
     dynamicToolDebugger: true,
     friendlyDebuggerForm: true,
     nodeApproval: true,
+    nodeDefaultCwd: true,
     aggregateStatus: true,
     machineConfiguration: true,
     resourceUsage: true,

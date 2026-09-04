@@ -64,6 +64,10 @@ must close active connections and reap children. Worker process isolation is not
 Bulk binary transfers must bypass JSON text buffers and apply bounded backpressure. Shell executes
 as the Node OS user, not an arbitrary SSH username. Do not claim full OpenSSH extension compatibility,
 automatic session recovery or Android PTY acceptance based only on cross-compilation.
+`mira ssh`, `mira scp` and `mira sftp` remain ordinary CLI commands rather than dynamic tools. A
+managed App Server receives the local CLI's absolute path and concise usage through merged developer
+instructions on every thread start/resume, so Codex and subagents can use the CLI without relying on
+`PATH` or confusing the SSH byte transport with the CapabilityService.
 
 Codex remains a native process on the selected execution node. Mira does not reimplement Codex or
 turn model execution into a central monolith. The central service coordinates nodes and persists
@@ -129,7 +133,9 @@ plane. Do not introduce a separate Termux or ADB-specific Mira Node implementati
 
 Desktop/server nodes may discover and run Codex App Server. Android reports App Server as
 unsupported. Desired state comes from Mira Server; reported state describes what is actually
-running. Secrets such as server tokens stay local and must not be included in desired state.
+running. Each execution Node may keep a Server-side `desiredAppServer.defaultCwd`; the broker applies
+it only when `thread/start` omits `cwd`, never when resuming a persisted thread. Secrets such as server
+tokens stay local and must not be included in desired state.
 Nodes also discover rollout JSONL files under their configured, environment and default Codex homes.
 Discovery is read-only. Import is an explicit administrator action: preserve every original record in
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing

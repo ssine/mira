@@ -30,6 +30,71 @@ function mergeDynamicTools(existing) {
   return [...tools.filter((tool) => tool?.name !== dynamicToolNamespace), ...dynamicToolSpecs()];
 }
 
+function validNativeAbsolutePath(value, platform) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 4_096 || /[\u0000-\u001f\u007f]/.test(value)) {
+    return false;
+  }
+  if (platform === "windows") return /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(value);
+  return value.startsWith("/");
+}
+
+function bundledMiraCLIPath(codexPath, platform) {
+  if (typeof codexPath !== "string") return null;
+  const match = codexPath.match(/^(.*[\\/])mira-codex-package[\\/]bin[\\/]codex(?:\.exe)?$/i);
+  if (!match) return null;
+  return `${match[1]}${platform === "windows" ? "mira.exe" : "mira"}`;
+}
+
+function targetMiraCLIPath(target) {
+  const platform = target?.platform;
+  const candidates = [
+    target?.reportedAppServer?.miraCliPath,
+    target?.machineStatus?.miraCliPath,
+    bundledMiraCLIPath(target?.reportedAppServer?.codexPath, platform),
+  ];
+  return candidates.find((candidate) => validNativeAbsolutePath(candidate, platform)) ?? null;
+}
+
+function targetDefaultCwd(target) {
+  const value = target?.desiredAppServer?.defaultCwd;
+  return validNativeAbsolutePath(value, target?.platform) ? value : null;
+}
+
+function shellInvocation(path, platform) {
+  const quoted = platform === "windows"
+    ? `'${path.replaceAll("'", "''")}'`
+    : `'${path.replaceAll("'", `'"'"'`)}'`;
+  return platform === "windows" ? `& ${quoted}` : quoted;
+}
+
+function miraCLIInstructions(target) {
+  const path = targetMiraCLIPath(target);
+  if (!path) return null;
+  const executable = shellInvocation(path, target.platform);
+  return [
+    "MIRA_CLI_INSTRUCTIONS_V1_BEGIN",
+    "Mira node-to-node SSH access is available from this execution node.",
+    `The Mira CLI absolute path is ${JSON.stringify(path)}. Invoke that exact path as a normal shell command; do not assume mira is on PATH.`,
+    "SSH, SCP, and SFTP are CLI-only operations. They are not home_nodes dynamic tools and must not be modeled or invoked as dynamic tools.",
+    `List approved nodes before selecting a target: ${executable} nodes list --json`,
+    `Run a remote command: ${executable} ssh <node-id-or-exact-node-key> -- pwd`,
+    `Open an interactive remote shell: ${executable} ssh -t <node-id-or-exact-node-key>`,
+    `Upload one regular file: ${executable} scp <local-path> <node-id>::<absolute-remote-path>`,
+    `Download one regular file: ${executable} scp <node-id>::<absolute-remote-path> <local-path>`,
+    `Use SFTP interactively or with one operation: ${executable} sftp <node-id> [ls|stat|mkdir|rm|get|put ...]`,
+    "Use a Node ID or exact nodeKey returned by nodes list; do not guess selectors. Never read or expose the Mira identity credential.",
+    "MIRA_CLI_INSTRUCTIONS_V1_END",
+  ].join("\n");
+}
+
+function mergeDeveloperInstructions(existing, addition) {
+  if (!addition) return existing;
+  const current = typeof existing === "string"
+    ? existing.replace(/\n?MIRA_CLI_INSTRUCTIONS_V1_BEGIN[\s\S]*?MIRA_CLI_INSTRUCTIONS_V1_END\n?/g, "\n").trim()
+    : "";
+  return current ? `${current}\n\n${addition}` : addition;
+}
+
 function rejectUpgrade(socket, status, label) {
   socket.write(`HTTP/1.1 ${status} ${label}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   socket.destroy();
@@ -99,7 +164,7 @@ export class NodeChannel {
     const target = await getNode(this.pool, targetNodeId);
     if (!target) return { status: 404 };
     if (target.capabilities?.appServer !== true) return { status: 409 };
-    return { status: 200, principal };
+    return { status: 200, principal, target };
   }
 
   async upgrade(request, socket, head) {
@@ -128,7 +193,7 @@ export class NodeChannel {
     }
     this.wss.handleUpgrade(request, socket, head, (ws) => {
       if (nodeMatch) this.attachNode(nodeMatch[1], ws);
-      else this.attachProxy(proxyMatch[1], ws, authorization.principal, storeId);
+      else this.attachProxy(proxyMatch[1], ws, authorization.principal, storeId, authorization.target);
     });
   }
 
@@ -292,7 +357,7 @@ export class NodeChannel {
     ).catch((error) => console.error("thread runtime binding failed", error));
   }
 
-  attachProxy(targetNodeId, ws, caller, storeId = "personal") {
+  attachProxy(targetNodeId, ws, caller, storeId = "personal", target = null) {
     if (!this.isConnected(targetNodeId)) {
       ws.close(1013, "node capability channel is offline");
       return;
@@ -300,7 +365,7 @@ export class NodeChannel {
     const sessionId = crypto.randomUUID();
     const proxy = {
       targetNodeId, callerNodeId: caller.kind === "node" ? caller.nodeId : null,
-      sessionId, ws, storeId, threadId: null, threadRequestBindings: new Map(), boundThreadIds: new Set(),
+      sessionId, ws, storeId, target, threadId: null, threadRequestBindings: new Map(), boundThreadIds: new Set(),
     };
     this.proxies.set(sessionId, proxy);
     if (!this.trySendToNode(targetNodeId, { type: "appserver.open", sessionId })) {
@@ -320,6 +385,14 @@ export class NodeChannel {
         if (message.method === "thread/start" || message.method === "thread/resume") {
           message.params ??= {};
           message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
+          if (message.method === "thread/start" &&
+              (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {
+            message.params.cwd = targetDefaultCwd(proxy.target) ?? message.params.cwd;
+          }
+          message.params.developerInstructions = mergeDeveloperInstructions(
+            message.params.developerInstructions,
+            miraCLIInstructions(proxy.target),
+          );
         }
         if (["thread/start", "thread/resume", "turn/start"].includes(message.method) && message.id !== undefined) {
           proxy.threadRequestBindings.set(String(message.id),

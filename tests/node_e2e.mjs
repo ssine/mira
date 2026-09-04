@@ -95,7 +95,7 @@ async function initializeAppServer(nodeId) {
     JSON.stringify({
       method: "thread/start",
       id: 2,
-      params: { cwd: workspace, approvalPolicy: "never", sandbox: "read-only" },
+      params: { approvalPolicy: "never", sandbox: "read-only" },
     }),
   );
   const started = await new Promise((resolve, reject) => {
@@ -110,7 +110,7 @@ async function initializeAppServer(nodeId) {
   });
   socket.close();
   if (started.error) throw new Error(`thread/start failed: ${JSON.stringify(started.error)}`);
-  return { initialized: response.result, threadId: started.result.thread.id };
+  return { initialized: response.result, threadId: started.result.thread.id, cwd: started.result.cwd };
 }
 
 async function dynamicCall(tool, arguments_) {
@@ -179,7 +179,22 @@ try {
       : null;
   }, "node registration and app-server startup");
   runningNode = running;
+  const expectedMiraCLIPath = path.join(path.dirname(nodeBinary), "mira");
+  if (running.machineStatus?.miraCliPath !== expectedMiraCLIPath ||
+      running.reportedAppServer?.miraCliPath !== expectedMiraCLIPath) {
+    throw new Error("Node did not report the installed Mira CLI absolute path");
+  }
+  const configured = await jsonRequest(`/v1/nodes/${running.nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({ running: true, defaultCwd: workspace }),
+  });
+  if (configured.desiredAppServer?.defaultCwd !== workspace) {
+    throw new Error("Node default working directory was not persisted");
+  }
   const appServerResult = await initializeAppServer(running.nodeId);
+  if (appServerResult.cwd !== workspace) {
+    throw new Error(`App Server did not apply the Node default cwd: ${appServerResult.cwd}`);
+  }
   const runtimeBinding = await waitFor(async () => {
     const threads = await adminRequest(
       controlUrl, adminSession, `/v1/codex/threads?storeId=${encodeURIComponent(storeId)}`,
@@ -187,6 +202,9 @@ try {
     return threads.data?.find((thread) =>
       thread.threadId === appServerResult.threadId && thread.runtimeNodeId === running.nodeId) ?? null;
   }, "durable thread runtime binding");
+  if (runtimeBinding.cwd !== workspace) {
+    throw new Error(`PostgreSQL thread projection did not preserve the Node default cwd: ${runtimeBinding.cwd}`);
+  }
   const stored = await jsonRequest(`/v1/stores/${storeId}`);
   const dynamicTools = stored.snapshot.created_threads[appServerResult.threadId].dynamic_tools;
   if (!dynamicTools.some((tool) => tool.name === "home_nodes")) {
@@ -258,6 +276,8 @@ try {
       appServerProxy: true,
       runtimeNodeId: runtimeBinding.runtimeNodeId,
       dynamicToolsInjected: true,
+      miraCliPathReported: true,
+      defaultCwdApplied: runtimeBinding.cwd === workspace,
       machineStatus: status.hostname === running.hostname,
       fileRoundTrip: file.content === "file-ok",
       processRoundTrip: processResult.output.includes("process-ok"),

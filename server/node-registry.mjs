@@ -11,6 +11,25 @@ function requiredString(name, value, maximum = 256) {
   return value;
 }
 
+function optionalAbsolutePath(name, value) {
+  if (value === undefined) return undefined;
+  if (value === null || value === "") return null;
+  if (typeof value !== "string" || value.length > 4_096 || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${name} must be null or an absolute path of at most 4096 characters`);
+  }
+  const normalized = value.trim();
+  if (!/^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(normalized)) {
+    throw new Error(`${name} must be an absolute Unix or Windows path`);
+  }
+  return normalized;
+}
+
+function nativeAbsolutePath(value, platform) {
+  return platform === "windows"
+    ? /^(?:[a-zA-Z]:[\\/]|\\\\)/.test(value)
+    : value.startsWith("/");
+}
+
 function nodeView(row) {
   return {
     nodeId: row.node_id,
@@ -146,13 +165,36 @@ export async function setDesiredAppServer(pool, nodeId, body) {
       error: "configOverrides must be non-secret and contain at most 20 strings", code: "invalid_request",
     } };
   }
-  const desired = {
-    running: body.running, listenUrl: body.listenUrl ?? null,
-    codexPath: body.codexPath ?? null, codexHome: body.codexHome ?? null,
-    configOverrides, revision: Date.now(),
-  };
+  let defaultCwd;
+  try {
+    defaultCwd = optionalAbsolutePath("defaultCwd", body.defaultCwd);
+  } catch (error) {
+    return { status: 400, body: { error: error.message, code: "invalid_request" } };
+  }
+  if (defaultCwd !== undefined && defaultCwd !== null) {
+    const target = await pool.query(
+      `SELECT platform FROM codex_nodes WHERE node_id = $1 AND approval_status = 'approved'`,
+      [nodeId],
+    );
+    if (target.rowCount === 0) {
+      return { status: 404, body: { error: "approved node not found", code: "not_found" } };
+    }
+    if (!nativeAbsolutePath(defaultCwd, target.rows[0].platform)) {
+      return { status: 400, body: {
+        error: `defaultCwd must be an absolute ${target.rows[0].platform} path`, code: "invalid_request",
+      } };
+    }
+  }
+  const desired = { running: body.running, revision: Date.now() };
+  for (const [field, value] of [
+    ["listenUrl", body.listenUrl], ["codexPath", body.codexPath], ["codexHome", body.codexHome],
+  ]) {
+    if (value !== undefined) desired[field] = value ?? null;
+  }
+  if (body.configOverrides !== undefined) desired.configOverrides = configOverrides;
+  if (defaultCwd !== undefined) desired.defaultCwd = defaultCwd;
   const result = await pool.query(
-    `UPDATE codex_nodes SET desired_app_server = $2::jsonb, updated_at = NOW()
+    `UPDATE codex_nodes SET desired_app_server = desired_app_server || $2::jsonb, updated_at = NOW()
      WHERE node_id = $1 AND approval_status = 'approved' RETURNING desired_app_server`,
     [nodeId, JSON.stringify(desired)],
   );

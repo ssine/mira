@@ -114,3 +114,82 @@ test("App Server proxy persists its store-scoped thread runtime binding", async 
   ]);
   channel.close();
 });
+
+test("App Server proxy tells Codex to use the absolute Mira CLI without adding SSH tools", async () => {
+  const channel = new NodeChannel({
+    server: new EventEmitter(), authService: {},
+    pool: { query: async () => ({ rowCount: 1 }) },
+  });
+  const node = new Socket();
+  channel.attachNode("node-1", node);
+  const client = new Socket();
+  channel.attachProxy("node-1", client, { kind: "admin" }, "personal", {
+    platform: "linux",
+    capabilities: { appServer: true },
+    desiredAppServer: { defaultCwd: "/srv/mira-workspace" },
+    reportedAppServer: {
+      codexPath: "/opt/mira/versions/0.11.2/mira-codex-package/bin/codex",
+    },
+  });
+
+  client.emit("message", JSON.stringify({
+    id: 1,
+    method: "thread/start",
+    params: {
+      developerInstructions: "Keep the user's existing instruction.",
+      dynamicTools: [{ name: "client_tool", description: "client tool", inputSchema: {} }],
+    },
+  }));
+  const start = JSON.parse(node.sent.at(-1).payload);
+  assert.equal(start.method, "thread/start");
+  assert.equal(start.params.cwd, "/srv/mira-workspace");
+  assert.match(start.params.developerInstructions, /^Keep the user's existing instruction\./);
+  assert.match(start.params.developerInstructions, /'\/opt\/mira\/versions\/0\.11\.2\/mira' nodes list --json/);
+  assert.match(start.params.developerInstructions, /SSH, SCP, and SFTP are CLI-only operations/);
+  assert.equal(start.params.dynamicTools.filter((tool) => tool.name === "home_nodes").length, 1);
+  assert.equal(start.params.dynamicTools.filter((tool) => tool.name === "client_tool").length, 1);
+  assert.equal(start.params.dynamicTools.some((tool) => /ssh|scp|sftp/i.test(tool.name)), false);
+
+  client.emit("message", JSON.stringify({
+    id: 2,
+    method: "thread/resume",
+    params: {
+      threadId: "thread-1",
+      developerInstructions: [
+        "Keep this resume instruction.",
+        "MIRA_CLI_INSTRUCTIONS_V1_BEGIN",
+        "obsolete path",
+        "MIRA_CLI_INSTRUCTIONS_V1_END",
+      ].join("\n"),
+    },
+  }));
+  const resume = JSON.parse(node.sent.at(-1).payload);
+  assert.match(resume.params.developerInstructions, /^Keep this resume instruction\./);
+  assert.equal(resume.params.cwd, undefined, "resume must preserve the thread's persisted cwd");
+  assert.doesNotMatch(resume.params.developerInstructions, /obsolete path/);
+  assert.equal(resume.params.developerInstructions.match(/MIRA_CLI_INSTRUCTIONS_V1_BEGIN/g)?.length, 1);
+
+  channel.close();
+});
+
+test("App Server proxy emits native Windows CLI and cwd syntax", () => {
+  const channel = new NodeChannel({
+    server: new EventEmitter(), authService: {},
+    pool: { query: async () => ({ rowCount: 1 }) },
+  });
+  const node = new Socket();
+  channel.attachNode("windows-node", node);
+  const client = new Socket();
+  channel.attachProxy("windows-node", client, { kind: "admin" }, "personal", {
+    platform: "windows",
+    capabilities: { appServer: true },
+    desiredAppServer: { defaultCwd: "C:\\code\\mira" },
+    reportedAppServer: { miraCliPath: "C:\\Program Files\\Mira\\mira.exe" },
+  });
+  client.emit("message", JSON.stringify({ id: 1, method: "thread/start", params: {} }));
+  const start = JSON.parse(node.sent.at(-1).payload);
+  assert.equal(start.params.cwd, "C:\\code\\mira");
+  assert.match(start.params.developerInstructions,
+    /& 'C:\\Program Files\\Mira\\mira\.exe' nodes list --json/);
+  channel.close();
+});

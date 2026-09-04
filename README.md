@@ -13,6 +13,12 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 不需要开放 22 端口或安装系统 sshd。权限沿用已批准的 Node 身份，具体功能、限制和使用方式见
 [SSH 协议与使用说明](./protocol/ssh-v1.md)。
 
+0.11.3 让受控 App Server 在每次新建或恢复 thread 时，把当前执行 Node 上 `mira` CLI 的绝对
+路径和 `ssh`/`scp`/`sftp` 用法合并进 Codex 开发者说明。SSH 族保持普通 CLI，不注册为
+dynamicTools；旧 Node 可从随包 Codex 路径兼容推导，更新后的 Node 会直接上报实际路径。每个
+Codex 运行节点还可在网页保存自己的默认工作目录；它只填充新 thread，恢复时仍使用 thread 原始
+`cwd`，并允许在发送前临时覆盖。
+
 0.11.2 让 Web 控制台从 PostgreSQL 权威事件生成完整历史轨迹，补齐导入/原生会话的工具调用，
 并使用经过净化的 GitHub Flavored Markdown 渲染用户与 Agent 消息。会话中的节点文件链接可从
 实际运行 Node 分块读取：图片、PDF、音视频和文本直接预览，其他格式下载。消息框支持选择、拖入
@@ -109,7 +115,8 @@ MIRA_SECURE_COOKIES=false npm start --prefix server
 
 打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。网站可登录、查看待审批申请、批准/拒绝、
 查看 Node 状态/能力、撤销设备并检查追加式审计记录。Agent 控制台可选择 Codex 运行节点、扫描并
-导入节点默认位置的本地会话、新建或继续 PostgreSQL thread，并实时展示消息和工具轨迹。连续工具
+导入节点默认位置的本地会话、新建或继续 PostgreSQL thread，并实时展示消息和工具轨迹。每个运行
+节点可以单独保存新会话默认工作目录，发送前仍能临时修改；恢复会话不会覆盖其原始目录。连续工具
 调用在 Web 对话中默认折叠为按工具名称统计的摘要，需要时可展开查看完整输入和输出。恢复已导入
 会话时，网页使用 PostgreSQL 投影保存的原始工作目录，不会用上一个会话的目录覆盖；正常 Turn
 生命周期和没有正文的推理事件只更新运行状态，不生成短暂的空消息卡片。恢复后的混合格式历史会

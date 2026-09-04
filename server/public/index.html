@@ -92,6 +92,8 @@
             <section class="agent-side-card">
               <p class="eyebrow">RUNTIME</p><h2>运行节点</h2>
               <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
+              <label>该节点的默认工作目录<input id="agentRuntimeDefaultCwd" type="text" placeholder="Unix /path 或 Windows C:\\path"></label>
+              <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
               <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
               <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
             </section>

@@ -5,13 +5,28 @@ description: Inspect and operate approved Windows, WSL, Linux, NAS, and Android 
 
 # Mira
 
-Use an available `home_nodes` dynamic tool directly. Otherwise use the `mira` CLI. Both paths reach
-the same Server-side CapabilityService and target Node safety checks.
+Use an available `home_nodes` dynamic tool for structured file, process, PTY, status and screen
+operations. Otherwise use the `mira` CLI. Both paths use the approved Mira Node identity and target
+Node checks.
+
+`mira ssh`, `mira scp` and `mira sftp` are intentionally CLI-only. They carry SSH/SFTP over Mira's
+dedicated byte relay and are not `home_nodes` dynamic tools. When the App Server provides the CLI's
+absolute path in developer instructions, invoke that exact path as a normal shell command; do not
+assume `mira` is on `PATH` and do not try to translate these commands into a dynamic tool call.
 
 Before choosing a target, call `home_nodes.status` with `action: list` or run:
 
 ```bash
 mira nodes list --json
+```
+
+The node-to-node CLI forms are:
+
+```text
+/absolute/path/to/mira ssh [-t|-T] <node-id-or-exact-node-key> [-- command]
+/absolute/path/to/mira scp [--overwrite] <local-path> <node-id>::<absolute-remote-path>
+/absolute/path/to/mira scp [--overwrite] <node-id>::<absolute-remote-path> <local-path>
+/absolute/path/to/mira sftp <node-id-or-exact-node-key> [ls|stat|mkdir|rm|get|put ...]
 ```
 
 Select the returned Node ID or exact `nodeKey`. Do not guess a Node ID, and stop on an ambiguous

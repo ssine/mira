@@ -95,7 +95,7 @@ func (runtimeValue *capabilityRuntime) machineStatus(ctx context.Context) (map[s
 		"cpu": runtimeValue.cpuStatus(), "memory": memory,
 		"disk": diskStatus(runtimeValue.realRoots), "networks": networkStatus(), "allowedRoots": runtimeValue.roots,
 		"processCount": processCount, "managedProcesses": managedProcesses, "ptySessions": ptySessions, "sessionLimit": maxProcessCount,
-		"ptyBackend": ptyBackendName(),
+		"ptyBackend": ptyBackendName(), "miraCliPath": localMiraCLIPath(),
 	}, nil
 }
 

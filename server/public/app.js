@@ -1907,9 +1907,31 @@ async function refreshAgentNodes() {
   if ([...runtimeSelect.options].some((option) => option.value === previousRuntime)) runtimeSelect.value = previousRuntime;
   if ([...sourceSelect.options].some((option) => option.value === previousSource)) sourceSelect.value = previousSource;
   const selected = dashboardNodes.get(runtimeSelect.value);
+  const defaultCwd = selected?.desiredAppServer?.defaultCwd ?? "";
+  $("#agentRuntimeDefaultCwd").value = defaultCwd;
+  if (!agent.threadId && !$("#conversationCwd").value.trim()) $("#conversationCwd").value = defaultCwd;
   if (selected && agent.socketNodeId !== selected.nodeId) {
     setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
   }
+}
+
+async function saveAgentRuntimeDefaultCwd() {
+  const nodeId = $("#agentRuntimeNode").value;
+  const node = dashboardNodes.get(nodeId);
+  if (!node) throw new Error("没有可配置的 Codex 运行节点");
+  const defaultCwd = $("#agentRuntimeDefaultCwd").value.trim();
+  const result = await api(`/v1/nodes/${nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({
+      running: node.desiredAppServer?.running === true,
+      defaultCwd: defaultCwd || null,
+    }),
+  });
+  node.desiredAppServer = result.desiredAppServer;
+  dashboardNodes.set(nodeId, node);
+  $("#agentRuntimeDefaultCwd").value = result.desiredAppServer.defaultCwd ?? "";
+  if (!agent.threadId) $("#conversationCwd").value = result.desiredAppServer.defaultCwd ?? "";
+  toast(defaultCwd ? "已保存该节点的默认工作目录" : "已清除该节点的默认工作目录");
 }
 
 function renderAgentThreads() {
@@ -2055,7 +2077,8 @@ function newAgentThread() {
   resetAgentTranscript();
   $("#conversationTitle").textContent = "新会话";
   $("#conversationMeta").textContent = "第一条消息发送时在所选节点创建，并立即写入 PostgreSQL。";
-  $("#conversationCwd").value = "";
+  const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
 }
@@ -2266,9 +2289,12 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
   setConversationNotice(error.message, "error");
 }));
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
+$("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) closeAgentSocket();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
+  if (!agent.threadId) $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
 });
 $("#agentNewThread").addEventListener("click", newAgentThread);

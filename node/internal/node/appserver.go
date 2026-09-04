@@ -397,9 +397,13 @@ func (manager *appServerManager) report() map[string]any {
 	if !supportsAppServer() {
 		return map[string]any{"status": "unsupported"}
 	}
+	miraCLIPath := localMiraCLIPath()
 	instance := manager.instance
 	if instance == nil || channelClosed(instance.done) {
-		return map[string]any{"status": "stopped", "lastError": manager.lastError}
+		return map[string]any{
+			"status": "stopped", "lastError": manager.lastError,
+			"miraCliPath": miraCLIPath,
+		}
 	}
 	status := "starting"
 	if instance.ready {
@@ -408,7 +412,8 @@ func (manager *appServerManager) report() map[string]any {
 	return map[string]any{
 		"status": status, "pid": instance.command.Process.Pid, "listenUrl": instance.listenURL,
 		"codexPath": instance.codex.Path, "codexVersion": instance.codex.Version,
-		"codexHome": instance.codexHome, "configOverrideCount": len(instance.configOverrides),
+		"miraCliPath": miraCLIPath,
+		"codexHome":   instance.codexHome, "configOverrideCount": len(instance.configOverrides),
 		"startedAt": instance.startedAt.Format(time.RFC3339Nano), "lastError": manager.lastError,
 	}
 }
