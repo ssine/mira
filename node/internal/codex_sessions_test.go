@@ -20,7 +20,9 @@ func TestResolveImmutableRolloutInSourceHome(t *testing.T) {
 		}
 	}
 	id := "01a065c7-297e-7b53-890e-b2551c7d27f2"
-	name := "rollout-test-" + id + ".jsonl"
+	// Current Codex may preserve the logical thread ID and suffix the
+	// referenced immutable rollout ID after an underscore.
+	name := "rollout-test-01a0623f-a78b-7260-a419-461af25d1dcd_" + id + ".jsonl"
 	source := filepath.Join(home, "sessions", name)
 	data := []byte(`{"type":"session_meta","payload":{"id":"01a0623f-a78b-7260-a419-461af25d1dcd"}}` + "\n")
 	if err := os.WriteFile(source, data, 0600); err != nil {

@@ -414,7 +414,7 @@ func (runtimeValue *capabilityRuntime) resolveCodexRollout(params codexSessionsP
 					}
 					return walkErr
 				}
-				if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(strings.ToLower(entry.Name()), "-"+strings.ToLower(params.RolloutID)+".jsonl") {
+				if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(strings.ToLower(entry.Name()), strings.ToLower(params.RolloutID)+".jsonl") {
 					return nil
 				}
 				resolved, resolveErr := runtimeValue.authorizedCodexSessionPath(candidate)
