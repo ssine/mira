@@ -62,7 +62,11 @@ jobs:
           expected=$(awk -v name="$asset" '$2 == name { print $1 }' "$cache/SHA256SUMS")
           actual=$(sha256sum < "$cache/$asset" | awk '{print $1}')
           [[ "$expected" =~ ^[a-f0-9]{64}$ && "$actual" == "$expected" ]] || exit 1
-          tar -xf "$cache/$asset" -C "$cache" "$prefix/mira-codex-package"
+          if [[ "$platform" == windows ]]; then
+            unzip -q "$cache/$asset" "$prefix/mira-codex-package/*" -d "$cache"
+          else
+            tar -xf "$cache/$asset" -C "$cache" "$prefix/mira-codex-package"
+          fi
           test -f "$cache/$prefix/mira-codex-package/codex-package.json"
           mv "$cache/$prefix/mira-codex-package" "$PACKAGE"
 
