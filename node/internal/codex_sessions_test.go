@@ -34,7 +34,9 @@ func TestResolveImmutableRolloutInSourceHome(t *testing.T) {
 	}
 	params := codexSessionsParams{Action: "resolve", Path: source, RolloutID: id}
 	result, err := r.codexSessions(params)
-	if err != nil || result.(codexSessionSummary).Path != source {
+	resolvedInfo, statErr := os.Stat(result.(codexSessionSummary).Path)
+	sourceInfo, sourceStatErr := os.Stat(source)
+	if err != nil || statErr != nil || sourceStatErr != nil || !os.SameFile(resolvedInfo, sourceInfo) {
 		t.Fatalf("resolve: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(home, "archived_sessions", name), data, 0600); err != nil {
