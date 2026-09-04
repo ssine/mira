@@ -39,6 +39,7 @@ await fs.writeFile(sessionPath, [
       source: "cli",
       cli_version: "0.151.0",
       base_instructions: "Mira import fixture",
+      history_mode: "paginated",
     },
   }),
   JSON.stringify({
@@ -306,16 +307,58 @@ try {
   assert(imported.response.ok && imported.body.threadId === importedThreadId,
     `Codex session import failed: ${JSON.stringify(imported.body)}`);
   assert(imported.body.itemCount === 2, "Codex session import did not preserve every rollout record");
+  const threads = await admin(`/v1/codex/threads?storeId=${encodeURIComponent(importStoreId)}`);
+  const importedProjection = threads.body.data?.find((item) => item.threadId === importedThreadId);
+  assert(importedProjection?.title === "Imported Mira session" && importedProjection.itemCount === 2,
+    "unified Codex thread projection omitted the imported session");
+  const nodeIdentity = JSON.parse(await fs.readFile(identityFile, "utf8"));
+  const storeHeaders = { authorization: `Bearer ${nodeIdentity.token}`, "x-mira-client-type": "codex" };
+  const importedHead = await fetchBody(`/v2/stores/${encodeURIComponent(importStoreId)}`, { headers: storeHeaders });
+  assert(importedHead.response.ok, `imported store head failed: ${JSON.stringify(importedHead.body)}`);
+  assert(importedHead.body.state?.created_threads?.[importedThreadId]?.history_mode === "legacy",
+    "paginated local session was not adapted to the remote ThreadStore history mode");
+  const importedManifest = importedHead.body.historyManifest?.[importedThreadId];
+  const importedHistory = await fetchBody(
+    `/v2/stores/${encodeURIComponent(importStoreId)}/threads/${importedThreadId}/history?generation=${importedManifest.generation}`,
+    { headers: storeHeaders },
+  );
+  assert(importedHistory.response.ok, `imported history failed: ${JSON.stringify(importedHistory.body)}`);
+  assert(importedHistory.body.items?.[0]?.payload?.history_mode === "legacy",
+    "imported session metadata did not use the remote ThreadStore history mode");
+  const preFixItems = structuredClone(importedHistory.body.items);
+  preFixItems[0].payload.history_mode = "paginated";
+  const preFixState = await fetchBody(`/v2/stores/${encodeURIComponent(importStoreId)}/commits`, {
+    method: "POST",
+    headers: { ...storeHeaders, "content-type": "application/json", "x-codex-operation-id": randomUUID() },
+    body: JSON.stringify({
+      expectedVersion: importedHead.body.version,
+      stateChanges: [{
+        path: ["created_threads", importedThreadId, "history_mode"], mode: "set",
+        conflictPolicy: "compareAndSwap", expected: { exists: true, value: "legacy" }, value: "paginated",
+      }],
+      historyChanges: [{
+        threadId: importedThreadId, mode: "replace",
+        expectedGeneration: importedManifest.generation, expectedItemCount: importedManifest.itemCount,
+        items: preFixItems,
+      }],
+    }),
+  });
+  assert(preFixState.response.ok, `failed to create pre-fix import fixture: ${JSON.stringify(preFixState.body)}`);
   const duplicateImport = await admin(`/v1/nodes/${nodeId}/codex-session-imports`, {
     method: "POST",
     body: JSON.stringify({ path: sessionPath, storeId: importStoreId }),
   });
   assert(duplicateImport.response.ok && duplicateImport.body.duplicate === true,
     "Codex session import was not idempotent");
-  const threads = await admin(`/v1/codex/threads?storeId=${encodeURIComponent(importStoreId)}`);
-  const importedProjection = threads.body.data?.find((item) => item.threadId === importedThreadId);
-  assert(importedProjection?.title === "Imported Mira session" && importedProjection.itemCount === 2,
-    "unified Codex thread projection omitted the imported session");
+  const repairedHead = await fetchBody(`/v2/stores/${encodeURIComponent(importStoreId)}`, { headers: storeHeaders });
+  const repairedManifest = repairedHead.body.historyManifest?.[importedThreadId];
+  const repairedHistory = await fetchBody(
+    `/v2/stores/${encodeURIComponent(importStoreId)}/threads/${importedThreadId}/history?generation=${repairedManifest.generation}`,
+    { headers: storeHeaders },
+  );
+  assert(repairedHead.body.state?.created_threads?.[importedThreadId]?.history_mode === "legacy" &&
+    repairedHistory.body.items?.[0]?.payload?.history_mode === "legacy",
+  "re-import did not repair a pre-fix paginated ThreadStore adaptation");
 
   // The workbench's aggregate state is assembled from the trusted Node record and
   // the live status capability, using the same administrator session as the UI.

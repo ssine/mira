@@ -1223,7 +1223,15 @@ function traceText(value) {
   return "";
 }
 
-function upsertTrace(key, kind, title, body = "", status = "") {
+function setTraceBody(card, body) {
+  const value = body ?? "";
+  const node = card.querySelector(".trace-body");
+  node.textContent = value;
+  node.hidden = value.length === 0;
+  card.classList.toggle("trace-card-empty", value.length === 0);
+}
+
+function upsertTrace(key, kind, title, body = undefined, status = "") {
   const trace = $("#conversationTrace");
   trace.querySelector(".conversation-empty")?.remove();
   let card = key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null;
@@ -1232,13 +1240,14 @@ function upsertTrace(key, kind, title, body = "", status = "") {
     if (key) card.dataset.traceKey = key;
     const head = element("div", "trace-head");
     head.append(element("span", "trace-kind", title), element("span", "trace-status", status));
-    card.append(head, element("pre", "trace-body", body));
+    card.append(head, element("pre", "trace-body"));
+    setTraceBody(card, body);
     trace.append(card);
   } else {
     card.className = `trace-card ${kind}`;
     card.querySelector(".trace-kind").textContent = title;
     card.querySelector(".trace-status").textContent = status;
-    if (body !== undefined) card.querySelector(".trace-body").textContent = body;
+    if (body !== undefined) setTraceBody(card, body);
   }
   trace.scrollTop = trace.scrollHeight;
   return card;
@@ -1246,7 +1255,10 @@ function upsertTrace(key, kind, title, body = "", status = "") {
 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
   const card = upsertTrace(key, kind, title, undefined, status);
-  card.querySelector(".trace-body").textContent += delta;
+  const body = card.querySelector(".trace-body");
+  body.textContent += delta;
+  body.hidden = false;
+  card.classList.remove("trace-card-empty");
   $("#conversationTrace").scrollTop = $("#conversationTrace").scrollHeight;
 }
 
@@ -1256,16 +1268,23 @@ function itemView(item) {
   if (type === "agentMessage") return { kind: "assistant", title: "Codex", body: item.text ?? traceText(item.content) };
   if (type === "reasoning") return { kind: "reasoning", title: "推理摘要", body: traceText(item.summary ?? item.content ?? item.text) };
   if (type === "commandExecution") return {
-    kind: "tool", title: `Shell · ${item.status ?? "运行"}`,
-    body: [item.command, item.aggregatedOutput ?? item.output].filter(Boolean).join("\n\n"),
+    kind: "tool", title: "Shell",
+    body: [traceText(item.command), item.cwd ? `cwd: ${item.cwd}` : "", item.aggregatedOutput ?? item.output]
+      .filter(Boolean).join("\n\n"),
   };
   if (type === "fileChange") return {
-    kind: "tool", title: `文件修改 · ${item.status ?? "运行"}`,
+    kind: "tool", title: "文件修改",
     body: traceText(item.changes) || JSON.stringify(item.changes ?? item, null, 2),
   };
   if (["mcpToolCall", "dynamicToolCall", "toolCall"].includes(type)) return {
     kind: "tool", title: `${item.server ?? item.namespace ?? "Tool"} · ${item.tool ?? item.name ?? type}`,
-    body: JSON.stringify(item.arguments ?? item.result ?? item, null, 2),
+    body: JSON.stringify({
+      arguments: item.arguments,
+      result: item.result,
+      contentItems: item.contentItems,
+      error: item.error,
+      success: item.success,
+    }, (_key, value) => value === undefined ? undefined : value, 2),
   };
   if (type === "plan") return { kind: "reasoning", title: "计划", body: traceText(item.text ?? item.plan) || JSON.stringify(item, null, 2) };
   if (type === "contextCompaction") return { kind: "system", title: "上下文压缩", body: item.summary ?? "已压缩较早上下文" };

@@ -13,6 +13,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 不需要开放 22 端口或安装系统 sshd。权限沿用已批准的 Node 身份，具体功能、限制和使用方式见
 [SSH 协议与使用说明](./protocol/ssh-v1.md)。
 
+0.11.1 修复 paginated 本地会话导入后的 App Server 恢复兼容性，并改进 Web 消息轨迹布局与流式输出。
+
 0.11.0 增加 Agent 控制台和本地会话迁移：Node 自动发现默认 `CODEX_HOME/sessions`，管理员可把
 本地 JSONL 会话导入 PostgreSQL，再选择任意兼容 Node 通过受控 App Server 继续。网页可以新建、
 恢复和中断 Turn，并实时展示 Agent 消息、推理摘要、文件修改和工具调用。Linux amd64 与 Windows

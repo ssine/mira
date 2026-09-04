@@ -45,7 +45,17 @@ function canonicalRolloutItem(record) {
   if (record.type === "session_meta" && Object.hasOwn(payload, "base_instructions")) {
     payload.base_instructions = baseInstructions(payload.base_instructions);
   }
+  // The current remote HTTP ThreadStore exposes the complete rollout through
+  // the legacy history API. Local Codex stores may already use paginated
+  // history, but persisting that flag would make App Server call list_turns /
+  // list_items, which this adapter intentionally does not advertise yet. The
+  // untouched source record remains in mira_codex_session_import_records.
+  if (record.type === "session_meta") payload.history_mode = "legacy";
   return { type: record.type, payload };
+}
+
+function legacyCompatibleHistory(items) {
+  return items.map((item) => item?.type === "session_meta" ? canonicalRolloutItem(item) : item);
 }
 
 function dateOrNull(value) {
@@ -68,7 +78,9 @@ function createdThread(meta, threadId) {
     session_id: sessionId,
     extra_config: null,
     history_base: meta.history_base ?? null,
-    history_mode: meta.history_mode ?? "legacy",
+    // Imported sessions are adapted to the history API supported by Mira's
+    // remote ThreadStore. The source mode is retained in import provenance.
+    history_mode: "legacy",
     dynamic_tools: Array.isArray(meta.dynamic_tools) ? meta.dynamic_tools : [],
     selected_capability_roots: Array.isArray(meta.selected_capability_roots) ? meta.selected_capability_roots : [],
     thread_source: meta.thread_source ?? null,
@@ -263,35 +275,37 @@ export async function importCodexSession(pool, capabilityService, principal, nod
   const staged = await insertStagedImport(pool, {
     ...loaded, storeId, threadId, nodeId, summary,
   });
-  if (staged.existing && staged.status === "imported") {
-    return { status: 200, body: {
-      importId: staged.importId, storeId, threadId, version: staged.storeEventSeq,
-      duplicate: true, itemCount: rolloutItems.length,
-    } };
-  }
-
   try {
     const head = await getStoreHead(pool, storeId);
     const existingCreated = head.state?.created_threads?.[threadId];
     const existingMetadata = head.state?.metadata_updates?.[threadId];
     const manifest = head.historyManifest?.[threadId];
     let existingItems = [];
+    let desiredItems = rolloutItems;
     if (manifest) {
       const history = await getThreadHistory(pool, storeId, threadId, manifest.generation, head.version);
       if (history.status !== 200) throw Object.assign(new Error(history.body.error), { code: "history_read_failed" });
       existingItems = history.body.items;
-      if (!isPrefix(existingItems, rolloutItems) && !isPrefix(rolloutItems, existingItems)) {
+      const compatibleExistingItems = legacyCompatibleHistory(existingItems);
+      if (!isPrefix(compatibleExistingItems, rolloutItems) && !isPrefix(rolloutItems, compatibleExistingItems)) {
         await markImport(pool, staged.importId, "failed", null, "history_diverged");
         return { status: 409, body: {
           error: "This local session diverges from the PostgreSQL thread and was preserved as a staged import",
           code: "history_diverged", importId: staged.importId, threadId, storeId,
         } };
       }
+      desiredItems = compatibleExistingItems.length < rolloutItems.length ? rolloutItems : compatibleExistingItems;
     }
     const stateChanges = [];
     if (!existingCreated) stateChanges.push({
       path: ["created_threads", threadId], mode: "set", conflictPolicy: "compareAndSwap",
       expected: { exists: false }, value: createdThread(sessionMetaRecord.raw.payload, threadId),
+    });
+    else if (existingCreated.history_mode !== "legacy") stateChanges.push({
+      // This also repairs sessions imported before Mira normalized local
+      // paginated history at the adapter boundary.
+      path: ["created_threads", threadId, "history_mode"], mode: "set", conflictPolicy: "compareAndSwap",
+      expected: { exists: true, value: existingCreated.history_mode ?? null }, value: "legacy",
     });
     if (!existingMetadata) stateChanges.push({
       path: ["metadata_updates", threadId], mode: "set", conflictPolicy: "compareAndSwap",
@@ -301,10 +315,14 @@ export async function importCodexSession(pool, capabilityService, principal, nod
     if (!manifest) historyChanges.push({
       threadId, mode: "append", expectedGeneration: 0, expectedItemCount: 0, items: rolloutItems,
     });
-    else if (existingItems.length < rolloutItems.length) historyChanges.push({
-      threadId, mode: "append", expectedGeneration: manifest.generation,
-      expectedItemCount: existingItems.length, items: rolloutItems.slice(existingItems.length),
-    });
+    else if (!sameJson(existingItems, desiredItems)) {
+      const appendOnly = isPrefix(existingItems, desiredItems);
+      historyChanges.push({
+        threadId, mode: appendOnly ? "append" : "replace", expectedGeneration: manifest.generation,
+        expectedItemCount: existingItems.length,
+        items: appendOnly ? desiredItems.slice(existingItems.length) : desiredItems,
+      });
+    }
     const operationId = crypto.randomUUID();
     const committed = await commitDelta(pool, storeId, {
       expectedVersion: head.version, stateChanges, historyChanges,
@@ -323,13 +341,75 @@ export async function importCodexSession(pool, capabilityService, principal, nod
     });
     return { status: 200, body: {
       importId: staged.importId, storeId, threadId, version: committed.body.version,
-      duplicate: committed.body.noChange === true, itemCount: rolloutItems.length,
+      duplicate: staged.existing || committed.body.noChange === true, itemCount: rolloutItems.length,
       parentThreadId: sessionMetaRecord.raw.payload.parent_thread_id ?? null,
     } };
   } catch (error) {
     await markImport(pool, staged.importId, "failed", null, error.code ?? "import_failed");
     throw error;
   }
+}
+
+export async function normalizeImportedThreadHistoryModes(pool) {
+  const imported = await pool.query(
+    `SELECT DISTINCT store_id, thread_id
+     FROM mira_codex_session_imports
+     WHERE status = 'imported'
+     ORDER BY store_id, thread_id`,
+  );
+  const byStore = new Map();
+  for (const row of imported.rows) {
+    const threadIds = byStore.get(row.store_id) ?? [];
+    threadIds.push(row.thread_id);
+    byStore.set(row.store_id, threadIds);
+  }
+  let normalized = 0;
+  for (const [storeId, threadIds] of byStore) {
+    const head = await getStoreHead(pool, storeId);
+    const stateChanges = [];
+    const historyChanges = [];
+    for (const threadId of threadIds) {
+      const mode = head.state?.created_threads?.[threadId]?.history_mode;
+      if (mode === "paginated") {
+        stateChanges.push({
+          path: ["created_threads", threadId, "history_mode"],
+          mode: "set",
+          conflictPolicy: "compareAndSwap",
+          expected: { exists: true, value: mode },
+          value: "legacy",
+        });
+      }
+      const manifest = head.historyManifest?.[threadId];
+      if (!manifest) continue;
+      const history = await getThreadHistory(pool, storeId, threadId, manifest.generation, head.version);
+      if (history.status !== 200) throw new Error(`failed to load imported thread ${threadId}: ${history.body.error}`);
+      const compatibleItems = legacyCompatibleHistory(history.body.items);
+      if (!sameJson(history.body.items, compatibleItems)) historyChanges.push({
+        threadId,
+        mode: "replace",
+        expectedGeneration: manifest.generation,
+        expectedItemCount: manifest.itemCount,
+        items: compatibleItems,
+      });
+    }
+    if (stateChanges.length === 0 && historyChanges.length === 0) continue;
+    const committed = await commitDelta(pool, storeId, {
+      expectedVersion: head.version,
+      stateChanges,
+      historyChanges,
+    }, {
+      "x-codex-operation-id": crypto.randomUUID(),
+      "x-codex-version": "mira-import-compatibility",
+    });
+    if (committed.status !== 200) {
+      throw new Error(`failed to normalize imported thread history modes in ${storeId}: ${committed.body.error}`);
+    }
+    normalized += new Set([
+      ...stateChanges.map((change) => change.path[1]),
+      ...historyChanges.map((change) => change.threadId),
+    ]).size;
+  }
+  return normalized;
 }
 
 export async function listImportedThreads(pool, storeId = defaultStoreId, limit = 200) {

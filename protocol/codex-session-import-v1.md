@@ -19,7 +19,9 @@ capability.
    exact source version and makes retries idempotent.
 6. Server adapts the records to canonical `{type, payload}` ThreadStore items and commits them using
    the normal v2 expected-version, generation and operation-ID rules. The source record remains
-   available even when a compatibility normalization is required.
+   available even when a compatibility normalization is required. A local `paginated` session is
+   exposed as `legacy` to the current remote adapter because it does not yet advertise `list_turns`
+   / `list_items`; the original history mode and records remain intact in import provenance.
 7. The thread becomes visible in `/v1/codex/threads` and can be resumed by a Mira-compatible Codex
    App Server on any selected Node.
 

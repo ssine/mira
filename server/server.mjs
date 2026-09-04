@@ -8,7 +8,8 @@ import { Pool } from "pg";
 import { appendAudit, AuthService } from "./auth.mjs";
 import { CapabilityService } from "./capability-service.mjs";
 import {
-  defaultStoreId, importCodexSession, listImportedThreads, scanCodexSessions,
+  defaultStoreId, importCodexSession, listImportedThreads, normalizeImportedThreadHistoryModes,
+  scanCodexSessions,
 } from "./codex-session-import.mjs";
 import { currentSchemaVersion, initializeDatabase } from "./db.mjs";
 import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
@@ -45,6 +46,7 @@ const pool = new Pool({ connectionString: databaseUrl, max: 10 });
 
 await initializeDatabase(pool);
 const importedLegacyStoreCount = await seedLegacySnapshots(pool);
+const normalizedImportedThreadCount = await normalizeImportedThreadHistoryModes(pool);
 const authService = new AuthService({
   pool,
   secureCookies: process.env.MIRA_SECURE_COOKIES !== "false",
@@ -567,7 +569,7 @@ const capabilityService = new CapabilityService({ pool, nodeChannel });
 nodeChannel.setCapabilityService(capabilityService);
 
 server.listen(listenPort, listenHost, () => {
-  console.log(`Mira Server listening on http://${listenHost}:${listenPort}; imported ${importedLegacyStoreCount} legacy store(s)`);
+  console.log(`Mira Server listening on http://${listenHost}:${listenPort}; imported ${importedLegacyStoreCount} legacy store(s); normalized ${normalizedImportedThreadCount} imported thread(s)`);
   if (!authState.adminConfigured) {
     console.warn("No Mira administrator is configured. Run: npm run admin -- set-password admin");
   }
