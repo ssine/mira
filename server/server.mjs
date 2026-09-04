@@ -38,6 +38,7 @@ const staticAssets = new Map([
   ["/", [path.join(publicDirectory, "index.html"), "text/html; charset=utf-8"]],
   ["/app.js", [path.join(publicDirectory, "app.js"), "text/javascript; charset=utf-8"]],
   ["/trace-activity.js", [path.join(publicDirectory, "trace-activity.js"), "text/javascript; charset=utf-8"]],
+  ["/conversation-progress.js", [path.join(publicDirectory, "conversation-progress.js"), "text/javascript; charset=utf-8"]],
   ["/styles.css", [path.join(publicDirectory, "styles.css"), "text/css; charset=utf-8"]],
   ["/vendor/xterm.js", [path.join(serverDirectory, "node_modules/@xterm/xterm/lib/xterm.mjs"), "text/javascript; charset=utf-8"]],
   ["/vendor/xterm-addon-fit.js", [path.join(serverDirectory, "node_modules/@xterm/addon-fit/lib/addon-fit.mjs"), "text/javascript; charset=utf-8"]],
@@ -316,10 +317,32 @@ async function route(request, response) {
   if (request.method === "POST" && match) {
     const principal = await authorize(request, response, "admin");
     if (!principal) return;
-    const result = await importCodexSession(
-      pool, capabilityService, principal, match[1], await readJson(request), request,
-    );
-    sendJson(response, result.status, result.body);
+    const body = await readJson(request);
+    const controller = new AbortController();
+    const abort = () => { if (!response.writableEnded) controller.abort(); };
+    response.on("close", abort);
+    const streaming = request.headers.accept?.includes("application/x-ndjson");
+    let heartbeat;
+    const emit = (event) => { if (!response.destroyed && !response.writableEnded) response.write(`${JSON.stringify(event)}\n`); };
+    if (streaming) {
+      response.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-store", "x-accel-buffering": "no" });
+      response.flushHeaders();
+      heartbeat = setInterval(() => emit({ type: "heartbeat" }), 5000);
+    }
+    try {
+      const result = await importCodexSession(pool, capabilityService, principal, match[1], body, request, {
+        signal: controller.signal,
+        onProgress: streaming ? (progress) => emit({ type: "progress", ...progress }) : undefined,
+      });
+      if (streaming) { emit({ type: result.status === 200 ? "complete" : "error", ...result.body }); response.end(); }
+      else if (!response.destroyed) sendJson(response, result.status, result.body);
+    } catch (error) {
+      if (streaming) { emit({ type: "error", error: error.message, code: error.code ?? "import_failed" }); response.end(); }
+      else if (!response.destroyed) sendJson(response, error.statusCode ?? 500, { error: error.message, code: error.code ?? "import_failed" });
+    } finally {
+      clearInterval(heartbeat);
+      response.removeListener("close", abort);
+    }
     return;
   }
   if (request.method === "GET" && url.pathname === "/v1/codex/threads") {

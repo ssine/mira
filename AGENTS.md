@@ -106,6 +106,21 @@ PostgreSQL is the sole durable source of truth for Codex thread state and histor
 The v1 snapshot API is a compatibility adapter. The v2 event/delta API is the preferred persistence
 contract. See `protocol/thread-store-v2.md`.
 
+Desktop/CLI imports and Web attachments must not impose arbitrary total byte/count ceilings. Use
+bounded chunks, visible progress and cancellation instead. Raw import staging is transactional;
+canonical publication must remain atomic even when the user cancels. Chunk limits are backpressure,
+not file-size limits. Never buffer a whole upload in the browser or a whole imported thread in the
+Server. Images use uploaded `localImage` paths. Schema 13 uses PostgreSQL JSON for raw rollout,
+provenance and snapshot payloads because JSONB rejects escaped NUL present in real tool output;
+retain JSONB for indexed metadata and do not strip characters from canonical history.
+Referenced Desktop forks follow upstream RolloutLineage: resolve immutable rollout IDs in the same
+Codex home, validate exact byte/ordinal cutoffs, skip ancestor metadata, and materialize a copied
+history under the child's identity. Preserve raw references and segment provenance (schema 14).
+Missing, ambiguous, cyclic or inconsistent sources fail without publishing a partial live thread.
+Web submission feedback is ephemeral UI state scoped to thread and turn: show it immediately and
+remove it on the first non-empty assistant prose, failure, completion or disconnect. Empty reasoning
+and ordinary lifecycle events must not become transcript cards.
+
 ## Protocol and upgrade policy
 
 Mira should follow official Codex ThreadStore and App Server semantics instead of inventing a

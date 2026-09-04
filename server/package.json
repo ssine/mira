@@ -1,12 +1,12 @@
 {
   "name": "mira-control-server",
-  "version": "0.12.0",
+  "version": "0.13.0",
   "private": true,
   "type": "module",
   "scripts": {
     "admin": "node admin-cli.mjs",
     "start": "node server.mjs",
-    "check": "node ../scripts/check-version.mjs && node --check server.mjs && node --check admin-cli.mjs && node --check auth.mjs && node --check capability-service.mjs && node --check codex-session-import.mjs && node --check codex-transcript.mjs && node --check db.mjs && node --check thread-store.mjs && node --check node-enrollment.mjs && node --check node-registry.mjs && node --check node-channel.mjs && node --check ssh-relay.mjs && node --check dynamic-tools.mjs && node --check public/app.js && node --check public/trace-activity.js && node --test ../tests/codex_transcript_test.mjs ../tests/node_channel_test.mjs ../tests/trace_copy_test.mjs ../tests/trace_activity_test.mjs"
+    "check": "node ../scripts/check-version.mjs && node --check server.mjs && node --check admin-cli.mjs && node --check auth.mjs && node --check capability-service.mjs && node --check codex-session-import.mjs && node --check session-transfer.mjs && node --check public/conversation-progress.js && node --check codex-transcript.mjs && node --check db.mjs && node --check thread-store.mjs && node --check node-enrollment.mjs && node --check node-registry.mjs && node --check node-channel.mjs && node --check ssh-relay.mjs && node --check dynamic-tools.mjs && node --check public/app.js && node --check public/trace-activity.js && node --test ../tests/codex_transcript_test.mjs ../tests/node_channel_test.mjs ../tests/trace_copy_test.mjs ../tests/trace_activity_test.mjs ../tests/conversation_progress_test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

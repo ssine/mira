@@ -58,4 +58,10 @@
 .trace-card.reasoning .trace-kind{color:var(--muted);font-weight:500}
 .trace-card.activity-failed{border-color:rgba(255,125,116,.4)}
 .trace-card.activity-failed .trace-kind{color:#ffaaa4}
+.conversation-progress{display:flex;align-items:center;gap:9px;min-width:0;color:var(--muted);font-size:12px;line-height:1.6;padding:2px 0 7px}
+#conversationProgressTime{margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+.reply-spinner{width:12px;height:12px;flex:none;border:2px solid var(--line);border-top-color:var(--mint);border-radius:50%;animation:reply-spin 1s linear infinite}
+.local-session small,.local-session .session-source{overflow-wrap:anywhere;white-space:normal}
+@keyframes reply-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.reply-spinner{animation:none}}
 @media(max-width:600px){.tool-group-summary{grid-template-columns:minmax(0,1fr)}.tool-group-latest{grid-column:1}.trace-detail>.trace-head{gap:7px}.trace-detail .trace-actions{gap:5px}.trace-detail .trace-copy{padding:4px 6px}.trace-detail .trace-status{max-width:60px}}

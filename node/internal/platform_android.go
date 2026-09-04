@@ -128,8 +128,9 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 	bridgeEnabled := runtimeValue.bridge != nil
 	return map[string]any{
 		"appServer": false, "shell": false, "files": true, "processes": true, "pty": false,
-		"codexSessions": false,
-		"ssh":           BundledOpenSSH == "true", "sshProtocolVersion": 1, "sshFeatures": []string{"exec", "shell", "pty", "sftp"},
+		"fileChunkedWrite": true,
+		"codexSessions":    false,
+		"ssh":              BundledOpenSSH == "true", "sshProtocolVersion": 1, "sshFeatures": []string{"exec", "shell", "pty", "sftp"},
 		"screen": rootEnabled || bridgeEnabled, "input": rootEnabled || bridgeEnabled,
 		"reverseChannel": true, "nativePaths": true, "rootAvailable": rootEnabled,
 		"nodeMode": "android", "transport": "native", "privilegeMode": runtimeValue.configuration.PrivilegeMode,

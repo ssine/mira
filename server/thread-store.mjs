@@ -199,7 +199,7 @@ async function appendCanonicalEvent(
       `INSERT INTO codex_thread_events (
          store_id, thread_id, generation, item_seq, store_event_seq,
          event_format_version, codex_version, payload, payload_sha256
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9)`,
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::json, $9)`,
       [
         storeId,
         item.threadId,
@@ -265,6 +265,11 @@ export async function getSnapshot(pool, storeId) {
      FROM codex_thread_store_snapshots WHERE store_id = $1`,
     [storeId],
   );
+  const head = await getStoreHead(pool, storeId);
+  if (head.version && Number(result.rows[0]?.version) !== head.version) {
+    const current = await canonicalStore(pool, storeId, head.version);
+    return { version: current.version, snapshot: { ...current.state, histories: current.histories }, updatedAt: current.updatedAt };
+  }
   if (result.rowCount === 0) {
     return { version: 0, snapshot: null, updatedAt: null };
   }
@@ -295,11 +300,15 @@ async function putSnapshotTransaction(pool, storeId, body, headers) {
   try {
     await client.query("BEGIN");
     const lockedVersion = await acquireStoreWriteLock(client, storeId);
-    const current = await client.query(
+    let current = await client.query(
       `SELECT version::text, snapshot
        FROM codex_thread_store_snapshots WHERE store_id = $1 FOR UPDATE`,
       [storeId],
     );
+    if (lockedVersion && Number(current.rows[0]?.version) !== lockedVersion) {
+      const canonical = await canonicalStore(client, storeId, lockedVersion);
+      current = { rowCount: 1, rows: [{ version: canonical.version, snapshot: { ...canonical.state, histories: canonical.histories } }] };
+    }
     const currentVersion =
       current.rowCount === 0 ? 0 : Number.parseInt(current.rows[0].version, 10);
     if (lockedVersion !== currentVersion) {
@@ -353,7 +362,7 @@ async function putSnapshotTransaction(pool, storeId, body, headers) {
 
     const updated = await client.query(
       `INSERT INTO codex_thread_store_snapshots (store_id, version, snapshot)
-       VALUES ($1, $2, $3::jsonb)
+       VALUES ($1, $2, $3::json)
        ON CONFLICT (store_id) DO UPDATE SET
          version = EXCLUDED.version,
          snapshot = EXCLUDED.snapshot,
@@ -782,7 +791,7 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
     });
     const updated = await client.query(
       `INSERT INTO codex_thread_store_snapshots (store_id, version, snapshot)
-       VALUES ($1, $2, $3::jsonb)
+       VALUES ($1, $2, $3::json)
        ON CONFLICT (store_id) DO UPDATE SET
          version = EXCLUDED.version,
          snapshot = EXCLUDED.snapshot,
@@ -837,6 +846,128 @@ export async function commitDelta(pool, storeId, body, headers) {
   return withStoreWriteQueue(storeId, () =>
     commitDeltaTransaction(pool, storeId, body, headers),
   );
+}
+
+// Import already-staged history without materializing a whole thread/store in
+// JavaScript. This uses the same canonical event, generation and writer lock
+// rules as commitDelta. The one transaction makes cancellation all-or-nothing.
+export async function commitImportedHistory(pool, storeId, value, context = {}) {
+  return withStoreWriteQueue(storeId, async () => {
+    const client = await pool.connect();
+    const { threadId, importId, count, created, metadata, normalize, codexVersion } = value;
+    const { signal, onProgress = () => {} } = context;
+    const check = () => signal?.throwIfAborted();
+    const batchSize = 100;
+    try {
+      await client.query("BEGIN");
+      check();
+      await acquireStoreWriteLock(client, storeId);
+      const head = await getStoreHead(client, storeId);
+      const existing = head.historyManifest[threadId];
+      const previousCount = existing?.itemCount ?? 0;
+      let replace = false;
+      const segments = value.segments ?? [{ importId, firstLine: 1, count, boundary: null }];
+      for (const [index, segment] of segments.entries()) {
+        check();
+        await client.query(`INSERT INTO mira_codex_session_import_segments
+          (import_id,segment_index,source_import_id,first_line_seq,item_count,end_position)
+          VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT DO NOTHING`,
+        [importId, index, segment.importId, segment.firstLine, segment.count, JSON.stringify(segment.boundary)]);
+      }
+      const saved = await client.query(`SELECT source_import_id AS "importId",first_line_seq::text AS "firstLine",
+        item_count::text AS count,end_position AS boundary FROM mira_codex_session_import_segments WHERE import_id=$1 ORDER BY segment_index`, [importId]);
+      if (!jsonEqual(saved.rows.map((s) => ({ ...s, firstLine: Number(s.firstLine), count: Number(s.count) })), segments)) {
+        throw Object.assign(new Error("同一源会话的祖先历史发生变化，未覆盖已保存的引用关系"), { code: "history_diverged", statusCode: 409 });
+      }
+      const sourceBatch = async (after, limit = batchSize) => {
+        const rows = [];
+        let start = 0;
+        for (const segment of segments) {
+          const skip = Math.max(0, after - start);
+          start += segment.count;
+          if (skip >= segment.count) continue;
+          const take = Math.min(limit - rows.length, segment.count - skip);
+          rows.push(...(await client.query(`SELECT raw_record FROM mira_codex_session_import_records
+            WHERE import_id=$1 AND line_seq >= $2 AND line_seq < $3 ORDER BY line_seq`,
+          [segment.importId, segment.firstLine + skip, segment.firstLine + skip + take])).rows);
+          if (rows.length === limit) break;
+        }
+        return rows;
+      };
+      const existingBatch = async (after, limit = batchSize) => (await client.query(
+        `SELECT payload FROM codex_thread_events
+         WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4
+         AND store_event_seq<=$5 ORDER BY item_seq LIMIT $6`,
+        [storeId, threadId, existing?.generation ?? 0, after, head.version, limit])).rows;
+      for (let offset = 0; offset < Math.min(count, previousCount); offset += batchSize) {
+        check();
+        const limit = Math.min(batchSize, count - offset, previousCount - offset);
+        const source = await sourceBatch(offset, limit);
+        const target = await existingBatch(offset, limit);
+        if (source.length !== limit || target.length !== limit) throw new Error("Incomplete canonical import history");
+        for (let index = 0; index < limit; index++) {
+          const desired = normalize(source[index].raw_record);
+          if (!jsonEqual(normalize(target[index].payload), desired)) {
+            throw Object.assign(new Error("本地会话与数据库历史已分叉；源记录已保留，未覆盖现有会话"), { code: "history_diverged", statusCode: 409 });
+          }
+          if (!jsonEqual(target[index].payload, desired)) replace = true;
+        }
+        onProgress({ phase: "validating", records: offset + limit, totalRecords: Math.min(count, previousCount) });
+      }
+      const state = structuredClone(head.state);
+      state.created_threads ??= {};
+      state.metadata_updates ??= {};
+      if (!state.created_threads[threadId]) state.created_threads[threadId] = created;
+      else state.created_threads[threadId].history_mode = "legacy";
+      state.metadata_updates[threadId] ??= metadata;
+      if (existing && previousCount >= count && !replace && jsonEqual(state, head.state)) {
+        check();
+        await client.query("UPDATE mira_codex_session_imports SET status='imported',store_event_seq=$2,error_code=NULL,updated_at=NOW() WHERE import_id=$1", [importId, head.version]);
+        await client.query("COMMIT");
+        return { version: head.version, noChange: true };
+      }
+      const manifest = structuredClone(head.historyManifest);
+      const generation = existing ? existing.generation + (replace ? 1 : 0) : 1;
+      const total = Math.max(count, previousCount);
+      manifest[threadId] = { generation, itemCount: total };
+      const version = await advanceStoreHead(client, storeId, head.version);
+      await client.query(`INSERT INTO codex_store_events
+        (store_id,event_seq,previous_event_seq,operation_id,event_format_version,codex_version,state,history_manifest)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb)`,
+      [storeId, version, head.version, crypto.randomUUID(), eventFormatVersion, codexVersion, JSON.stringify(state), JSON.stringify(manifest)]);
+      for (let offset = replace ? 0 : previousCount; offset < total;) {
+        check();
+        const fromSource = offset < count;
+        const limit = Math.min(batchSize, (fromSource ? count : total) - offset);
+        const rows = fromSource ? await sourceBatch(offset, limit) : await existingBatch(offset, limit);
+        if (rows.length !== limit) throw new Error("Incomplete staged import history");
+        const parameters = [];
+        const tuples = [];
+        for (const row of rows) {
+          check();
+          const payload = normalize(fromSource ? row.raw_record : row.payload);
+          const base = parameters.length;
+          parameters.push(storeId, threadId, generation, ++offset, version, eventFormatVersion, codexVersion, JSON.stringify(payload), payloadHash(payload));
+          tuples.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8}::json,$${base+9})`);
+        }
+        await client.query(`INSERT INTO codex_thread_events
+          (store_id,thread_id,generation,item_seq,store_event_seq,event_format_version,codex_version,payload,payload_sha256)
+          VALUES ${tuples.join(",")}`, parameters);
+        onProgress({ phase: "publishing", records: offset, totalRecords: total });
+      }
+      await replaceProjections(client, storeId, state, manifest, version);
+      // Compatibility snapshots are rebuildable caches, not the source of
+      // truth. V1 reads rebuild on demand; normal V2 reads use canonical rows.
+      await client.query("DELETE FROM codex_thread_store_snapshots WHERE store_id=$1", [storeId]);
+      await client.query("UPDATE mira_codex_session_imports SET status='imported',store_event_seq=$2,error_code=NULL,updated_at=NOW() WHERE import_id=$1", [importId, version]);
+      check();
+      await client.query("COMMIT");
+      return { version };
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally { client.release(); }
+  });
 }
 
 export async function listStoreEvents(pool, storeId, after, limit) {
@@ -917,7 +1048,7 @@ export async function rebuildSnapshot(pool, storeId) {
   const snapshot = { ...row.state, histories };
   await pool.query(
     `INSERT INTO codex_thread_store_snapshots (store_id, version, snapshot)
-     VALUES ($1, $2, $3::jsonb)
+     VALUES ($1, $2, $3::json)
      ON CONFLICT (store_id) DO UPDATE SET
        version = EXCLUDED.version,
        snapshot = EXCLUDED.snapshot,

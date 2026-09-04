@@ -103,6 +103,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 	return map[string]any{
 		"appServer": true, "shell": true, "files": true, "processes": true, "pty": true,
 		"codexSessions":        true,
+		"fileChunkedWrite":     true,
 		"codexRuntimeDownload": runtimeValue.configuration.CodexBinary == "" && runtime.GOARCH == "amd64" && (runtime.GOOS == "linux" || runtime.GOOS == "windows"),
 		"ssh":                  BundledOpenSSH == "true", "sshProtocolVersion": 1, "sshFeatures": []string{"exec", "shell", "pty", "sftp"},
 		"screen": false, "input": false, "reverseChannel": true, "nativePaths": true,

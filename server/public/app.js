@@ -3,6 +3,7 @@ import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/vendor/marked.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
+import { ReplyProgress } from "/conversation-progress.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -48,6 +49,9 @@ const agent = {
   activeTurns: new Map(),
   turnThreads: new Map(),
   sessions: [],
+  sessionNodeId: null,
+  sessionScanEpoch: 0,
+  sessionVisibleLimit: 40,
   threads: [],
   transcriptThreadId: null,
   transcriptGeneration: null,
@@ -60,14 +64,34 @@ const agent = {
   attachments: [],
   fileObjectUrl: null,
   sendPromise: null,
+  replySubmission: null,
+  uploadController: null,
+  fileReadController: null,
+  filePreview: null,
+  sessionImportController: null,
   newThreadRequestId: null,
   newThreadRequestSignature: null,
 };
 
 const transcriptPageSize = 60;
-const maximumAttachmentBytes = 4 * 1024 * 1024;
-const maximumAttachmentTotalBytes = 8 * 1024 * 1024;
-const maximumConversationFileBytes = 128 * 1024 * 1024;
+const replyProgress = new ReplyProgress();
+let replyProgressTimer = null;
+
+function renderReplyProgress() {
+  const entry = replyProgress.current(agent.threadId);
+  $("#conversationProgress").classList.toggle("hidden", !entry);
+  if (entry) {
+    $("#conversationProgressText").textContent = entry.phase;
+    $("#conversationProgressTime").textContent = `${Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000))} 秒`;
+  }
+  if (entry && !replyProgressTimer) replyProgressTimer = setInterval(renderReplyProgress, 1000);
+  if (!entry && replyProgressTimer) { clearInterval(replyProgressTimer); replyProgressTimer = null; }
+}
+
+function updateReplyProgress(entry, values) {
+  replyProgress.update(entry, values);
+  renderReplyProgress();
+}
 const nodeFileChunkBytes = 4 * 1024 * 1024;
 
 async function refreshAdminCsrf() {
@@ -1230,6 +1254,7 @@ function notificationIsForOpenThread(params = {}) {
 function syncActiveTurnUi() {
   agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
   $("#agentInterrupt").classList.toggle("hidden", !agent.turnId);
+  renderReplyProgress();
 }
 
 function syncConversationSendUi() {
@@ -1238,10 +1263,14 @@ function syncConversationSendUi() {
   $("#conversationSend").disabled = busy || !selectedNode;
   $("#agentRuntimeNode").disabled = busy;
   $("#agentNewThread").disabled = busy;
+  $("#conversationAttach").disabled = busy;
+  $("#conversationCwd").disabled = busy;
+  for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
 }
 
-function closeAgentSocket() {
+function closeAgentSocket({ preserveSubmission = false } = {}) {
+  replyProgress.clear(preserveSubmission ? agent.replySubmission : null);
   agent.runtimeStartEpoch++;
   const socket = agent.socket;
   agent.socket = null;
@@ -1533,18 +1562,17 @@ function bytesBase64(bytes) {
   return btoa(binary);
 }
 
-async function readNodeFile(nodeId, path, stat) {
+async function readNodeFile(nodeId, path, stat, controller) {
   const size = Number(stat.size ?? 0);
   if (!Number.isSafeInteger(size) || size < 0) throw new Error("Node 返回了无效的文件大小");
-  if (size > maximumConversationFileBytes) {
-    throw new Error(`网页端单次最多读取 ${formatBytes(maximumConversationFileBytes)}；此文件为 ${formatBytes(size)}`);
-  }
   const chunks = [];
   for (let offset = 0; offset < size;) {
+    controller.signal.throwIfAborted();
     $("#nodeFileLoading").textContent = `正在从 Node 读取 ${formatBytes(offset)} / ${formatBytes(size)}…`;
     const result = await invokeNode(nodeId, "file", {
       action: "read", path, offset, length: Math.min(nodeFileChunkBytes, size - offset), encoding: "base64",
     }, 60_000);
+    controller.signal.throwIfAborted();
     if (result.encoding !== "base64") throw new Error("Node 没有返回预期的二进制文件数据");
     const chunk = base64Bytes(result.content ?? "");
     if (!chunk.length && !result.eof) throw new Error("Node 文件读取没有取得进展");
@@ -1556,6 +1584,10 @@ async function readNodeFile(nodeId, path, stat) {
 }
 
 function resetNodeFileDialog() {
+  agent.fileReadController?.abort();
+  agent.fileReadController = null;
+  agent.filePreview = null;
+  $("#nodeFileTextMore").classList.add("hidden");
   if (agent.fileObjectUrl) URL.revokeObjectURL(agent.fileObjectUrl);
   agent.fileObjectUrl = null;
   for (const selector of ["#nodeFileImage", "#nodeFileVideo", "#nodeFileAudio", "#nodeFileFrame"]) {
@@ -1575,6 +1607,8 @@ function resetNodeFileDialog() {
 async function openNodeFile(path, line = null) {
   const dialog = $("#nodeFileDialog");
   resetNodeFileDialog();
+  const controller = new AbortController();
+  agent.fileReadController = controller;
   $("#nodeFileTitle").textContent = baseName(path);
   $("#nodeFileMeta").textContent = "正在查找包含此文件的节点…";
   $("#nodeFilePath").textContent = path;
@@ -1587,14 +1621,16 @@ async function openNodeFile(path, line = null) {
   for (const nodeId of candidates) {
     try {
       const candidate = await invokeNode(nodeId, "file", { action: "stat", path }, 30_000);
+      controller.signal.throwIfAborted();
       if (candidate.type !== "file") throw new Error("路径不是普通文件");
       selectedNode = nodeId;
       stat = candidate;
       break;
-    } catch (error) { lastError = error; }
+    } catch (error) { controller.signal.throwIfAborted(); lastError = error; }
   }
   if (!selectedNode) throw new Error(`无法从会话关联的节点读取此文件：${lastError?.message ?? "文件不存在"}`);
-  const blob = await readNodeFile(selectedNode, path, stat);
+  const blob = await readNodeFile(selectedNode, path, stat, controller);
+  controller.signal.throwIfAborted();
   const mime = blob.type || "application/octet-stream";
   const node = dashboardNodes.get(selectedNode);
   $("#nodeFileMeta").textContent = `${formatBytes(blob.size)} · ${mime} · ${node?.hostname ?? selectedNode}${line ? ` · 第 ${line} 行` : ""}`;
@@ -1618,20 +1654,31 @@ async function openNodeFile(path, line = null) {
     $("#nodeFileFrame").classList.remove("hidden");
   } else if (mime.startsWith("text/") || ["application/json", "application/xml", "application/x-ndjson"].includes(mime)) {
     const preview = $("#nodeFileText");
-    if (blob.size <= 4 * 1024 * 1024) {
-      preview.textContent = await blob.text();
-      preview.classList.remove("hidden");
-      if (line) requestAnimationFrame(() => {
-        const lineHeight = Number.parseFloat(getComputedStyle(preview).lineHeight) || 20;
-        preview.scrollTop = Math.max(0, (line - 3) * lineHeight);
-      });
-    } else {
-      $("#nodeFileUnsupported").textContent = "文本文件超过 4 MiB；为避免卡住页面，请直接下载查看。";
-      $("#nodeFileUnsupported").classList.remove("hidden");
-    }
+    agent.filePreview = { blob, offset: 0, decoder: new TextDecoder() };
+    preview.classList.remove("hidden");
+    await loadMoreFilePreview();
+    if (line) requestAnimationFrame(() => {
+      const lineHeight = Number.parseFloat(getComputedStyle(preview).lineHeight) || 20;
+      preview.scrollTop = Math.max(0, (line - 3) * lineHeight);
+    });
   } else {
     $("#nodeFileUnsupported").classList.remove("hidden");
   }
+}
+
+async function loadMoreFilePreview() {
+  const value = agent.filePreview;
+  if (!value || value.loading) return;
+  value.loading = true;
+  try {
+    const end = Math.min(value.offset + 64 * 1024, value.blob.size);
+    const bytes = await value.blob.slice(value.offset, end).arrayBuffer();
+    if (agent.filePreview !== value) return;
+    $("#nodeFileText").append(document.createTextNode(value.decoder.decode(bytes, { stream: end < value.blob.size })));
+    value.offset = end;
+    $("#nodeFileTextMore").classList.toggle("hidden", end >= value.blob.size);
+    $("#nodeFileTextMore").textContent = `显示更多 · 已展示 ${formatBytes(end)} / ${formatBytes(value.blob.size)}`;
+  } finally { value.loading = false; }
 }
 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
@@ -1852,6 +1899,8 @@ function handleAgentNotification(message) {
     agent.socket?.send(JSON.stringify({ id: message.id, error: { code: -32601, message: "interactive request is not supported by Mira Web" } }));
     return;
   }
+  replyProgress.observe(method, { ...params, threadId: notificationThreadId(params) });
+  renderReplyProgress();
   if (method === "turn/started") {
     const turnId = params.turn?.id ?? null;
     const threadId = params.threadId ?? agent.threadId;
@@ -1934,13 +1983,13 @@ function onAgentSocketMessage(event) {
 
 async function connectAgentSocket(nodeId) {
   if (agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
-  closeAgentSocket();
+  closeAgentSocket({ preserveSubmission: true });
   setAgentRuntimeState("正在建立 App Server 通道…", "offline");
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
   agent.socket = socket;
   agent.socketNodeId = nodeId;
-  socket.addEventListener("message", onAgentSocketMessage);
+  socket.addEventListener("message", (event) => { if (agent.socket === socket) onAgentSocketMessage(event); });
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("App Server WebSocket 连接超时")), 15_000);
     socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
@@ -2042,23 +2091,37 @@ async function loadAgentThreads() {
 
 function renderLocalSessions() {
   const list = clear($("#localSessionList"));
+  const source = $("#sessionSourceFilter").value;
+  const archive = $("#sessionArchiveFilter").value;
+  const query = $("#sessionSearch").value.trim().toLowerCase();
+  const filtered = [...agent.sessions.entries()].filter(([, session]) =>
+    (source === "all" || (session.clientKind ?? "unknown") === source) &&
+    (archive === "all" || Boolean(session.archived) === (archive === "archived")) &&
+    [session.title, session.threadId, session.cwd].some((value) => String(value ?? "").toLowerCase().includes(query)));
+  $("#sessionShowMore").classList.toggle("hidden", filtered.length <= agent.sessionVisibleLimit);
   if (!agent.sessions.length) {
     list.append(element("div", "agent-list-empty", "没有发现本地 Codex 会话"));
     return;
   }
-  for (const [index, session] of agent.sessions.entries()) {
+  if (!filtered.length) list.append(element("div", "agent-list-empty", "没有匹配的会话"));
+  for (const [index, session] of filtered.slice(0, agent.sessionVisibleLimit)) {
     const card = element("article", "local-session");
     const copy = element("div");
     copy.append(
       element("strong", "", session.title || "未命名会话"),
+      element("span", "session-source", `${({ desktop: "Codex Desktop", cli: "CLI", ide: "IDE 扩展", subagent: "子 Agent" })[session.clientKind] ?? "其他 / 旧节点"}${session.archived ? " · 已归档" : ""} · ${session.codexVersion || "版本未知"}`),
       element("span", "", `${formatBytes(session.sizeBytes)} · ${when(session.modifiedAt)}`),
+      element("small", "", session.cwd || "工作目录未知"),
       element("small", "", session.threadId),
+      element("small", "", session.path),
     );
-    const button = element("button", session.import?.unchanged && session.import.status === "imported" ? "ghost" : "approve",
-      session.import?.unchanged && session.import.status === "imported" ? "已导入" : "导入");
+    if (session.historyBase) copy.append(element("small", "", "引用式分支：导入时自动读取并补齐祖先历史。"));
+    const imported = session.import?.unchanged && session.import.status === "imported" && session.import.storeId === "personal";
+    const button = element("button", imported ? "ghost" : "approve", imported ? "打开会话" : "导入");
     button.type = "button";
     button.dataset.sessionIndex = String(index);
-    button.disabled = session.import?.unchanged && session.import.status === "imported";
+    if (imported) button.dataset.importedThreadId = session.import.threadId;
+    button.disabled = Boolean(agent.sessionImportController);
     card.append(copy, button);
     list.append(card);
   }
@@ -2067,35 +2130,100 @@ function renderLocalSessions() {
 async function scanLocalSessions() {
   const nodeId = $("#sessionSourceNode").value;
   if (!nodeId) throw new Error("没有支持本地会话发现的节点");
-  $("#sessionScanState").textContent = "正在扫描默认 CODEX_HOME…";
-  const response = await api(`/v1/nodes/${nodeId}/codex-sessions`);
-  agent.sessions = response.sessions ?? [];
+  const epoch = ++agent.sessionScanEpoch;
+  agent.sessions = [];
+  agent.sessionNodeId = null;
   renderLocalSessions();
-  $("#sessionScanState").textContent = `发现 ${agent.sessions.length} 个会话 · ${response.codexHomes?.length ?? 0} 个 CODEX_HOME`;
+  $("#sessionScanState").textContent = "正在扫描桌面 App、CLI 和归档会话…";
+  let response;
+  try { response = await api(`/v1/nodes/${nodeId}/codex-sessions`); }
+  catch (error) { if (epoch !== agent.sessionScanEpoch) return; throw error; }
+  if (epoch !== agent.sessionScanEpoch || nodeId !== $("#sessionSourceNode").value) return;
+  agent.sessions = response.sessions ?? [];
+  agent.sessionNodeId = nodeId;
+  agent.sessionVisibleLimit = 40;
+  renderLocalSessions();
+  $("#sessionScanState").textContent = `发现 ${agent.sessions.length} 个会话（桌面 ${agent.sessions.filter((s) => s.clientKind === "desktop").length}，归档 ${agent.sessions.filter((s) => s.archived).length}） · ${response.codexHomes?.length ?? 0} 个 CODEX_HOME${response.truncated ? " · 已达扫描上限，结果不完整" : ""}${response.warnings?.length ? ` · ${response.warnings.length} 个读取警告` : ""}${agent.sessions.some((s) => !s.clientKind) ? " · 更新源节点可识别桌面来源并扫描归档" : ""}`;
+  $("#sessionScanState").title = (response.warnings ?? []).join("\n");
+}
+
+async function openImportedSession(threadId, nodeId) {
+  if (agent.sendPromise) throw new Error("请等待当前消息提交完成");
+  if ([...$("#agentRuntimeNode").options].some((option) => option.value === nodeId)) {
+    $("#agentRuntimeNode").value = nodeId;
+    $("#agentRuntimeNode").dispatchEvent(new Event("change"));
+  } else throw new Error("源节点暂不能运行受控 Codex。会话已在统一数据库中，请选择合适的运行节点和工作目录后打开。");
+  await resumeAgentThread(threadId);
 }
 
 async function importLocalSession(index, button) {
+  if (agent.sessionImportController) return;
   const session = agent.sessions[index];
-  if (!session) return;
+  const nodeId = agent.sessionNodeId;
+  if (!session || !nodeId) return;
+  if (button.dataset.importedThreadId) return openImportedSession(button.dataset.importedThreadId, nodeId);
   button.disabled = true;
   button.textContent = "导入中…";
+  const controller = new AbortController();
+  agent.sessionImportController = controller;
+  $("#sessionImportProgress").classList.remove("hidden");
+  $("#sessionImportCancel").classList.remove("hidden");
+  $("#sessionImportState").textContent = "正在准备导入…";
+  $("#sessionImportMeter").removeAttribute("value");
+  const startedAt = Date.now();
+  for (const button of $("#localSessionList").querySelectorAll("button")) button.disabled = true;
   try {
-    const result = await api(`/v1/nodes/${$("#sessionSourceNode").value}/codex-session-imports`, {
-      method: "POST", body: JSON.stringify({ path: session.path, storeId: "personal" }),
+    await refreshAdminCsrf();
+    const response = await fetch(`/v1/nodes/${nodeId}/codex-session-imports`, {
+      method: "POST", credentials: "same-origin", signal: controller.signal,
+      headers: { "content-type": "application/json", accept: "application/x-ndjson", "x-mira-csrf": csrfToken },
+      body: JSON.stringify({ path: session.path, storeId: "personal" }),
     });
+    if (!response.ok) throw new Error((await response.json()).error ?? `HTTP ${response.status}`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let carry = "";
+    let result = null;
+    for (;;) {
+      const { value, done } = await reader.read();
+      carry += decoder.decode(value, { stream: !done });
+      const lines = carry.split("\n");
+      carry = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.type === "error") throw new Error(event.error ?? "导入失败");
+        if (event.type === "complete") result = event;
+        if (event.type !== "progress") continue;
+        const label = ({ scanning: "扫描源会话", resolving: "定位祖先历史", reading: event.ancestor ? "读取祖先历史" : "读取并暂存", validating: "校验已有历史", publishing: "写入统一会话" })[event.phase] ?? "导入中";
+        const current = event.bytes ?? event.records;
+        const total = event.totalBytes ?? event.totalRecords;
+        const meter = $("#sessionImportMeter");
+        if (total > 0) { meter.max = total; meter.value = current ?? 0; } else meter.removeAttribute("value");
+        const amount = event.bytes !== undefined ? `${formatBytes(current)} / ${formatBytes(total)}` : `${current ?? 0} / ${total ?? "—"} 条记录`;
+        $("#sessionImportState").textContent = `${label} · ${amount} · ${Math.floor((Date.now() - startedAt) / 1000)} 秒`;
+      }
+      if (done) break;
+    }
+    if (!result) throw new Error("导入连接已断开，未收到完成确认；请扫描确认状态后重试");
     toast(`已导入 ${result.itemCount} 条记录`);
-    await Promise.all([scanLocalSessions(), loadAgentThreads()]);
+    $("#sessionImportState").textContent = `导入完成 · ${result.itemCount} 条记录`;
+    await Promise.all([nodeId === $("#sessionSourceNode").value ? scanLocalSessions() : Promise.resolve(), loadAgentThreads()]);
   } catch (error) {
-    button.disabled = false;
-    button.textContent = "重试";
+    $("#sessionImportState").textContent = error.name === "AbortError" ? "已请求取消；未提交的数据将回滚。若恰好已完成提交，重新扫描可确认结果。" : `导入失败：${error.message}`;
+    if (error.name === "AbortError") return;
     throw error;
+  } finally {
+    if (agent.sessionImportController === controller) agent.sessionImportController = null;
+    $("#sessionImportCancel").classList.add("hidden");
+    renderLocalSessions();
   }
 }
 
 async function startAgentRuntime() {
   const nodeId = $("#agentRuntimeNode").value;
   if (!nodeId) throw new Error("没有可运行 Codex 的节点");
-  closeAgentSocket();
+  closeAgentSocket({ preserveSubmission: true });
   setAgentRuntimeState("正在启动受控 App Server…", "offline");
   const epoch = agent.runtimeStartEpoch;
   await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
@@ -2220,43 +2348,64 @@ async function prepareUploadDirectory(nodeId, cwd) {
   throw new Error(`无法在运行节点创建附件暂存目录：${lastError?.message ?? "没有可写目录"}`);
 }
 
-async function fileDataUrl(file) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  return `data:${file.type || nodeFileMimeType(file.name)};base64,${bytesBase64(bytes)}`;
-}
-
-async function prepareTurnInput(text, attachments) {
-  const images = attachments.filter(nativeImageAttachment);
-  const files = attachments.filter((file) => !nativeImageAttachment(file));
+async function prepareTurnInput(text, attachments, progress) {
+  const controller = new AbortController();
+  agent.uploadController = controller;
+  const signal = controller.signal;
   const annotations = [];
   const inputs = [];
-  if (images.length) {
-    annotations.push(`已附加图片：${images.map((file) => `\`${String(file.name).replaceAll("`", "'")}\``).join("、")}`);
-  }
-  if (files.length) {
-    const nodeId = agent.socketNodeId;
-    const cwd = $("#conversationCwd").value.trim();
-    $("#conversationHint").textContent = `正在上传 ${files.length} 个文件到运行节点…`;
-    const directory = await prepareUploadDirectory(nodeId, cwd);
-    const staged = [];
-    for (const [index, file] of files.entries()) {
-      $("#conversationHint").textContent = `正在上传文件 ${index + 1} / ${files.length}…`;
-      const path = joinPath(directory, safeAttachmentName(file.name, index));
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      await invokeNode(nodeId, "file", {
-        action: "write", path, encoding: "base64", content: bytesBase64(bytes), overwrite: false,
-      }, 60_000);
-      staged.push({ file, path });
+  let directory = null;
+  let uploaded = 0;
+  const total = attachments.reduce((sum, file) => sum + file.size, 0);
+  const nodeId = agent.socketNodeId;
+  $("#conversationUploadCancel").classList.toggle("hidden", !attachments.length);
+  try {
+    if (attachments.length) {
+      const cwd = $("#conversationCwd").value.trim();
+      directory = await prepareUploadDirectory(nodeId, cwd);
+      signal.throwIfAborted();
+      const staged = [];
+      for (const [index, file] of attachments.entries()) {
+        const path = joinPath(directory, safeAttachmentName(file.name, index));
+        let offset = 0;
+        do {
+          signal.throwIfAborted();
+          const status = `上传 ${index + 1}/${attachments.length} · ${file.name} · ${formatBytes(uploaded)} / ${formatBytes(total)}${total ? ` · ${Math.floor(uploaded / total * 100)}%` : ""}`;
+          $("#conversationHint").textContent = status;
+          updateReplyProgress(progress, { phase: status });
+          const bytes = new Uint8Array(await file.slice(offset, offset + nodeFileChunkBytes).arrayBuffer());
+          signal.throwIfAborted();
+          // Await the in-flight chunk even after cancellation, then remove only our
+          // unique batch directory. This avoids racing cleanup against a late write.
+          await invokeNode(nodeId, "file", {
+            action: "write", path, encoding: "base64", content: bytesBase64(bytes), overwrite: false,
+            append: offset > 0, offset,
+          }, 60_000);
+          offset += bytes.length;
+          uploaded += bytes.length;
+          signal.throwIfAborted();
+        } while (offset < file.size);
+        staged.push({ file, path });
+        if (nativeImageAttachment(file)) inputs.push({ type: "localImage", path });
+      }
+      annotations.push([
+        "已附加文件（暂存在当前运行节点）：",
+        ...staged.map(({ file, path }) => `- \`${String(file.name).replaceAll("`", "'")}\`：\`${path}\``),
+      ].join("\n"));
     }
-    annotations.push([
-      "已附加文件（暂存在当前运行节点）：",
-      ...staged.map(({ file, path }) => `- \`${String(file.name).replaceAll("`", "'")}\`：\`${path}\``),
-    ].join("\n"));
+    const message = [text, ...annotations].filter(Boolean).join("\n\n");
+    if (message) inputs.unshift({ type: "text", text: message });
+    return { inputs, message };
+  } catch (error) {
+    if (directory) {
+      try { await invokeNode(nodeId, "file", { action: "remove", path: directory, recursive: true }, 60_000); }
+      catch { toast(`附件暂存文件清理失败，可在运行节点删除：${directory}`); }
+    }
+    throw error;
+  } finally {
+    if (agent.uploadController === controller) agent.uploadController = null;
+    $("#conversationUploadCancel").classList.add("hidden");
   }
-  const message = [text, ...annotations].filter(Boolean).join("\n\n");
-  if (message) inputs.push({ type: "text", text: message });
-  for (const image of images) inputs.push({ type: "image", url: await fileDataUrl(image) });
-  return { inputs, message };
 }
 
 function renderComposerAttachments() {
@@ -2279,22 +2428,18 @@ function renderComposerAttachments() {
 }
 
 function addComposerFiles(files) {
-  let total = agent.attachments.reduce((sum, file) => sum + file.size, 0);
-  const rejected = [];
+  if (agent.sendPromise) { toast("请等待当前提交完成，或取消上传后修改附件"); return; }
   for (const file of files) {
-    if (agent.attachments.length >= 8) { rejected.push(`${file.name}：最多 8 个附件`); continue; }
-    if (file.size > maximumAttachmentBytes) { rejected.push(`${file.name}：超过 4 MiB`); continue; }
-    if (total + file.size > maximumAttachmentTotalBytes) { rejected.push(`${file.name}：附件合计超过 8 MiB`); continue; }
     agent.attachments.push(file);
-    total += file.size;
   }
   renderComposerAttachments();
-  if (rejected.length) toast(rejected.join("；"));
 }
 
-async function sendAgentMessage(text, attachments = []) {
+async function sendAgentMessage(text, attachments = [], progress = null) {
+  updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   if (!agent.threadId) {
+    updateReplyProgress(progress, { phase: "正在创建会话…" });
     const params = {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
@@ -2318,7 +2463,9 @@ async function sendAgentMessage(text, attachments = []) {
     $("#conversationMeta").textContent = `${agent.threadId} · ${started.model ?? "默认模型"} · ${startedCwd || "默认目录"}`;
     $("#conversationCwd").value = startedCwd ?? "";
   }
-  const prepared = await prepareTurnInput(text, attachments);
+  updateReplyProgress(progress, { threadId: agent.threadId, phase: attachments.length ? "正在上传附件…" : "正在发送…" });
+  const prepared = await prepareTurnInput(text, attachments, progress);
+  updateReplyProgress(progress, { phase: "正在提交消息，等待 Codex 回复…" });
   const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", prepared.message, "已发送");
   optimistic.dataset.pendingUser = "true";
   const turnThreadId = agent.threadId;
@@ -2334,6 +2481,7 @@ async function sendAgentMessage(text, attachments = []) {
     throw error;
   }
   if (result.turn?.id) {
+    updateReplyProgress(progress, { turnId: result.turn.id });
     agent.activeTurns.set(turnThreadId, result.turn.id);
     agent.turnThreads.set(result.turn.id, turnThreadId);
   }
@@ -2411,6 +2559,7 @@ $("#conversationTrace").addEventListener("click", (event) => {
   if (file) {
     event.preventDefault();
     openNodeFile(file.dataset.nodeFilePath, Number(file.dataset.nodeFileLine) || null).catch((error) => {
+      if (error.name === "AbortError") return;
       $("#nodeFileMeta").textContent = "读取失败";
       $("#nodeFileLoading").textContent = error.message;
       toast(error.message);
@@ -2424,6 +2573,18 @@ $("#conversationTrace").addEventListener("click", (event) => {
 $("#sessionScan").addEventListener("click", () => scanLocalSessions().catch((error) => {
   $("#sessionScanState").textContent = `扫描失败：${error.message}`;
 }));
+$("#sessionSourceNode").addEventListener("change", () => {
+  agent.sessionScanEpoch++;
+  agent.sessionNodeId = null;
+  agent.sessions = [];
+  renderLocalSessions();
+  $("#sessionScanState").textContent = "节点已切换，请重新扫描。";
+});
+for (const id of ["sessionSourceFilter", "sessionArchiveFilter", "sessionSearch"]) {
+  $(`#${id}`).addEventListener("input", () => { agent.sessionVisibleLimit = 40; renderLocalSessions(); });
+}
+$("#sessionShowMore").addEventListener("click", () => { agent.sessionVisibleLimit += 40; renderLocalSessions(); });
+$("#sessionImportCancel").addEventListener("click", () => agent.sessionImportController?.abort());
 $("#localSessionList").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-session-index]");
   if (button) importLocalSession(Number(button.dataset.sessionIndex), button).catch((error) => toast(error.message));
@@ -2434,19 +2595,26 @@ $("#conversationForm").addEventListener("submit", async (event) => {
   const text = $("#conversationInput").value.trim();
   const attachments = [...agent.attachments];
   if (!text && !attachments.length) return;
-  const operation = sendAgentMessage(text, attachments);
+  setConversationNotice();
+  const progress = replyProgress.begin(agent.threadId, agent.turnId);
+  agent.replySubmission = progress;
+  renderReplyProgress();
+  const operation = sendAgentMessage(text, attachments, progress);
   agent.sendPromise = operation;
   syncConversationSendUi();
   try {
     await operation;
-    $("#conversationInput").value = "";
-    agent.attachments = [];
+    if ($("#conversationInput").value.trim() === text) $("#conversationInput").value = "";
+    agent.attachments = agent.attachments.filter((file) => !attachments.includes(file));
     renderComposerAttachments();
-    $("#conversationHint").textContent = "可粘贴或拖入 · 单个 4 MiB，合计 8 MiB";
+    $("#conversationHint").textContent = "可粘贴或拖入图片与文件 · 上传支持取消";
   } catch (error) {
-    setConversationNotice(error.message, "error");
-    $("#conversationHint").textContent = "发送失败；附件仍保留，可重试";
+    replyProgress.finish(progress);
+    renderReplyProgress();
+    setConversationNotice(error.name === "AbortError" ? "已取消上传，未发送消息；附件仍保留。" : error.message, error.name === "AbortError" ? "" : "error");
+    $("#conversationHint").textContent = "附件仍保留，可重试";
   } finally {
+    if (agent.replySubmission === progress) agent.replySubmission = null;
     if (agent.sendPromise === operation) agent.sendPromise = null;
     syncConversationSendUi();
   }
@@ -2458,6 +2626,10 @@ $("#conversationInput").addEventListener("keydown", (event) => {
   }
 });
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
+$("#conversationUploadCancel").addEventListener("click", () => {
+  agent.uploadController?.abort();
+  $("#conversationHint").textContent = "正在取消并清理当前上传…";
+});
 $("#conversationFileInput").addEventListener("change", (event) => {
   addComposerFiles(event.target.files ?? []);
   event.target.value = "";
@@ -2486,6 +2658,7 @@ $("#conversationDropZone").addEventListener("drop", (event) => {
   addComposerFiles(event.dataTransfer?.files ?? []);
 });
 $("#nodeFileClose").addEventListener("click", () => $("#nodeFileDialog").close());
+$("#nodeFileTextMore").addEventListener("click", () => loadMoreFilePreview().catch((error) => toast(error.message)));
 $("#nodeFileDialog").addEventListener("close", resetNodeFileDialog);
 $("#agentInterrupt").addEventListener("click", () => {
   if (!agent.threadId || !agent.turnId) return;

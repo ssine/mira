@@ -12,6 +12,7 @@ const assets = new Map([
   ["/", ["public/index.html", "text/html"]],
   ["/app.js", ["public/app.js", "text/javascript"]],
   ["/trace-activity.js", ["public/trace-activity.js", "text/javascript"]],
+  ["/conversation-progress.js", ["public/conversation-progress.js", "text/javascript"]],
   ["/styles.css", ["public/styles.css", "text/css"]],
   ["/vendor/xterm.js", ["node_modules/@xterm/xterm/lib/xterm.mjs", "text/javascript"]],
   ["/vendor/xterm-addon-fit.js", ["node_modules/@xterm/addon-fit/lib/addon-fit.mjs", "text/javascript"]],
@@ -27,7 +28,9 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/app.js") body = body.replace("void bootstrap();", `
       show("agentView");
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
-        upsertTrace, clear: () => clear($("#conversationTrace")) };
+        upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
+        message: onAgentSocketMessage, nodes: dashboardNodes,
+        setInvoke: (fn) => { invokeNode = fn; }, clear: () => clear($("#conversationTrace")) };
     `);
     response.writeHead(200, { "content-type": asset[1], "cache-control": "no-store" });
     response.end(body);
@@ -42,6 +45,87 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(() => !!window.traceHarness);
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    document.querySelector("#agentRuntimeNode").append(new Option("Test runtime", "test-node"));
+    document.querySelector("#conversationSend").disabled = false;
+    h.agent.socketNodeId = "test-node";
+    window.rpcMessages = [];
+    h.agent.socket = { readyState: 1, send: (message) => window.rpcMessages.push(JSON.parse(message)) };
+    document.querySelector("#conversationInput").value = "Waiting hint test";
+  });
+  await page.locator("#conversationSend").click();
+  assert.equal(await page.locator("#conversationProgress").isVisible(), true, "hint must appear before thread/start returns");
+  assert.match(await page.locator("#conversationProgressText").textContent(), /创建/);
+  await page.evaluate(() => {
+    const request = window.rpcMessages.find((m) => m.method === "thread/start");
+    window.traceHarness.message({ data: JSON.stringify({ id: request.id, result: { thread: { id: "progress-thread" }, cwd: "/project" } }) });
+  });
+  await page.waitForFunction(() => window.rpcMessages.some((m) => m.method === "turn/start"));
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.notify({ method: "turn/started", params: { threadId: "progress-thread", turn: { id: "progress-turn" } } });
+    h.notify({ method: "item/started", params: { threadId: "progress-thread", turnId: "progress-turn", item: { id: "empty", type: "reasoning", summary: [] } } });
+  });
+  assert.equal(await page.locator("#conversationProgress").isVisible(), true);
+  assert.equal(await page.locator(".trace-card.reasoning").count(), 0);
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.notify({ method: "item/agentMessage/delta", params: { threadId: "another-thread", turnId: "other", delta: "unrelated" } });
+  });
+  assert.equal(await page.locator("#conversationProgress").isVisible(), true, "another thread cannot clear progress");
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.notify({ method: "item/agentMessage/delta", params: { threadId: "progress-thread", turnId: "progress-turn", itemId: "prose", delta: "First body" } });
+    const request = window.rpcMessages.find((m) => m.method === "turn/start");
+    h.message({ data: JSON.stringify({ id: request.id, result: { turn: { id: "progress-turn" } } }) });
+  });
+  assert.equal(await page.locator("#conversationProgress").isVisible(), false, "first prose clears hint even before turn/start acknowledgement");
+  await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+
+  const uploaded = await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.nodes.set("test-node", { platform: "linux", capabilities: { files: true } });
+    const calls = [];
+    h.setInvoke(async (_node, _capability, params) => { calls.push({ ...params, content: params.content?.length }); return {}; });
+    const file = new File([new Uint8Array(12 * 1024 * 1024 + 17)], "large.bin");
+    const image = new File([new Uint8Array(5 * 1024 * 1024)], "large.png", { type: "image/png" });
+    const result = await h.prepareTurnInput("attachments", [file, image]);
+    return { calls, inputs: result.inputs };
+  });
+  assert.equal(uploaded.calls.filter((p) => p.action === "write").length, 6);
+  assert(uploaded.calls.some((p) => p.append && p.offset === 12 * 1024 * 1024));
+  assert(uploaded.inputs.some((p) => p.type === "localImage" && p.path.endsWith("large.png")));
+  const cancellation = await page.evaluate(async () => {
+    const h = window.traceHarness;
+    const calls = [];
+    h.setInvoke(async (_node, _capability, params) => {
+      calls.push({ action: params.action, path: params.path });
+      if (params.action === "write") h.agent.uploadController.abort();
+      return {};
+    });
+    try { await h.prepareTurnInput("cancel", [new File([new Uint8Array(9 * 1024 * 1024)], "cancel.bin")]); }
+    catch (error) { return { error: error.name, calls }; }
+  });
+  assert.equal(cancellation.error, "AbortError");
+  assert.equal(cancellation.calls.filter((p) => p.action === "write").length, 1);
+  assert.match(cancellation.calls.find((p) => p.action === "remove").path, /^\/tmp\/mira-web-uploads\/progress-thread\//);
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.agent.sessions = Array.from({ length: 65 }, (_, index) => ({ threadId: `desktop-${index}`, title: `Desktop ${index}`, clientKind: "desktop", archived: index % 2 === 0, cwd: "C:\\project" }));
+    h.agent.sessions.push({ threadId: "cli", title: "CLI", clientKind: "cli" });
+    h.renderLocalSessions();
+    document.querySelector(".import-card").open = true;
+  });
+  assert.equal(await page.locator(".local-session").count(), 40);
+  await page.locator("#sessionShowMore").click();
+  assert.equal(await page.locator(".local-session").count(), 66);
+  await page.locator("#sessionSourceFilter").selectOption("desktop");
+  await page.locator("#sessionArchiveFilter").selectOption("archived");
+  assert.equal(await page.locator(".local-session").count(), 33);
+  await page.locator("#sessionSearch").fill("desktop-2");
+  assert.equal(await page.locator(".local-session").count(), 6);
+  await page.evaluate(() => { document.querySelector(".import-card").open = false; });
   await page.evaluate(() => {
     const h = window.traceHarness;
     h.clear();
@@ -166,7 +250,7 @@ try {
   assert.deepEqual(errors, [], "browser must have no uncaught errors");
   const screenshot = process.env.MIRA_TRACE_SCREENSHOT ?? process.argv[4];
   if (screenshot) await page.locator(".conversation-card").screenshot({ path: screenshot });
-  console.log("PASS: real-browser live/history activity, summaries, grouping, copy, identity isolation, scrolling, narrow layout and keyboard checks");
+  console.log("PASS: real-browser submission hint, cross-thread isolation, 17 MiB chunked attachments, image paths, cancellation cleanup, desktop filters/paging, live/history activity and responsive layout");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

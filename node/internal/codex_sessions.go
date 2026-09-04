@@ -2,11 +2,13 @@ package node
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -20,10 +22,12 @@ const (
 )
 
 type codexSessionsParams struct {
-	Action string `json:"action"`
-	Path   string `json:"path,omitempty"`
-	Cursor int64  `json:"cursor,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	Action    string `json:"action"`
+	Path      string `json:"path,omitempty"`
+	Cursor    int64  `json:"cursor,omitempty"`
+	Limit     int    `json:"limit,omitempty"`
+	Encoding  string `json:"encoding,omitempty"`
+	RolloutID string `json:"rolloutId,omitempty"`
 }
 
 type codexSessionSummary struct {
@@ -35,6 +39,12 @@ type codexSessionSummary struct {
 	Title          string    `json:"title,omitempty"`
 	Cwd            string    `json:"cwd,omitempty"`
 	Source         any       `json:"source,omitempty"`
+	Originator     string    `json:"originator,omitempty"`
+	ClientKind     string    `json:"clientKind"`
+	HistoryMode    string    `json:"historyMode,omitempty"`
+	HistoryBase    any       `json:"historyBase,omitempty"`
+	Archived       bool      `json:"archived"`
+	ForkedFromID   string    `json:"forkedFromId,omitempty"`
 	CodexVersion   string    `json:"codexVersion,omitempty"`
 	StartedAt      string    `json:"startedAt,omitempty"`
 	ModifiedAt     time.Time `json:"modifiedAt"`
@@ -147,6 +157,28 @@ func summarizeCodexSession(pathValue, codexHome string, info fs.FileInfo) (codex
 			result.ParentThreadID, _ = record.Payload["parent_thread_id"].(string)
 			result.Cwd, _ = record.Payload["cwd"].(string)
 			result.Source = record.Payload["source"]
+			result.Originator, _ = record.Payload["originator"].(string)
+			result.HistoryMode, _ = record.Payload["history_mode"].(string)
+			result.HistoryBase = record.Payload["history_base"]
+			result.ForkedFromID, _ = record.Payload["forked_from_id"].(string)
+			result.ClientKind = "unknown"
+			if source, ok := result.Source.(map[string]any); ok && source["subagent"] != nil {
+				result.ClientKind = "subagent"
+				if subagent, ok := source["subagent"].(map[string]any); ok {
+					if spawn, ok := subagent["thread_spawn"].(map[string]any); ok && result.ParentThreadID == "" {
+						result.ParentThreadID, _ = spawn["parent_thread_id"].(string)
+					}
+				}
+			} else if strings.EqualFold(result.Originator, "Codex Desktop") {
+				result.ClientKind = "desktop"
+			} else if source, ok := result.Source.(string); ok {
+				switch source {
+				case "cli":
+					result.ClientKind = "cli"
+				case "vscode":
+					result.ClientKind = "ide"
+				}
+			}
 			result.CodexVersion, _ = record.Payload["cli_version"].(string)
 			result.StartedAt = record.Timestamp
 			if result.StartedAt == "" {
@@ -168,6 +200,14 @@ func summarizeCodexSession(pathValue, codexHome string, info fs.FileInfo) (codex
 				result.Title = compactSessionTitle(message)
 			}
 		}
+		if record.Type == "event_msg" && record.Payload["type"] == "item_completed" {
+			if item, ok := record.Payload["item"].(map[string]any); ok && item["type"] == "userMessage" {
+				message := textFromContent(item["content"])
+				if isSessionTitleCandidate(message) {
+					result.Title = compactSessionTitle(message)
+				}
+			}
+		}
 	}
 	if result.ThreadID == "" {
 		return codexSessionSummary{}, fmt.Errorf("session_meta thread id is missing")
@@ -185,36 +225,46 @@ func (runtimeValue *capabilityRuntime) listCodexSessions() (any, error) {
 	}
 	sessions := make([]codexSessionSummary, 0)
 	warnings := make([]string, 0)
+	warn := func(message string) {
+		if len(warnings) < 50 {
+			warnings = append(warnings, message)
+		}
+	}
 	for _, codexHome := range homes {
-		sessionsRoot := filepath.Join(codexHome, "sessions")
-		walkErr := filepath.WalkDir(sessionsRoot, func(pathValue string, entry fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				warnings = append(warnings, walkErr.Error())
+		for _, directory := range []string{"sessions", "archived_sessions"} {
+			sessionsRoot := filepath.Join(codexHome, directory)
+			walkErr := filepath.WalkDir(sessionsRoot, func(pathValue string, entry fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					if !os.IsNotExist(walkErr) {
+						warn(walkErr.Error())
+					}
+					return nil
+				}
+				if entry.IsDir() {
+					return nil
+				}
+				if len(sessions) >= maxCodexSessionFiles {
+					return fs.SkipAll
+				}
+				if !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+					return nil
+				}
+				info, infoErr := entry.Info()
+				if infoErr != nil || !info.Mode().IsRegular() {
+					return nil
+				}
+				summary, summaryErr := summarizeCodexSession(pathValue, codexHome, info)
+				if summaryErr != nil {
+					warn(fmt.Sprintf("%s: %v", pathValue, summaryErr))
+					return nil
+				}
+				summary.Archived = directory == "archived_sessions"
+				sessions = append(sessions, summary)
 				return nil
+			})
+			if walkErr != nil && !os.IsNotExist(walkErr) {
+				warn(walkErr.Error())
 			}
-			if entry.IsDir() {
-				return nil
-			}
-			if len(sessions) >= maxCodexSessionFiles {
-				return fs.SkipAll
-			}
-			if !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
-				return nil
-			}
-			info, infoErr := entry.Info()
-			if infoErr != nil || !info.Mode().IsRegular() {
-				return nil
-			}
-			summary, summaryErr := summarizeCodexSession(pathValue, codexHome, info)
-			if summaryErr != nil {
-				warnings = append(warnings, fmt.Sprintf("%s: %v", pathValue, summaryErr))
-				return nil
-			}
-			sessions = append(sessions, summary)
-			return nil
-		})
-		if walkErr != nil && !os.IsNotExist(walkErr) {
-			warnings = append(warnings, walkErr.Error())
 		}
 	}
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt) })
@@ -237,16 +287,18 @@ func (runtimeValue *capabilityRuntime) authorizedCodexSessionPath(input string) 
 		return "", err
 	}
 	for _, home := range homes {
-		root := filepath.Join(home, "sessions")
-		if pathContained(root, resolved) {
-			info, statErr := os.Stat(resolved)
-			if statErr != nil {
-				return "", statErr
+		for _, directory := range []string{"sessions", "archived_sessions"} {
+			root := filepath.Join(home, directory)
+			if pathContained(root, resolved) {
+				info, statErr := os.Stat(resolved)
+				if statErr != nil {
+					return "", statErr
+				}
+				if !info.Mode().IsRegular() {
+					return "", fmt.Errorf("Codex session must be a regular file")
+				}
+				return resolved, nil
 			}
-			if !info.Mode().IsRegular() {
-				return "", fmt.Errorf("Codex session must be a regular file")
-			}
-			return resolved, nil
 		}
 	}
 	return "", fmt.Errorf("path is outside detected Codex session directories")
@@ -292,8 +344,15 @@ func (runtimeValue *capabilityRuntime) readCodexSession(params codexSessionsPara
 		return nil, err
 	}
 	buffer = buffer[:count]
+	latest, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if latest.Size() != info.Size() || !latest.ModTime().Equal(info.ModTime()) {
+		return nil, fmt.Errorf("Codex session changed while reading")
+	}
 	next := params.Cursor + int64(count)
-	if next < info.Size() {
+	if next < info.Size() && params.Encoding != "base64" {
 		lastNewline := bytes.LastIndexByte(buffer, '\n')
 		if lastNewline < 0 {
 			return nil, fmt.Errorf("a JSONL record exceeds the %d byte chunk limit", limit)
@@ -301,9 +360,16 @@ func (runtimeValue *capabilityRuntime) readCodexSession(params codexSessionsPara
 		buffer = buffer[:lastNewline+1]
 		next = params.Cursor + int64(lastNewline+1)
 	}
+	content := string(buffer)
+	encoding := "utf8"
+	if params.Encoding == "base64" {
+		content = base64.StdEncoding.EncodeToString(buffer)
+		encoding = "base64"
+	}
 	return map[string]any{
 		"path": pathValue, "cursor": params.Cursor, "nextCursor": next,
-		"content": string(buffer), "eof": next >= info.Size(), "sizeBytes": info.Size(),
+		"content": content, "encoding": encoding, "eof": next >= info.Size(), "sizeBytes": info.Size(),
+		"modifiedAt": info.ModTime().UTC(),
 	}, nil
 }
 
@@ -313,7 +379,68 @@ func (runtimeValue *capabilityRuntime) codexSessions(params codexSessionsParams)
 		return runtimeValue.listCodexSessions()
 	case "read":
 		return runtimeValue.readCodexSession(params)
+	case "resolve":
+		return runtimeValue.resolveCodexRollout(params)
 	default:
 		return nil, fmt.Errorf("unsupported Codex sessions action: %s", params.Action)
 	}
+}
+
+// References name immutable rollout IDs (the filename suffix), not necessarily
+// the logical thread ID after a revert. Search only the selected source's home;
+// do not resolve against another installation or the bounded discovery page.
+func (runtimeValue *capabilityRuntime) resolveCodexRollout(params codexSessionsParams) (any, error) {
+	if !regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`).MatchString(params.RolloutID) {
+		return nil, fmt.Errorf("invalid rolloutId")
+	}
+	source, err := runtimeValue.authorizedCodexSessionPath(params.Path)
+	if err != nil {
+		return nil, err
+	}
+	homes, err := runtimeValue.codexSessionHomes()
+	if err != nil {
+		return nil, err
+	}
+	var found []codexSessionSummary
+	for _, home := range homes {
+		if !pathContained(filepath.Join(home, "sessions"), source) && !pathContained(filepath.Join(home, "archived_sessions"), source) {
+			continue
+		}
+		for _, directory := range []string{"sessions", "archived_sessions"} {
+			err = filepath.WalkDir(filepath.Join(home, directory), func(candidate string, entry fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					if os.IsNotExist(walkErr) {
+						return nil
+					}
+					return walkErr
+				}
+				if entry.IsDir() || !strings.HasPrefix(entry.Name(), "rollout-") || !strings.HasSuffix(strings.ToLower(entry.Name()), "-"+strings.ToLower(params.RolloutID)+".jsonl") {
+					return nil
+				}
+				resolved, resolveErr := runtimeValue.authorizedCodexSessionPath(candidate)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				info, statErr := os.Stat(resolved)
+				if statErr != nil {
+					return statErr
+				}
+				summary, summaryErr := summarizeCodexSession(resolved, home, info)
+				if summaryErr != nil {
+					return summaryErr
+				}
+				summary.Archived = directory == "archived_sessions"
+				found = append(found, summary)
+				return nil
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+		break
+	}
+	if len(found) != 1 {
+		return nil, fmt.Errorf("referenced rollout must have exactly one source in this Codex home (found %d)", len(found))
+	}
+	return found[0], nil
 }

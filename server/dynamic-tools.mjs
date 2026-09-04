@@ -47,6 +47,7 @@ export function dynamicToolSpecs() {
               length: { type: "integer", minimum: 1, maximum: 4194304 },
               recursive: { type: "boolean" },
               overwrite: { type: "boolean" },
+              append: { type: "boolean", description: "Append a file chunk only when offset equals the current file size; updated Nodes only." },
             },
             required: ["nodeId", "action"],
             additionalProperties: false,

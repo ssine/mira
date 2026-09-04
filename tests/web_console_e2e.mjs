@@ -50,6 +50,26 @@ await fs.writeFile(sessionPath, [
   "",
 ].join("\n"));
 
+let desktopFixture = null;
+if (process.env.MIRA_REAL_DESKTOP_SESSION) {
+  const source = process.env.MIRA_REAL_DESKTOP_SESSION;
+  const file = await fs.open(source, "r");
+  let meta;
+  try {
+    const buffer = Buffer.alloc(512 * 1024);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    const end = buffer.subarray(0, bytesRead).indexOf(10);
+    meta = JSON.parse(buffer.subarray(0, end).toString()).payload;
+  } finally { await file.close(); }
+  const directory = path.join(codexHome, "archived_sessions");
+  await fs.mkdir(directory, { recursive: true });
+  desktopFixture = { id: meta.id, path: path.join(directory, path.basename(source)) };
+  await fs.copyFile(source, desktopFixture.path);
+  for (const ancestor of (process.env.MIRA_REAL_DESKTOP_ANCESTORS ?? "").split(";").filter(Boolean)) {
+    await fs.copyFile(ancestor, path.join(directory, path.basename(ancestor)));
+  }
+}
+
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
@@ -143,7 +163,7 @@ for (const control of ["agentView", "agentRuntimeNode", "agentRuntimeDefaultCwd"
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"image\"", "url: await fileDataUrl(image)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
 assert(!assets["/app.js"].includes('$("#conversationSend").disabled = false'),
@@ -353,6 +373,13 @@ try {
   assert(imported.response.ok && imported.body.threadId === importedThreadId,
     `Codex session import failed: ${JSON.stringify(imported.body)}`);
   assert(imported.body.itemCount === 2, "Codex session import did not preserve every rollout record");
+  const streamed = await fetchBody(`/v1/nodes/${nodeId}/codex-session-imports`, {
+    method: "POST", headers: { accept: "application/x-ndjson", "content-type": "application/json", cookie: session.cookie, "x-mira-csrf": session.csrf },
+    body: JSON.stringify({ path: sessionPath, storeId: importStoreId }),
+  }, "text");
+  const importEvents = streamed.body.trim().split("\n").map((line) => JSON.parse(line));
+  assert(importEvents.some((event) => event.type === "progress" && event.phase === "reading") &&
+    importEvents.at(-1).type === "complete", "streamed import omitted progress/completion");
   const threads = await admin(`/v1/codex/threads?storeId=${encodeURIComponent(importStoreId)}`);
   const importedProjection = threads.body.data?.find((item) => item.threadId === importedThreadId);
   assert(importedProjection?.title === "Imported Mira session" && importedProjection.itemCount === 2,
@@ -372,7 +399,45 @@ try {
   assert(transcript.body.trace[0].kind === "user" && transcript.body.trace[0].body === "Imported Mira session",
     "Codex transcript projection returned an incorrect user message");
   const nodeIdentity = JSON.parse(await fs.readFile(identityFile, "utf8"));
+  if (desktopFixture) {
+    const found = scanned.body.sessions.find((item) => item.threadId === desktopFixture.id);
+    assert(found?.clientKind === "desktop" && found.archived, "real desktop source/archived discovery failed");
+    const desktopStoreId = `desktop-resume-${process.pid}`;
+    const desktop = await admin(`/v1/nodes/${nodeId}/codex-session-imports`, {
+      method: "POST", body: JSON.stringify({ path: desktopFixture.path, storeId: desktopStoreId }),
+    });
+    assert(desktop.response.ok, "real desktop import failed");
+    const resumeHome = path.join(temporary, "resume-home");
+    await fs.mkdir(resumeHome);
+    const output = execFileSync("python3", [path.join(projectDirectory, "tests/desktop_resume_e2e.py")], {
+      cwd: projectDirectory, timeout: 150_000, encoding: "utf8",
+      env: { ...process.env, MIRA_NODE_TOKEN: nodeIdentity.token,
+        MIRA_DESKTOP_TEST_CODEX_HOME: resumeHome, MIRA_DESKTOP_TEST_STORE_ID: desktopStoreId,
+        MIRA_DESKTOP_TEST_THREAD_ID: desktopFixture.id, MIRA_SERVER_URL: serverUrl },
+    });
+    assert(output.includes('"desktopResume": true'), "real App Server did not resume the desktop thread");
+    console.log(output.trim());
+  }
   const storeHeaders = { authorization: `Bearer ${nodeIdentity.token}`, "x-mira-client-type": "codex" };
+  const cancelledStore = `cancel-http-${process.pid}`;
+  const cancelController = new AbortController();
+  // Stall only our disposable Node so abort reliably reaches the Server before
+  // the scan completes, then let the queued capability finish normally.
+  child.kill("SIGSTOP");
+  try {
+    const transfer = await fetch(`${serverUrl}/v1/nodes/${nodeId}/codex-session-imports`, {
+      method: "POST", signal: cancelController.signal,
+      headers: { accept: "application/x-ndjson", "content-type": "application/json", cookie: session.cookie, "x-mira-csrf": session.csrf },
+      body: JSON.stringify({ path: sessionPath, storeId: cancelledStore }),
+    });
+    const reader = transfer.body.getReader();
+    const first = await reader.read();
+    assert(new TextDecoder().decode(first.value).includes('"scanning"'), "import progress did not arrive before scan finished");
+    cancelController.abort();
+  } finally { child.kill("SIGCONT"); }
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const cancelledHead = await fetchBody(`/v2/stores/${cancelledStore}`, { headers: storeHeaders });
+  assert(cancelledHead.response.ok && cancelledHead.body.version === 0, "HTTP cancellation published a partial thread");
   const importedHead = await fetchBody(`/v2/stores/${encodeURIComponent(importStoreId)}`, { headers: storeHeaders });
   assert(importedHead.response.ok, `imported store head failed: ${JSON.stringify(importedHead.body)}`);
   assert(importedHead.body.state?.created_threads?.[importedThreadId]?.history_mode === "legacy",

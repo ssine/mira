@@ -102,11 +102,17 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <details class="agent-side-card import-card">
-              <summary>导入节点本地会话</summary>
+              <summary>导入桌面 App / CLI 会话</summary>
               <label>扫描节点<select id="sessionSourceNode"></select></label>
-              <button id="sessionScan" class="secondary" type="button">扫描默认 CODEX_HOME</button>
-              <p id="sessionScanState" class="muted">只读取 Node 自动发现的 sessions 目录。</p>
+              <button id="sessionScan" class="secondary" type="button">扫描桌面与 CLI 会话</button>
+              <p class="muted">选择桌面 App 所在节点。读取该用户的 CODEX_HOME / .codex（含归档），不会修改源文件；不包含云端 ChatGPT 聊天。</p>
+              <label>来源<select id="sessionSourceFilter"><option value="all">全部来源</option><option value="desktop">Codex Desktop</option><option value="cli">CLI</option><option value="ide">IDE 扩展</option><option value="subagent">子 Agent</option><option value="unknown">其他 / 旧节点</option></select></label>
+              <label>搜索<input id="sessionSearch" type="search" placeholder="标题、会话 ID 或工作目录"></label>
+              <label>范围<select id="sessionArchiveFilter"><option value="all">全部（含归档）</option><option value="active">未归档</option><option value="archived">仅归档</option></select></label>
+              <p id="sessionScanState" class="muted" role="status">点击扫描发现本地会话。</p>
+              <div id="sessionImportProgress" class="hidden"><p id="sessionImportState" role="status"></p><progress id="sessionImportMeter"></progress><button id="sessionImportCancel" class="ghost" type="button">取消导入</button></div>
               <div id="localSessionList" class="local-session-list"></div>
+              <button id="sessionShowMore" class="ghost hidden" type="button">显示更多</button>
             </details>
           </aside>
           <section class="conversation-card">
@@ -117,6 +123,7 @@
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             <form id="conversationForm" class="conversation-composer">
+              <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span></div>
               <label class="composer-cwd">工作目录<input id="conversationCwd" type="text" placeholder="在运行节点上的绝对路径"></label>
               <div id="conversationDropZone" class="conversation-drop-zone">
                 <textarea id="conversationInput" rows="4" placeholder="给 Codex 发消息…"></textarea>
@@ -124,7 +131,7 @@
               </div>
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
               <div class="composer-actions">
-                <div class="composer-tools"><button id="conversationAttach" class="ghost" type="button">＋ 图片或文件</button><span id="conversationHint" class="muted">可粘贴或拖入 · 单个 4 MiB，合计 8 MiB</span></div>
+                <div class="composer-tools"><button id="conversationAttach" class="ghost" type="button">＋ 图片或文件</button><button id="conversationUploadCancel" class="ghost hidden" type="button">取消上传</button><span id="conversationHint" class="muted">可粘贴或拖入图片与文件 · 上传支持取消</span></div>
                 <button id="conversationSend" class="primary" type="submit" disabled>发送 <span>→</span></button>
               </div>
             </form>
@@ -248,6 +255,7 @@
         <audio id="nodeFileAudio" class="node-file-audio hidden" controls></audio>
         <iframe id="nodeFileFrame" class="node-file-frame hidden" title="节点文件预览" sandbox></iframe>
         <pre id="nodeFileText" class="node-file-text hidden"></pre>
+        <button id="nodeFileTextMore" class="ghost hidden" type="button">显示更多</button>
         <div id="nodeFileUnsupported" class="node-file-unsupported hidden">浏览器不支持直接预览这种文件，可以下载后用本地应用打开。</div>
         <footer class="node-file-dialog-actions">
           <span id="nodeFilePath" class="muted"></span>

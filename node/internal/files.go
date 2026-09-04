@@ -22,6 +22,7 @@ type fileParams struct {
 	Length      *int64 `json:"length"`
 	Recursive   bool   `json:"recursive"`
 	Overwrite   *bool  `json:"overwrite"`
+	Append      bool   `json:"append"`
 }
 
 func pathContained(root string, candidate string) bool {
@@ -233,11 +234,27 @@ func (runtime *capabilityRuntime) writeFile(target string, params fileParams) (a
 	if params.Overwrite != nil && !*params.Overwrite {
 		flags = os.O_WRONLY | os.O_CREATE | os.O_EXCL
 	}
+	if params.Append {
+		// Offset-checked append prevents a retry from silently duplicating data.
+		flags = os.O_WRONLY
+	}
 	file, err := os.OpenFile(target, flags, 0640)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
+	if params.Append {
+		info, err := file.Stat()
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() || params.Offset < 0 || info.Size() != params.Offset {
+			return nil, fmt.Errorf("append offset does not match file size")
+		}
+		if _, err := file.Seek(params.Offset, 0); err != nil {
+			return nil, err
+		}
+	}
 	count, err := file.Write(content)
 	if err != nil {
 		return nil, err

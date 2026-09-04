@@ -428,6 +428,34 @@ const migrations = [
         ON mira_appserver_thread_start_requests(updated_at DESC);
     `,
   },
+  {
+    version: 13,
+    name: "lossless-rollout-json",
+    sql: `
+      -- Raw tool output may contain escaped NUL/unpaired UTF-16 surrogates.
+      -- PostgreSQL JSONB rejects these; JSON preserves their valid JSON text.
+      -- Indexed metadata/manifests remain JSONB. No source records are dropped.
+      ALTER TABLE codex_thread_events ALTER COLUMN payload TYPE JSON USING payload::json;
+      ALTER TABLE mira_codex_session_import_records ALTER COLUMN raw_record TYPE JSON USING raw_record::json;
+      ALTER TABLE codex_thread_store_snapshots ALTER COLUMN snapshot TYPE JSON USING snapshot::json;
+    `,
+  },
+  {
+    version: 14,
+    name: "import-rollout-lineage",
+    sql: `
+      ALTER TABLE mira_codex_session_imports ADD COLUMN source_boundary JSONB;
+      CREATE TABLE mira_codex_session_import_segments (
+        import_id UUID NOT NULL REFERENCES mira_codex_session_imports(import_id),
+        segment_index INTEGER NOT NULL,
+        source_import_id UUID NOT NULL REFERENCES mira_codex_session_imports(import_id),
+        first_line_seq BIGINT NOT NULL CHECK (first_line_seq > 0),
+        item_count BIGINT NOT NULL CHECK (item_count > 0),
+        end_position JSONB,
+        PRIMARY KEY (import_id, segment_index)
+      );
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

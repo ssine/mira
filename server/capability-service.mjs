@@ -7,7 +7,7 @@ const actions = {
   process: new Set(["count", "list", "start", "poll", "signal"]),
   pty: new Set(["list", "open", "write", "poll", "resize", "close"]),
   screen: new Set(["display", "screenshot", "hierarchy", "tap", "swipe", "key", "text"]),
-  codexSessions: new Set(["list", "read"]),
+  codexSessions: new Set(["list", "read", "resolve"]),
 };
 
 function serviceError(message, statusCode, code) {
@@ -79,8 +79,11 @@ function validateParams(capability, params) {
     validateText(params.path, "path");
     validateInteger(params.cursor, "cursor", 0, Number.MAX_SAFE_INTEGER);
     validateInteger(params.limit, "limit", 1, 8 * 1024 * 1024);
-    if (params.action === "read" && typeof params.path !== "string") {
+    if (["read", "resolve"].includes(params.action) && typeof params.path !== "string") {
       throw serviceError("path is required", 400, "invalid_request");
+    }
+    if (params.action === "resolve" && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.rolloutId ?? "")) {
+      throw serviceError("valid rolloutId is required", 400, "invalid_request");
     }
   }
   return params;
