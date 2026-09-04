@@ -32,6 +32,14 @@ build_unix() {
       [ -f "$codex_package_source/$required" ] || { printf 'Canonical Mira Codex package is missing %s\n' "$required" >&2; exit 1; }
     done
     cp -R "$codex_package_source" "$package_dir/mira-codex-package"
+    # actions/upload-artifact intentionally does not preserve Unix mode bits.
+    # Restore the canonical package executables after the release job downloads
+    # the Codex build artifact and before creating the distributable tarball.
+    chmod 755 \
+      "$package_dir/mira-codex-package/bin/codex" \
+      "$package_dir/mira-codex-package/bin/codex-code-mode-host" \
+      "$package_dir/mira-codex-package/codex-resources/bwrap" \
+      "$package_dir/mira-codex-package/codex-path/rg"
   elif [ "${MIRA_REQUIRE_CODEX_BUNDLE:-false}" = true ] && [ "$architecture" = amd64 ]; then
     printf 'Mira Codex bundle is required for Linux %s\n' "$architecture" >&2
     exit 1

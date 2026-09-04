@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -60,8 +61,10 @@ try {
   assert.equal(version.data.build.version, current);
   const codexPackage = path.join(prefix, "share/mira/versions", current, "mira-codex-package");
   if (await fs.stat(codexPackage).catch(() => null)) {
-    await fs.access(path.join(codexPackage, "bin/codex"));
-    await fs.access(path.join(codexPackage, "codex-resources/bwrap"));
+    await fs.access(path.join(codexPackage, "bin/codex"), fsConstants.X_OK);
+    await fs.access(path.join(codexPackage, "bin/codex-code-mode-host"), fsConstants.X_OK);
+    await fs.access(path.join(codexPackage, "codex-resources/bwrap"), fsConstants.X_OK);
+    await fs.access(path.join(codexPackage, "codex-path/rg"), fsConstants.X_OK);
     await fs.access(path.join(codexPackage, "codex-package.json"));
   }
   await fs.access(path.join(prefix, "share/mira/versions", previous, "mira-node"));
