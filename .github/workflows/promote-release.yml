@@ -1,0 +1,75 @@
+name: Publish verified release
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful Release workflow run containing mira-signed-acceptance
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: mira-release-promotion
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Verify source run provenance
+        id: source
+        env:
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > "$RUNNER_TEMP/source.json"
+          jq -e --arg repo "$GH_REPO" '
+            .status == "completed" and .conclusion == "success" and
+            .path == ".github/workflows/release.yml" and
+            .repository.full_name == $repo and .head_repository.full_name == $repo
+          ' "$RUNNER_TEMP/source.json"
+          commit=$(jq -r .head_sha "$RUNNER_TEMP/source.json")
+          [[ "$commit" =~ ^[a-f0-9]{40}$ ]]
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.source.outputs.commit }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: mira-signed-acceptance
+          path: dist
+          run-id: ${{ inputs.source_run }}
+          github-token: ${{ github.token }}
+      - name: Verify and publish the existing draft
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          SOURCE_RUN: ${{ inputs.source_run }}
+        run: |
+          set -euo pipefail
+          version=$(<VERSION)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$version"
+          gh release view "$tag" --json isDraft,targetCommitish > "$RUNNER_TEMP/draft.json"
+          jq -e --arg commit "$SOURCE_COMMIT" '.isDraft == true and .targetCommitish == $commit' "$RUNNER_TEMP/draft.json"
+          assets=(SHA256SUMS install.sh install.ps1
+            "mira_${version}_linux_amd64.tar.gz" "mira_${version}_linux_arm64.tar.gz"
+            "mira_${version}_windows_amd64.zip" "mira_${version}_android_arm64.apk")
+          [[ $(find dist -mindepth 1 -maxdepth 1 | wc -l) == ${#assets[@]} ]]
+          for asset in "${assets[@]}"; do test -s "dist/$asset"; done
+          (cd dist && sha256sum -c SHA256SUMS)
+          for asset in "${assets[@]:1}"; do
+            expected=$(awk -v name="$asset" '$2 == name {print $1}' dist/SHA256SUMS)
+            [[ "$expected" =~ ^[a-f0-9]{64}$ ]]
+            [[ "$(sha256sum "dist/$asset" | awk '{print $1}')" == "$expected" ]]
+          done
+          cmp scripts/install.sh dist/install.sh
+          cmp scripts/install.ps1 dist/install.ps1
+          upload=(); for asset in "${assets[@]}"; do upload+=("dist/$asset"); done
+          gh release upload "$tag" "${upload[@]}" --clobber
+          gh release edit "$tag" --draft=false --latest
+          echo "Published $tag from verified run $SOURCE_RUN ($SOURCE_COMMIT)" >> "$GITHUB_STEP_SUMMARY"

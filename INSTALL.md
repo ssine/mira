@@ -140,6 +140,10 @@ Secrets 注入：`MIRA_ANDROID_KEYSTORE_BASE64`、`MIRA_ANDROID_STORE_PASSWORD`�
 一致，再验证归档 SHA-256；不一致直接失败，不会把旧 Codex 混入新补丁。留空则从源码构建。
 发布前使用 `publish=false` 验收签名产物，再为同一提交创建正式 tag 和 Release。
 
+若本地上传较慢，可先创建指向已验收提交的 Release 草稿，再运行 `Publish verified release`
+工作流，传入成功的 Release workflow run ID。它会校验来源仓库、构建结果、目标提交、完整资产
+校验和及安装器源码，直接从云端发布同一份 `mira-signed-acceptance`，不会重新编译或覆盖正式版。
+
 SHA-256 用于检测传输/文件损坏；发行信任边界是固定 GitHub 仓库与 HTTPS，不是独立离线签名
 的软件供应链。发布权限和 Android 签名私钥应严格保管。
 
@@ -155,3 +159,6 @@ SHA-256 用于检测传输/文件损坏；发行信任边界是固定 GitHub 仓
 这不需要卸载、重新注册或重新授权节点。
 
 更新仍保留节点身份、配置和旧版本。SCP/SFTP 现在使用原生覆盖、递归和批处理语义；旧 `--overwrite` 选项不再使用。发布打包需要先构建完整内嵌包，见 [构建说明](node/openssh/README.md)。这不代表当前 GitHub 已发布的旧版本会自动改变。
+
+跨旧/新 SSH 后端迁移时，先更新 Server 和调用方 CLI，再更新目标 Node。新 CLI 能连接旧 Node；
+旧 0.11.x CLI 固定使用 SSH 用户名 `mira`，不能连接使用实际操作系统用户名的新原生后端。
