@@ -83,6 +83,8 @@ for (const [pathname, contentType] of [
   ["/vendor/xterm.js", "text/javascript"],
   ["/vendor/xterm-addon-fit.js", "text/javascript"],
   ["/vendor/xterm.css", "text/css"],
+  ["/vendor/marked.js", "text/javascript"],
+  ["/vendor/dompurify.js", "text/javascript"],
 ]) {
   const result = await fetchBody(pathname, {}, "text");
   assert(result.response.ok, `${pathname} returned HTTP ${result.response.status}`);
@@ -96,6 +98,8 @@ for (const [pathname, contentType] of [
 assert(assets["/"].includes("/app.js") && assets["/"].includes("/styles.css"), "website shell does not load its assets");
 assert(assets["/"].includes("/vendor/xterm.css"), "website shell does not load xterm styles");
 assert(assets["/app.js"].includes('from "/vendor/xterm.js"'), "website does not load the xterm terminal emulator");
+assert(assets["/app.js"].includes('from "/vendor/marked.js"'), "website does not load the Markdown renderer");
+assert(assets["/app.js"].includes('from "/vendor/dompurify.js"'), "website does not sanitize rendered Markdown");
 assert(assets["/"].includes("loginForm"), "website does not expose the administrator login view");
 for (const control of ["installLinux", "installWindows", "installServer", "installAndroid"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted installer ${control}`);
@@ -129,7 +133,7 @@ for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "sys
 for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
-for (const route of ["/v1/codex/threads", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
+for (const route of ["/v1/codex/threads", "/transcript?storeId=", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
@@ -311,6 +315,14 @@ try {
   const importedProjection = threads.body.data?.find((item) => item.threadId === importedThreadId);
   assert(importedProjection?.title === "Imported Mira session" && importedProjection.itemCount === 2,
     "unified Codex thread projection omitted the imported session");
+  const transcript = await admin(
+    `/v1/codex/threads/${importedThreadId}/transcript?storeId=${encodeURIComponent(importStoreId)}`,
+  );
+  assert(transcript.response.ok, `Codex transcript projection failed: ${JSON.stringify(transcript.body)}`);
+  assert(transcript.body.itemCount === 2 && transcript.body.trace?.length === 1,
+    "Codex transcript projection omitted the imported history");
+  assert(transcript.body.trace[0].kind === "user" && transcript.body.trace[0].body === "Imported Mira session",
+    "Codex transcript projection returned an incorrect user message");
   const nodeIdentity = JSON.parse(await fs.readFile(identityFile, "utf8"));
   const storeHeaders = { authorization: `Bearer ${nodeIdentity.token}`, "x-mira-client-type": "codex" };
   const importedHead = await fetchBody(`/v2/stores/${encodeURIComponent(importStoreId)}`, { headers: storeHeaders });

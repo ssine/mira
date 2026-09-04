@@ -7,6 +7,7 @@ import { Pool } from "pg";
 
 import { appendAudit, AuthService } from "./auth.mjs";
 import { CapabilityService } from "./capability-service.mjs";
+import { getCodexTranscript } from "./codex-transcript.mjs";
 import {
   defaultStoreId, importCodexSession, listImportedThreads, normalizeImportedThreadHistoryModes,
   scanCodexSessions,
@@ -40,6 +41,8 @@ const staticAssets = new Map([
   ["/vendor/xterm.js", [path.join(serverDirectory, "node_modules/@xterm/xterm/lib/xterm.mjs"), "text/javascript; charset=utf-8"]],
   ["/vendor/xterm-addon-fit.js", [path.join(serverDirectory, "node_modules/@xterm/addon-fit/lib/addon-fit.mjs"), "text/javascript; charset=utf-8"]],
   ["/vendor/xterm.css", [path.join(serverDirectory, "node_modules/@xterm/xterm/css/xterm.css"), "text/css; charset=utf-8"]],
+  ["/vendor/marked.js", [path.join(serverDirectory, "node_modules/marked/lib/marked.esm.js"), "text/javascript; charset=utf-8"]],
+  ["/vendor/dompurify.js", [path.join(serverDirectory, "node_modules/dompurify/dist/purify.es.mjs"), "text/javascript; charset=utf-8"]],
 ]);
 const maxBodyBytes = 64 * 1024 * 1024;
 const pool = new Pool({ connectionString: databaseUrl, max: 10 });
@@ -324,6 +327,16 @@ async function route(request, response) {
     const storeId = url.searchParams.get("storeId") ?? defaultStoreId;
     const limit = boundedInteger(url.searchParams.get("limit"), 200, 1, 500);
     sendJson(response, 200, { storeId, data: await listImportedThreads(pool, storeId, limit) });
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})\/transcript$/i);
+  if (request.method === "GET" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
+    if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
+    const result = await getCodexTranscript(pool, storeId, match[1]);
+    sendJson(response, result.status, result.body);
     return;
   }
   match = url.pathname.match(/^\/v1\/codex\/runtimes\/([0-9a-f-]{36})\/(start|stop)$/i);

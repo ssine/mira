@@ -222,3 +222,22 @@ PoC 的 E2E 已验证这个 quiescent handoff。生产版仍应把它升级为�
 - process/PTY 游标输出缓存：1 MiB。
 
 这些是传输边界，不限制一个 thread 的总历史大小；大历史通过 append 和按 generation 读取。
+
+## 9. Web transcript 投影
+
+管理员 Web 控制台通过下面的只读接口读取可展示轨迹：
+
+```http
+GET /v1/codex/threads/{threadId}/transcript?storeId=personal
+```
+
+Server 在同一个 store head 上读取 active generation，并从权威 rollout items 重建有序的
+`user`、`assistant`、`reasoning`、`tool` 和 `system` 轨迹。投影会配对原始
+`custom_tool_call` / `custom_tool_call_output`，也能读取 paginated rollout 的
+`item_completed` materialized items。每条轨迹保留稳定 key、turn ID、源 item 序号、状态以及
+是否应按 Markdown 展示。
+
+这个接口不是新的事实来源，也不修改或替代 App Server 协议。它只解决不同 Codex 历史模式在
+`thread/resume` 中可能返回不完整展示 items 的问题；继续对话仍由官方 App Server 完成。投影可以
+在任何时候从 `codex_thread_events` 重建，未知原始字段继续完整保存在数据库。为避免单个工具输出
+拖垮浏览器，每条投影正文最多 1 MiB，截断只发生在 Web 响应中。

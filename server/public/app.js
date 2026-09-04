@@ -1,5 +1,9 @@
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
+import DOMPurify from "/vendor/dompurify.js";
+import { marked } from "/vendor/marked.js";
+
+marked.setOptions({ gfm: true, breaks: false });
 
 const $ = (selector) => document.querySelector(selector);
 let csrfToken = null;
@@ -1223,10 +1227,18 @@ function traceText(value) {
   return "";
 }
 
-function setTraceBody(card, body) {
+function traceUsesMarkdown(kind) {
+  return ["user", "assistant", "reasoning"].includes(kind);
+}
+
+function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const value = body ?? "";
   const node = card.querySelector(".trace-body");
-  node.textContent = value;
+  node._miraSource = value;
+  const markdown = traceUsesMarkdown(kind);
+  node.classList.toggle("markdown-body", markdown);
+  if (markdown) node.innerHTML = DOMPurify.sanitize(marked.parse(value));
+  else node.textContent = value;
   node.hidden = value.length === 0;
   card.classList.toggle("trace-card-empty", value.length === 0);
 }
@@ -1238,16 +1250,18 @@ function upsertTrace(key, kind, title, body = undefined, status = "") {
   if (!card) {
     card = element("article", `trace-card ${kind}`);
     if (key) card.dataset.traceKey = key;
+    card.dataset.traceKind = kind;
     const head = element("div", "trace-head");
     head.append(element("span", "trace-kind", title), element("span", "trace-status", status));
-    card.append(head, element("pre", "trace-body"));
-    setTraceBody(card, body);
+    card.append(head, element("div", "trace-body"));
+    setTraceBody(card, body, kind);
     trace.append(card);
   } else {
     card.className = `trace-card ${kind}`;
+    card.dataset.traceKind = kind;
     card.querySelector(".trace-kind").textContent = title;
     card.querySelector(".trace-status").textContent = status;
-    if (body !== undefined) setTraceBody(card, body);
+    if (body !== undefined) setTraceBody(card, body, kind);
   }
   trace.scrollTop = trace.scrollHeight;
   return card;
@@ -1256,9 +1270,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "") {
 function appendTraceText(key, kind, title, delta, status = "运行中") {
   const card = upsertTrace(key, kind, title, undefined, status);
   const body = card.querySelector(".trace-body");
-  body.textContent += delta;
-  body.hidden = false;
-  card.classList.remove("trace-card-empty");
+  setTraceBody(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind);
   $("#conversationTrace").scrollTop = $("#conversationTrace").scrollHeight;
 }
 
@@ -1303,6 +1315,36 @@ function renderThread(thread) {
   if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
 }
 
+function renderTranscript(transcript, fallbackThread) {
+  const trace = clear($("#conversationTrace"));
+  const items = Array.isArray(transcript?.trace) ? transcript.trace : [];
+  for (const item of items) {
+    upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "");
+  }
+  if (items.length) return;
+  renderThread(fallbackThread);
+  if (!fallbackThread?.turns?.some((turn) => (turn.items ?? []).length > 0)) {
+    clear(trace).append(element("div", "conversation-empty", "数据库中没有可投影的消息或工具记录。"));
+  }
+}
+
+async function loadAgentTranscript(threadId, fallbackThread = null) {
+  const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?storeId=personal`);
+  if (agent.threadId === threadId) renderTranscript(transcript, fallbackThread);
+  return transcript;
+}
+
+async function refreshCompletedTranscript(threadId) {
+  // ThreadStore persistence can finish shortly after turn/completed. Refresh a
+  // few times so missed live notifications are replaced by the authoritative
+  // database projection without requiring a manual reopen.
+  for (const delay of [250, 750, 1_500]) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    if (agent.threadId !== threadId) return;
+    try { await loadAgentTranscript(threadId); } catch { /* next refresh may succeed */ }
+  }
+}
+
 function handleAgentNotification(message) {
   const method = message.method ?? "";
   const params = message.params ?? {};
@@ -1323,6 +1365,7 @@ function handleAgentNotification(message) {
     agent.turnId = null;
     $("#agentInterrupt").classList.add("hidden");
     void loadAgentThreads();
+    if (agent.threadId) void refreshCompletedTranscript(agent.threadId);
     return;
   }
   if (method === "item/started" || method === "item/completed") {
@@ -1544,7 +1587,7 @@ async function resumeAgentThread(threadId) {
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
   $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${result.cwd ?? "默认目录"}`;
   if (!$("#conversationCwd").value && result.cwd) $("#conversationCwd").value = result.cwd;
-  renderThread(result.thread);
+  await loadAgentTranscript(agent.threadId, result.thread);
   renderAgentThreads();
   setConversationNotice();
 }
