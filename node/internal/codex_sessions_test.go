@@ -11,6 +11,8 @@ func TestCodexSessionsListAndChunkedRead(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("CODEX_HOME", home)
 	t.Setenv("HOME", home)
+	// os.UserHomeDir uses USERPROFILE on Windows. Never scan real user history.
+	t.Setenv("USERPROFILE", home)
 	sessionDirectory := filepath.Join(home, "sessions", "2026", "09", "04")
 	if err := os.MkdirAll(sessionDirectory, 0700); err != nil {
 		t.Fatal(err)
@@ -47,7 +49,7 @@ func TestCodexSessionsListAndChunkedRead(t *testing.T) {
 	listed := listedRaw.(map[string]any)["sessions"].([]codexSessionSummary)
 	if len(listed) != 1 || listed[0].ThreadID != "01a0693d-114e-76b1-a994-0a673fe124a2" ||
 		listed[0].Title != "Please inspect this session" {
-		t.Fatalf("unexpected session summary: %#v", listed)
+		t.Fatalf("unexpected fixture session summary (count=%d)", len(listed))
 	}
 	readRaw, err := runtimeValue.codexSessions(codexSessionsParams{
 		Action: "read", Path: pathValue, Limit: len(contents),
