@@ -262,6 +262,11 @@ func runUpdate(ctx context.Context, options cliOptions, args []string, stdin io.
 		if _, err := os.Stat(installer); err != nil {
 			return nil, fmt.Errorf("this copy was not installed by the Mira installer; install the release first")
 		}
+		installer, err = downloadUpdateInstaller(ctx, "https://github.com/ssine/mira/releases/download/v"+target, installRoot, "install.ps1")
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(installer)
 		command = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-Update", "-Version", target, "-InstallDirectory", installRoot)
 	} else {
 		home, err := os.UserHomeDir()
@@ -275,6 +280,11 @@ func runUpdate(ctx context.Context, options cliOptions, args []string, stdin io.
 		if _, err := os.Stat(installer); err != nil {
 			return nil, fmt.Errorf("this copy was not installed by the Mira installer; install the release first")
 		}
+		installer, err = downloadUpdateInstaller(ctx, "https://github.com/ssine/mira/releases/download/v"+target, installRoot, "install.sh")
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(installer)
 		arguments := []string{installer, "--update", "--version", target}
 		if installRoot != filepath.Join(home, ".local", "share", "mira") {
 			arguments = append(arguments, "--prefix", filepath.Dir(filepath.Dir(installRoot)))
