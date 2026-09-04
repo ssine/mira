@@ -1368,6 +1368,28 @@ function decorateTraceFileReferences(root) {
   }
 }
 
+function createTraceCopyButton(card) {
+  const button = element("button", "trace-copy", "复制");
+  button.type = "button";
+  button.title = "复制消息原文（保留 Markdown）";
+  button.setAttribute("aria-label", "复制这条消息的原文");
+  button.addEventListener("click", async () => {
+    // Read at click time: the same card may still be receiving streamed deltas.
+    const source = card.querySelector(".trace-body")._miraSource ?? "";
+    if (!source || button.disabled) return;
+    button.disabled = true;
+    try {
+      await navigator.clipboard.writeText(source);
+      toast("消息原文已复制");
+    } catch {
+      toast("浏览器未允许复制，请选中消息手动复制");
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return button;
+}
+
 function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const value = body ?? "";
   const node = card.querySelector(".trace-body");
@@ -1381,6 +1403,7 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   else node.textContent = value;
   node.hidden = value.length === 0;
   card.classList.toggle("trace-card-empty", value.length === 0);
+  card.querySelector(".trace-copy").hidden = value.length === 0;
 }
 
 function traceNearBottom(trace = $("#conversationTrace"), threshold = 96) {
@@ -1428,7 +1451,9 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
     const head = element("div", "trace-head");
-    head.append(element("span", "trace-kind", title), element("span", "trace-status", status));
+    const actions = element("div", "trace-actions");
+    actions.append(element("span", "trace-status", status), createTraceCopyButton(card));
+    head.append(element("span", "trace-kind", title), actions);
     card.append(head, element("div", "trace-body"));
     setTraceBody(card, body, kind);
     if (kind === "tool" && options.collapseTools !== false) {
