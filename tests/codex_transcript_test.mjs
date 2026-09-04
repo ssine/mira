@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectCodexTranscript } from "../server/codex-transcript.mjs";
+import { paginateCodexTranscript, projectCodexTranscript } from "../server/codex-transcript.mjs";
 
 const record = (type, payload) => ({ type, payload });
 
@@ -57,3 +57,20 @@ test("projects legacy messages, reasoning, and paired custom tool output", () =>
   assert.equal(result[3].body, "**Finished.**");
 });
 
+test("paginates newest transcript items backwards without reordering", () => {
+  const trace = Array.from({ length: 125 }, (_value, index) => ({ key: `item-${index}` }));
+  const newest = paginateCodexTranscript(trace, null, 60);
+  assert.equal(newest.trace[0].key, "item-65");
+  assert.equal(newest.trace.at(-1).key, "item-124");
+  assert.equal(newest.nextCursor, "65");
+  assert.equal(newest.totalTraceItems, 125);
+
+  const older = paginateCodexTranscript(trace, Number(newest.nextCursor), 60);
+  assert.equal(older.trace[0].key, "item-5");
+  assert.equal(older.trace.at(-1).key, "item-64");
+  assert.equal(older.nextCursor, "5");
+
+  const oldest = paginateCodexTranscript(trace, Number(older.nextCursor), 60);
+  assert.deepEqual(oldest.trace.map((item) => item.key), ["item-0", "item-1", "item-2", "item-3", "item-4"]);
+  assert.equal(oldest.nextCursor, null);
+});

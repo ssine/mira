@@ -133,9 +133,17 @@ for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "sys
 for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
-for (const route of ["/v1/codex/threads", "/transcript?storeId=", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
+for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older"]) {
+  assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
+}
+assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&
+  assets["/styles.css"].includes(".history-loader{flex:0 0 auto") &&
+  assets["/styles.css"].includes(".conversation-trace{max-height:68vh") &&
+  !/\.trace-body\{[^}]*max-height/.test(assets["/styles.css"]),
+"website conversation cards may shrink, nest scrollbars, or omit the history loader");
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
 }
@@ -321,6 +329,8 @@ try {
   assert(transcript.response.ok, `Codex transcript projection failed: ${JSON.stringify(transcript.body)}`);
   assert(transcript.body.itemCount === 2 && transcript.body.trace?.length === 1,
     "Codex transcript projection omitted the imported history");
+  assert(transcript.body.nextCursor === null && transcript.body.totalTraceItems === 1,
+    "Codex transcript projection omitted pagination metadata");
   assert(transcript.body.trace[0].kind === "user" && transcript.body.trace[0].body === "Imported Mira session",
     "Codex transcript projection returned an incorrect user message");
   const nodeIdentity = JSON.parse(await fs.readFile(identityFile, "utf8"));

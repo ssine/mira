@@ -228,7 +228,7 @@ PoC 的 E2E 已验证这个 quiescent handoff。生产版仍应把它升级为�
 管理员 Web 控制台通过下面的只读接口读取可展示轨迹：
 
 ```http
-GET /v1/codex/threads/{threadId}/transcript?storeId=personal
+GET /v1/codex/threads/{threadId}/transcript?storeId=personal&limit=60&cursor={nextCursor}
 ```
 
 Server 在同一个 store head 上读取 active generation，并从权威 rollout items 重建有序的
@@ -236,6 +236,11 @@ Server 在同一个 store head 上读取 active generation，并从权威 rollou
 `custom_tool_call` / `custom_tool_call_output`，也能读取 paginated rollout 的
 `item_completed` materialized items。每条轨迹保留稳定 key、turn ID、源 item 序号、状态以及
 是否应按 Markdown 展示。
+
+默认响应最新 60 条轨迹，并返回 `nextCursor` 和 `totalTraceItems`。网页只保留最近一页作为首次
+载荷；用户请求更早历史时把 `nextCursor` 原样传回，Server 从当前位置向前返回下一页。每页保持
+时间正序，因此客户端只需把旧页插到当前列表顶部。`limit` 允许 10–200；`nextCursor` 为 `null`
+表示已经到达最早记录。cursor 是 Server 实现细节，客户端不得自行推算。
 
 这个接口不是新的事实来源，也不修改或替代 App Server 协议。它只解决不同 Codex 历史模式在
 `thread/resume` 中可能返回不完整展示 items 的问题；继续对话仍由官方 App Server 完成。投影可以

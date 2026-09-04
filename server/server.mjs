@@ -334,8 +334,15 @@ async function route(request, response) {
     const principal = await authorize(request, response, "admin");
     if (!principal) return;
     const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
-    if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
-    const result = await getCodexTranscript(pool, storeId, match[1]);
+    const cursorValue = url.searchParams.get("cursor");
+    const cursor = cursorValue === null || !/^\d+$/.test(cursorValue)
+      ? null
+      : boundedInteger(cursorValue, null, 0, Number.MAX_SAFE_INTEGER);
+    const limit = boundedInteger(url.searchParams.get("limit"), 60, 10, 200);
+    if (!storeId || (cursorValue !== null && cursor === null)) {
+      errorJson(response, 400, "invalid store id or transcript cursor", "invalid_request"); return;
+    }
+    const result = await getCodexTranscript(pool, storeId, match[1], { cursor, limit });
     sendJson(response, result.status, result.body);
     return;
   }

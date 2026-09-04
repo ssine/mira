@@ -45,7 +45,15 @@ const agent = {
   turnId: null,
   sessions: [],
   threads: [],
+  transcriptThreadId: null,
+  transcriptGeneration: null,
+  transcriptItems: [],
+  transcriptCursor: null,
+  transcriptTotal: 0,
+  transcriptLoadingOlder: false,
 };
+
+const transcriptPageSize = 60;
 
 async function refreshAdminCsrf() {
   if (!csrfRefreshPromise) {
@@ -1243,8 +1251,17 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   card.classList.toggle("trace-card-empty", value.length === 0);
 }
 
-function upsertTrace(key, kind, title, body = undefined, status = "") {
+function traceNearBottom(trace = $("#conversationTrace"), threshold = 96) {
+  return trace.scrollHeight - trace.clientHeight - trace.scrollTop <= threshold;
+}
+
+function scrollTraceToBottom(trace = $("#conversationTrace")) {
+  trace.scrollTop = trace.scrollHeight;
+}
+
+function upsertTrace(key, kind, title, body = undefined, status = "", options = {}) {
   const trace = $("#conversationTrace");
+  const follow = options.forceScroll === true || traceNearBottom(trace);
   trace.querySelector(".conversation-empty")?.remove();
   let card = key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null;
   if (!card) {
@@ -1263,15 +1280,17 @@ function upsertTrace(key, kind, title, body = undefined, status = "") {
     card.querySelector(".trace-status").textContent = status;
     if (body !== undefined) setTraceBody(card, body, kind);
   }
-  trace.scrollTop = trace.scrollHeight;
+  if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
   return card;
 }
 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
-  const card = upsertTrace(key, kind, title, undefined, status);
+  const trace = $("#conversationTrace");
+  const follow = traceNearBottom(trace);
+  const card = upsertTrace(key, kind, title, undefined, status, { autoScroll: false });
   const body = card.querySelector(".trace-body");
   setTraceBody(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind);
-  $("#conversationTrace").scrollTop = $("#conversationTrace").scrollHeight;
+  if (follow) scrollTraceToBottom(trace);
 }
 
 function itemView(item) {
@@ -1309,29 +1328,122 @@ function renderThread(thread) {
   for (const turn of turns) {
     for (const item of turn.items ?? []) {
       const view = itemView(item);
-      upsertTrace(`history-${turn.id}-${item.id ?? crypto.randomUUID?.() ?? Math.random()}`, view.kind, view.title, view.body, item.status ?? "");
+      upsertTrace(`history-${turn.id}-${item.id ?? crypto.randomUUID?.() ?? Math.random()}`, view.kind, view.title, view.body, item.status ?? "", { autoScroll: false });
     }
   }
   if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
+  requestAnimationFrame(() => scrollTraceToBottom(trace));
 }
 
-function renderTranscript(transcript, fallbackThread) {
+function resetAgentTranscript(threadId = null) {
+  agent.transcriptThreadId = threadId;
+  agent.transcriptGeneration = null;
+  agent.transcriptItems = [];
+  agent.transcriptCursor = null;
+  agent.transcriptTotal = 0;
+  agent.transcriptLoadingOlder = false;
+}
+
+function mergeTranscriptItems(current, updates) {
+  const merged = new Map(current.map((item) => [item.key, item]));
+  for (const item of updates) merged.set(item.key, item);
+  return [...merged.values()].sort((left, right) =>
+    (left.sourceItemSeq ?? Number.MAX_SAFE_INTEGER) - (right.sourceItemSeq ?? Number.MAX_SAFE_INTEGER));
+}
+
+function renderHistoryLoader(trace) {
+  if (agent.transcriptCursor === null) return;
+  const loader = element("div", "history-loader");
+  const button = element("button", "history-load-button",
+    agent.transcriptLoadingOlder
+      ? "正在加载更早历史…"
+      : `加载更早历史 · 已显示 ${agent.transcriptItems.length} / ${agent.transcriptTotal}`);
+  button.type = "button";
+  button.dataset.loadOlder = "true";
+  button.disabled = agent.transcriptLoadingOlder;
+  loader.append(button);
+  trace.append(loader);
+}
+
+function renderTranscript(fallbackThread, options = {}) {
   const trace = clear($("#conversationTrace"));
-  const items = Array.isArray(transcript?.trace) ? transcript.trace : [];
-  for (const item of items) {
-    upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "");
+  renderHistoryLoader(trace);
+  for (const item of agent.transcriptItems) {
+    upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", { autoScroll: false });
   }
-  if (items.length) return;
-  renderThread(fallbackThread);
-  if (!fallbackThread?.turns?.some((turn) => (turn.items ?? []).length > 0)) {
-    clear(trace).append(element("div", "conversation-empty", "数据库中没有可投影的消息或工具记录。"));
+  if (!agent.transcriptItems.length) {
+    renderThread(fallbackThread);
+    if (!fallbackThread?.turns?.some((turn) => (turn.items ?? []).length > 0)) {
+      clear(trace).append(element("div", "conversation-empty", "数据库中没有可投影的消息或工具记录。"));
+    }
+    return;
   }
+  requestAnimationFrame(() => {
+    if (options.preserveViewport) {
+      trace.scrollTop = options.preserveViewport.top + trace.scrollHeight - options.preserveViewport.height;
+    } else if (options.anchorBottom !== false) {
+      scrollTraceToBottom(trace);
+      requestAnimationFrame(() => scrollTraceToBottom(trace));
+    }
+  });
 }
 
-async function loadAgentTranscript(threadId, fallbackThread = null) {
-  const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?storeId=personal`);
-  if (agent.threadId === threadId) renderTranscript(transcript, fallbackThread);
+async function loadAgentTranscript(threadId, fallbackThread = null, options = {}) {
+  const query = new URLSearchParams({ storeId: "personal", limit: String(options.limit ?? transcriptPageSize) });
+  if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
+  const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`);
+  if (agent.threadId !== threadId) return transcript;
+
+  const incoming = Array.isArray(transcript.trace) ? transcript.trace : [];
+  const sameThread = agent.transcriptThreadId === threadId &&
+    agent.transcriptGeneration === transcript.generation;
+  const trace = $("#conversationTrace");
+  const preserveViewport = options.prepend
+    ? { top: trace.scrollTop, height: trace.scrollHeight }
+    : null;
+  if (options.prepend && sameThread) {
+    agent.transcriptItems = mergeTranscriptItems(incoming, agent.transcriptItems);
+    agent.transcriptCursor = transcript.nextCursor ?? null;
+  } else if (options.preserveLoaded && sameThread) {
+    const wasEmpty = agent.transcriptItems.length === 0;
+    agent.transcriptItems = mergeTranscriptItems(agent.transcriptItems, incoming);
+    if (wasEmpty) agent.transcriptCursor = transcript.nextCursor ?? null;
+  } else {
+    agent.transcriptThreadId = threadId;
+    agent.transcriptGeneration = transcript.generation ?? null;
+    agent.transcriptItems = incoming;
+    agent.transcriptCursor = transcript.nextCursor ?? null;
+  }
+  agent.transcriptTotal = transcript.totalTraceItems ?? agent.transcriptItems.length;
+  renderTranscript(fallbackThread, {
+    preserveViewport,
+    anchorBottom: options.anchorBottom !== false,
+  });
   return transcript;
+}
+
+async function loadOlderAgentTranscript() {
+  if (!agent.threadId || agent.transcriptCursor === null || agent.transcriptLoadingOlder) return;
+  agent.transcriptLoadingOlder = true;
+  const button = $("#conversationTrace").querySelector("[data-load-older]");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在加载更早历史…";
+  }
+  try {
+    await loadAgentTranscript(agent.threadId, null, {
+      cursor: agent.transcriptCursor,
+      prepend: true,
+      anchorBottom: false,
+    });
+  } finally {
+    agent.transcriptLoadingOlder = false;
+    const current = $("#conversationTrace").querySelector("[data-load-older]");
+    if (current) {
+      current.disabled = false;
+      current.textContent = `加载更早历史 · 已显示 ${agent.transcriptItems.length} / ${agent.transcriptTotal}`;
+    }
+  }
 }
 
 async function refreshCompletedTranscript(threadId) {
@@ -1341,7 +1453,12 @@ async function refreshCompletedTranscript(threadId) {
   for (const delay of [250, 750, 1_500]) {
     await new Promise((resolve) => setTimeout(resolve, delay));
     if (agent.threadId !== threadId) return;
-    try { await loadAgentTranscript(threadId); } catch { /* next refresh may succeed */ }
+    try {
+      await loadAgentTranscript(threadId, null, {
+        preserveLoaded: true,
+        anchorBottom: traceNearBottom(),
+      });
+    } catch { /* next refresh may succeed */ }
   }
 }
 
@@ -1584,6 +1701,7 @@ async function resumeAgentThread(threadId) {
   if (cwd) params.cwd = cwd;
   const result = await rpc("thread/resume", params, 120_000);
   agent.threadId = result.thread.id;
+  resetAgentTranscript(agent.threadId);
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
   $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${result.cwd ?? "默认目录"}`;
   if (!$("#conversationCwd").value && result.cwd) $("#conversationCwd").value = result.cwd;
@@ -1595,6 +1713,7 @@ async function resumeAgentThread(threadId) {
 function newAgentThread() {
   agent.threadId = null;
   agent.turnId = null;
+  resetAgentTranscript();
   $("#conversationTitle").textContent = "新会话";
   $("#conversationMeta").textContent = "第一条消息发送时在所选节点创建，并立即写入 PostgreSQL。";
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
@@ -1684,6 +1803,10 @@ $("#agentThreadList").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-thread-id]");
   if (button) resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
 });
+$("#conversationTrace").addEventListener("click", (event) => {
+  if (!event.target.closest("button[data-load-older]")) return;
+  loadOlderAgentTranscript().catch((error) => toast(error.message));
+});
 $("#sessionScan").addEventListener("click", () => scanLocalSessions().catch((error) => {
   $("#sessionScanState").textContent = `扫描失败：${error.message}`;
 }));
@@ -1718,6 +1841,7 @@ $("#agentInterrupt").addEventListener("click", () => {
   rpc("turn/interrupt", { threadId: agent.threadId, turnId: agent.turnId }).catch((error) => toast(error.message));
 });
 $("#conversationClear").addEventListener("click", () => {
+  resetAgentTranscript(agent.threadId);
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "当前视图已清空；数据库中的会话没有删除。"));
 });
 

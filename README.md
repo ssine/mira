@@ -242,6 +242,7 @@ Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件�
 | `GET` | `/v1/nodes/{id}/codex-sessions` | 管理员扫描 Node 默认位置的本地 Codex 会话 |
 | `POST` | `/v1/nodes/{id}/codex-session-imports` | 管理员保存原始 JSONL 并导入统一 ThreadStore |
 | `GET` | `/v1/codex/threads` | 管理员读取统一 thread 投影和导入来源 |
+| `GET` | `/v1/codex/threads/{id}/transcript` | 管理员按页读取可重建的 Web 消息与工具轨迹 |
 | `POST` | `/v1/codex/runtimes/{id}/start\|stop` | 管理员选择 Node 启停受控 App Server |
 | `PUT` | `/v1/nodes/{id}/desired-app-server` | 可信身份选择 App Server 状态 |
 | `WS` | `/v1/nodes/{id}/connect` | Node 反向通道，Node ID 严格绑定 |

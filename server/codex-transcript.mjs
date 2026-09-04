@@ -242,12 +242,24 @@ export function projectCodexTranscript(items) {
   return trace.filter((entry) => entry.body || entry.kind !== "tool");
 }
 
-export async function getCodexTranscript(pool, storeId, threadId) {
+export function paginateCodexTranscript(trace, cursor = null, limit = 60) {
+  const end = cursor === null ? trace.length : Math.min(cursor, trace.length);
+  const start = Math.max(0, end - limit);
+  return {
+    trace: trace.slice(start, end),
+    nextCursor: start > 0 ? String(start) : null,
+    totalTraceItems: trace.length,
+  };
+}
+
+export async function getCodexTranscript(pool, storeId, threadId, options = {}) {
   const head = await getStoreHead(pool, storeId);
   const manifest = head.historyManifest?.[threadId];
   if (!manifest) return { status: 404, body: { error: "thread history not found", code: "not_found" } };
   const history = await getThreadHistory(pool, storeId, threadId, manifest.generation, head.version);
   if (history.status !== 200) return history;
+  const projected = projectCodexTranscript(history.body.items);
+  const page = paginateCodexTranscript(projected, options.cursor ?? null, options.limit ?? 60);
   return {
     status: 200,
     body: {
@@ -256,8 +268,7 @@ export async function getCodexTranscript(pool, storeId, threadId) {
       storeVersion: head.version,
       generation: history.body.generation,
       itemCount: history.body.itemCount,
-      trace: projectCodexTranscript(history.body.items),
+      ...page,
     },
   };
 }
-
