@@ -33,7 +33,9 @@ jobs:
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             package: mira-codex-package-windows-amd64
-    runs-on: ${{ matrix.runner }}
+    # Copying an existing package is platform-independent; avoid Windows ZIP
+    # attributes/path conversion when no Windows compiler is needed.
+    runs-on: ${{ inputs.codex_release != '' && 'ubuntu-latest' || matrix.runner }}
     steps:
       - uses: actions/checkout@v7
 
@@ -43,6 +45,7 @@ jobs:
         env:
           REUSE_TAG: ${{ inputs.codex_release }}
           PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -51,11 +54,10 @@ jobs:
           git diff --exit-code "$REUSE_TAG" HEAD -- CODEX_VERSION patches/codex/
           version=${REUSE_TAG#v}
           platform=linux; extension=tar.gz
-          if [[ "$RUNNER_OS" == Windows ]]; then platform=windows; extension=zip; fi
+          if [[ "$TARGET" == *windows* ]]; then platform=windows; extension=zip; fi
           prefix="mira_${version}_${platform}_amd64"
           asset="$prefix.$extension"
           cache="$RUNNER_TEMP/mira-reuse-codex"
-          if [[ "$RUNNER_OS" == Windows ]]; then cache="$(cygpath -u "$RUNNER_TEMP")/mira-reuse-codex"; fi
           mkdir -p "$cache"
           gh release download "$REUSE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$cache" \
             --pattern "$asset" --pattern SHA256SUMS
@@ -63,12 +65,16 @@ jobs:
           actual=$(sha256sum < "$cache/$asset" | awk '{print $1}')
           [[ "$expected" =~ ^[a-f0-9]{64}$ && "$actual" == "$expected" ]] || exit 1
           if [[ "$platform" == windows ]]; then
-            unzip -q "$cache/$asset" "$prefix/mira-codex-package/*" -d "$cache"
+            unzip -q "$cache/$asset" -d "$cache"
           else
             tar -xf "$cache/$asset" -C "$cache" "$prefix/mira-codex-package"
           fi
           test -f "$cache/$prefix/mira-codex-package/codex-package.json"
           mv "$cache/$prefix/mira-codex-package" "$PACKAGE"
+          suffix=""; [[ "$platform" == windows ]] && suffix=.exe
+          for required in "bin/codex$suffix" "bin/codex-code-mode-host$suffix" "codex-path/rg$suffix"; do
+            test -s "$PACKAGE/$required" || { echo "Missing reused Codex file: $required" >&2; exit 1; }
+          done
 
       - name: Prepare patched Codex source
         if: inputs.codex_release == ''

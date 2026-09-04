@@ -5,6 +5,14 @@ import {spawnSync} from 'node:child_process';
 const workspace=path.resolve(process.argv[2]??'');
 if(!workspace.includes('mira-openssh-windows.')) throw Error('Use an isolated native build workspace');
 const combined=path.join(workspace,'combined'),go=path.join(workspace,'go-objects');
+// MSVC directives use names such as LIBCMT.lib while the SDK ships libcmt.lib.
+// NTFS resolves these identically; a Linux CI linker needs explicit aliases.
+const sdk=path.join(workspace,'sdk-libs');
+for(const name of fs.readdirSync(sdk).filter(n=>/\.lib$/i.test(n))){
+  for(const alias of [name.toLowerCase(),name.slice(0,-4).toUpperCase()+'.lib']){
+    if(!fs.existsSync(path.join(sdk,alias)))fs.linkSync(path.join(sdk,name),path.join(sdk,alias));
+  }
+}
 const lld=process.env.MIRA_LLD??'/usr/lib/llvm-18/bin/ld.lld';
 const inputs=JSON.parse(fs.readFileSync(path.join(combined,'objects.json'),'utf8'));
 const system='legacy_stdio_wide_specifiers bcrypt userenv crypt32 ws2_32 secur32 shlwapi kernel32 user32 gdi32 winspool comdlg32 advapi32 shell32 ole32 oleaut32 uuid odbc32 odbccp32 netapi32 rpcrt4 ntdll setupapi hid'.split(' ').map(n=>n+'.lib');
