@@ -136,9 +136,11 @@ for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sess
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
+assert(!assets["/app.js"].includes('"Turn", "Codex 正在处理…", "运行中"'),
+  "website still renders normal Turn lifecycle notifications as transcript cards");
 assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&
   assets["/styles.css"].includes(".history-loader{flex:0 0 auto") &&
   assets["/styles.css"].includes(".conversation-trace{max-height:68vh") &&
@@ -327,6 +329,8 @@ try {
   const importedProjection = threads.body.data?.find((item) => item.threadId === importedThreadId);
   assert(importedProjection?.title === "Imported Mira session" && importedProjection.itemCount === 2,
     "unified Codex thread projection omitted the imported session");
+  assert(importedProjection.cwd === temporary,
+    "unified Codex thread projection did not preserve the imported working directory");
   const transcript = await admin(
     `/v1/codex/threads/${importedThreadId}/transcript?storeId=${encodeURIComponent(importStoreId)}`,
   );

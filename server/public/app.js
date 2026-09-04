@@ -1317,6 +1317,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
 }
 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
+  if (!delta) return;
   const trace = $("#conversationTrace");
   const follow = traceNearBottom(trace);
   const existing = trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
@@ -1522,12 +1523,18 @@ function handleAgentNotification(message) {
   if (method === "turn/started") {
     agent.turnId = params.turn?.id ?? null;
     $("#agentInterrupt").classList.remove("hidden");
-    upsertTrace(`turn-${agent.turnId ?? Date.now()}`, "system", "Turn", "Codex 正在处理…", "运行中");
     return;
   }
   if (method === "turn/completed") {
     const turn = params.turn ?? {};
-    upsertTrace(`turn-${turn.id ?? agent.turnId}`, "system", "Turn", turn.error?.message ?? "处理完成", turn.status ?? "完成");
+    const status = String(turn.status ?? "").toLowerCase();
+    if (turn.error?.message || ["failed", "error"].includes(status)) {
+      upsertTrace(`turn-${turn.id ?? agent.turnId ?? Date.now()}`, "error", "Turn 失败",
+        turn.error?.message ?? "Codex Turn 执行失败", turn.status ?? "失败");
+    } else if (["interrupted", "cancelled", "canceled", "aborted"].includes(status)) {
+      upsertTrace(`turn-${turn.id ?? agent.turnId ?? Date.now()}`, "system", "Turn 已中断",
+        "本次执行没有继续完成。", turn.status);
+    }
     agent.turnId = null;
     $("#agentInterrupt").classList.add("hidden");
     void loadAgentThreads();
@@ -1539,7 +1546,11 @@ function handleAgentNotification(message) {
     const view = itemView(item);
     const itemKey = `item-${item.id ?? (view.kind === "user" ? "current-user" : method)}`;
     if (view.kind === "user") reconcilePendingUserTrace(itemKey, view.body);
-    upsertTrace(itemKey, view.kind, view.title, view.body, method.endsWith("started") ? "运行中" : (item.status ?? "完成"));
+    const existing = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(itemKey)}"]`);
+    const emptyNarrative = ["assistant", "reasoning"].includes(view.kind) && !view.body;
+    if (emptyNarrative && !existing) return;
+    upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? undefined : view.body,
+      method.endsWith("started") ? "运行中" : (item.status ?? "完成"));
     return;
   }
   if (method === "item/agentMessage/delta") {
@@ -1747,15 +1758,18 @@ async function stopAgentRuntime() {
 async function resumeAgentThread(threadId) {
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
   setConversationNotice("正在从 PostgreSQL 恢复会话…");
+  const projectedThread = agent.threads.find((thread) => thread.threadId === threadId);
+  const projectedCwd = typeof projectedThread?.cwd === "string" ? projectedThread.cwd.trim() : "";
+  $("#conversationCwd").value = projectedCwd;
   const params = { threadId };
-  const cwd = $("#conversationCwd").value.trim();
-  if (cwd) params.cwd = cwd;
+  if (projectedCwd) params.cwd = projectedCwd;
   const result = await rpc("thread/resume", params, 120_000);
   agent.threadId = result.thread.id;
   resetAgentTranscript(agent.threadId);
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
-  $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${result.cwd ?? "默认目录"}`;
-  if (!$("#conversationCwd").value && result.cwd) $("#conversationCwd").value = result.cwd;
+  const resumedCwd = result.cwd ?? projectedCwd;
+  $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${resumedCwd || "默认目录"}`;
+  $("#conversationCwd").value = resumedCwd ?? "";
   await loadAgentTranscript(agent.threadId, result.thread);
   renderAgentThreads();
   setConversationNotice();
@@ -1767,6 +1781,7 @@ function newAgentThread() {
   resetAgentTranscript();
   $("#conversationTitle").textContent = "新会话";
   $("#conversationMeta").textContent = "第一条消息发送时在所选节点创建，并立即写入 PostgreSQL。";
+  $("#conversationCwd").value = "";
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
 }
