@@ -421,6 +421,9 @@ func (runtimeValue *capabilityRuntime) resolveCodexRollout(params codexSessionsP
 				if resolveErr != nil {
 					return resolveErr
 				}
+				if !pathContained(filepath.Join(home, "sessions"), resolved) && !pathContained(filepath.Join(home, "archived_sessions"), resolved) {
+					return fmt.Errorf("referenced rollout symlink leaves the source Codex home")
+				}
 				info, statErr := os.Stat(resolved)
 				if statErr != nil {
 					return statErr
