@@ -136,7 +136,7 @@ for (const control of ["agentView", "agentRuntimeNode", "agentThreadList", "sess
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
 assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&
@@ -144,6 +144,8 @@ assert(assets["/styles.css"].includes(".trace-card{flex:0 0 auto") &&
   assets["/styles.css"].includes(".conversation-trace{max-height:68vh") &&
   !/\.trace-body\{[^}]*max-height/.test(assets["/styles.css"]),
 "website conversation cards may shrink, nest scrollbars, or omit the history loader");
+assert(assets["/styles.css"].includes(".tool-group{") && assets["/styles.css"].includes(".tool-group-items{"),
+  "website omitted collapsed tool-call groups");
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
 }

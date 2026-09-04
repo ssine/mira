@@ -1259,6 +1259,33 @@ function scrollTraceToBottom(trace = $("#conversationTrace")) {
   trace.scrollTop = trace.scrollHeight;
 }
 
+function updateToolGroup(group) {
+  if (!group) return;
+  const cards = [...group.querySelectorAll(".trace-card.tool")];
+  const counts = new Map();
+  let running = 0;
+  for (const card of cards) {
+    const title = card.querySelector(".trace-kind")?.textContent || "工具";
+    counts.set(title, (counts.get(title) ?? 0) + 1);
+    if (/运行|等待/.test(card.querySelector(".trace-status")?.textContent ?? "")) running += 1;
+  }
+  group.querySelector(".tool-group-total").textContent = `工具调用 · ${cards.length} 次${running ? ` · ${running} 运行中` : ""}`;
+  group.querySelector(".tool-group-counts").textContent = [...counts]
+    .map(([title, count]) => `${title} × ${count}`)
+    .join(" · ");
+}
+
+function ensureToolGroup(trace) {
+  let group = trace.lastElementChild;
+  if (group?.classList.contains("tool-group")) return group;
+  group = element("details", "tool-group");
+  const summary = element("summary", "tool-group-summary");
+  summary.append(element("span", "tool-group-total"), element("span", "tool-group-counts"));
+  group.append(summary, element("div", "tool-group-items"));
+  trace.append(group);
+  return group;
+}
+
 function upsertTrace(key, kind, title, body = undefined, status = "", options = {}) {
   const trace = $("#conversationTrace");
   const follow = options.forceScroll === true || traceNearBottom(trace);
@@ -1272,7 +1299,11 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     head.append(element("span", "trace-kind", title), element("span", "trace-status", status));
     card.append(head, element("div", "trace-body"));
     setTraceBody(card, body, kind);
-    trace.append(card);
+    if (kind === "tool" && options.collapseTools !== false) {
+      ensureToolGroup(trace).querySelector(".tool-group-items").append(card);
+    } else {
+      trace.append(card);
+    }
   } else {
     card.className = `trace-card ${kind}`;
     card.dataset.traceKind = kind;
@@ -1280,6 +1311,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.querySelector(".trace-status").textContent = status;
     if (body !== undefined) setTraceBody(card, body, kind);
   }
+  updateToolGroup(card.closest(".tool-group"));
   if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
   return card;
 }
@@ -1287,10 +1319,23 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
   const trace = $("#conversationTrace");
   const follow = traceNearBottom(trace);
-  const card = upsertTrace(key, kind, title, undefined, status, { autoScroll: false });
+  const existing = trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
+  const effectiveTitle = existing?.querySelector(".trace-kind")?.textContent || title;
+  const card = upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false });
   const body = card.querySelector(".trace-body");
   setTraceBody(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind);
   if (follow) scrollTraceToBottom(trace);
+}
+
+function reconcilePendingUserTrace(key, body) {
+  const candidates = [...$("#conversationTrace").querySelectorAll('[data-pending-user="true"]')].reverse();
+  const card = candidates.find((candidate) => {
+    const pendingBody = candidate.querySelector(".trace-body")?._miraSource ?? "";
+    return !body || pendingBody === body;
+  });
+  if (!card) return;
+  card.dataset.traceKey = key;
+  delete card.dataset.pendingUser;
 }
 
 function itemView(item) {
@@ -1492,7 +1537,9 @@ function handleAgentNotification(message) {
   if (method === "item/started" || method === "item/completed") {
     const item = params.item ?? {};
     const view = itemView(item);
-    upsertTrace(`item-${item.id ?? method}`, view.kind, view.title, view.body, method.endsWith("started") ? "运行中" : (item.status ?? "完成"));
+    const itemKey = `item-${item.id ?? (view.kind === "user" ? "current-user" : method)}`;
+    if (view.kind === "user") reconcilePendingUserTrace(itemKey, view.body);
+    upsertTrace(itemKey, view.kind, view.title, view.body, method.endsWith("started") ? "运行中" : (item.status ?? "完成"));
     return;
   }
   if (method === "item/agentMessage/delta") {
@@ -1735,12 +1782,19 @@ async function sendAgentMessage(text) {
     $("#conversationTitle").textContent = "新会话";
     $("#conversationMeta").textContent = `${agent.threadId} · ${started.model ?? "默认模型"} · ${(started.cwd ?? cwd) || "默认目录"}`;
   }
-  upsertTrace(`user-${Date.now()}`, "user", "你", text, "已发送");
-  const result = await rpc("turn/start", {
-    threadId: agent.threadId,
-    input: [{ type: "text", text }],
-    approvalPolicy: "never",
-  }, 120_000);
+  const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", text, "已发送");
+  optimistic.dataset.pendingUser = "true";
+  let result;
+  try {
+    result = await rpc("turn/start", {
+      threadId: agent.threadId,
+      input: [{ type: "text", text }],
+      approvalPolicy: "never",
+    }, 120_000);
+  } catch (error) {
+    if (optimistic.dataset.pendingUser === "true") optimistic.remove();
+    throw error;
+  }
   agent.turnId = result.turn.id;
   $("#agentInterrupt").classList.remove("hidden");
 }
