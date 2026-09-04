@@ -1380,7 +1380,9 @@ function renderTranscript(fallbackThread, options = {}) {
   }
   requestAnimationFrame(() => {
     if (options.preserveViewport) {
-      trace.scrollTop = options.preserveViewport.top + trace.scrollHeight - options.preserveViewport.height;
+      trace.scrollTop = options.preserveViewport.mode === "prepend"
+        ? options.preserveViewport.top + trace.scrollHeight - options.preserveViewport.height
+        : options.preserveViewport.top;
     } else if (options.anchorBottom !== false) {
       scrollTraceToBottom(trace);
       requestAnimationFrame(() => scrollTraceToBottom(trace));
@@ -1399,8 +1401,10 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     agent.transcriptGeneration === transcript.generation;
   const trace = $("#conversationTrace");
   const preserveViewport = options.prepend
-    ? { top: trace.scrollTop, height: trace.scrollHeight }
-    : null;
+    ? { mode: "prepend", top: trace.scrollTop, height: trace.scrollHeight }
+    : options.preserveLoaded && options.anchorBottom === false
+      ? { mode: "stable", top: trace.scrollTop, height: trace.scrollHeight }
+      : null;
   if (options.prepend && sameThread) {
     agent.transcriptItems = mergeTranscriptItems(incoming, agent.transcriptItems);
     agent.transcriptCursor = transcript.nextCursor ?? null;
