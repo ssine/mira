@@ -73,6 +73,8 @@ The App Server broker defaults both thread start and resume to `approvalPolicy: 
 network access and cross-directory work from being blocked by the Codex sandbox, including after an
 older thread is resumed. Preserve an explicit client override. This policy removes the Codex sandbox;
 it does not elevate beyond the Mira Node process' operating-system identity.
+The `mira codex` wrapper applies the same defaults as early `-c` overrides, before user arguments, so
+later explicit Codex CLI/config arguments retain precedence.
 
 Codex remains a native process on the selected execution node. Mira does not reimplement Codex or
 turn model execution into a central monolith. The central service coordinates nodes and persists

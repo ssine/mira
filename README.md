@@ -8,6 +8,10 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
 管理员网站已连通。durable scheduler、writer lease、完整恢复演练和服务端编排的集群批量更新仍待完成。
 
+0.11.4 将 Mira 管理的 Codex 默认执行策略统一为 YOLO：新建和恢复 App Server thread，以及本机
+`mira codex`，均默认使用 `approvalPolicy: never` 与 `danger-full-access`。显式传入的更严格策略
+仍可覆盖默认值；Codex 不再额外限制联网和跨目录操作，但仍受运行 Node 的操作系统身份约束。
+
 0.10.1 加入真正的 SSH/SFTP 节点互连：`mira ssh <设备>`、`mira scp`、`mira sftp`。
 客户端内置，目标 Node 从同一二进制启动独立 SSH worker，通过单独的反向 WSS 数据流连接；
 不需要开放 22 端口或安装系统 sshd。权限沿用已批准的 Node 身份，具体功能、限制和使用方式见
@@ -172,7 +176,7 @@ mira status
 mira version
 mira update --check
 mira nodes list --json
-mira codex                         # 本机 Mira Codex，默认读写 personal PostgreSQL store
+mira codex                         # 本机 Mira Codex；personal PostgreSQL store，默认 YOLO
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
 mira process count --node homeserver --json
 mira process run --node homeserver -- /usr/bin/git status --short
@@ -207,7 +211,8 @@ multi_agent_v2 = true
 ```
 
 本机直接运行时使用 `mira codex`。包装器从 identity file 安全设置 `MIRA_NODE_TOKEN`，并自动注入
-当前 Server endpoint 与 `personal` store；`MIRA_CODEX_STORE_ID` 可选择其他 store。不要打印 token。
+当前 Server endpoint、`personal` store 及默认 YOLO 策略；后置 Codex 参数可显式覆盖默认策略，
+`MIRA_CODEX_STORE_ID` 可选择其他 store。不要打印 token。
 补丁保留显式 `bearer_token` 仅用于受控开发兼容。
 
 ## Android APK

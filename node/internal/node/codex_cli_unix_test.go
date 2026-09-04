@@ -45,6 +45,8 @@ printf '%s' "$MIRA_NODE_TOKEN" > "$MIRA_TEST_TOKEN"
 		`experimental_thread_store.type="remote_http"`,
 		`experimental_thread_store.endpoint="https://mira.example.test"`,
 		`experimental_thread_store.store_id="test-store"`,
+		`approval_policy="never"`,
+		`sandbox_mode="danger-full-access"`,
 		"--version",
 	} {
 		if !strings.Contains(joined, expected) {

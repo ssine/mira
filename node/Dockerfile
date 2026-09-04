@@ -1,6 +1,6 @@
 FROM golang:1.26.6-bookworm AS build
 
-ARG MIRA_VERSION=0.11.3
+ARG MIRA_VERSION=0.11.4
 ARG MIRA_COMMIT=unknown
 ARG MIRA_BUILD_TIME=unknown
 

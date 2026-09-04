@@ -674,6 +674,8 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 		"-c", `experimental_thread_store.type="remote_http"`,
 		"-c", "experimental_thread_store.endpoint=" + strconv.Quote(client.identity.ServerURL),
 		"-c", "experimental_thread_store.store_id=" + strconv.Quote(storeID),
+		"-c", `approval_policy="never"`,
+		"-c", `sandbox_mode="danger-full-access"`,
 	}
 	command := exec.CommandContext(ctx, codexPath, append(remoteArgs, args...)...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
