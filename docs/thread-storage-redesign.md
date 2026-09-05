@@ -131,6 +131,8 @@ store and should be handled under the administrator's normal backup retention.
 - `tests/session_transfer_e2e.mjs`: raw/unknown fields, subagent metadata, imported
   fork lineage, large streamed import and compatibility reads.
 - `tests/thread_fork_e2e.mjs`: real Codex App Server fork and fresh-process resume.
+- `tests/thread_cli_e2e.mjs`: CLI creation and resume with a fresh `CODEX_HOME`,
+  reconstructing the previous model context entirely from PostgreSQL.
 - `tests/runtime_reliability_e2e.mjs`: streaming, lost replies, UUID-stable retry,
   cancellation, permanent errors and preservation of imported unknown fields.
 - Codex `remote_http` tests verify direct append without downloading 10,000 prior
