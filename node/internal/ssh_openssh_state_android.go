@@ -8,8 +8,8 @@ import (
 )
 
 // The identity remains in the app-owned noBackup directory. Only SSH root home
-// and ephemeral host/auth keys live here; StrictModes must never be disabled to
-// accommodate an app-owned parent. OpenSSH stops its ownership walk at this home.
+// and ephemeral host/auth keys live here. Keep this root-owned home private even
+// though the generated sshd configuration does not use StrictModes.
 func openSSHStateDirectory(state string) (string, error) {
 	if !filepath.IsAbs(state) {
 		return "", fmt.Errorf("OpenSSH state directory must be absolute")

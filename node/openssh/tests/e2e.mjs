@@ -29,8 +29,8 @@ const processes=[],logs=[];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function wait(fn,label){for(let i=0;i<150;i++){const value=await fn();if(value)return value;await sleep(200)}throw Error(`timeout: ${label}`)}
 function launch(executable,args,env={}){const p=spawn(executable,args,{cwd:repo,env:{...process.env,...env},stdio:['ignore','pipe','pipe']});for(const s of [p.stdout,p.stderr])s.on('data',b=>{logs.push(b.toString());if(logs.length>150)logs.shift()});processes.push(p);return p;}
-function cli(identity,args,{input='',timeout=20000}={}){return new Promise((resolve,reject)=>{
-  const p=spawn(cliBinary,args,{env:{...process.env,MIRA_IDENTITY_FILE:identity,MIRA_NODE_OPENSSH_DIR:''}});
+function cli(identity,args,{input='',timeout=20000,executable=cliBinary}={}){return new Promise((resolve,reject)=>{
+  const p=spawn(executable,args,{env:{...process.env,MIRA_IDENTITY_FILE:identity,MIRA_NODE_OPENSSH_DIR:''}});
   const out=[],err=[];const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error(`CLI timeout: ${args[0]}`))},timeout);
   p.stdout.on('data',b=>out.push(b));p.stderr.on('data',b=>err.push(b));p.on('error',reject);
   p.on('close',code=>{clearTimeout(timer);resolve({code,stdout:Buffer.concat(out),stderr:Buffer.concat(err).toString()})});p.stdin.on('error',()=>{});p.stdin.end(input);
@@ -50,7 +50,7 @@ async function verifyForward(identity,nodeKey,directory){
 }
 let admin;
 async function enroll(name,env={}){
-  const dir=path.join(fixture,name);await fs.mkdir(dir);
+  const dir=path.join(fixture,name);await fs.mkdir(dir,{mode:0o700});
   const identity=path.join(dir,'identity.json'),key=`openssh-${process.pid}-${name}`;
   launch(nodeBinary,[],{MIRA_SERVER_URL:url,MIRA_NODE_KEY:key,MIRA_IDENTITY_FILE:identity,MIRA_NODE_TOKEN:'',CONTROL_SERVER_TOKEN:'',MIRA_NODE_OPENSSH_DIR:'',MIRA_NODE_ALLOWED_ROOTS:'["/"]',APP_SERVER_AUTO_START:'false',CODEX_BINARY:path.join(fixture,'no-codex'),MIRA_NODE_HEARTBEAT_SECONDS:'1',...env});
   await approvePendingNode(url,admin,key);
@@ -72,8 +72,30 @@ try{
   await wait(async()=>{try{return(await fetch(url+'/healthz')).ok}catch{return false}},'test Server');
   admin=await loginAdmin(url,'admin',password);
   const a=await enroll('source'),b=await enroll('target');
+  // Deliberately exercise the parent permissions that sshd StrictModes rejects.
+  // The fixture root stays private; only ephemeral test identities are involved.
+  for(const n of [a,b])await fs.chmod(n.dir,0o775);
   let r=await good(a.identity,['ssh',b.key,'--','printf RELAY_OK; id -u']);assert.equal(r.stdout.toString(),`RELAY_OK${process.getuid()}\n`);
-  console.log('PASS native OpenSSH, Mira-derived keys, real approved reverse relay');
+  console.log('PASS native OpenSSH, approved reverse relay with group-writable state parents');
+  const {rows:keys}=await pool.query('SELECT node_id, credential_id, host_key, client_key FROM mira_node_ssh_keys JOIN mira_node_credentials USING(credential_id) WHERE node_id = ANY($1::uuid[])',[[a.nodeId,b.nodeId]]);
+  const aKey=keys.find(k=>k.node_id===a.nodeId),bKey=keys.find(k=>k.node_id===b.nodeId);
+  assert(aKey&&bKey);
+  // Authenticate the relay as approved Node A, but give the native SSH client an
+  // unrelated ephemeral key. This exercises sshd's proof-of-possession check.
+  const wrongKey=path.join(a.dir,'wrong-key'),knownHosts=path.join(a.dir,'test-known-hosts');
+  execFileSync(path.join(binaries,'ssh-keygen'),['-q','-t','ed25519','-N','','-f',wrongKey]);
+  await fs.writeFile(knownHosts,`${b.nodeId} ${bKey.host_key}\n`);
+  r=await cli(a.identity,['-F','/dev/null','-i',wrongKey,'-o',`ProxyCommand=${cliBinary} ssh-proxy ${b.nodeId}`,
+    '-o',`UserKnownHostsFile=${knownHosts}`,'-o',`HostKeyAlias=${b.nodeId}`,'-o','StrictHostKeyChecking=yes',
+    '-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','BatchMode=yes',`${os.userInfo().username}@mira-target`,'printf UNAUTHORIZED'],{executable:path.join(binaries,'ssh')});
+  assert.notEqual(r.code,0);assert.match(r.stderr,/Permission denied \(publickey\)/);assert(!r.stdout.includes('UNAUTHORIZED'));
+  try{
+    await pool.query('UPDATE mira_node_ssh_keys SET host_key=$1 WHERE credential_id=$2',[aKey.host_key,bKey.credential_id]);
+    r=await cli(a.identity,['ssh',b.key,'--','printf UNAUTHORIZED']);
+    assert.notEqual(r.code,0);assert.match(r.stderr,/Host key verification failed/);assert(!r.stdout.includes('UNAUTHORIZED'));
+  }finally{await pool.query('UPDATE mira_node_ssh_keys SET host_key=$1 WHERE credential_id=$2',[bKey.host_key,bKey.credential_id])}
+  await good(a.identity,['ssh',b.key,'--','true']);
+  console.log('PASS wrong caller key and wrong pinned host key are rejected');
   r=await cli(a.identity,['ssh',b.key,'--','printf OUT; printf ERR >&2; exit 23']);assert.equal(r.code,23);assert.equal(r.stdout.toString(),'OUT');assert(r.stderr.includes('ERR'));
   const data=crypto.randomBytes(2*1024*1024);r=await good(a.identity,['ssh',b.key,'--','cat'],{input:data});assert.deepEqual(r.stdout,data);
   r=await good(a.identity,['ssh','-tt',b.key,'--','test -t 0 && printf PTY_OK']);assert(r.stdout.includes('PTY_OK'));
@@ -93,6 +115,15 @@ try{
   const pidFile=path.join(b.dir,'remote.pid');
   const alive=cli(a.identity,['ssh',b.key,'--',`echo $$ > '${pidFile}'; exec sleep 60`],{timeout:15000});
   const pid=await wait(async()=>{try{return Number(await fs.readFile(pidFile,'utf8'))}catch{return null}},'remote command PID');
+  for(const n of [a,b]){
+    const sessions=(await fs.readdir(n.dir)).filter(name=>name.startsWith('ssh-session-'));
+    assert(sessions.length>0);
+    for(const name of sessions){
+      const dir=path.join(n.dir,name);assert.equal((await fs.stat(dir)).mode&0o777,0o700);
+      for(const file of await fs.readdir(dir))assert.equal((await fs.stat(path.join(dir,file))).mode&0o777,0o600,file);
+    }
+  }
+  console.log('PASS session directories and key/config files remain owner-private');
   await adminRequest(url,admin,`/v1/admin/nodes/${a.nodeId}/revoke`,{method:'POST',body:'{}'});
   assert.notEqual((await alive).code,0);
   await wait(async()=>{try{process.kill(pid,0);return false}catch(e){return e.code==='ESRCH'}},'reap OpenSSH descendant after revoke');

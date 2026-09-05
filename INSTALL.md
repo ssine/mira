@@ -1,9 +1,9 @@
 # 安装、接入与更新
 
-Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.12.0**，发布来源为
+Mira 的 Server、Node、CLI 与 Android APK 使用同一个版本号。当前版本 **0.13.5**，发布来源为
 [GitHub Releases](https://github.com/ssine/mira/releases)。无需安装 Go、Node.js 或 Termux。
 Codex 运行包独立发行，其版本号由官方版本和 Mira 补丁修订号组成，例如 `0.151.0-mira.1`。
-以下拆分机制属于当前源码；已发布的 0.12.0 归档仍保持原样，需要发布新版 Mira 才会生效。
+Node 安装包不包含 Codex；只有运行 Codex CLI 或启用 App Server 时才按需下载固定版本的运行包。
 
 ## Linux / WSL / NAS
 
@@ -13,7 +13,7 @@ Codex 运行包独立发行，其版本号由官方版本和 Mira 补丁修订�
 curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --server https://mira.ssine.cc
 ```
 
-支持 Linux amd64、arm64；WSL 使用 Linux 版本。需要 `curl`、`tar`、`sha256sum`。
+支持 Linux amd64、arm64；WSL 使用 Linux 版本。需要 `curl`、`diff`、`cmp`、`tar`、`sha256sum`、`readlink`、`awk`、`mktemp`。
 去掉 `--server` 参数会交互询问 Server URL。支持 `--version 0.9.4` 固定版本。
 脚本会下载 GitHub Release、核对 SHA-256，然后按当前用户安装，不使用 `sudo`。
 如希望先审查脚本，下载并阅读后执行 `sh install.sh --server ...`。
@@ -25,7 +25,47 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
   开机未登录也要运行时，由管理员决定是否执行 `loginctl enable-linger <用户名>`。
 - 没有 user systemd 的 NAS：安装器显示启动命令；在 NAS 的任务/服务管理器中将它设置为常驻服务。
   不会擅自修改厂商系统或启用 root。
-- `--no-service` 仅安装二进制，更新保留此选择；`--prefix /absolute/path` 是不安装服务的便携模式。
+- `--no-service` 仅安装二进制，更新保留此选择；`--prefix /absolute/path` 默认是不安装服务的便携模式。
+  可用 `--service auto|systemd|procd|none` 显式选择，覆盖便携模式或之前保存的服务选择。
+
+## OpenWrt / FriendlyWrt 软路由
+
+Linux amd64/arm64 的正式包内置静态链接的 OpenSSH，可在 musl 系统上运行。以 root 执行上述
+Linux 安装命令时，脚本自动识别 OpenWrt 的 `procd`，创建 `/etc/init.d/mira-node` 并启用开机启动。
+Node 以当前 root 身份运行；系统 SSH、网络及防火墙配置不变。首次安装的 App Server 默认关闭，
+只使用文件、进程、终端和 Mira SSH/SCP/SFTP 时不会下载或运行 Codex。
+
+脚本检查安装命令、CA 证书及 Web/动态工具终端所需的 util-linux `script`。缺少时自动通过
+`opkg update` / `opkg install`，或 apk 系统上的 `apk update` / `apk add` 安装对应包，
+包括 `script-utils` 和 `ca-bundle`；已有依赖不重复安装。包管理器、软件源或空间不足导致失败时，
+脚本在修改 Mira 的身份、版本入口和服务前停止。首次获取脚本仍需已有的 `curl`/`wget`，
+也可以从另一台机器传入脚本后执行。
+
+空间较小的路由器可选择一个开机时已经挂载、允许执行程序的持久目录，例如：
+
+```sh
+sh install.sh --server https://mira.ssine.cc --prefix /opt/mira --service procd
+/opt/mira/bin/mira status
+```
+
+该布局把命令放到 `/opt/mira/bin/`，版本放到 `/opt/mira/share/mira/versions/`。
+身份和配置仍在 `/root/.config/mira/`；如使用 `MIRA_IDENTITY_FILE` 或 `MIRA_NODE_CONFIG_FILE`
+指定路径，安装器会将路径写入 procd 服务，后续 CLI 也应使用相同设置。升级保留已有服务环境、
+身份、配置和旧版本，保存的 `procd` 选择会随 `mira update` 沿用。新版本无法启动时恢复旧版本入口
+及之前的服务启停状态；相同版本重复安装不会中断已运行的 Node。旧安装器留下的手动服务不会在
+普通更新时自动改为 procd，需先停止原有进程，再显式使用 `--service procd` 接管。
+同名服务由其他方式管理、或属于另一安装目录时拒绝覆盖。
+
+```sh
+/etc/init.d/mira-node status
+/etc/init.d/mira-node restart
+logread -e mira-node
+/opt/mira/bin/mira update
+```
+
+procd 提供有限次数的崩溃重启、30 秒优雅退出时间，以及系统环形日志；无需另装 systemd。
+`--no-service` 仍可用于手动启动。升级到包含此功能的正式发行版后，目标版本的安装器也需支持
+procd；回退到更早的安装器时，应先停止服务，再按旧版的手动服务方式处理，不能假定它会管理 procd。
 
 ## Windows
 

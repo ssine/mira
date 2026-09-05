@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { testOpenWrtInstaller } from "./openwrt_installer_e2e.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const current = (await fs.readFile(path.join(root, "VERSION"), "utf8")).trim();
@@ -13,7 +14,12 @@ const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-installers-e2e-"
 const releases = path.join(temporary, "releases");
 const prefix = path.join(temporary, "prefix");
 const identity = path.join(temporary, "state", "identity.json");
-const environment = { ...process.env, MIRA_IDENTITY_FILE: identity, CODEX_BINARY: path.join(temporary, "no-codex") };
+// A test launched from a managed Codex session must not inherit its Node token,
+// endpoint or configuration; this fixture enrolls only against loopback port 9.
+const environment = {
+  ...Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(MIRA_|NODE_AGENT_|APP_SERVER_|ANDROID_NATIVE_|CONTROL_SERVER_)/.test(name))),
+  MIRA_IDENTITY_FILE: identity, CODEX_BINARY: path.join(temporary, "no-codex"),
+};
 let child;
 
 function command(program, args, options = {}) {
@@ -68,6 +74,7 @@ try {
   const runtime = JSON.parse(command(path.join(prefix, "bin/mira"), ["--json", "codex-runtime", "status"], { env: environment }));
   assert.equal(runtime.data.installed, false, "Node install/update must not download optional Codex");
   await fs.access(path.join(prefix, "share/mira/versions", previous, "mira-node"));
+  await testOpenWrtInstaller({ root, releases, current, previous });
   const protectedInstall = await fs.readFile(path.join(prefix, "bin/mira-node"));
   await fs.appendFile(path.join(releases, `mira_${current}_linux_amd64.tar.gz`), "corruption");
   assert.throws(() => command("sh", [...install, "--version", current, "--update"], { env: environment, stdio: "pipe" }));

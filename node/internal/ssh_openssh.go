@@ -199,7 +199,10 @@ func serveOpenSSH(ctx context.Context, input io.Reader, output io.Writer, config
 	if err = privateSSHFile(filepath.Join(dir, "authorized_keys"), ssh.MarshalAuthorizedKey(key)); err != nil {
 		return err
 	}
-	settings := []string{"PasswordAuthentication no", "KbdInteractiveAuthentication no", "AuthenticationMethods publickey", "PubkeyAuthentication yes", "PermitRootLogin prohibit-password", "StrictModes yes", "PermitUserEnvironment no", "PermitUserRC no", "X11Forwarding no", "UseDNS no", "LoginGraceTime 15", "LogLevel ERROR"}
+	// Mira supplies the exact approved caller key in an owner-private session
+	// directory. Do not apply sshd's home/ancestor ownership heuristic to this
+	// generated file: an otherwise valid Node state parent may be group-writable.
+	settings := []string{"PasswordAuthentication no", "KbdInteractiveAuthentication no", "AuthenticationMethods publickey", "PubkeyAuthentication yes", "PermitRootLogin prohibit-password", "StrictModes no", "PermitUserEnvironment no", "PermitUserRC no", "X11Forwarding no", "UseDNS no", "LoginGraceTime 15", "LogLevel ERROR"}
 	subsystem := "internal-sftp"
 	if runtime.GOOS == "windows" {
 		p, e := openSSHProgram("sftp-server")

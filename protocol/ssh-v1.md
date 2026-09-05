@@ -32,12 +32,17 @@ immutable public keys only (migration 9). Keys rotate with the Node credential.
 The CLI pins the exact target host key returned by the authenticated Server. The
 target accepts only the exact approved caller public key and proof of possession.
 The SSH account is the **target Node's current OS account**, not a selectable user.
-Public-key-only authentication and StrictModes stay enabled. No password/PAM login,
+Public-key-only authentication stays enabled. No password/PAM login,
 user RC or X11 is enabled. The approved Nodes remain mutually trusted; this is not
 a multiuser account-login service or a privilege sandbox. A compromised Server key
 authority or approved Node remains in the trust boundary.
 
-Mira generates owner-private temporary keys/config per invocation/session. The
+Mira generates owner-private temporary keys/config per invocation/session (0700
+directories and 0600 files on Unix, protected ACLs on Windows). Its generated
+sshd configuration uses `StrictModes no`: authentication trusts the exact approved
+caller key rather than applying OpenSSH's ownership/mode heuristic to the state
+directory's ancestors. This does not alter system SSH configuration, host-key
+pinning or caller-key verification. The
 durable source of those keys remains the protected Node identity. Temporary files
 are removed on orderly completion, but a hard crash can leave private session state;
 do not describe this as secret-free disk storage. Secrets never enter argv, URLs,

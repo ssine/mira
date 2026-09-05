@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim AS build
 
 ARG TARGETARCH
-ARG MIRA_VERSION=0.13.4
+ARG MIRA_VERSION=0.13.5
 
 WORKDIR /src
 # Build from the repository root after producing the matching native bundle.

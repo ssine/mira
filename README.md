@@ -60,6 +60,8 @@ Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签�
 或启动受控 App Server 时，按需安装固定兼容版本的完整 Codex package。缓存跨 Mira 版本复用，
 节点升级不会重复下载 Codex；Android 不下载 Codex。拆分不会自动改变已经发布的 0.12.0 包。
 后续桌面端执行 `mira update`；Android 在 APP 内检查更新。身份和配置随升级保留。
+OpenWrt / FriendlyWrt 使用同一 Linux 安装脚本，自动补齐依赖并通过 procd 管理开机启动；
+自定义持久目录可使用 `--prefix /opt/mira --service procd`，不需要运行 Codex。
 具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 
 ## 架构

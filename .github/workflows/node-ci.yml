@@ -9,6 +9,7 @@ on:
       - "scripts/install.ps1"
       - "scripts/install.sh"
       - "tests/installers_e2e.mjs"
+      - "tests/openwrt_installer_e2e.mjs"
       - "tests/node_channel_test.mjs"
       - "tests/ssh_relay_test.mjs"
   pull_request:
@@ -18,6 +19,7 @@ on:
       - "scripts/install.ps1"
       - "scripts/install.sh"
       - "tests/installers_e2e.mjs"
+      - "tests/openwrt_installer_e2e.mjs"
       - "tests/node_channel_test.mjs"
       - "tests/ssh_relay_test.mjs"
 
