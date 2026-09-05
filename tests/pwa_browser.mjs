@@ -10,6 +10,7 @@ const { chromium, devices } = await import(process.argv[2] ?? "playwright");
 const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8789";
 const thread = "00000000-0000-4000-8000-0000000000a1";
 const other = "00000000-0000-4000-8000-0000000000b2";
+const cwd = "/workspace/" + "long-project-directory/".repeat(8);
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), "mira-pwa-browser-"));
 let context;
 try {
@@ -21,8 +22,8 @@ try {
   page.on("console", (message) => {
     if (message.type() === "error" && /content security policy/i.test(message.text())) errors.push(message.text());
   });
-  await context.route("**/v1/codex/threads?*", (route) => route.fulfill({ json: { data: [{ threadId: thread, title: "手机会话", updatedAt: new Date().toISOString() }] } }));
-  await context.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: { threadId: other, title: "另一个会话" } }));
+  await context.route("**/v1/codex/threads?*", (route) => route.fulfill({ json: { data: [{ threadId: thread, title: "手机会话", cwd, model: "gpt-6-astra", updatedAt: new Date().toISOString() }] } }));
+  await context.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: { threadId: other, title: "另一个会话", cwd, model: "gpt-6-astra" } }));
   await context.route("**/v1/codex/threads/*/transcript?*", (route) => route.fulfill({ json: {
     generation: 1, trace: [{ key: "message", kind: "assistant", turnId: "turn", body: "手机上的对话正文。\n\n".repeat(100) }],
   } }));
@@ -78,6 +79,24 @@ try {
   await page.goto(`${origin}/?thread=${thread}`, { waitUntil: "networkidle" });
   await page.locator(".trace-card.assistant").waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.app.route")), `/?thread=${thread}`);
+  await page.setViewportSize({ width: 320, height: 640 });
+  const header = await page.locator(".conversation-head").evaluate((node) => {
+    const directory = node.querySelector(".conversation-directory");
+    const model = node.querySelector(".conversation-model");
+    return { height: node.getBoundingClientRect().height, directory: directory.textContent, model: model.textContent,
+      directoryTop: directory.getBoundingClientRect().top, modelTop: model.getBoundingClientRect().top,
+      directoryClipped: directory.scrollWidth > directory.clientWidth, modelClipped: model.scrollWidth > model.clientWidth,
+      meta: node.querySelector("#conversationMeta").textContent };
+  });
+  assert.equal(header.directory, cwd);
+  assert.equal(header.model, "gpt-6-astra");
+  assert.ok(header.height <= 48, `compact header: ${JSON.stringify(header)}`);
+  assert.equal(header.directoryTop, header.modelTop, "directory and model stay on one line");
+  assert.equal(header.directoryClipped, true);
+  assert.equal(header.modelClipped, false, "a long directory must leave the model readable");
+  assert.equal(header.meta.includes(thread), false);
+  assert.equal(await page.locator("#conversationTitle").evaluate((node) => getComputedStyle(node).clipPath === "inset(50%)" || node.getBoundingClientRect().width <= 1), true);
+  await page.setViewportSize({ width: 393, height: 851 });
 
   // A real cold document load uses the install start URL and restores the route.
   await page.goto(`${origin}/?launch=pwa`, { waitUntil: "networkidle" });

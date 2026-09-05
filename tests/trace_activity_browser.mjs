@@ -306,9 +306,12 @@ try {
   const otherResume = reconnectMessages.findLast((message) => message.method === "thread/resume");
   assert.notEqual(slowResume.id, otherResume.id);
   reconnectedSocket.send(JSON.stringify({ id: slowResume.id, result: { thread: { id: "fast-thread", name: "STALE TITLE" }, cwd: "/fast" } }));
-  reconnectedSocket.send(JSON.stringify({ id: otherResume.id, result: { thread: { id: "other-thread", name: "Current thread" }, cwd: "/other" } }));
+  reconnectedSocket.send(JSON.stringify({ id: otherResume.id, result: { thread: { id: "other-thread", name: "Current thread" }, cwd: "/other", model: "gpt-6-astra" } }));
   await page.waitForFunction(() => document.querySelector("#conversationTitle").textContent === "Current thread");
   assert.equal(await page.evaluate(() => window.traceHarness.agent.threadId), "other-thread");
+  assert.equal(await page.locator("#conversationMeta .conversation-directory").textContent(), "/other");
+  assert.equal(await page.locator("#conversationMeta .conversation-model").textContent(), "gpt-6-astra");
+  assert.equal((await page.locator("#conversationMeta").textContent()).includes("other-thread"), false);
 
   expireLogin = true;
   reconnectedSocket.close({ code: 1001 });

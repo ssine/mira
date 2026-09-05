@@ -1371,6 +1371,14 @@ function setConversationNotice(message = "", kind = "") {
   notice.className = `workspace-notice${message ? "" : " hidden"}${kind ? ` ${kind}` : ""}`;
 }
 
+function setConversationMeta(cwd, model) {
+  const directory = element("span", "conversation-directory", cwd || "默认目录");
+  const runtimeModel = element("span", "conversation-model", model || "默认模型");
+  directory.title = directory.textContent;
+  runtimeModel.title = runtimeModel.textContent;
+  $("#conversationMeta").replaceChildren(directory, element("span", "conversation-meta-separator", "·"), runtimeModel);
+}
+
 function setAgentRuntimeState(message, status = "offline") {
   $("#agentRuntimeState").textContent = message;
   $("#agentRuntimeBadge").textContent = status;
@@ -2747,7 +2755,7 @@ async function restoreAgentThread(threadId, socket) {
   agent.threadRuntimeNodeId = agent.socketNodeId;
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
   const resumedCwd = result.cwd ?? projectedCwd;
-  $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${resumedCwd || "默认目录"}`;
+  setConversationMeta(resumedCwd, result.model);
   $("#conversationCwd").value = resumedCwd ?? "";
   return result.thread;
 }
@@ -2783,7 +2791,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
     $("#agentRuntimeNode").value = preferredNode;
   }
   $("#conversationTitle").textContent = projected?.title || "Codex 会话";
-  $("#conversationMeta").textContent = projected?.cwd || "";
+  setConversationMeta(projected?.cwd, projected?.model);
   $("#conversationCwd").value = projected?.cwd || "";
   syncActiveTurnUi();
   renderAgentThreads();
@@ -2815,9 +2823,9 @@ function newAgentThread({ updateRoute = true } = {}) {
   syncActiveTurnUi();
   resetAgentTranscript();
   $("#conversationTitle").textContent = "新会话";
-  $("#conversationMeta").textContent = "第一条消息发送时在所选节点创建，并立即写入 PostgreSQL。";
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
+  setConversationMeta($("#conversationCwd").value);
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
 }
@@ -2997,7 +3005,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     agent.previousRuntimeNodeId = null;
     $("#conversationTitle").textContent = "新会话";
     const startedCwd = started.cwd ?? cwd;
-    $("#conversationMeta").textContent = `${agent.threadId} · ${started.model ?? "默认模型"} · ${startedCwd || "默认目录"}`;
+    setConversationMeta(startedCwd, started.model);
     $("#conversationCwd").value = startedCwd ?? "";
   }
   updateReplyProgress(progress, { threadId: agent.threadId, phase: attachments.length ? "正在上传附件…" : "正在发送…" });
@@ -3142,7 +3150,10 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
-  if (!agent.threadId) $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
+  if (!agent.threadId) {
+    $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
+    setConversationMeta($("#conversationCwd").value);
+  }
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
   syncConversationSendUi();
 });
