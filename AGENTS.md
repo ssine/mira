@@ -113,6 +113,14 @@ PostgreSQL is the sole durable source of truth for Codex thread state and histor
 The v1 snapshot API is a compatibility adapter. The v2 event/delta API is the preferred persistence
 contract. See `protocol/thread-store-v2.md`.
 
+Remote persistence retries must reuse the exact operation UUID and body until acknowledged;
+never retry a tool's side effects to compensate for a lost storage response. Cancelling a turn
+must not discard already-started writes. Permanent persistence failures must stop further model
+sampling, and task panics must finish the correct turn with an explicit error. See
+`docs/runtime-reliability.md` for guarantees, failure boundaries and fault-injection tests.
+Build caches are performance aids, never release authority: warm trusted main caches, key native
+inputs by the actual toolchain/source/flags, and freshly link/version/verify every final package.
+
 Desktop/CLI imports and Web attachments must not impose arbitrary total byte/count ceilings. Use
 bounded chunks, visible progress and cancellation instead. Raw import staging is transactional;
 canonical publication must remain atomic even when the user cancels. Chunk limits are backpressure,

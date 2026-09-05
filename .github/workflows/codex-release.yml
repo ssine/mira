@@ -2,8 +2,17 @@ name: Codex runtime release
 
 on:
   push:
+    branches: [main]
     tags:
       - "codex-v*"
+    # Release tags can restore default-branch caches, but not another tag's cache.
+    # Only runtime changes warm this expensive lane; Web/Server changes do not.
+    paths:
+      - CODEX_VERSION
+      - patches/codex/**
+      - node/internal/codex-runtime.json
+      - tests/runtime_reliability_e2e.mjs
+      - .github/workflows/codex-release.yml
   workflow_dispatch:
     inputs:
       publish:
@@ -21,6 +30,11 @@ permissions:
 jobs:
   codex:
     timeout-minutes: 90
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      # The action starts the daemon: these must exist before that step.
+      SCCACHE_IDLE_TIMEOUT: "0"
+      STABLE_GIT_COMMIT: ${{ github.sha }}
     strategy:
       fail-fast: false
       matrix:
@@ -92,7 +106,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: inputs.codex_release == ''
         with:
+          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
+
+      - name: Cache Cargo downloads (not target binaries)
+        if: inputs.codex_release == ''
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+          key: cargo-downloads-v1-${{ runner.os }}-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}
+          restore-keys: cargo-downloads-v1-${{ runner.os }}-
 
       - uses: actions/setup-python@v6
         if: inputs.codex_release == ''
@@ -111,8 +138,9 @@ jobs:
         if: inputs.codex_release == ''
         shell: bash
         run: |
-          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          rustc --version --verbose
+          sccache --version
 
       - if: runner.os == 'Linux' && inputs.codex_release == ''
         uses: mlugg/setup-zig@v2
@@ -129,6 +157,21 @@ jobs:
           sudo apt-get update -y
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils libcap-dev pkg-config
           bash upstream-codex/.github/scripts/install-musl-build-tools.sh
+
+      - name: Resolve pinned rusty_v8 cache inputs
+        id: v8
+        if: inputs.codex_release == ''
+        shell: bash
+        run: |
+          version=$(python upstream-codex/.github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pinned rusty_v8 downloads
+        if: inputs.codex_release == ''
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/mira-rusty-v8
+          key: rusty-v8-v1-${{ matrix.target }}-ptrcomp_sandbox_release-${{ steps.v8.outputs.version }}
 
       - name: Configure verified Codex rusty_v8 artifacts
         if: inputs.codex_release == ''
@@ -149,9 +192,14 @@ jobs:
           fi
           binding="src_binding_${profile}_${TARGET}.rs"
           checksums="rusty_v8_${profile}_${TARGET}.sha256"
-          curl -fsSL "$base_url/$archive" -o "$artifact_dir/$archive"
-          curl -fsSL "$base_url/$binding" -o "$artifact_dir/$binding"
-          curl -fsSL "$base_url/$checksums" -o "$artifact_dir/$checksums"
+          for file in "$archive" "$binding"; do
+            if [[ ! -s "$artifact_dir/$file" ]]; then
+              curl --retry 5 --retry-all-errors -fsSL "$base_url/$file" -o "$artifact_dir/$file.part"
+              mv "$artifact_dir/$file.part" "$artifact_dir/$file"
+            fi
+          done
+          # Re-fetch authoritative digests and verify even on a cache hit.
+          curl --retry 5 --retry-all-errors -fsSL "$base_url/$checksums" -o "$artifact_dir/$checksums"
           (cd "$artifact_dir" && tr -d '\r' < "$checksums" | sha256sum -c -)
           echo "RUSTY_V8_ARCHIVE=$artifact_dir/$archive" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=$artifact_dir/$binding" >> "$GITHUB_ENV"
@@ -166,8 +214,8 @@ jobs:
           export AWS_LC_SYS_NO_JITTER_ENTROPY=1
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
           export "$target_no_jitter=1"
-          cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
-            --target "$TARGET" --release --locked --bin bwrap
+          (cd upstream-codex/codex-rs && cargo build --timings \
+            --target "$TARGET" --release --locked --bin bwrap)
           bwrap="upstream-codex/codex-rs/target/${TARGET}/release/bwrap"
           strip --strip-debug --strip-unneeded "$bwrap"
           digest=$(sha256sum "$bwrap" | awk '{print $1}')
@@ -189,8 +237,29 @@ jobs:
             target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
             export "$target_no_jitter=1"
           fi
-          cargo build --manifest-path upstream-codex/codex-rs/Cargo.toml \
-            --target "$TARGET" --release --locked "${build_args[@]}"
+          # Build from the workspace so upstream target flags (e.g. static MSVC CRT) apply.
+          (cd upstream-codex/codex-rs && cargo build --timings \
+            --target "$TARGET" --release --locked "${build_args[@]}")
+
+      - name: Report compiler cache effectiveness
+        if: always() && inputs.codex_release == ''
+        shell: bash
+        run: |
+          sccache --show-stats | tee "$RUNNER_TEMP/sccache-stats.txt"
+          if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
+            echo '### Rust compilation cache' >> "$GITHUB_STEP_SUMMARY"
+            cat "$RUNNER_TEMP/sccache-stats.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Preserve build timings and cache statistics
+        if: always() && inputs.codex_release == ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-build-diagnostics-${{ matrix.target }}
+          path: |
+            upstream-codex/codex-rs/target/cargo-timings/
+            ${{ runner.temp }}/sccache-stats.txt
+          retention-days: 14
 
       - name: Strip Linux release binaries
         if: runner.os == 'Linux' && inputs.codex_release == ''
@@ -233,6 +302,26 @@ jobs:
             arguments+=(--bwrap-bin "$release_dir/bwrap")
           fi
           python upstream-codex/scripts/build_codex_package.py "${arguments[@]}"
+
+      - name: Fault-inject persistence and terminal errors against the packaged runtime
+        if: runner.os == 'Linux' && inputs.codex_release == ''
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          set -euo pipefail
+          npm ci --prefix server
+          docker run -d --name mira-codex-test-postgres \
+            -e POSTGRES_USER=mira -e POSTGRES_PASSWORD=mira-local -e POSTGRES_DB=mira \
+            -p 127.0.0.1:55432:5432 postgres:17-alpine
+          trap 'docker rm -f mira-codex-test-postgres >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 40); do
+            if docker exec mira-codex-test-postgres pg_isready -U mira; then break; fi
+            if [[ "$attempt" == 40 ]]; then exit 1; fi
+            sleep 0.5
+          done
+          CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex" \
+            node tests/runtime_reliability_e2e.mjs
 
       - uses: actions/upload-artifact@v4
         with:

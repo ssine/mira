@@ -1,7 +1,7 @@
-From 72fa975fe854f526c38486b10180af9adb559055 Mon Sep 17 00:00:00 2001
+From 59d43f3a0b5020c7b7861147f59e74b80b785668 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
-Date: Sat, 5 Sep 2026 04:09:03 +0800
-Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
+Date: Sat, 5 Sep 2026 14:02:49 +0800
+Subject: [PATCH] feat(thread-store): add reliable remote PostgreSQL adapter
 
 ---
  codex-rs/Cargo.lock                           | 299 +++----
@@ -13,14 +13,25 @@ Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
  codex-rs/core/src/codex_thread.rs             |   6 +
  codex-rs/core/src/config/mod.rs               |  17 +
  codex-rs/core/src/session/mod.rs              |   9 +
+ codex-rs/core/src/session/turn.rs             |   7 +
+ codex-rs/core/src/tasks/failure_tests.rs      |  61 ++
+ codex-rs/core/src/tasks/mod.rs                |  47 +-
  codex-rs/core/src/thread_manager.rs           |  23 +
  codex-rs/core/src/thread_manager_tests.rs     |  45 +
+ codex-rs/core/tests/suite/guardian_history.rs |   3 +
  codex-rs/thread-store/Cargo.toml              |   1 +
- codex-rs/thread-store/src/in_memory.rs        |  84 +-
+ codex-rs/thread-store/src/in_memory.rs        |  86 +-
  codex-rs/thread-store/src/lib.rs              |   2 +
- codex-rs/thread-store/src/remote_http.rs      | 838 ++++++++++++++++++
- 15 files changed, 1211 insertions(+), 162 deletions(-)
+ codex-rs/thread-store/src/remote_http.rs      | 776 ++++++++++++++++++
+ .../thread-store/src/remote_http/retry.rs     |  84 ++
+ .../src/remote_http/retry_tests.rs            | 226 +++++
+ .../thread-store/src/remote_http/writer.rs    | 148 ++++
+ 22 files changed, 1708 insertions(+), 181 deletions(-)
+ create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
+ create mode 100644 codex-rs/thread-store/src/remote_http/retry.rs
+ create mode 100644 codex-rs/thread-store/src/remote_http/retry_tests.rs
+ create mode 100644 codex-rs/thread-store/src/remote_http/writer.rs
 
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
 index e217b70..caf010a 100644
@@ -1566,6 +1577,175 @@ index 9130036..e263944 100644
      pub(crate) async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
          let state = self.state.lock().await;
          state
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f7c4268..81f3e83 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -377,6 +377,13 @@ pub(crate) async fn run_turn(
+                 .record_step_world_state_if_changed(&world_state, step_context.as_ref())
+                 .await?;
+ 
++            // Never sample from tool results that the durable store has rejected.
++            sess.flush_rollout().await.map_err(|err| {
++                CodexErr::Fatal(format!(
++                    "Failed to save the conversation transcript before contacting the model: {err}"
++                ))
++            })?;
++
+             // Construct the input that we will send to the model.
+             let sampling_request_input: Vec<ResponseItem> = async {
+                 sess.clone_history()
+diff --git a/codex-rs/core/src/tasks/failure_tests.rs b/codex-rs/core/src/tasks/failure_tests.rs
+new file mode 100644
+index 0000000..28ed006
+--- /dev/null
++++ b/codex-rs/core/src/tasks/failure_tests.rs
+@@ -0,0 +1,61 @@
++use super::*;
++use crate::session::tests::make_session_and_context_with_rx;
++use pretty_assertions::assert_eq;
++
++struct PanickingTask;
++
++impl SessionTask for PanickingTask {
++    fn kind(&self) -> TaskKind {
++        TaskKind::Regular
++    }
++    fn span_name(&self) -> &'static str {
++        "session_task.panic_test"
++    }
++    async fn run(
++        self: Arc<Self>,
++        _session: Arc<Session>,
++        _ctx: Arc<TurnContext>,
++        _input: Vec<TurnInput>,
++        _cancellation_token: CancellationToken,
++    ) -> SessionTaskResult {
++        panic!("private panic payload must not appear in user-visible error")
++    }
++}
++
++#[tokio::test]
++async fn panic_emits_error_and_completion_for_the_same_turn_and_clears_task() {
++    let (session, context, events) = make_session_and_context_with_rx().await;
++    session
++        .spawn_task(Arc::clone(&context), Vec::new(), PanickingTask)
++        .await;
++    let mut saw_error = false;
++    tokio::time::timeout(Duration::from_secs(10), async {
++        loop {
++            let event = events.recv().await.unwrap();
++            match event.msg {
++                EventMsg::Error(error) => {
++                    assert_eq!(event.id, context.sub_id);
++                    assert!(error.message.contains("internal error"));
++                    assert!(!error.message.contains("private panic payload"));
++                    saw_error = true;
++                }
++                EventMsg::TurnComplete(_) => {
++                    assert!(saw_error);
++                    assert_eq!(event.id, context.sub_id);
++                    break;
++                }
++                _ => {}
++            }
++        }
++    })
++    .await
++    .unwrap();
++    assert!(
++        session
++            .active_turn
++            .lock()
++            .await
++            .as_ref()
++            .is_none_or(|turn| turn.task.is_none())
++    );
++}
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 5bf4101..3037a3a 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -4,12 +4,17 @@ mod regular;
+ mod review;
+ mod user_shell;
+ 
++#[cfg(test)]
++mod failure_tests;
++
++use std::panic::AssertUnwindSafe;
+ use std::sync::Arc;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
+ use codex_diagnostics::Gauge;
+ use codex_extension_api::ThreadIdleCause;
++use futures::FutureExt;
+ use futures::future::BoxFuture;
+ use tokio::select;
+ use tokio::sync::Mutex;
+@@ -54,10 +59,10 @@ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TurnAbortReason;
+ use codex_protocol::protocol::TurnAbortedEvent;
+ use codex_protocol::protocol::TurnCompleteEvent;
+-use codex_protocol::protocol::WarningEvent;
+ use codex_thread_store::PersistContext;
+ 
+ use codex_features::Feature;
++use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result as CodexResult;
+ pub(crate) use compact::CompactTask;
+@@ -362,27 +367,31 @@ impl Session {
+         let handle = tokio::spawn(
+             async move {
+                 let ctx_for_finish = Arc::clone(&ctx);
+-                let task_result = task_for_run
+-                    .run(
+-                        Arc::clone(&session),
+-                        ctx,
+-                        task_input,
+-                        task_cancellation_token.child_token(),
+-                    )
+-                    .instrument(trace_span!("session_task.run"))
+-                    .await;
++                let mut task_result = AssertUnwindSafe(async {
++                    task_for_run
++                        .run(
++                            Arc::clone(&session),
++                            ctx,
++                            task_input,
++                            task_cancellation_token.child_token(),
++                        )
++                        .instrument(trace_span!("session_task.run"))
++                        .await
++                })
++                .catch_unwind()
++                .await
++                .unwrap_or_else(|_| {
++                    Err(CodexErr::Fatal(
++                        "The Codex task stopped because of an internal error. This turn failed; your request has not been retried automatically."
++                            .to_string(),
++                    ))
++                });
+                 let sess = Arc::clone(&session);
+                 if let Err(err) = sess.flush_rollout().await {
+                     warn!("failed to flush rollout before completing turn: {err}");
+-                    sess.send_event(
+-                        ctx_for_finish.as_ref(),
+-                        EventMsg::Warning(WarningEvent {
+-                            message: format!(
+-                                "Failed to save the conversation transcript; Codex will continue retrying. Error: {err}"
+-                            ),
+-                        }),
+-                    )
+-                    .await;
++                    task_result = Err(CodexErr::Fatal(format!(
++                        "Failed to save the conversation transcript. This turn failed; repair storage before continuing. Error: {err}"
++                    )));
+                 }
+                 if !task_cancellation_token.is_cancelled() {
+                     // Finish uniformly from the spawn site so all tasks share the same lifecycle.
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
 index cfa6196..06cbe68 100644
 --- a/codex-rs/core/src/thread_manager.rs
@@ -1705,6 +1885,20 @@ index 74cdb32..7db9edb 100644
  /// Controls without a custom allocation policy still produce distinct thread identifiers.
  #[test]
  fn thread_id_generator_defaults_to_standard_ids() {
+diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
+index 8bf3395..dc3f2b7 100644
+--- a/codex-rs/core/tests/suite/guardian_history.rs
++++ b/codex-rs/core/tests/suite/guardian_history.rs
+@@ -68,6 +68,9 @@ async fn guardian_history_survives_restart_and_user_fork(
+     let pathless_store = match &store_config {
+         ThreadStoreConfig::Local => None,
+         ThreadStoreConfig::InMemory { id } => Some(InMemoryThreadStore::for_id(id)),
++        ThreadStoreConfig::RemoteHttp { .. } => {
++            anyhow::bail!("guardian fixture requires a local or in-memory test store")
++        }
+     };
+     let mut builder = test_codex()
+         .with_history_mode(history_mode)
 diff --git a/codex-rs/thread-store/Cargo.toml b/codex-rs/thread-store/Cargo.toml
 index b0d2b15..64cb882 100644
 --- a/codex-rs/thread-store/Cargo.toml
@@ -1718,7 +1912,7 @@ index b0d2b15..64cb882 100644
  serde_json = { workspace = true }
  sqlx = { workspace = true }
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 9ea7e2b..1bc5fa1 100644
+index 9ea7e2b..8b4213c 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -20,6 +20,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
@@ -1742,7 +1936,7 @@ index 9ea7e2b..1bc5fa1 100644
      calls: InMemoryThreadStoreCalls,
      created_threads: HashMap<ThreadId, CreateThreadParams>,
      histories: HashMap<ThreadId, Vec<RolloutItem>>,
-@@ -512,7 +516,85 @@ struct InMemoryThreadStoreState {
+@@ -512,7 +516,87 @@ struct InMemoryThreadStoreState {
      rollout_paths: HashMap<PathBuf, ThreadId>,
  }
  
@@ -1801,7 +1995,9 @@ index 9ea7e2b..1bc5fa1 100644
 +            .collect::<HashMap<_, _>>();
 +        snapshot
 +            .as_object_mut()
-+            .expect("serialized thread-store state is an object")
++            .ok_or_else(|| ThreadStoreError::Internal {
++                message: "serialized thread-store state is not an object".to_string(),
++            })?
 +            .insert(
 +                "histories".to_string(),
 +                serde_json::to_value(histories).map_err(|err| ThreadStoreError::Internal {
@@ -1850,12 +2046,13 @@ index a8b6a36..3fbd587 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..86c06f9
+index 0000000..22f0ecd
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,838 @@
+@@ -0,0 +1,776 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
++use std::sync::Arc;
 +use std::time::Duration;
 +
 +use codex_protocol::ThreadId;
@@ -1883,6 +2080,10 @@ index 0000000..86c06f9
 +use crate::ThreadStoreFuture;
 +use crate::ThreadStoreResult;
 +use crate::UpdateThreadMetadataParams;
++
++mod retry;
++mod writer;
++use retry::request_json;
 +
 +#[derive(Deserialize)]
 +#[serde(rename_all = "camelCase")]
@@ -1966,12 +2167,15 @@ index 0000000..86c06f9
 +/// Thread semantics remain delegated to the in-memory implementation, while the adapter caches a
 +/// materialized view and submits per-thread append, replace, or delete deltas with optimistic
 +/// concurrency control. PostgreSQL remains the only durable source of truth.
++#[derive(Clone)]
 +pub struct RemoteHttpThreadStore {
 +    client: reqwest::Client,
 +    store_url: String,
 +    bearer_token: String,
-+    operation_gate: tokio::sync::Semaphore,
-+    cache: std::sync::Mutex<Option<CachedStore>>,
++    operation_gate: Arc<tokio::sync::Semaphore>,
++    cache: Arc<std::sync::Mutex<Option<CachedStore>>>,
++    write_error: Arc<std::sync::Mutex<Option<String>>>,
++    write_tail: Arc<std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>>,
 +}
 +
 +impl RemoteHttpThreadStore {
@@ -1986,8 +2190,10 @@ index 0000000..86c06f9
 +            client: reqwest::Client::new(),
 +            store_url: format!("{}/v2/stores/{store_id}", endpoint.trim_end_matches('/')),
 +            bearer_token: bearer_token.into(),
-+            operation_gate: tokio::sync::Semaphore::new(1),
-+            cache: std::sync::Mutex::new(None),
++            operation_gate: Arc::new(tokio::sync::Semaphore::new(1)),
++            cache: Arc::new(std::sync::Mutex::new(None)),
++            write_error: Arc::new(std::sync::Mutex::new(None)),
++            write_tail: Arc::new(std::sync::Mutex::new(None)),
 +        }
 +    }
 +
@@ -2006,16 +2212,13 @@ index 0000000..86c06f9
 +    }
 +
 +    async fn head(&self) -> ThreadStoreResult<HeadResponse> {
-+        let response = self
-+            .client
-+            .get(&self.store_url)
-+            .bearer_auth(&self.bearer_token)
-+            .timeout(Duration::from_secs(10))
-+            .send()
-+            .await
-+            .map_err(remote_error)?;
-+        let response = checked_response(response).await?;
-+        response.json::<HeadResponse>().await.map_err(remote_error)
++        request_json(
++            self.client
++                .get(&self.store_url)
++                .bearer_auth(&self.bearer_token)
++                .timeout(Duration::from_secs(10)),
++        )
++        .await
 +    }
 +
 +    async fn load(&self, head: HeadResponse) -> ThreadStoreResult<CachedStore> {
@@ -2055,22 +2258,16 @@ index 0000000..86c06f9
 +        }
 +        let thread_id_text = thread_id.to_string();
 +        if let Some(entry) = cached.history_manifest.get(&thread_id_text) {
-+            let response = self
-+                .client
-+                .get(format!(
-+                    "{}/threads/{thread_id_text}/history?generation={}&throughVersion={}",
-+                    self.store_url, entry.generation, cached.version
-+                ))
-+                .bearer_auth(&self.bearer_token)
-+                .timeout(Duration::from_secs(120))
-+                .send()
-+                .await
-+                .map_err(remote_error)?;
-+            let response = checked_response(response).await?;
-+            let history = response
-+                .json::<HistoryResponse>()
-+                .await
-+                .map_err(remote_error)?;
++            let history: HistoryResponse = request_json(
++                self.client
++                    .get(format!(
++                        "{}/threads/{thread_id_text}/history?generation={}&throughVersion={}",
++                        self.store_url, entry.generation, cached.version
++                    ))
++                    .bearer_auth(&self.bearer_token)
++                    .timeout(Duration::from_secs(120)),
++            )
++            .await?;
 +            if history.generation != entry.generation || history.item_count != entry.item_count {
 +                return Err(ThreadStoreError::Conflict {
 +                    message: format!("remote history changed while loading thread {thread_id}"),
@@ -2142,27 +2339,21 @@ index 0000000..86c06f9
 +            return Ok(None);
 +        }
 +        let operation_id = ThreadId::new().to_string();
-+        let response = self
-+            .client
-+            .post(format!("{}/commits", self.store_url))
-+            .bearer_auth(&self.bearer_token)
-+            .header("x-codex-operation-id", operation_id)
-+            .header("x-codex-version", env!("CARGO_PKG_VERSION"))
-+            .timeout(Duration::from_secs(10))
-+            .json(&CommitRequest {
-+                expected_version: version,
-+                state_changes,
-+                history_changes,
-+            })
-+            .send()
-+            .await
-+            .map_err(remote_error)?;
-+        let response = checked_response(response).await?;
-+        response
-+            .json::<CommitResponse>()
-+            .await
-+            .map(Some)
-+            .map_err(remote_error)
++        request_json(
++            self.client
++                .post(format!("{}/commits", self.store_url))
++                .bearer_auth(&self.bearer_token)
++                .header("x-codex-operation-id", operation_id)
++                .header("x-codex-version", env!("CARGO_PKG_VERSION"))
++                .timeout(Duration::from_secs(10))
++                .json(&CommitRequest {
++                    expected_version: version,
++                    state_changes,
++                    history_changes,
++                }),
++        )
++        .await
++        .map(Some)
 +    }
 +
 +    async fn read<T: Send>(
@@ -2175,6 +2366,7 @@ index 0000000..86c06f9
 +            .acquire()
 +            .await
 +            .map_err(|_| operation_gate_closed())?;
++        self.check_write_error()?;
 +        let mut cache = self.take_cache();
 +        let result = async {
 +            self.refresh(&mut cache).await?;
@@ -2185,62 +2377,6 @@ index 0000000..86c06f9
 +            operation(&cached.store).await
 +        }
 +        .await;
-+        self.replace_cache(cache);
-+        result
-+    }
-+
-+    async fn mutate<T: Send>(
-+        &self,
-+        thread_ids: Vec<ThreadId>,
-+        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
-+    ) -> ThreadStoreResult<T> {
-+        let _permit = self
-+            .operation_gate
-+            .acquire()
-+            .await
-+            .map_err(|_| operation_gate_closed())?;
-+        let mut cache = self.take_cache();
-+        let mut invalidate_cache = false;
-+        let result = async {
-+            self.refresh(&mut cache).await?;
-+            let cached = cache.as_mut().ok_or_else(cache_missing)?;
-+            let selected = thread_ids.iter().copied().collect::<HashSet<_>>();
-+            for thread_id in &selected {
-+                self.ensure_history(cached, *thread_id).await?;
-+            }
-+            let before = cached.store.snapshot_for_threads(&selected).await?;
-+            let output = match operation(&cached.store).await {
-+                Ok(output) => output,
-+                Err(error) => {
-+                    invalidate_cache = true;
-+                    return Err(error);
-+                }
-+            };
-+            let after = cached.store.snapshot_for_threads(&selected).await?;
-+            match self
-+                .save(cached.version, &cached.history_manifest, before, after)
-+                .await
-+            {
-+                Ok(Some(committed)) => {
-+                    if committed.rebased {
-+                        invalidate_cache = true;
-+                    } else {
-+                        cached.version = committed.version;
-+                        cached.history_manifest = committed.history_manifest;
-+                    }
-+                }
-+                Ok(None) => {}
-+                Err(error) => {
-+                    invalidate_cache = true;
-+                    return Err(error);
-+                }
-+            }
-+            Ok(output)
-+        }
-+        .await;
-+        if invalidate_cache {
-+            cache = None;
-+        }
 +        self.replace_cache(cache);
 +        result
 +    }
@@ -2447,10 +2583,30 @@ index 0000000..86c06f9
 +        }))
 +    }
 +
-+    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.read(Vec::new(), move |store| {
-+            ThreadStore::flush_thread(store, thread_id)
-+        }))
++    fn flush_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
++        Box::pin(async move {
++            // Mutations are acknowledged synchronously. This is a cheap ordered durability
++            // barrier, including writes whose callers were cancelled, not another head download.
++            let pending = self
++                .write_tail
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .clone();
++            if let Some(mut pending) = pending {
++                pending.wait_for(|finished| *finished).await.map_err(|_| {
++                    ThreadStoreError::Internal {
++                        message: "remote thread-store write worker stopped before acknowledgement"
++                            .to_string(),
++                    }
++                })?;
++            }
++            let _permit = self
++                .operation_gate
++                .acquire()
++                .await
++                .map_err(|_| operation_gate_closed())?;
++            self.check_write_error()
++        })
 +    }
 +
 +    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
@@ -2566,12 +2722,6 @@ index 0000000..86c06f9
 +    }
 +}
 +
-+fn remote_error(error: reqwest::Error) -> ThreadStoreError {
-+    ThreadStoreError::Internal {
-+        message: format!("remote thread-store request failed: {error}"),
-+    }
-+}
-+
 +fn cache_missing() -> ThreadStoreError {
 +    ThreadStoreError::Internal {
 +        message: "remote thread-store cache was not initialized".to_string(),
@@ -2582,22 +2732,6 @@ index 0000000..86c06f9
 +    ThreadStoreError::Internal {
 +        message: "remote thread-store operation gate was closed".to_string(),
 +    }
-+}
-+
-+async fn checked_response(response: reqwest::Response) -> ThreadStoreResult<reqwest::Response> {
-+    if response.status().is_success() {
-+        return Ok(response);
-+    }
-+    let status = response.status();
-+    let body = response.text().await.unwrap_or_default();
-+    if status == reqwest::StatusCode::CONFLICT {
-+        return Err(ThreadStoreError::Conflict {
-+            message: format!("remote thread-store changed concurrently: {body}"),
-+        });
-+    }
-+    Err(ThreadStoreError::Internal {
-+        message: format!("remote thread-store returned HTTP {status}: {body}"),
-+    })
 +}
 +
 +#[cfg(test)]
@@ -2692,6 +2826,481 @@ index 0000000..86c06f9
 +        assert!(!cwd_is_compatible("C:\\Users\\Sine", false));
 +    }
 +}
+diff --git a/codex-rs/thread-store/src/remote_http/retry.rs b/codex-rs/thread-store/src/remote_http/retry.rs
+new file mode 100644
+index 0000000..8221135
+--- /dev/null
++++ b/codex-rs/thread-store/src/remote_http/retry.rs
+@@ -0,0 +1,84 @@
++use std::time::Duration;
++
++use reqwest::RequestBuilder;
++use reqwest::StatusCode;
++use serde::de::DeserializeOwned;
++
++use crate::ThreadStoreError;
++use crate::ThreadStoreResult;
++
++/// Retries transport failures with the exact same request, including the commit UUID and body.
++/// A request timeout bounds each attempt, not the lifetime of an unacknowledged write.
++pub(super) async fn request_json<T: DeserializeOwned>(
++    request: RequestBuilder,
++) -> ThreadStoreResult<T> {
++    let mut attempt = 0_u32;
++    loop {
++        let next = request
++            .try_clone()
++            .ok_or_else(|| ThreadStoreError::Internal {
++                message: "remote thread-store request is not replayable".to_string(),
++            })?;
++        let mut retry_after = None;
++        let result = match next.send().await {
++            Ok(response) => {
++                let status = response.status();
++                if status.is_success() {
++                    match response.bytes().await {
++                        Ok(bytes) => {
++                            return serde_json::from_slice(&bytes).map_err(|_| {
++                                ThreadStoreError::Internal {
++                                    message: "remote thread-store returned an invalid response"
++                                        .to_string(),
++                                }
++                            });
++                        }
++                        Err(error) => Err(error),
++                    }
++                } else if status.is_server_error()
++                    || matches!(
++                        status,
++                        StatusCode::TOO_MANY_REQUESTS | StatusCode::REQUEST_TIMEOUT
++                    )
++                {
++                    retry_after = response
++                        .headers()
++                        .get(reqwest::header::RETRY_AFTER)
++                        .and_then(|value| value.to_str().ok())
++                        .and_then(|value| value.parse::<u64>().ok())
++                        .map(|seconds| Duration::from_secs(seconds.min(60)));
++                    Ok(status.as_u16())
++                } else {
++                    // Do not retry authorization, validation or optimistic concurrency failures.
++                    // Never include a response body, URL or credential in a user-visible error.
++                    let message = format!("remote thread-store returned HTTP {status}");
++                    return Err(if status == StatusCode::CONFLICT {
++                        ThreadStoreError::Conflict { message }
++                    } else {
++                        ThreadStoreError::Internal { message }
++                    });
++                }
++            }
++            Err(error) if error.is_builder() => {
++                return Err(ThreadStoreError::Internal {
++                    message: "remote thread-store request could not be constructed".to_string(),
++                });
++            }
++            Err(error) => Err(error),
++        };
++        attempt = attempt.saturating_add(1);
++        if attempt == 1 || attempt.is_multiple_of(10) {
++            tracing::warn!(
++                attempt,
++                http_status = result.ok(),
++                "remote thread-store unavailable; retaining operation and retrying until acknowledged"
++            );
++        }
++        let delay = Duration::from_millis(250 * (1_u64 << attempt.min(5)));
++        tokio::time::sleep(retry_after.unwrap_or(delay)).await;
++    }
++}
++
++#[cfg(test)]
++#[path = "retry_tests.rs"]
++mod tests;
+diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
+new file mode 100644
+index 0000000..34370aa
+--- /dev/null
++++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
+@@ -0,0 +1,226 @@
++use std::sync::Arc;
++use std::time::Duration;
++
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tokio::io::AsyncReadExt;
++use tokio::io::AsyncWriteExt;
++
++use super::request_json;
++use crate::CreateThreadParams;
++use crate::RemoteHttpThreadStore;
++use crate::ThreadStore;
++use crate::ThreadStoreError;
++use codex_protocol::ThreadId;
++
++// None means the server accepted a complete request but lost its response.
++async fn server(
++    replies: Vec<Option<(u16, String)>>,
++) -> (
++    String,
++    tokio::sync::mpsc::UnboundedReceiver<String>,
++    tokio::task::JoinHandle<()>,
++) {
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++    let url = format!("http://{}", listener.local_addr().unwrap());
++    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
++    let handle = tokio::spawn(async move {
++        for reply in replies {
++            let (mut stream, _) = listener.accept().await.unwrap();
++            let mut bytes = Vec::new();
++            loop {
++                let mut buffer = [0; 4096];
++                let count = stream.read(&mut buffer).await.unwrap();
++                assert!(count > 0);
++                bytes.extend_from_slice(&buffer[..count]);
++                if let Some(end) = bytes.windows(4).position(|chunk| chunk == b"\r\n\r\n") {
++                    let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
++                    let length = header
++                        .lines()
++                        .find_map(|line| line.strip_prefix("content-length: "))
++                        .map(|length| length.parse::<usize>().unwrap())
++                        .unwrap_or(0);
++                    if bytes.len() >= end + 4 + length {
++                        break;
++                    }
++                }
++            }
++            tx.send(String::from_utf8(bytes).unwrap()).unwrap();
++            if let Some((status, body)) = reply {
++                let response = format!(
++                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
++                    body.len()
++                );
++                stream.write_all(response.as_bytes()).await.unwrap();
++            }
++        }
++    });
++    (url, rx, handle)
++}
++
++fn create(thread_id: ThreadId, parent_thread_id: Option<ThreadId>) -> CreateThreadParams {
++    use codex_protocol::models::BaseInstructions;
++    use codex_protocol::protocol::SessionSource;
++    use codex_protocol::protocol::ThreadHistoryMode;
++    use codex_protocol::protocol::ThreadMemoryMode;
++    CreateThreadParams {
++        session_id: parent_thread_id.unwrap_or(thread_id).into(),
++        thread_id,
++        parent_thread_id,
++        extra_config: None,
++        forked_from_id: None,
++        source: SessionSource::Exec,
++        thread_source: None,
++        originator: "retry-test".to_string(),
++        base_instructions: BaseInstructions::default(),
++        dynamic_tools: Vec::new(),
++        selected_capability_roots: Vec::new(),
++        multi_agent_version: None,
++        history_mode: ThreadHistoryMode::Legacy,
++        history_base: None,
++        subagent_history_start_ordinal: None,
++        initial_window_id: ThreadId::new().to_string(),
++        metadata: crate::ThreadPersistenceMetadata {
++            cwd: None,
++            model_provider: "test".to_string(),
++            memory_mode: ThreadMemoryMode::Disabled,
++        },
++    }
++}
++
++#[tokio::test]
++async fn retries_transient_failures_with_identical_id_and_body() {
++    let (url, mut requests, handle) = server(vec![
++        Some((502, String::new())),
++        None,
++        Some((429, String::new())),
++        Some((200, json!({"version": 1}).to_string())),
++    ])
++    .await;
++    let response: serde_json::Value = tokio::time::timeout(
++        Duration::from_secs(15),
++        request_json(
++            reqwest::Client::new()
++                .post(url)
++                .header("x-codex-operation-id", "stable-operation")
++                .timeout(Duration::from_secs(1))
++                .json(&json!({"items": ["one tool result"]})),
++        ),
++    )
++    .await
++    .unwrap()
++    .unwrap();
++    assert_eq!(response, json!({"version": 1}));
++    handle.await.unwrap();
++    let first = requests.recv().await.unwrap();
++    for _ in 0..3 {
++        assert_eq!(requests.recv().await.unwrap(), first);
++    }
++}
++
++#[tokio::test]
++async fn does_not_retry_or_disclose_authorization_or_conflict_response_bodies() {
++    for status in [400, 401, 403, 409] {
++        let (url, mut requests, handle) =
++            server(vec![Some((status, "secret diagnostic".to_string()))]).await;
++        let error = request_json::<serde_json::Value>(reqwest::Client::new().post(url))
++            .await
++            .unwrap_err();
++        assert!(error.to_string().contains(&status.to_string()));
++        assert!(!error.to_string().contains("secret"));
++        assert_eq!(
++            matches!(error, ThreadStoreError::Conflict { .. }),
++            status == 409
++        );
++        handle.await.unwrap();
++        assert!(requests.recv().await.is_some());
++        assert!(requests.recv().await.is_none());
++    }
++}
++
++#[tokio::test]
++async fn cancelled_write_is_acknowledged_before_flush_and_child_write() {
++    let head = |version| {
++        Some((
++            200,
++            json!({"version": version, "state": {}, "historyManifest": {}}).to_string(),
++        ))
++    };
++    let commit = |version| {
++        Some((
++            200,
++            json!({"version": version, "historyManifest": {}}).to_string(),
++        ))
++    };
++    let (url, mut requests, handle) =
++        server(vec![head(0), None, commit(1), head(1), commit(2)]).await;
++    let store = Arc::new(RemoteHttpThreadStore::new(url, "test", "test-token"));
++    let parent = ThreadId::new();
++    let writer = {
++        let store = Arc::clone(&store);
++        tokio::spawn(async move { store.create_thread(create(parent, None)).await })
++    };
++    let _head = requests.recv().await.unwrap();
++    let first_commit = requests.recv().await.unwrap();
++    writer.abort();
++    assert!(
++        tokio::time::timeout(Duration::from_millis(50), store.flush_thread(parent))
++            .await
++            .is_err()
++    );
++    let child = ThreadId::new();
++    tokio::time::timeout(
++        Duration::from_secs(10),
++        store.create_thread(create(child, Some(parent))),
++    )
++    .await
++    .unwrap()
++    .unwrap();
++    store.flush_thread(child).await.unwrap();
++    assert_eq!(requests.recv().await.unwrap(), first_commit);
++    let _head = requests.recv().await.unwrap();
++    let child_commit = requests.recv().await.unwrap();
++    assert!(child_commit.contains(&format!("\"parent_thread_id\":\"{parent}\"")));
++    assert!(child_commit.contains("\"expectedVersion\":1"));
++    handle.await.unwrap();
++}
++
++#[tokio::test]
++async fn permanent_write_failure_latches_and_prevents_later_success() {
++    let (url, _requests, handle) = server(vec![
++        Some((
++            200,
++            json!({"version": 0, "state": {}, "historyManifest": {}}).to_string(),
++        )),
++        Some((403, String::new())),
++    ])
++    .await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    let thread = ThreadId::new();
++    assert!(store.create_thread(create(thread, None)).await.is_err());
++    let error = store.flush_thread(thread).await.unwrap_err();
++    assert!(error.to_string().contains("403"));
++    assert!(
++        store
++            .create_thread(create(ThreadId::new(), None))
++            .await
++            .is_err()
++    );
++    handle.await.unwrap();
++}
++
++#[tokio::test]
++async fn write_worker_panic_fails_the_durability_barrier() {
++    let (url, _requests, handle) = server(vec![Some((
++        200,
++        json!({"version": 0, "state": {}, "historyManifest": {}}).to_string(),
++    ))])
++    .await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    let result: crate::ThreadStoreResult<()> = store
++        .mutate(Vec::new(), |_| Box::pin(async { panic!("test failure") }))
++        .await;
++    assert!(result.is_err());
++    assert!(store.flush_thread(ThreadId::new()).await.is_err());
++    handle.await.unwrap();
++}
+diff --git a/codex-rs/thread-store/src/remote_http/writer.rs b/codex-rs/thread-store/src/remote_http/writer.rs
+new file mode 100644
+index 0000000..d4657a3
+--- /dev/null
++++ b/codex-rs/thread-store/src/remote_http/writer.rs
+@@ -0,0 +1,148 @@
++use std::collections::HashSet;
++use std::panic::AssertUnwindSafe;
++
++use codex_protocol::ThreadId;
++use futures::FutureExt;
++
++use super::RemoteHttpThreadStore;
++use super::cache_missing;
++use super::operation_gate_closed;
++use crate::InMemoryThreadStore;
++use crate::ThreadStoreError;
++use crate::ThreadStoreFuture;
++use crate::ThreadStoreResult;
++
++// The serialized writer outlives cancelled callers, but has no local durable outbox.
++impl RemoteHttpThreadStore {
++    pub(super) async fn mutate<T: Send + 'static>(
++        &self,
++        thread_ids: Vec<ThreadId>,
++        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T>
++        + Send
++        + 'static,
++    ) -> ThreadStoreResult<T> {
++        let store = self.clone();
++        let (done, receiver) = tokio::sync::watch::channel(false);
++        let previous = store
++            .write_tail
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .replace(receiver);
++        // Dropping the caller (e.g. turn/interrupt) must not drop a completed tool's result.
++        // Only process shutdown can abandon this in-memory, unacknowledged operation.
++        tokio::spawn(async move {
++            if let Some(mut previous) = previous {
++                let _ = previous.wait_for(|finished| *finished).await;
++            }
++            let _permit = store
++                .operation_gate
++                .acquire()
++                .await
++                .map_err(|_| operation_gate_closed())?;
++            let result = match AssertUnwindSafe(async {
++                store.check_write_error()?;
++                store.mutate_inner(thread_ids, operation).await
++            })
++            .catch_unwind()
++            .await
++            {
++                Ok(result) => result,
++                Err(_) => {
++                    let error = ThreadStoreError::Internal {
++                        message: "remote thread-store write worker failed".to_string(),
++                    };
++                    store.record_write_error(&error);
++                    Err(error)
++                }
++            };
++            done.send_replace(true);
++            result
++        })
++        .await
++        .map_err(|_| ThreadStoreError::Internal {
++            message: "remote thread-store write worker failed".to_string(),
++        })?
++    }
++
++    fn record_write_error(&self, error: &ThreadStoreError) {
++        let mut failure = self
++            .write_error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if failure.is_none() {
++            *failure = Some(error.to_string());
++        }
++    }
++
++    pub(super) fn check_write_error(&self) -> ThreadStoreResult<()> {
++        match self
++            .write_error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++        {
++            Some(message) => Err(ThreadStoreError::Internal {
++                message: format!(
++                    "conversation storage failed; fix the connection/permissions and restart the runtime: {message}"
++                ),
++            }),
++            None => Ok(()),
++        }
++    }
++
++    async fn mutate_inner<T: Send>(
++        &self,
++        thread_ids: Vec<ThreadId>,
++        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
++    ) -> ThreadStoreResult<T> {
++        let mut cache = self.take_cache();
++        let mut invalidate_cache = false;
++        let result = async {
++            self.refresh(&mut cache)
++                .await
++                .inspect_err(|error| self.record_write_error(error))?;
++            let cached = cache.as_mut().ok_or_else(cache_missing)?;
++            let selected = thread_ids.iter().copied().collect::<HashSet<_>>();
++            for thread_id in &selected {
++                self.ensure_history(cached, *thread_id)
++                    .await
++                    .inspect_err(|error| self.record_write_error(error))?;
++            }
++            let before = cached.store.snapshot_for_threads(&selected).await?;
++            let output = match operation(&cached.store).await {
++                Ok(output) => output,
++                Err(error) => {
++                    invalidate_cache = true;
++                    return Err(error);
++                }
++            };
++            let after = cached.store.snapshot_for_threads(&selected).await?;
++            match self
++                .save(cached.version, &cached.history_manifest, before, after)
++                .await
++            {
++                Ok(Some(committed)) => {
++                    if committed.rebased {
++                        invalidate_cache = true;
++                    } else {
++                        cached.version = committed.version;
++                        cached.history_manifest = committed.history_manifest;
++                    }
++                }
++                Ok(None) => {}
++                Err(error) => {
++                    invalidate_cache = true;
++                    self.record_write_error(&error);
++                    return Err(error);
++                }
++            }
++            Ok(output)
++        }
++        .await;
++        if invalidate_cache {
++            cache = None;
++        }
++        self.replace_cache(cache);
++        result
++    }
++}
 -- 
 2.51.2
-

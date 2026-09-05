@@ -25,7 +25,26 @@ jobs:
           go-version-file: node/go.mod
           cache-dependency-path: node/go.sum
       - run: go -C node mod download
+      - uses: docker/setup-buildx-action@v3
+      - name: Cache native builder layers
+        uses: docker/build-push-action@v6
+        with:
+          context: node/openssh/linux
+          file: node/openssh/linux/Dockerfile
+          load: true
+          tags: mira-openssh-musl-builder:ci
+          cache-from: type=gha,scope=mira-openssh-builder-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=mira-openssh-builder-${{ matrix.arch }}
+      - name: Restore native inputs and container Go compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/mira-openssh-build-cache
+          key: openssh-linux-v1-${{ matrix.arch }}-${{ hashFiles('node/openssh/sources.json', 'node/openssh/linux/**', 'node/openssh/common/objects.mk', 'node/go.mod', 'node/go.sum') }}-${{ github.sha }}
+          restore-keys: openssh-linux-v1-${{ matrix.arch }}-${{ hashFiles('node/openssh/sources.json', 'node/openssh/linux/**', 'node/openssh/common/objects.mk', 'node/go.mod', 'node/go.sum') }}-
       - name: Build single static image
+        env:
+          MIRA_OPENSSH_NATIVE_CACHE: ${{ runner.temp }}/mira-openssh-build-cache
+          MIRA_OPENSSH_BUILDER_IMAGE: mira-openssh-musl-builder:ci
         run: |
           MIRA_OPENSSH_OUTPUT="$RUNNER_TEMP/bundle" bash node/openssh/build.sh linux
           node node/openssh/verify-package.mjs "$RUNNER_TEMP/bundle" linux '${{ matrix.arch }}'
@@ -43,7 +62,28 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
+      - name: Fingerprint native compiler and SDK
+        id: native
+        shell: pwsh
+        run: |
+          . node/openssh/windows/toolchain.ps1
+          $compilerDir=Split-Path $MiraToolchain.Compiler
+          $inputs=@($MiraToolchain.Compiler,$MiraToolchain.CMake)
+          $inputs+=@('c1.dll','c1xx.dll','c2.dll','link.exe') | ForEach-Object { Join-Path $compilerDir $_ }
+          $inputs+=@('libcmt.lib','vcruntime.lib') | ForEach-Object { Join-Path $MiraToolchain.Libraries[0] $_ }
+          $inputs+=Join-Path $MiraToolchain.Libraries[1] 'ucrt.lib'
+          $inputs+=Join-Path $MiraToolchain.Libraries[2] 'kernel32.lib'
+          $fingerprint=$MiraToolchain.SdkVersion+"`n"+(($inputs | ForEach-Object { (Get-FileHash $_ -Algorithm SHA256).Hash }) -join "`n")
+          $digest=[Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($fingerprint))
+          "toolchain=$([BitConverter]::ToString($digest).Replace('-','').ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - name: Cache verified Windows native inputs
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/windows-native.tar.gz
+          key: openssh-windows-native-v1-${{ steps.native.outputs.toolchain }}-${{ hashFiles('node/openssh/sources.json', 'node/openssh/windows/**', '.github/workflows/openssh.yml') }}
       - name: Build native MSVC objects and static crypto
+        if: steps.native-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $cache=Join-Path $env:RUNNER_TEMP 'openssh-sources'
