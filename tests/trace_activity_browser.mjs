@@ -31,7 +31,7 @@ const server = http.createServer(async (request, response) => {
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
         upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
         show, renderNodes, renderEnrollments, renderAudit,
-        message: onAgentSocketMessage, nodes: dashboardNodes,
+        message: onAgentSocketMessage, nodes: dashboardNodes, connectAgentSocket, resumeAgentThread, recoverAgentSession, stopAgentRecovery, mergeTranscriptItems,
         setInvoke: (fn) => { invokeNode = fn; }, clear: () => clear($("#conversationTrace")) };
     `);
     response.writeHead(200, { "content-type": asset[1], "cache-control": "no-store" });
@@ -45,20 +45,82 @@ try {
   const page = await browser.newPage({ viewport: { width: 1440, height: 1100 } });
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  const reconnectMessages = [];
+  let reconnectedSocket;
+  let automaticResume = false;
+  let ignoreProbe = false;
+  let socketCount = 0;
+  let nodeRequests = 0;
+  let expireLogin = false;
+  let transcriptRequests = 0;
+  await page.route("**/v1/nodes/test-node", (route) => {
+    nodeRequests++;
+    return route.fulfill({ status: expireLogin ? 401 : 200, json: expireLogin
+      ? { error: "login expired" }
+      : { nodeId: "test-node", hostname: "Test runtime", reportedAppServer: { status: "running" } } });
+  });
+  await page.route("**/v1/codex/threads/*/transcript?*", (route) => {
+    transcriptRequests++;
+    const url = new URL(route.request().url());
+    assert.equal(url.searchParams.get("tail"), "1");
+    const threadId = url.pathname.split("/").at(-2);
+    return route.fulfill({ json: { generation: 1, nextCursor: null, trace: [{
+      key: `recovered-${threadId}`, kind: "assistant", body: `Recent messages for ${threadId}`,
+      sourceItemSeq: 99, turnId: `recovered-turn-${threadId}`,
+    }] } });
+  });
+  await page.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: {
+    threadId: new URL(route.request().url()).pathname.split("/").at(-1), cwd: "/project", runtimeNodeId: "test-node",
+  } }));
+  await page.routeWebSocket(/\/v1\/nodes\/test-node\/app-server\?storeId=personal$/, (socket) => {
+    reconnectedSocket = socket;
+    socketCount++;
+    socket.onMessage((data) => {
+      const message = JSON.parse(data);
+      if (message.method === "initialize") {
+        socket.send(JSON.stringify({ id: message.id, result: {} }));
+      } else if (message.id !== undefined) {
+        reconnectMessages.push(message);
+        if (message.method === "thread/resume" && automaticResume) {
+          socket.send(JSON.stringify({ id: message.id, result: { thread: { id: message.params.threadId }, cwd: "/project" } }));
+        }
+        if (message.method === "thread/loaded/list" && !ignoreProbe) {
+          socket.send(JSON.stringify({ id: message.id, result: { data: [], nextCursor: null } }));
+        }
+      }
+    });
+  });
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(() => !!window.traceHarness);
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   assert.equal(await page.locator("#globalAgent").getAttribute("aria-current"), "page");
-  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false", "wide chat opens its sidebar by default");
+  assert.equal(await page.locator("#agentThreadDrawer").evaluate((node) => node.inert), false);
+  const sidebar = await page.locator("#agentThreadDrawer").boundingBox();
+  const conversation = await page.locator(".conversation-card").boundingBox();
+  assert.ok(sidebar.x + sidebar.width <= conversation.x, "wide sidebar must not cover the conversation");
+  assert.equal(await page.locator("#agentThreadDrawerBackdrop").isVisible(), false);
   assert.equal(await page.locator("#agentRuntimeNode").evaluate((node) => node.closest("section[id]")?.id), "runtimeView",
     "runtime selection belongs to its own management page");
   assert.equal(await page.locator("#sessionSourceNode").evaluate((node) => node.closest("section[id]")?.id), "runtimeView",
     "session import belongs to its own management page");
   await page.locator("#agentThreadDrawerToggle").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
+  await page.locator("#agentThreadDrawerToggle").click();
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
   assert.equal(await page.locator("#agentThreadDrawerToggle").getAttribute("aria-expanded"), "true");
   await page.keyboard.press("Escape");
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
+  await page.setViewportSize({ width: 1099, height: 1100 });
+  await page.locator("#agentThreadDrawerToggle").click();
+  assert.equal(await page.locator("#agentThreadDrawerBackdrop").getAttribute("tabindex"), "0");
+  await page.locator("#agentThreadDrawerClose").click();
+  await page.locator("#conversationInput").focus();
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.waitForFunction(() => document.querySelector("#agentThreadDrawer").getAttribute("aria-hidden") === "false");
+  assert.equal(await page.locator("#conversationInput").evaluate((node) => node === document.activeElement), true, "resizing must not steal input focus");
+  await page.locator("#agentNewThread").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false", "wide sidebar stays open after choosing a new conversation");
   await page.locator("#agentThemeToggle").click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
@@ -66,6 +128,17 @@ try {
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   assert.equal(await page.locator("#conversationCwd").getAttribute("type"), "hidden", "thread cwd must not look editable per message");
   assert.equal(await page.locator("#conversationInput").getAttribute("rows"), "1");
+  const composerStyle = () => page.locator("#conversationDropZone").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { border: style.borderColor, shadow: style.boxShadow };
+  });
+  await page.locator("#conversationDropZone").evaluate(async (node) => {
+    await Promise.all(node.getAnimations().map((animation) => animation.finished));
+  });
+  const unfocusedComposer = await composerStyle();
+  await page.locator("#conversationInput").focus();
+  assert.deepEqual(await composerStyle(), unfocusedComposer, "focusing the composer must not highlight its border");
+  assert.equal(await page.locator("#conversationInput").evaluate((node) => getComputedStyle(node).outlineStyle), "none");
   const singleLineHeight = await page.locator("#conversationInput").evaluate((node) => node.getBoundingClientRect().height);
   await page.locator("#conversationInput").fill(Array.from({ length: 12 }, (_, index) => `Line ${index}`).join("\n"));
   const expandedInput = await page.locator("#conversationInput").evaluate((node) => ({
@@ -81,13 +154,26 @@ try {
     document.querySelector("#agentRuntimeNode").append(new Option("Test runtime", "test-node"));
     document.querySelector("#conversationSend").disabled = false;
     h.agent.socketNodeId = "test-node";
+    h.agent.socketInitialized = true;
     window.rpcMessages = [];
     h.agent.socket = { readyState: 1, send: (message) => window.rpcMessages.push(JSON.parse(message)) };
     document.querySelector("#conversationInput").value = "Waiting hint test";
   });
-  await page.locator("#conversationSend").click();
+  await page.locator("#conversationInput").focus();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Shift+Enter");
+  assert.equal(await page.locator("#conversationInput").inputValue(), "Waiting hint test\n", "Shift+Enter inserts a newline");
+  await page.locator("#conversationInput").evaluate((node) => {
+    node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true }));
+    node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, bubbles: true, cancelable: true }));
+    node.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true, cancelable: true }));
+  });
+  assert.equal(await page.evaluate(() => window.rpcMessages.length), 0, "IME confirmation and key repeats must not submit");
+  await page.keyboard.press("Enter");
   assert.equal(await page.locator("#conversationProgress").isVisible(), true, "hint must appear before thread/start returns");
   assert.match(await page.locator("#conversationProgressText").textContent(), /创建/);
+  await page.keyboard.press("Enter");
+  assert.equal(await page.evaluate(() => window.rpcMessages.filter((m) => m.method === "thread/start").length), 1, "Enter while sending stays single-flight");
   await page.evaluate(() => {
     const request = window.rpcMessages.find((m) => m.method === "thread/start");
     window.traceHarness.message({ data: JSON.stringify({ id: request.id, result: { thread: { id: "progress-thread" }, cwd: "/project" } }) });
@@ -113,6 +199,18 @@ try {
   });
   assert.equal(await page.locator("#conversationProgress").isVisible(), false, "first prose clears hint even before turn/start acknowledgement");
   await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+  // A follow-up accepted into the same turn has no new turn/started event.
+  await page.locator("#conversationInput").fill("Follow up in the active turn");
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => window.rpcMessages.filter((m) => m.method === "turn/start").length === 2);
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    const request = window.rpcMessages.filter((m) => m.method === "turn/start").at(-1);
+    h.message({ data: JSON.stringify({ id: request.id, result: { turn: { id: "progress-turn" } } }) });
+  });
+  await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+  assert.equal(await page.locator("#conversationProgress").isVisible(), false, "acknowledgement ends submission even when the current turn continues");
+  await page.locator('.trace-card.user').last().evaluate((node) => node.remove());
   await page.evaluate(() => window.traceHarness.notify({
     method: "item/completed",
     params: { threadId: "progress-thread", turnId: "progress-turn", item: { id: "prose", type: "agentMessage", text: "First body" } },
@@ -124,6 +222,123 @@ try {
   assert.match(await page.locator(".trace-card.assistant .trace-elapsed").textContent(), /^耗时 /);
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy svg").count(), 1);
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy").getAttribute("aria-label"), "复制这条消息的原文");
+
+  // Reconnect to a fresh App Server while keeping the selected conversation.
+  // Only thread/resume loads the old ID; turn/start cannot restore it itself.
+  await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.agent.socket.readyState = 3;
+    h.agent.threads = [{ threadId: "progress-thread", cwd: "/project", runtimeNodeId: "test-node" }];
+    await h.connectAgentSocket("test-node");
+  });
+  await page.locator("#conversationInput").fill("Continue after restart");
+  await page.locator("#conversationSend").click();
+  await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
+  // A second submit while resume is pending must remain single-flight.
+  await page.locator("#conversationForm").evaluate((form) => form.requestSubmit());
+  assert.deepEqual(reconnectMessages.map((message) => message.method), ["thread/resume"]);
+  assert.deepEqual(reconnectMessages[0].params, { threadId: "progress-thread", cwd: "/project", excludeTurns: true });
+  assert.match(await page.locator("#conversationProgressText").textContent(), /恢复/);
+  assert.equal(await page.locator(".trace-card.user").count(), 1, "resume must precede the optimistic user message");
+  reconnectedSocket.send(JSON.stringify({ id: reconnectMessages[0].id, error: { code: -32600, message: "resume unavailable" } }));
+  await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+  assert.equal(await page.locator("#conversationInput").inputValue(), "Continue after restart");
+  assert.equal(await page.locator("#conversationNotice").textContent(), "resume unavailable");
+  assert.equal(await page.locator("#conversationProgress").isVisible(), false);
+  assert.equal(reconnectMessages.length, 1, "failed resume must not send a turn or create a replacement thread");
+
+  await page.locator("#conversationSend").click();
+  await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
+  assert.equal(reconnectMessages[1].method, "thread/resume", "failed restoration must remain retryable");
+  reconnectedSocket.send(JSON.stringify({ id: reconnectMessages[1].id, result: { thread: { id: "progress-thread" }, cwd: "/project" } }));
+  await page.waitForFunction(() => document.querySelectorAll(".trace-card.user").length === 2);
+  assert.deepEqual(reconnectMessages.map((message) => message.method), ["thread/resume", "thread/resume", "turn/start"]);
+  assert.equal(reconnectMessages[2].params.threadId, "progress-thread");
+  assert.equal((await page.locator(".trace-card.assistant .trace-body").textContent()).trim(), "First body", "restoration preserves visible history");
+  reconnectedSocket.send(JSON.stringify({ id: reconnectMessages[2].id, result: { turn: { id: "reconnected-turn" } } }));
+  await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+  assert.equal(await page.locator("#conversationInput").inputValue(), "");
+
+  await page.locator("#conversationInput").fill("Another message on the same connection");
+  await page.locator("#conversationSend").click();
+  await page.waitForFunction(() => document.querySelectorAll(".trace-card.user").length === 3);
+  assert.equal(reconnectMessages[3].method, "turn/start", "a loaded conversation must not be resumed before every message");
+  reconnectedSocket.send(JSON.stringify({ id: reconnectMessages[3].id, result: { turn: { id: "next-turn" } } }));
+  await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+
+  automaticResume = true;
+  const sendsBeforeRecovery = reconnectMessages.filter((message) => message.method === "turn/start").length;
+  await page.locator("#conversationInput").fill("Draft stays through mobile suspension");
+  reconnectedSocket.close({ code: 1001, reason: "mobile radio suspended" });
+  await page.waitForFunction(() => window.traceHarness.agent.socketInitialized &&
+    window.traceHarness.agent.loadedThreadIds.has("progress-thread") && !window.traceHarness.agent.recoveryPromise);
+  assert.equal(socketCount, 2, "closed sockets reconnect automatically");
+  assert.ok(nodeRequests > 0 && transcriptRequests > 0);
+  assert.match(await page.locator("#conversationTrace").textContent(), /Recent messages for progress-thread/,
+    "recovery must backfill notifications missed while asleep");
+  assert.equal(await page.locator("#conversationInput").inputValue(), "Draft stays through mobile suspension");
+
+  // An OPEN browser socket with no reply is also recoverable on foreground.
+  ignoreProbe = true;
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await page.waitForFunction(() => window.traceHarness.agent.recoveryPromise !== null);
+  await page.waitForFunction(() => window.traceHarness.agent.socketInitialized &&
+    window.traceHarness.agent.loadedThreadIds.has("progress-thread") && !window.traceHarness.agent.recoveryPromise,
+  null, { timeout: 15_000 });
+  ignoreProbe = false;
+  assert.equal(socketCount, 3, "foreground probe replaces a half-open connection");
+  assert.equal(reconnectMessages.filter((message) => message.method === "turn/start").length, sendsBeforeRecovery,
+    "reconnect must never replay an uncertain user submission");
+
+  // First paint and fast thread switches do not wait for Codex restoration.
+  automaticResume = false;
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.agent.threads.push({ threadId: "fast-thread", title: "Fast thread", cwd: "/fast" });
+    window.openRecent = h.resumeAgentThread("fast-thread");
+  });
+  await page.waitForFunction(() => document.querySelector("#conversationTrace").textContent.includes("Recent messages for fast-thread"));
+  assert.equal(await page.evaluate(() => window.traceHarness.agent.loadedThreadIds.has("fast-thread")), false);
+  const slowResume = reconnectMessages.findLast((message) => message.method === "thread/resume");
+  await page.evaluate(() => { window.openOther = window.traceHarness.resumeAgentThread("other-thread"); });
+  await page.waitForFunction(() => document.querySelector("#conversationTrace").textContent.includes("Recent messages for other-thread"));
+  const otherResume = reconnectMessages.findLast((message) => message.method === "thread/resume");
+  assert.notEqual(slowResume.id, otherResume.id);
+  reconnectedSocket.send(JSON.stringify({ id: slowResume.id, result: { thread: { id: "fast-thread", name: "STALE TITLE" }, cwd: "/fast" } }));
+  reconnectedSocket.send(JSON.stringify({ id: otherResume.id, result: { thread: { id: "other-thread", name: "Current thread" }, cwd: "/other" } }));
+  await page.waitForFunction(() => document.querySelector("#conversationTitle").textContent === "Current thread");
+  assert.equal(await page.evaluate(() => window.traceHarness.agent.threadId), "other-thread");
+
+  expireLogin = true;
+  reconnectedSocket.close({ code: 1001 });
+  await page.waitForFunction(() => !window.traceHarness.agent.connectionWanted);
+  assert.match(await page.locator("#conversationNotice").textContent(), /登录已过期/);
+  const stoppedRequests = nodeRequests;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  assert.equal(nodeRequests, stoppedRequests, "expired sessions must stop automatic retries");
+  await page.locator("#conversationInput").fill("");
+
+  const fragmentMerge = await page.evaluate(() => window.traceHarness.mergeTranscriptItems([
+    { key: "tool-a", kind: "tool", turnId: "turn-a", sourceItemSeq: 250, title: "工具输出", body: "输出\nresult", toolFragment: { input: null, output: "result" } },
+  ], [
+    { key: "tool-a", kind: "tool", turnId: "turn-a", sourceItemSeq: 5, title: "functions.exec", body: "输入\ncommand", toolFragment: { input: "command", output: null } },
+  ]));
+  assert.equal(fragmentMerge.length, 1);
+  assert.equal(fragmentMerge[0].sourceItemSeq, 5);
+  assert.equal(fragmentMerge[0].body, "输入\ncommand\n\n输出\nresult");
+  assert.equal(fragmentMerge[0].title, "functions.exec");
+
+  const glass = await page.locator(".conversation-head").evaluate((head) => {
+    const style = getComputedStyle(head);
+    const trace = document.querySelector("#conversationTrace");
+    return { blur: style.backdropFilter, background: style.backgroundColor,
+      headTop: head.getBoundingClientRect().top, traceTop: trace.getBoundingClientRect().top,
+      padding: parseFloat(getComputedStyle(trace).paddingTop), height: head.getBoundingClientRect().height };
+  });
+  assert.match(glass.blur, /blur\(2px\)/);
+  assert.match(glass.background, /rgba/);
+  assert.equal(glass.headTop, glass.traceTop, "messages must scroll behind the glass header");
+  assert.ok(glass.padding > glass.height, "initial messages must clear the header");
 
   const streamBenchmark = await page.evaluate(async () => {
     const h = window.traceHarness;
@@ -152,6 +367,20 @@ try {
   assert.equal(streamBenchmark.markdownDuringStream, false, "live deltas use the lossless lightweight renderer");
   assert.ok(streamBenchmark.dispatchMs < 1_000,
     `streaming 1,200 deltas blocked the browser for ${streamBenchmark.dispatchMs.toFixed(1)}ms`);
+  const incremental = await page.evaluate(async () => {
+    const h = window.traceHarness;
+    const body = document.querySelector(".trace-card.assistant .trace-body");
+    const textNode = body.firstChild;
+    const started = performance.now();
+    h.notify({ method: "item/agentMessage/delta", params: {
+      threadId: "stream-benchmark", turnId: "stream-turn", itemId: "stream-item", delta: "New words immediately" } });
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    return { sameTextNode: textNode === body.firstChild, tail: body.textContent.endsWith("New words immediately"), latencyMs: performance.now() - started };
+  });
+  assert.equal(incremental.sameTextNode, true, "new words append without replacing already-rendered text");
+  assert.equal(incremental.tail, true);
+  assert.ok(incremental.latencyMs < 250, "visible output must not wait for a typing timer");
+  console.log(`TRACE_PAINT_BENCHMARK append latency=${incremental.latencyMs.toFixed(1)}ms`);
   await page.evaluate(() => {
     const h = window.traceHarness;
     const body = document.querySelector(".trace-card.assistant .trace-body");
@@ -163,10 +392,26 @@ try {
   assert.equal(await page.locator(".trace-card.assistant .trace-body").evaluate((node) => node.classList.contains("markdown-body")), true,
     "completed messages receive the full Markdown renderer");
   assert.equal(await page.locator(".trace-card.assistant strong").count(), 1_200);
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.notify({ method: "item/completed", params: { threadId: "stream-benchmark", turnId: "stream-turn",
+      item: { id: "compact", type: "contextCompaction", status: "completed" } } });
+    h.agent.transcriptItems = [{ key: "stored-message", kind: "assistant", body: "Stored response", turnId: "stream-turn" }];
+    h.renderTranscript();
+  });
+  assert.equal(await page.locator(".trace-card.compaction").count(), 1, "a lagging history refresh retains the live compaction notice");
+  assert.equal(await page.locator(".trace-card.compaction .trace-head, .trace-card.compaction .trace-copy").count(), 0);
+  await page.evaluate((compaction) => {
+    const h = window.traceHarness;
+    h.agent.transcriptItems.push({ ...compaction, turnId: "stream-turn" });
+    h.renderTranscript();
+  }, projectCodexTranscript([{ type: "compacted", payload: { message: "Internal summary" } }])[0]);
+  assert.equal(await page.locator(".trace-card.compaction").count(), 1, "durable compaction replaces the live notice without duplication");
   await page.evaluate(() => { window.traceHarness.agent.threadId = "progress-thread"; window.traceHarness.clear(); });
 
   const uploaded = await page.evaluate(async () => {
     const h = window.traceHarness;
+    h.agent.socketNodeId = "test-node";
     h.nodes.set("test-node", { platform: "linux", capabilities: { files: true } });
     const calls = [];
     h.setInvoke(async (_node, _capability, params) => { calls.push({ ...params, content: params.content?.length }); return {}; });
@@ -364,6 +609,11 @@ try {
   }
 
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => document.querySelector("#agentThreadDrawer").getAttribute("aria-hidden") === "true");
+  assert.equal(await page.locator("#agentThreadDrawer").evaluate((node) => node.inert), true);
+  await page.locator("#agentThreadDrawerToggle").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
+  await page.keyboard.press("Escape");
   if (process.env.MIRA_TRACE_MOBILE_MESSAGES_SCREENSHOT) {
     await page.locator("#conversationTrace").evaluate((node) => { node.scrollTop = node.scrollHeight; });
     await page.locator(".conversation-card").screenshot({ path: process.env.MIRA_TRACE_MOBILE_MESSAGES_SCREENSHOT });
@@ -398,7 +648,7 @@ try {
   assert.deepEqual(errors, [], "browser must have no uncaught errors");
   const screenshot = process.env.MIRA_TRACE_SCREENSHOT ?? process.argv[4];
   if (screenshot) await page.locator(".conversation-card").screenshot({ path: screenshot });
-  console.log("PASS: real-browser submission hint, cross-thread isolation, 17 MiB chunked attachments, image paths, cancellation cleanup, desktop filters/paging, live/history activity and responsive layout");
+  console.log("PASS: real-browser mobile recovery, half-open probe, tail-first paint, stale resume isolation, thin glass, submission hint, cross-thread isolation, 17 MiB chunked attachments, cancellation cleanup, live/history activity and responsive layout");
 } finally {
   await browser?.close();
   await new Promise((resolve) => server.close(resolve));

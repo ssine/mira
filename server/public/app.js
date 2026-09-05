@@ -13,6 +13,50 @@ let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
 
 const themeStorageKey = "mira.theme";
+const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
+let agentThreadDrawerOpen = agentThreadDrawerWide.matches;
+let browserRouteEpoch = 0;
+
+function writeBrowserRoute(view, threadId = null, { replace = false } = {}) {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("thread");
+  url.searchParams.delete("view");
+  if (view === "agent" && threadId) url.searchParams.set("thread", threadId);
+  else if (view !== "nodes") url.searchParams.set("view", view);
+  if (url.href === window.location.href) return;
+  browserRouteEpoch++;
+  window.history[replace ? "replaceState" : "pushState"](null, "", url);
+}
+
+async function restoreBrowserRoute() {
+  const epoch = ++browserRouteEpoch;
+  const url = new URL(window.location.href);
+  const threadId = url.searchParams.get("thread");
+  const view = threadId ? "agent" : url.searchParams.get("view");
+  if (agent.sendPromise) {
+    writeBrowserRoute("agent", agent.threadId, { replace: true });
+    return;
+  }
+  if (view === "agent") {
+    show("agentView");
+    await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+    if (epoch !== browserRouteEpoch) return;
+    if (threadId) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
+        setConversationNotice("会话链接中的 ID 无效。", "error");
+        return;
+      }
+      await resumeAgentThread(threadId, { updateRoute: false });
+    } else newAgentThread({ updateRoute: false });
+  } else if (view === "runtime") {
+    show("runtimeView");
+    await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+  } else {
+    stopAgentRecovery();
+    show("dashboardView");
+    await loadDashboard();
+  }
+}
 
 function terminalTheme() {
   if (document.documentElement.dataset.theme === "dark") {
@@ -75,6 +119,19 @@ const workspace = {
 const agent = {
   socket: null,
   socketNodeId: null,
+  loadedThreadIds: new Set(),
+  resumePromises: new Map(),
+  runtimePromise: null,
+  recoveryPromise: null,
+  connectionWanted: false,
+  socketInitialized: false,
+  reconnectTimer: null,
+  heartbeatTimer: null,
+  reconnectAttempt: 0,
+  lastSocketMessageAt: 0,
+  selectionEpoch: 0,
+  transcriptRequest: 0,
+  liveRevision: 0,
   runtimeStartEpoch: 0,
   pending: new Map(),
   requestId: 0,
@@ -208,25 +265,33 @@ function show(view) {
   $("#globalRuntime").classList.toggle("active", view === "runtimeView");
   $("#globalRuntime").setAttribute("aria-current", view === "runtimeView" ? "page" : "false");
   document.body.dataset.view = view;
-  if (view !== "agentView") setAgentThreadDrawer(false);
+  if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
+  else if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
 }
 
-function setAgentThreadDrawer(open) {
+function setAgentThreadDrawer(open, { focus = true } = {}) {
   const drawer = $("#agentThreadDrawer");
   const backdrop = $("#agentThreadDrawerBackdrop");
   const toggle = $("#agentThreadDrawerToggle");
   if (!drawer || !backdrop || !toggle) return;
+  agentThreadDrawerOpen = open;
+  drawer.closest(".chat-shell").classList.toggle("sidebar-open", open);
   drawer.classList.toggle("open", open);
   drawer.toggleAttribute("inert", !open);
   drawer.setAttribute("aria-hidden", String(!open));
-  backdrop.classList.toggle("open", open);
-  backdrop.tabIndex = open ? 0 : -1;
+  const overlay = open && !agentThreadDrawerWide.matches;
+  backdrop.classList.toggle("open", overlay);
+  backdrop.tabIndex = overlay ? 0 : -1;
   toggle.setAttribute("aria-expanded", String(open));
   toggle.setAttribute("aria-label", open ? "关闭会话侧边栏" : "打开会话侧边栏");
-  if (open) $("#agentThreadDrawerClose").focus({ preventScroll: true });
-  else if (document.body.dataset.view === "agentView" && document.activeElement && drawer.contains(document.activeElement)) {
+  if (open && focus) $("#agentThreadDrawerClose").focus({ preventScroll: true });
+  else if (!open && document.body.dataset.view === "agentView" && document.activeElement && drawer.contains(document.activeElement)) {
     toggle.focus({ preventScroll: true });
   }
+}
+
+function closeAgentThreadDrawerOnMobile() {
+  if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
 }
 
 function toast(message) {
@@ -1306,6 +1371,84 @@ function setAgentRuntimeState(message, status = "offline") {
   $("#agentRuntimeState").textContent = message;
   $("#agentRuntimeBadge").textContent = status;
   $("#agentRuntimeBadge").className = `badge ${status}`;
+  const indicator = $("#conversationConnection");
+  indicator.textContent = status === "online" ? "" : message;
+  indicator.classList.toggle("hidden", status === "online" || !agent.connectionWanted);
+}
+
+function agentRecoveryAllowed() {
+  return agent.connectionWanted && !document.hidden && navigator.onLine !== false &&
+    ["agentView", "runtimeView"].includes(document.body.dataset.view);
+}
+
+function scheduleAgentRecovery(delay = null) {
+  clearTimeout(agent.reconnectTimer);
+  if (!agentRecoveryAllowed()) return;
+  const backoff = Math.min(30_000, 500 * 2 ** Math.min(agent.reconnectAttempt++, 6));
+  agent.reconnectTimer = setTimeout(() => {
+    agent.reconnectTimer = null;
+    void recoverAgentSession();
+  }, delay ?? backoff + Math.random() * 250);
+}
+
+function stopAgentRecovery() {
+  agent.connectionWanted = false;
+  agent.selectionEpoch++;
+  agent.runtimePromise = null;
+  clearTimeout(agent.reconnectTimer);
+  clearTimeout(agent.heartbeatTimer);
+  closeAgentSocket();
+}
+
+function scheduleAgentHeartbeat() {
+  clearTimeout(agent.heartbeatTimer);
+  if (!agentRecoveryAllowed()) return;
+  agent.heartbeatTimer = setTimeout(() => {
+    void recoverAgentSession({ probe: true, refresh: false });
+  }, 25_000);
+}
+
+async function recoverAgentSession({ probe = false, refresh = true } = {}) {
+  if (!agentRecoveryAllowed()) return;
+  if (agent.recoveryPromise) return agent.recoveryPromise;
+  const epoch = agent.selectionEpoch;
+  const operation = (async () => {
+    try {
+      // A suspended mobile socket can remain OPEN after its network is gone.
+      // Check the end-to-end path before trusting that browser state.
+      if (probe && agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN) {
+        try { await rpc("thread/loaded/list", { limit: 1 }, 8_000); }
+        catch { closeAgentSocket(); }
+      }
+      if (!agentRecoveryAllowed() || epoch !== agent.selectionEpoch) return;
+      const threadId = agent.threadId;
+      const history = refresh && threadId
+        ? loadAgentTranscript(threadId, null, { preserveLoaded: true, anchorBottom: traceNearBottom() })
+        : Promise.resolve();
+      const connection = (async () => {
+        await startAgentRuntime({ allowStart: false });
+        if (epoch !== agent.selectionEpoch || !agentRecoveryAllowed()) return;
+        if (threadId && !agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
+      })();
+      const results = await Promise.allSettled([history, connection]);
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure) throw failure.reason;
+      agent.reconnectAttempt = 0;
+      scheduleAgentHeartbeat();
+    } catch (error) {
+      if (epoch !== agent.selectionEpoch || !agent.connectionWanted) return;
+      if (error.status === 401 || error.status === 403) {
+        stopAgentRecovery();
+        setConversationNotice("登录已过期，请重新登录。输入内容仍保留。", "warning");
+        return;
+      }
+      setAgentRuntimeState("连接暂时中断，正在自动重连…", "offline");
+      scheduleAgentRecovery();
+    }
+  })();
+  agent.recoveryPromise = operation;
+  try { await operation; }
+  finally { if (agent.recoveryPromise === operation) agent.recoveryPromise = null; }
 }
 
 function notificationThreadId(params = {}) {
@@ -1342,6 +1485,10 @@ function closeAgentSocket({ preserveSubmission = false } = {}) {
   const socket = agent.socket;
   agent.socket = null;
   agent.socketNodeId = null;
+  agent.socketInitialized = false;
+  agent.loadedThreadIds.clear();
+  agent.resumePromises.clear();
+  clearTimeout(agent.heartbeatTimer);
   for (const pending of agent.pending.values()) pending.reject(new Error("App Server connection closed"));
   agent.pending.clear();
   agent.activeTurns.clear();
@@ -1498,6 +1645,7 @@ const traceClockFormatter = new Intl.DateTimeFormat("zh-CN", {
 });
 
 function traceClock(value) {
+  if (value === null || value === undefined || value === "") return "";
   const date = value instanceof Date ? value : new Date(value);
   return Number.isFinite(date.getTime()) ? traceClockFormatter.format(date) : "";
 }
@@ -1507,13 +1655,15 @@ function setTraceMetadata(card, options = {}) {
   if (!footer) return;
   if (Object.hasOwn(options, "completedAt")) card._miraCompletedAt = options.completedAt;
   if (Object.hasOwn(options, "elapsedMs")) card._miraElapsedMs = options.elapsedMs;
+  if (Object.hasOwn(options, "timingScope")) card._miraTimingScope = options.timingScope;
+  if (Object.hasOwn(options, "elapsedApproximate")) card._miraElapsedApproximate = options.elapsedApproximate;
   const completed = footer.querySelector(".trace-completed");
   const elapsed = footer.querySelector(".trace-elapsed");
   const clock = traceClock(card._miraCompletedAt);
-  completed.textContent = clock ? `${clock} 完成` : "";
+  completed.textContent = clock ? `${clock} ${card._miraTimingScope === "turn" ? "本轮完成" : card._miraTimingScope === "recorded" ? "记录" : "完成"}` : "";
   completed.hidden = !clock;
   const duration = formatActivityDuration(card._miraElapsedMs);
-  elapsed.textContent = duration ? `耗时 ${duration}` : "";
+  elapsed.textContent = duration ? `${card._miraElapsedApproximate || card._miraTimingScope === "recorded" ? "约耗时" : card._miraTimingScope === "turn" ? "本轮耗时" : "耗时"} ${duration}` : "";
   elapsed.hidden = !duration;
 }
 
@@ -1540,6 +1690,7 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const value = body ?? "";
   const node = card.querySelector(".trace-body");
   cancelTraceStreamRender(card);
+  node._miraStreamText = null;
   updateTraceBodyState(card, value, kind);
   const markdown = traceUsesMarkdown(kind);
   node.classList.toggle("markdown-body", markdown);
@@ -1551,7 +1702,7 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
 }
 
 function queueTraceStreamRender(card, value, kind, follow) {
-  updateTraceBodyState(card, value, kind);
+  card.querySelector(".trace-body")._miraSource = value;
   const queued = traceStreamRenders.get(card);
   if (queued) {
     queued.follow ||= follow;
@@ -1564,11 +1715,18 @@ function queueTraceStreamRender(card, value, kind, follow) {
     const trace = $("#conversationTrace");
     const shouldFollow = pending.follow && traceNearBottom(trace);
     const node = card.querySelector(".trace-body");
+    const source = node._miraSource ?? "";
+    updateTraceBodyState(card, source, kind);
     // Parsing and sanitizing the entire accumulated Markdown for every token is
     // quadratic. Keep live output cheap and lossless, then fully typeset the
     // authoritative item once item/completed arrives.
     node.classList.remove("markdown-body");
-    node.textContent = node._miraSource ?? "";
+    if (node._miraStreamText?.parentNode === node && source.startsWith(node._miraStreamText.data)) {
+      node._miraStreamText.appendData(source.slice(node._miraStreamText.length));
+    } else {
+      node._miraStreamText = document.createTextNode(source);
+      node.replaceChildren(node._miraStreamText);
+    }
     if (shouldFollow) scrollTraceToBottom(trace);
   });
   traceStreamRenders.set(card, pending);
@@ -1620,7 +1778,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
     card._miraExpandable = ["tool", "reasoning"].includes(kind);
-    const copy = kind === "user" ? null : createTraceCopyButton(card);
+    const copy = ["user", "compaction"].includes(kind) ? null : createTraceCopyButton(card);
     if (card._miraExpandable) {
       const head = element("summary", "trace-head");
       const actions = element("div", "trace-actions");
@@ -1633,7 +1791,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       const footer = element("footer", "trace-footer");
       footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), copy);
       card.append(element("div", "trace-body"), footer);
-    } else if (kind === "user") {
+    } else if (["user", "compaction"].includes(kind)) {
       card.append(element("div", "trace-body"));
     } else {
       const head = element("div", "trace-head");
@@ -1830,12 +1988,11 @@ async function loadMoreFilePreview() {
 function appendTraceText(key, kind, title, delta, status = "运行中") {
   if (!delta) return;
   const trace = $("#conversationTrace");
-  const follow = traceNearBottom(trace);
   const existing = trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
   const effectiveTitle = existing?.dataset.traceTitle || title;
-  const card = upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false, turnId: agent.turnId });
+  const card = existing ?? upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false, turnId: agent.turnId });
   const body = card.querySelector(".trace-body");
-  queueTraceStreamRender(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind, follow);
+  queueTraceStreamRender(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind, true);
 }
 
 function reconcilePendingUserTrace(key, body) {
@@ -1857,7 +2014,8 @@ function itemView(item) {
   const tool = toolItemView(item);
   if (tool) return tool;
   if (type === "plan") return { kind: "reasoning", title: "计划", body: traceText(item.text ?? item.plan) || JSON.stringify(item, null, 2) };
-  if (type === "contextCompaction") return { kind: "system", title: "上下文压缩", body: item.summary ?? "已压缩较早上下文" };
+  if (type === "contextCompaction") return { kind: "compaction", title: "上下文自动压缩",
+    body: item.status === "inProgress" ? "正在自动压缩较早的上下文…" : "较早的上下文已自动压缩。" };
   return { kind: "tool", title: type, body: JSON.stringify(item, null, 2) };
 }
 
@@ -1899,7 +2057,8 @@ function renderThread(thread) {
     }
   }
   if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
-  requestAnimationFrame(() => scrollTraceToBottom(trace));
+  const last = trace.lastElementChild;
+  requestAnimationFrame(() => { if (trace.lastElementChild === last) scrollTraceToBottom(trace); });
 }
 
 function resetAgentTranscript(threadId = null) {
@@ -1912,10 +2071,39 @@ function resetAgentTranscript(threadId = null) {
 }
 
 function mergeTranscriptItems(current, updates) {
-  const merged = new Map(current.map((item) => [item.key, item]));
-  for (const item of updates) merged.set(item.key, item);
+  const merged = new Map();
+  for (const item of [...current, ...updates]) {
+    const previous = merged.get(item.key);
+    if (previous?.toolFragment && item.toolFragment) {
+      const materialized = item.toolFragment.materialized ? item : previous.toolFragment.materialized ? previous : null;
+      const fragments = {
+        input: item.toolFragment.input ?? previous.toolFragment.input,
+        output: item.toolFragment.output ?? previous.toolFragment.output,
+      };
+      merged.set(item.key, {
+        ...previous, ...item, ...(materialized ?? {}),
+        sourceItemSeq: Math.min(previous.sourceItemSeq, item.sourceItemSeq),
+        ...(!materialized ? {
+          title: fragments.input != null ? (item.toolFragment.input != null ? item.title : previous.title) : item.title,
+          activity: item.activity ?? previous.activity,
+          status: fragments.output != null ? "完成" : item.status,
+          toolFragment: fragments,
+          body: [fragments.input ? `输入\n${fragments.input}` : "", fragments.output ? `输出\n${fragments.output}` : ""].filter(Boolean).join("\n\n"),
+        } : {}),
+      });
+    } else merged.set(item.key, item);
+  }
+  const narratives = new Map();
   return [...merged.values()].sort((left, right) =>
-    (left.sourceItemSeq ?? Number.MAX_SAFE_INTEGER) - (right.sourceItemSeq ?? Number.MAX_SAFE_INTEGER));
+    (left.sourceItemSeq ?? Number.MAX_SAFE_INTEGER) - (right.sourceItemSeq ?? Number.MAX_SAFE_INTEGER))
+    .filter((item) => {
+      if (!["user", "assistant", "reasoning"].includes(item.kind)) return true;
+      const signature = JSON.stringify([item.turnId, item.kind, item.phase, item.body]);
+      const previous = narratives.get(signature);
+      if (previous && (item.turnId || item.sourceItemSeq - previous.sourceItemSeq <= 3)) return false;
+      narratives.set(signature, item);
+      return true;
+    });
 }
 
 function renderHistoryLoader(trace) {
@@ -1924,7 +2112,7 @@ function renderHistoryLoader(trace) {
   const button = element("button", "history-load-button",
     agent.transcriptLoadingOlder
       ? "正在加载更早历史…"
-      : `加载更早历史 · 已显示 ${agent.transcriptItems.length} / ${agent.transcriptTotal}`);
+      : `加载更早历史 · 已显示 ${agent.transcriptItems.length} 条`);
   button.type = "button";
   button.dataset.loadOlder = "true";
   button.disabled = agent.transcriptLoadingOlder;
@@ -1933,6 +2121,13 @@ function renderHistoryLoader(trace) {
 }
 
 function renderTranscript(fallbackThread, options = {}) {
+  const existingTrace = $("#conversationTrace");
+  const liveCompactions = [...existingTrace.querySelectorAll('.trace-card.compaction')]
+    .filter((card) => card.dataset.traceKey?.startsWith("item-"));
+  const preciseClocks = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
+    .filter((card) => card._miraCompletedAt && !card._miraTimingScope)
+    .map((card) => [JSON.stringify([card.dataset.turnId ?? null, card.querySelector('.trace-body')._miraSource]),
+      { completedAt: card._miraCompletedAt, elapsedMs: card._miraElapsedMs }]));
   const expandedItems = new Set([...$("#conversationTrace").querySelectorAll(".trace-detail[open]")]
     .map((details) => details.closest(".trace-card").dataset.traceKey));
   const expandedGroups = new Set([...$("#conversationTrace").querySelectorAll(".tool-group[open] .trace-card")]
@@ -1941,37 +2136,63 @@ function renderTranscript(fallbackThread, options = {}) {
   renderHistoryLoader(trace);
   for (const item of agent.transcriptItems) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
+    const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
       autoScroll: false, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId,
-      completedAt: item.completedAt, elapsedMs: item.elapsedMs,
+      completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
+      elapsedApproximate: item.elapsedApproximate,
+      ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
     });
     if (expandedItems.has(key) && card.querySelector(".trace-detail")) card.querySelector(".trace-detail").open = true;
     if (expandedGroups.has(key) && card.closest(".tool-group")) card.closest(".tool-group").open = true;
   }
-  if (!agent.transcriptItems.length) {
+  const storedCompactions = new Map();
+  for (const item of agent.transcriptItems.filter((item) => item.kind === "compaction")) {
+    const turn = item.turnId ?? "";
+    storedCompactions.set(turn, (storedCompactions.get(turn) ?? 0) + 1);
+  }
+  for (const card of liveCompactions) {
+    const turn = card.dataset.turnId ?? "";
+    const remaining = storedCompactions.get(turn) ?? 0;
+    if (remaining) storedCompactions.set(turn, remaining - 1);
+    else trace.append(card); // Keep the notice while its durable write catches up.
+  }
+  if (!agent.transcriptItems.length && !liveCompactions.length) {
+    if (agent.transcriptCursor !== null) {
+      trace.append(element("div", "conversation-empty", "此页没有可显示的消息，可继续加载更早历史。"));
+      return;
+    }
     renderThread(fallbackThread);
     if (!fallbackThread?.turns?.some((turn) => (turn.items ?? []).length > 0)) {
       clear(trace).append(element("div", "conversation-empty", "数据库中没有可投影的消息或工具记录。"));
     }
     return;
   }
+  const last = trace.lastElementChild;
+  const scrollTop = trace.scrollTop;
   requestAnimationFrame(() => {
+    if (trace.lastElementChild !== last || trace.scrollTop !== scrollTop) return;
     if (options.preserveViewport) {
       trace.scrollTop = options.preserveViewport.mode === "prepend"
         ? options.preserveViewport.top + trace.scrollHeight - options.preserveViewport.height
         : options.preserveViewport.top;
     } else if (options.anchorBottom !== false) {
       scrollTraceToBottom(trace);
-      requestAnimationFrame(() => scrollTraceToBottom(trace));
+      requestAnimationFrame(() => {
+        if (trace.lastElementChild === last && traceNearBottom(trace)) scrollTraceToBottom(trace);
+      });
     }
   });
 }
 
 async function loadAgentTranscript(threadId, fallbackThread = null, options = {}) {
-  const query = new URLSearchParams({ storeId: "personal", limit: String(options.limit ?? transcriptPageSize) });
+  const epoch = agent.selectionEpoch;
+  const request = ++agent.transcriptRequest;
+  const liveRevision = agent.liveRevision;
+  const query = new URLSearchParams({ storeId: "personal", tail: "1", limit: String(options.limit ?? transcriptPageSize) });
   if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
   const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`);
-  if (agent.threadId !== threadId) return transcript;
+  if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || request !== agent.transcriptRequest) return transcript;
 
   const incoming = Array.isArray(transcript.trace) ? transcript.trace : [];
   const sameThread = agent.transcriptThreadId === threadId &&
@@ -1992,10 +2213,12 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   } else {
     agent.transcriptThreadId = threadId;
     agent.transcriptGeneration = transcript.generation ?? null;
-    agent.transcriptItems = incoming;
+    agent.transcriptItems = mergeTranscriptItems([], incoming);
     agent.transcriptCursor = transcript.nextCursor ?? null;
   }
   agent.transcriptTotal = transcript.totalTraceItems ?? agent.transcriptItems.length;
+  // Do not replace live output that arrived after this HTTP snapshot began.
+  if (agent.liveRevision !== liveRevision && agent.transcriptThreadId === threadId && options.preserveLoaded) return transcript;
   renderTranscript(fallbackThread, {
     preserveViewport,
     anchorBottom: options.anchorBottom !== false,
@@ -2022,7 +2245,7 @@ async function loadOlderAgentTranscript() {
     const current = $("#conversationTrace").querySelector("[data-load-older]");
     if (current) {
       current.disabled = false;
-      current.textContent = `加载更早历史 · 已显示 ${agent.transcriptItems.length} / ${agent.transcriptTotal}`;
+      current.textContent = `加载更早历史 · 已显示 ${agent.transcriptItems.length} 条`;
     }
   }
 }
@@ -2046,6 +2269,8 @@ async function refreshCompletedTranscript(threadId) {
 function handleAgentNotification(message) {
   const method = message.method ?? "";
   const params = message.params ?? {};
+  if (notificationIsForOpenThread(params) && /^(item|turn)\//.test(method)) agent.liveRevision++;
+  if (method === "thread/closed") agent.loadedThreadIds.delete(params.threadId);
   if (message.id !== undefined) {
     if (notificationIsForOpenThread(params)) {
       upsertTrace(`request-${message.id}`, "system", method,
@@ -2153,6 +2378,7 @@ function handleAgentNotification(message) {
 }
 
 function onAgentSocketMessage(event) {
+  agent.lastSocketMessageAt = Date.now();
   let message;
   try { message = JSON.parse(event.data); } catch { return; }
   if (message.id !== undefined && (Object.hasOwn(message, "result") || Object.hasOwn(message, "error"))) {
@@ -2167,34 +2393,45 @@ function onAgentSocketMessage(event) {
 }
 
 async function connectAgentSocket(nodeId) {
-  if (agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
+  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
   closeAgentSocket({ preserveSubmission: true });
+  clearTimeout(agent.reconnectTimer);
   setAgentRuntimeState("正在建立 App Server 通道…", "offline");
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
   const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
   agent.socket = socket;
   agent.socketNodeId = nodeId;
   socket.addEventListener("message", (event) => { if (agent.socket === socket) onAgentSocketMessage(event); });
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("App Server WebSocket 连接超时")), 15_000);
-    socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
-    socket.addEventListener("error", () => { clearTimeout(timer); reject(new Error("App Server WebSocket 连接失败")); }, { once: true });
-  });
   socket.addEventListener("close", () => {
     if (agent.socket !== socket) return;
     closeAgentSocket();
-    setAgentRuntimeState("App Server 通道已断开", "offline");
-    setConversationNotice("运行节点或 App Server 已断开。重新连接后可继续同一 PostgreSQL thread。", "warning");
+    setAgentRuntimeState("连接暂时中断，正在自动重连…", "offline");
+    scheduleAgentRecovery();
   });
-  await rpc("initialize", {
-    clientInfo: { name: "mira_web", title: "Mira Web", version: "1" },
-    capabilities: { experimentalApi: true },
-  });
-  socket.send(JSON.stringify({ method: "initialized" }));
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("App Server WebSocket 连接超时")), 15_000);
+      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+      for (const type of ["error", "close"]) socket.addEventListener(type, () => {
+        clearTimeout(timer); reject(new Error("App Server WebSocket 连接失败"));
+      }, { once: true });
+    });
+    if (agent.socket !== socket) throw new Error("App Server 连接已取消");
+    await rpc("initialize", {
+      clientInfo: { name: "mira_web", title: "Mira Web", version: "1" },
+      capabilities: { experimentalApi: true },
+    }, 15_000);
+    if (agent.socket !== socket) throw new Error("App Server 连接已取消");
+    socket.send(JSON.stringify({ method: "initialized" }));
+    agent.socketInitialized = true;
+  } catch (error) {
+    if (agent.socket === socket) closeAgentSocket();
+    throw error;
+  }
   syncConversationSendUi();
-  setConversationNotice();
   const node = dashboardNodes.get(nodeId);
   setAgentRuntimeState(`已连接 ${node?.hostname ?? nodeId}`, "online");
+  scheduleAgentHeartbeat();
 }
 
 async function refreshAgentNodes() {
@@ -2344,7 +2581,7 @@ async function openImportedSession(threadId, runtimeNodeId = null) {
   }
   if (!$("#agentRuntimeNode").value) throw new Error("请先选择一个 Codex 运行节点。导入来源与运行位置可以不同。");
   show("agentView");
-  setAgentThreadDrawer(false);
+  closeAgentThreadDrawerOnMobile();
   await resumeAgentThread(threadId);
 }
 
@@ -2412,17 +2649,31 @@ async function importLocalSession(index, button) {
   }
 }
 
-async function startAgentRuntime() {
+async function startAgentRuntime({ allowStart = true } = {}) {
   const nodeId = $("#agentRuntimeNode").value;
   if (!nodeId) throw new Error("没有可运行 Codex 的节点");
+  if (allowStart) agent.connectionWanted = true;
+  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
+  if (agent.runtimePromise?.nodeId === nodeId) return agent.runtimePromise.promise;
+  const promise = connectAgentRuntime(nodeId, allowStart);
+  agent.runtimePromise = { nodeId, promise };
+  try { await promise; }
+  finally { if (agent.runtimePromise?.promise === promise) agent.runtimePromise = null; }
+}
+
+async function connectAgentRuntime(nodeId, allowStart) {
   closeAgentSocket({ preserveSubmission: true });
-  setAgentRuntimeState("正在启动受控 App Server…", "offline");
   const epoch = agent.runtimeStartEpoch;
+  let node = await api(`/v1/nodes/${nodeId}`);
+  if (epoch !== agent.runtimeStartEpoch || $("#agentRuntimeNode").value !== nodeId) throw new Error("连接已取消");
+  dashboardNodes.set(node.nodeId, node);
+  if (node.reportedAppServer?.status === "running") return connectAgentSocket(nodeId);
+  if (!allowStart) throw new Error("运行节点尚未就绪");
+  setAgentRuntimeState("正在启动运行节点…", "offline");
   await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
   // A fresh Node may need its independent Codex package before it can start.
   // Keep the page responsive and show preparation instead of a 30-second timeout.
   const deadline = Date.now() + (dashboardNodes.get(nodeId)?.capabilities?.codexRuntimeDownload ? 21 * 60_000 : 30_000);
-  let node;
   let lastError = "";
   let errorSince = 0;
   while (Date.now() < deadline) {
@@ -2449,37 +2700,94 @@ async function startAgentRuntime() {
 async function stopAgentRuntime() {
   const nodeId = $("#agentRuntimeNode").value;
   if (!nodeId) return;
-  closeAgentSocket();
+  stopAgentRecovery();
   await api(`/v1/codex/runtimes/${nodeId}/stop`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
   setAgentRuntimeState("已请求停止 App Server", "offline");
 }
 
-async function resumeAgentThread(threadId) {
-  if (agent.sendPromise) return;
-  if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
-  setConversationNotice("正在从 PostgreSQL 恢复会话…");
+async function resumeAgentThreadOnSocket(threadId) {
+  const pending = agent.resumePromises.get(threadId);
+  if (pending?.socket === agent.socket) return pending.promise;
+  const socket = agent.socket;
+  const promise = restoreAgentThread(threadId, socket);
+  agent.resumePromises.set(threadId, { socket, promise });
+  try { return await promise; }
+  finally { if (agent.resumePromises.get(threadId)?.promise === promise) agent.resumePromises.delete(threadId); }
+}
+
+async function restoreAgentThread(threadId, socket) {
   const projectedThread = agent.threads.find((thread) => thread.threadId === threadId);
-  agent.previousRuntimeNodeId = projectedThread?.runtimeNodeId ?? projectedThread?.sourceNodeId ?? null;
   const projectedCwd = typeof projectedThread?.cwd === "string" ? projectedThread.cwd.trim() : "";
-  $("#conversationCwd").value = projectedCwd;
-  const params = { threadId };
+  const params = { threadId, excludeTurns: true };
   if (projectedCwd) params.cwd = projectedCwd;
   const result = await rpc("thread/resume", params, 120_000);
-  agent.threadId = result.thread.id;
+  if (agent.socket !== socket) throw new Error("恢复会话时 App Server 通道已变更，请重新发送");
+  agent.loadedThreadIds.add(result.thread.id);
+  if (agent.threadId !== threadId) return result.thread;
+  agent.previousRuntimeNodeId = projectedThread?.runtimeNodeId ?? projectedThread?.sourceNodeId ?? null;
   agent.threadRuntimeNodeId = agent.socketNodeId;
-  resetAgentTranscript(agent.threadId);
-  syncActiveTurnUi();
   $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
   const resumedCwd = result.cwd ?? projectedCwd;
   $("#conversationMeta").textContent = `${agent.threadId} · ${result.model ?? "默认模型"} · ${resumedCwd || "默认目录"}`;
   $("#conversationCwd").value = resumedCwd ?? "";
-  await loadAgentTranscript(agent.threadId, result.thread);
-  renderAgentThreads();
-  setConversationNotice();
+  return result.thread;
 }
 
-function newAgentThread() {
+async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (agent.sendPromise) return;
+  if (updateRoute) writeBrowserRoute("agent", threadId);
+  const epoch = ++agent.selectionEpoch;
+  agent.connectionWanted = true;
+  agent.threadId = threadId;
+  resetAgentTranscript(threadId);
+  agent.threadRuntimeNodeId = null;
+  $("#conversationTitle").textContent = "正在打开会话…";
+  $("#conversationMeta").textContent = "";
+  clear($("#conversationTrace")).append(element("div", "conversation-empty", "正在加载最近消息…"));
+  let projected = currentAgentThread();
+  if (!projected) {
+    try {
+      projected = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+      if (epoch !== agent.selectionEpoch) return;
+      agent.threads.push(projected);
+    } catch (error) {
+      if (epoch !== agent.selectionEpoch) return;
+      stopAgentRecovery();
+      $("#conversationTitle").textContent = "会话不可用";
+      setConversationNotice(error.message, "error");
+      return;
+    }
+  }
+  agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
+  const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
+  if (preferredNode && [...$("#agentRuntimeNode").options].some((option) => option.value === preferredNode)) {
+    $("#agentRuntimeNode").value = preferredNode;
+  }
+  $("#conversationTitle").textContent = projected?.title || "Codex 会话";
+  $("#conversationMeta").textContent = projected?.cwd || "";
+  $("#conversationCwd").value = projected?.cwd || "";
+  syncActiveTurnUi();
+  renderAgentThreads();
+  setConversationNotice();
+  // Reading a conversation must not wait for a Node, model runtime or a full
+  // resume response. The authoritative tail and live subscription are separate.
+  const history = loadAgentTranscript(threadId);
+  void (async () => {
+    try {
+      await startAgentRuntime();
+      if (epoch !== agent.selectionEpoch) return;
+      await resumeAgentThreadOnSocket(threadId);
+    } catch {
+      if (epoch === agent.selectionEpoch) scheduleAgentRecovery();
+    }
+  })();
+  await history;
+}
+
+function newAgentThread({ updateRoute = true } = {}) {
+  if (agent.sendPromise) return;
+  if (updateRoute) writeBrowserRoute("agent");
+  agent.selectionEpoch++;
   agent.threadId = null;
   agent.newThreadRequestId = null;
   agent.newThreadRequestSignature = null;
@@ -2638,7 +2946,14 @@ function addComposerFiles(files) {
 
 async function sendAgentMessage(text, attachments = [], progress = null) {
   updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
-  if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
+  agent.connectionWanted = true;
+  if (!agent.socketInitialized || !agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
+  // A thread ID survives reconnects, but the new App Server may have no live
+  // thread handle. Restore it before uploading attachments or starting a turn.
+  if (agent.threadId && !agent.loadedThreadIds.has(agent.threadId)) {
+    updateReplyProgress(progress, { phase: "正在恢复会话…" });
+    await resumeAgentThreadOnSocket(agent.threadId);
+  }
   if (!agent.threadId) {
     updateReplyProgress(progress, { phase: "正在创建会话…" });
     const params = {
@@ -2655,6 +2970,8 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    writeBrowserRoute("agent", agent.threadId, { replace: true });
+    agent.loadedThreadIds.add(agent.threadId);
     agent.newThreadRequestId = null;
     agent.newThreadRequestSignature = null;
     agent.threadRuntimeNodeId = agent.socketNodeId;
@@ -2666,7 +2983,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
   }
   updateReplyProgress(progress, { threadId: agent.threadId, phase: attachments.length ? "正在上传附件…" : "正在发送…" });
   const prepared = await prepareTurnInput(text, attachments, progress);
-  updateReplyProgress(progress, { phase: "正在提交消息，等待 Codex 回复…" });
+  updateReplyProgress(progress, { phase: "正在提交消息…" });
   const optimisticCompletedAt = new Date().toISOString();
   const optimistic = upsertTrace(`user-${Date.now()}`, "user", "你", prepared.message, "已发送", {
     completedAt: optimisticCompletedAt,
@@ -2685,7 +3002,12 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     if (optimistic.dataset.pendingUser === "true") optimistic.remove();
     throw error;
   }
-  if (result.turn?.id) {
+  // turn/start can accept input into an already-running turn, without emitting
+  // another turn/started. The RPC acknowledgement ends submission in both cases.
+  replyProgress.finish(progress);
+  renderReplyProgress();
+  if (result.turn?.id && !agent.turnTimings.get(result.turn.id)?.completedAt &&
+      !["completed", "failed", "interrupted"].includes(result.turn.status)) {
     updateReplyProgress(progress, { turnId: result.turn.id });
     agent.activeTurns.set(turnThreadId, result.turn.id);
     agent.turnThreads.set(result.turn.id, turnThreadId);
@@ -2697,17 +3019,24 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
 }
 
 async function openAgentConsole() {
+  writeBrowserRoute("agent", agent.threadId);
   show("agentView");
   await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+  if (agent.threadId) {
+    agent.connectionWanted = true;
+    void recoverAgentSession({ probe: true });
+  }
 }
 
 async function openRuntimeConsole() {
+  writeBrowserRoute("runtime");
   show("runtimeView");
   await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
 }
 
 async function leaveAgentConsole() {
-  closeAgentSocket();
+  writeBrowserRoute("nodes");
+  stopAgentRecovery();
   show("dashboardView");
   await loadDashboard();
 }
@@ -2737,8 +3066,7 @@ $("#loginForm").addEventListener("submit", async (event) => {
     const result = await api("/v1/admin/login", { method: "POST", body: JSON.stringify({ username: $("#username").value, password: $("#password").value }) });
     csrfToken = result.csrfToken;
     $("#password").value = "";
-    show("dashboardView");
-    await loadDashboard();
+    await restoreBrowserRoute();
   } catch (error) {
     $("#loginError").textContent = error.message;
     $("#loginError").classList.remove("hidden");
@@ -2754,7 +3082,7 @@ $("#logoutButton").addEventListener("click", async () => {
     await api("/v1/admin/logout", { method: "POST", body: "{}" });
   } finally {
     csrfToken = null;
-    closeAgentSocket();
+    stopAgentRecovery();
     disposeTerminal();
     workspace.node = null;
     show("loginView");
@@ -2774,6 +3102,12 @@ $("#agentManage").addEventListener("click", () => navigateGlobal("runtime").catc
 $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
 $("#agentThreadDrawerClose").addEventListener("click", () => setAgentThreadDrawer(false));
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
+window.addEventListener("popstate", () => {
+  if (["loginView", "setupView"].includes(document.body.dataset.view)) return;
+  agent.selectionEpoch++;
+  void restoreBrowserRoute().catch((error) => setConversationNotice(error.message, "error"));
+});
+agentThreadDrawerWide.addEventListener("change", () => setAgentThreadDrawer(agentThreadDrawerWide.matches, { focus: false }));
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && $("#agentThreadDrawer").classList.contains("open")) setAgentThreadDrawer(false);
 });
@@ -2785,18 +3119,41 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
-  if (agent.socketNodeId !== $("#agentRuntimeNode").value) closeAgentSocket();
+  if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   if (!agent.threadId) $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
   syncConversationSendUi();
 });
-$("#agentNewThread").addEventListener("click", () => { newAgentThread(); setAgentThreadDrawer(false); });
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearTimeout(agent.reconnectTimer);
+    clearTimeout(agent.heartbeatTimer);
+  } else void recoverAgentSession({ probe: true });
+});
+window.addEventListener("pageshow", (event) => { if (event.persisted) void recoverAgentSession({ probe: true }); });
+window.addEventListener("online", () => { void recoverAgentSession({ probe: true }); });
+window.addEventListener("offline", () => {
+  clearTimeout(agent.reconnectTimer);
+  clearTimeout(agent.heartbeatTimer);
+  if (agent.connectionWanted) setAgentRuntimeState("网络已断开，恢复后将自动连接", "offline");
+});
+
+const conversationOverlayObserver = new ResizeObserver(() => {
+  const head = $(".conversation-head").getBoundingClientRect().height;
+  const notice = $("#conversationNotice");
+  const noticeHeight = notice.classList.contains("hidden") ? 0 : notice.getBoundingClientRect().height + 8;
+  $(".conversation-card").style.setProperty("--conversation-overlay-height", `${head + noticeHeight}px`);
+});
+conversationOverlayObserver.observe($(".conversation-head"));
+conversationOverlayObserver.observe($("#conversationNotice"));
+$("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
 $("#agentThreadList").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-thread-id]");
   if (button) {
-    setAgentThreadDrawer(false);
+    closeAgentThreadDrawerOnMobile();
     resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
   }
 });
@@ -2869,9 +3226,9 @@ $("#conversationForm").addEventListener("submit", async (event) => {
   }
 });
 $("#conversationInput").addEventListener("keydown", (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
-    if (!agent.sendPromise) $("#conversationForm").requestSubmit();
+    if (!event.repeat && !agent.sendPromise && !$("#conversationSend").disabled) $("#conversationForm").requestSubmit();
   }
 });
 $("#conversationInput").addEventListener("input", resizeConversationInput);
@@ -3039,8 +3396,7 @@ async function bootstrap() {
     try {
       const session = await api("/v1/admin/session");
       csrfToken = session.csrfToken;
-      show("dashboardView");
-      await loadDashboard();
+      await restoreBrowserRoute();
     } catch {
       show("loginView");
     }

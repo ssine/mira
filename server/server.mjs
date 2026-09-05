@@ -354,20 +354,31 @@ async function route(request, response) {
     sendJson(response, 200, { storeId, data: await listImportedThreads(pool, storeId, limit) });
     return;
   }
+  match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})$/i);
+  if (request.method === "GET" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const storeId = url.searchParams.get("storeId") ?? defaultStoreId;
+    const [thread] = await listImportedThreads(pool, storeId, 1, match[1]);
+    if (!thread) errorJson(response, 404, "会话不存在或已不可访问", "not_found");
+    else sendJson(response, 200, thread);
+    return;
+  }
   match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})\/transcript$/i);
   if (request.method === "GET" && match) {
     const principal = await authorize(request, response, "admin");
     if (!principal) return;
     const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
     const cursorValue = url.searchParams.get("cursor");
-    const cursor = cursorValue === null || !/^\d+$/.test(cursorValue)
+    const tail = url.searchParams.get("tail") === "1";
+    const cursor = tail ? cursorValue : cursorValue === null || !/^\d+$/.test(cursorValue)
       ? null
       : boundedInteger(cursorValue, null, 0, Number.MAX_SAFE_INTEGER);
     const limit = boundedInteger(url.searchParams.get("limit"), 60, 10, 200);
     if (!storeId || (cursorValue !== null && cursor === null)) {
       errorJson(response, 400, "invalid store id or transcript cursor", "invalid_request"); return;
     }
-    const result = await getCodexTranscript(pool, storeId, match[1], { cursor, limit });
+    const result = await getCodexTranscript(pool, storeId, match[1], { cursor, limit, tail });
     sendJson(response, result.status, result.body);
     return;
   }

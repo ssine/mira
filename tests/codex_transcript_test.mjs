@@ -130,6 +130,69 @@ test("projects durable completion clocks and turn elapsed time for narrative mes
   assert.equal(result[1].elapsedMs, 6250);
 });
 
+test("native ThreadStore timing fields survive without outer rollout timestamps", () => {
+  const records = [
+    record("event_msg", { type: "task_started", turn_id: "native", started_at: 1788602400 }),
+    record("event_msg", { type: "agent_message", message: "Working" }),
+    record("event_msg", { type: "agent_message", message: "Done" }),
+    record("event_msg", { type: "task_complete", turn_id: "native", started_at: 1788602400, completed_at: 1788602412, duration_ms: 12542 }),
+  ];
+  const before = JSON.stringify(records);
+  const trace = projectCodexTranscript(records);
+  assert.equal(trace.length, 2);
+  for (const item of trace) {
+    assert.equal(item.completedAt, "2026-09-05T10:00:12.000Z");
+    assert.equal(item.elapsedMs, 12542);
+    assert.equal(item.timingScope, "turn", "turn timing must not pretend to be an individual message clock");
+  }
+  assert.equal(JSON.stringify(records), before, "presentation never rewrites canonical history");
+  const page = projectCodexTranscript(records.slice(1, 3), {
+    itemOffset: 1, initialTurnId: "native", initialTurnStartedAt: "2026-09-05T10:00:00.000Z", timingRecords: [records[3]],
+  });
+  assert.equal(page[0].elapsedMs, 12542, "a paginated turn can use its completion marker from a newer page");
+});
+
+test("deduplication keeps precise item timing and does not fabricate missing clocks", () => {
+  const trace = projectCodexTranscript([
+    record("event_msg", { type: "task_started", turn_id: "native", started_at: 1788602400 }),
+    record("event_msg", { type: "agent_message", message: "Done" }),
+    record("event_msg", { type: "item_completed", turn_id: "native", completed_at_ms: 1788602404250,
+      item: { type: "agentMessage", id: "message", text: "Done" } }),
+    record("event_msg", { type: "task_complete", turn_id: "native", completed_at: 1788602412, duration_ms: 12542 }),
+  ]);
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].completedAt, "2026-09-05T10:00:04.250Z");
+  assert.equal(trace[0].elapsedMs, 4250);
+  assert.equal(trace[0].timingScope, undefined);
+  assert.equal(projectCodexTranscript([record("event_msg", { type: "agent_message", message: "Unknown" })])[0].completedAt, undefined);
+});
+
+test("legacy turn_context prevents resumed messages inheriting a previous turn's clock", () => {
+  const trace = projectCodexTranscript([
+    record("event_msg", { type: "task_started", turn_id: "old", started_at: 1788602400 }),
+    record("event_msg", { type: "task_complete", turn_id: "old", completed_at: 1788602412, duration_ms: 12542 }),
+    record("turn_context", { turn_id: "resumed" }),
+    record("event_msg", { type: "agent_message", message: "Resumed reply" }),
+    record("response_item", { type: "message", role: "assistant", content: [{ type: "output_text", text: "Resumed reply" }],
+      internal_chat_message_metadata_passthrough: { turn_id: "resumed" } }),
+  ], { recordedAt: new Map([[3, "2026-09-05T11:00:00.000Z"], [4, "2026-09-05T11:00:20.000Z"]]) });
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].turnId, "resumed");
+  assert.equal(trace[0].completedAt, "2026-09-05T11:00:20.000Z");
+  assert.equal(trace[0].elapsedMs, 20000);
+  assert.equal(trace[0].elapsedApproximate, true);
+});
+
+test("canonical compaction remains a small durable transcript notice", () => {
+  const trace = projectCodexTranscript([
+    record("compacted", { message: "Long internal context summary", replacement_history: [] }),
+  ]);
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].kind, "compaction");
+  assert.equal(trace[0].body, "较早的上下文已自动压缩。");
+  assert.equal(trace[0].body.includes("internal"), false);
+});
+
 test("projects nested task completion errors as durable readable history", () => {
   const turnId = "00000000-0000-4000-8000-000000000021";
   const result = projectCodexTranscript([

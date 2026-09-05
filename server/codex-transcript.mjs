@@ -1,12 +1,24 @@
 import { getStoreHead, getThreadHistory } from "./thread-store.mjs";
+import { isDeepStrictEqual } from "node:util";
 import { toolItemView, responseToolView, reasoningText, reasoningParts } from "./public/trace-activity.js";
 
 const maximumProjectedTextBytes = 1024 * 1024;
 
+function isoTimestamp(value, numericScale = 1) {
+  const milliseconds = typeof value === "number" ? value * numericScale : Date.parse(value ?? "");
+  const date = new Date(milliseconds);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+}
+
 function recordTimestamp(record) {
-  const value = record?.timestamp ?? record?.payload?.timestamp;
-  const milliseconds = typeof value === "number" ? value : Date.parse(value ?? "");
-  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
+  const payload = record?.payload;
+  return isoTimestamp(payload?.completed_at_ms) ?? isoTimestamp(payload?.completed_at, 1000) ??
+    isoTimestamp(payload?.item?.completedAt) ?? isoTimestamp(record?.timestamp ?? payload?.timestamp);
+}
+
+function turnStartedAt(record) {
+  return isoTimestamp(record?.payload?.started_at, 1000) ?? isoTimestamp(record?.payload?.started_at_ms) ??
+    (["task_started", "turn_started"].includes(record?.payload?.type) ? recordTimestamp(record) : null);
 }
 
 function elapsedMilliseconds(startedAt, completedAt) {
@@ -116,8 +128,8 @@ function projectedMaterializedItem(item, context) {
     body: boundedText(valueText(item.text ?? item.plan ?? item.content)),
   };
   if (type === "contextcompaction") return {
-    ...base, kind: "system", title: "上下文压缩", markdown: true,
-    body: boundedText(valueText(item.summary) || "已压缩较早上下文"),
+    ...base, kind: "compaction", title: "上下文自动压缩", markdown: false,
+    body: "较早的上下文已自动压缩。",
   };
   if (["websearch", "imageview", "imagegeneration", "subagentactivity", "functioncalloutput"].includes(type)) return {
     ...base, kind: "tool", title: normalizedToolTitle(item), markdown: false,
@@ -156,36 +168,47 @@ function responseToolCall(payload, itemSeq, index, turnId) {
  * Project canonical Codex rollout items into a stable, presentation-oriented
  * trace. The source items are never changed; this projection can be rebuilt.
  */
-export function projectCodexTranscript(items) {
+export function projectCodexTranscript(items, options = {}) {
   const records = Array.isArray(items) ? items : [];
+  const offset = options.itemOffset ?? 0;
   const responseCalls = new Set();
   const materializedTools = new Map();
   const turnTimings = new Map();
   const callKey = (turnId, id) => JSON.stringify([turnId ?? null, id]);
-  let scannedTurnId = null;
-  for (const [index, record] of records.entries()) {
+  let scannedTurnId = options.initialTurnId ?? null;
+  if (scannedTurnId && options.initialTurnStartedAt) {
+    turnTimings.set(scannedTurnId, { startedAt: options.initialTurnStartedAt, startedApproximate: options.initialTurnStartedApproximate });
+  }
+  for (const [index, record] of [...records, ...(options.timingRecords ?? [])].entries()) {
     const payload = record?.payload ?? {};
-    if (record?.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type)) {
+    if (record?.type === "turn_context" || (record?.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type))) {
       scannedTurnId = payload.turn_id ?? scannedTurnId;
     }
     const turnId = payload.turn_id ?? payload.internal_chat_message_metadata_passthrough?.turn_id ?? scannedTurnId;
-    const completedAt = recordTimestamp(record);
-    if (turnId && completedAt) {
+    if (turnId) {
       const timing = turnTimings.get(turnId) ?? {};
+      if (record?.type === "turn_context" && !timing.startedAt) {
+        timing.startedAt = recordTimestamp(record) ?? options.recordedAt?.get(offset + index + 1);
+        timing.startedApproximate = Boolean(timing.startedAt);
+      }
       if (record?.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type)) {
-        timing.startedAt ??= completedAt;
+        const startedAt = turnStartedAt(record);
+        if (startedAt) { timing.startedAt = startedAt; timing.startedApproximate = false; }
       }
       if (record?.type === "event_msg" && ["task_complete", "turn_complete", "turn_aborted"].includes(payload.type)) {
-        timing.completedAt = completedAt;
+        const startedAt = turnStartedAt(record);
+        if (startedAt) { timing.startedAt = startedAt; timing.startedApproximate = false; }
+        timing.completedAt = recordTimestamp(record);
+        if (Number.isFinite(payload.duration_ms) && payload.duration_ms >= 0) timing.elapsedMs = payload.duration_ms;
       }
       turnTimings.set(turnId, timing);
     }
     if (record?.type === "response_item") {
-      const tool = responseToolCall(payload, index + 1, index, turnId);
-      if (tool?.isCall) responseCalls.add(callKey(turnId, tool.callId));
+      const tool = responseToolCall(payload, offset + index + 1, index, turnId);
+      if (tool?.isCall || (options.fragments && tool?.isOutput)) responseCalls.add(callKey(turnId, tool.callId));
     }
     if (record?.type === "event_msg" && payload.type === "item_completed" && payload.item?.id) {
-      const entry = projectedMaterializedItem(payload.item, { itemSeq: index + 1, index, turnId });
+      const entry = projectedMaterializedItem(payload.item, { itemSeq: offset + index + 1, index, turnId });
       if (entry?.kind === "tool") materializedTools.set(callKey(turnId, payload.item.id), entry);
     }
   }
@@ -193,14 +216,19 @@ export function projectCodexTranscript(items) {
   const projectedById = new Map();
   const projectedNarratives = new Map();
   const toolCalls = new Map();
-  let currentTurnId = null;
+  let currentTurnId = options.initialTurnId ?? null;
 
   function withTiming(entry) {
     if (!entry) return entry;
-    const completedAt = entry.completedAt ?? recordTimestamp(records[(entry.sourceItemSeq ?? 1) - 1]);
+    const timing = turnTimings.get(entry.turnId);
+    const itemClock = entry.completedAt ?? recordTimestamp(records[(entry.sourceItemSeq ?? (offset + 1)) - offset - 1]);
+    const recordedAt = options.recordedAt?.get(entry.sourceItemSeq);
+    const completedAt = itemClock ?? (["assistant", "user"].includes(entry.kind) ? timing?.completedAt ?? recordedAt : null);
     if (completedAt) entry.completedAt = completedAt;
+    if (!itemClock && completedAt) entry.timingScope = timing?.completedAt ? "turn" : "recorded";
     if (["user", "assistant"].includes(entry.kind) && entry.elapsedMs == null) {
-      entry.elapsedMs = elapsedMilliseconds(turnTimings.get(entry.turnId)?.startedAt, completedAt);
+      entry.elapsedMs = !itemClock && timing?.elapsedMs != null ? timing.elapsedMs : elapsedMilliseconds(timing?.startedAt, completedAt);
+      if (timing?.startedApproximate && (itemClock || timing?.elapsedMs == null)) entry.elapsedApproximate = true;
     }
     return entry;
   }
@@ -216,7 +244,15 @@ export function projectCodexTranscript(items) {
       // A single Codex message can be persisted as item_completed,
       // event_msg and response_item records. Deduplicate those representations
       // without collapsing equal messages from different turns.
-      if (previous && (entry.turnId || entry.sourceItemSeq - previous.sourceItemSeq <= 3)) return;
+      if (previous && (entry.turnId || entry.sourceItemSeq - previous.sourceItemSeq <= 3)) {
+        if ((!previous.completedAt && entry.completedAt) || (previous.timingScope && !entry.timingScope && entry.completedAt)) {
+          previous.completedAt = entry.completedAt;
+          previous.elapsedMs = entry.elapsedMs;
+          previous.timingScope = entry.timingScope;
+          previous.elapsedApproximate = entry.elapsedApproximate;
+        }
+        return;
+      }
       projectedNarratives.set(signature, entry);
     }
     const existing = projectedById.get(entry.key);
@@ -229,8 +265,17 @@ export function projectCodexTranscript(items) {
 
   for (const [index, record] of records.entries()) {
     const payload = record?.payload ?? {};
-    const itemSeq = index + 1;
+    const itemSeq = offset + index + 1;
     const recordTurnId = payload.turn_id ?? payload.internal_chat_message_metadata_passthrough?.turn_id ?? currentTurnId;
+    if (record.type === "turn_context") {
+      currentTurnId = payload.turn_id ?? currentTurnId;
+      continue;
+    }
+    if (record.type === "compacted") {
+      push({ key: `history-${itemSeq}-compaction`, turnId: recordTurnId, sourceItemSeq: itemSeq,
+        kind: "compaction", title: "上下文自动压缩", markdown: false, body: "较早的上下文已自动压缩。" });
+      continue;
+    }
     if (record.type === "event_msg" && ["task_started", "turn_started"].includes(payload.type)) {
       currentTurnId = payload.turn_id ?? currentTurnId;
       continue;
@@ -251,9 +296,14 @@ export function projectCodexTranscript(items) {
       const materializedTurnId = payload.turn_id ?? recordTurnId;
       const key = callKey(materializedTurnId, materialized?.id);
       if (!(materializedTools.has(key) && responseCalls.has(key))) {
-        push(projectedMaterializedItem(materialized, {
+        const entry = projectedMaterializedItem(materialized, {
           itemSeq, index, turnId: materializedTurnId,
-        }));
+        });
+        if (options.fragments && entry?.kind === "tool" && entry.itemId) {
+          entry.key = `history-tool-${entry.turnId ?? "unscoped"}-${entry.itemId}`;
+          entry.toolFragment = { materialized: true };
+        }
+        push(entry);
       }
       continue;
     }
@@ -303,6 +353,12 @@ export function projectCodexTranscript(items) {
         if (view) state.entry.activity = view.activity;
       }
       state.entry.body = state.materialized?.body || toolBody(state.input, state.output);
+      if (options.fragments) state.entry.toolFragment = state.materialized
+        ? { materialized: true }
+        : {
+          input: state.input === undefined ? null : boundedText(printable(state.input)),
+          output: state.output === undefined ? null : boundedText(printable(state.output)),
+        };
       continue;
     }
     if (payload.type === "reasoning") push({
@@ -332,6 +388,7 @@ export function paginateCodexTranscript(trace, cursor = null, limit = 60) {
 }
 
 export async function getCodexTranscript(pool, storeId, threadId, options = {}) {
+  if (options.tail) return getCodexTranscriptTail(pool, storeId, threadId, options);
   const head = await getStoreHead(pool, storeId);
   const manifest = head.historyManifest?.[threadId];
   if (!manifest) return { status: 404, body: { error: "thread history not found", code: "not_found" } };
@@ -348,6 +405,149 @@ export async function getCodexTranscript(pool, storeId, threadId, options = {}) 
       generation: history.body.generation,
       itemCount: history.body.itemCount,
       ...page,
+    },
+  };
+}
+
+async function restoreImportedTimestamps(pool, storeId, threadId, rows) {
+  const imported = await pool.query(
+    `SELECT import_id, source_item_count::text FROM mira_codex_session_imports
+     WHERE store_id=$1 AND thread_id=$2 AND status='imported'
+     ORDER BY store_event_seq DESC, created_at DESC LIMIT 1`, [storeId, threadId]);
+  const recordedAt = new Map(rows.map((row) => [Number(row.item_seq), row.created_at?.toISOString()]));
+  if (!imported.rowCount) return recordedAt;
+  const source = imported.rows[0];
+  const segments = await pool.query(
+    `SELECT source_import_id, first_line_seq::text, item_count::text
+     FROM mira_codex_session_import_segments WHERE import_id=$1 ORDER BY segment_index`, [source.import_id]);
+  const parts = segments.rowCount ? segments.rows : [{ source_import_id: source.import_id, first_line_seq: 1, item_count: source.source_item_count }];
+  let offset = 0;
+  for (const segment of parts) {
+    const count = Number(segment.item_count);
+    const matching = rows.filter((row) => Number(row.item_seq) > offset && Number(row.item_seq) <= offset + count);
+    const firstLine = Number(segment.first_line_seq);
+    if (matching.length) {
+      const raw = await pool.query(
+        `SELECT line_seq::text, raw_record FROM mira_codex_session_import_records
+         WHERE import_id=$1 AND line_seq=ANY($2::bigint[])`,
+        [segment.source_import_id, matching.map((row) => firstLine + Number(row.item_seq) - offset - 1)]);
+      const byLine = new Map(raw.rows.map((row) => [Number(row.line_seq), row.raw_record]));
+      for (const row of matching) {
+        const original = byLine.get(firstLine + Number(row.item_seq) - offset - 1);
+        // A replacement generation may have different content at the same
+        // position. Attach provenance clocks only to an exact matching item.
+        if (original?.type !== row.payload?.type || !isDeepStrictEqual(original?.payload, row.payload?.payload)) continue;
+        recordedAt.delete(Number(row.item_seq));
+        const timestamp = recordTimestamp(original);
+        if (timestamp && !recordTimestamp(row.payload)) row.payload = { ...row.payload, timestamp };
+      }
+    }
+    offset += count;
+  }
+  return recordedAt;
+}
+
+// V2 cursors use immutable raw sequence positions, scoped to one generation.
+// Keep the original numeric-cursor reader for already-open older Web clients.
+export async function getCodexTranscriptTail(pool, storeId, threadId, options = {}) {
+  const cursor = options.cursor == null ? null : /^t2:(\d+):(\d+):(\d+)$/.exec(String(options.cursor));
+  if (options.cursor != null && (!cursor || cursor.slice(1).some((value) => !Number.isSafeInteger(Number(value))))) {
+    return { status: 400, body: { error: "invalid transcript cursor", code: "invalid_request" } };
+  }
+  const head = await pool.query(
+    `SELECT active_generation::text, item_count::text, through_event_seq::text
+     FROM codex_thread_projections WHERE store_id = $1 AND thread_id = $2`,
+    [storeId, threadId],
+  );
+  if (!head.rowCount) return { status: 404, body: { error: "thread history not found", code: "not_found" } };
+  const generation = Number(head.rows[0].active_generation);
+  const itemCount = Number(head.rows[0].item_count);
+  if (cursor && (Number(cursor[1]) !== generation || Number(cursor[3]) > itemCount)) {
+    return { status: 409, body: { error: "会话历史已更新，请重新加载", code: "stale_transcript_cursor" } };
+  }
+  const snapshotCount = cursor ? Number(cursor[3]) : itemCount;
+  const end = cursor ? Number(cursor[2]) : snapshotCount + 1;
+  if (end < 1 || end > snapshotCount + 1) {
+    return { status: 400, body: { error: "invalid transcript cursor", code: "invalid_request" } };
+  }
+  const limit = Math.max(10, Math.min(200, options.limit ?? 60));
+  const windowSize = Math.max(120, limit * 4);
+  const result = await pool.query(
+    `SELECT item_seq::text, payload, created_at FROM codex_thread_events AS events
+     WHERE store_id = $1 AND thread_id = $2 AND generation = $3 AND item_seq < $4
+     ORDER BY events.item_seq DESC LIMIT $5`,
+    [storeId, threadId, generation, end, windowSize],
+  );
+  const rows = result.rows.reverse();
+  const start = rows.length ? Number(rows[0].item_seq) : end;
+  if (rows.length !== Math.min(windowSize, end - 1) ||
+      rows.some((row, index) => Number(row.item_seq) !== end - rows.length + index)) {
+    return { status: 409, body: { error: "thread history is incomplete", code: "history_incomplete" } };
+  }
+  // Only fetch candidate turn markers, never the preceding full history.
+  // JSON -> operators decode escaped NUL even in unrelated values. A text
+  // prefilter avoids that; validate the actual structure in JS (which preserves
+  // NUL) so nested lookalikes cannot supply another turn's identity.
+  let context = null;
+  let contextRow = null;
+  let contextBefore = start;
+  while (contextBefore > 1) {
+    const candidates = await pool.query(
+      `SELECT item_seq::text, payload, created_at FROM codex_thread_events AS events
+       WHERE store_id = $1 AND thread_id = $2 AND generation = $3 AND item_seq < $4
+         AND payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|turn_context)"'
+       ORDER BY events.item_seq DESC LIMIT 1`,
+      [storeId, threadId, generation, contextBefore],
+    );
+    contextRow = candidates.rows.find(({ payload: record }) => record?.type === "turn_context" || (record?.type === "event_msg" &&
+      ["task_started", "turn_started"].includes(record.payload?.type)));
+    context = contextRow?.payload;
+    if (context || candidates.rows.length === 0) break;
+    contextBefore = Number(candidates.rows.at(-1).item_seq);
+  }
+  const recordedAt = await restoreImportedTimestamps(pool, storeId, threadId, contextRow ? [contextRow, ...rows] : rows);
+  context = contextRow?.payload;
+  const projectionOptions = {
+    itemOffset: start - 1,
+    initialTurnId: context?.payload?.turn_id,
+    initialTurnStartedAt: turnStartedAt(context) ?? recordTimestamp(context) ?? recordedAt.get(Number(contextRow?.item_seq)),
+    initialTurnStartedApproximate: !turnStartedAt(context),
+    fragments: true,
+    recordedAt,
+  };
+  let projected = projectCodexTranscript(rows.map((row) => row.payload), projectionOptions);
+  // A page can end inside a turn. Its completion marker may be in the newer
+  // page; read just that marker within the same immutable snapshot boundary.
+  if (end <= snapshotCount && projected.some((item) => item.kind === "assistant" && (!item.completedAt || item.timingScope === "recorded"))) {
+    let after = end - 1;
+    while (after < snapshotCount) {
+      const candidates = await pool.query(
+        `SELECT item_seq::text, payload FROM codex_thread_events
+         WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4 AND item_seq<=$5
+           AND payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_complete|turn_complete|turn_aborted)"'
+         ORDER BY item_seq LIMIT 1`, [storeId, threadId, generation, after, snapshotCount]);
+      if (!candidates.rowCount) break;
+      let record = candidates.rows[0].payload;
+      if (record?.type === "event_msg" && ["task_complete", "turn_complete", "turn_aborted"].includes(record.payload?.type)) {
+        if (!recordTimestamp(record)) {
+          await restoreImportedTimestamps(pool, storeId, threadId, candidates.rows);
+          record = candidates.rows[0].payload;
+        }
+        projected = projectCodexTranscript(rows.map((row) => row.payload), { ...projectionOptions, timingRecords: [record] });
+        break;
+      }
+      after = Number(candidates.rows[0].item_seq);
+    }
+  }
+  const trace = projected.slice(-limit);
+  const before = projected.length > limit ? Math.min(...trace.map((item) => item.sourceItemSeq)) : start;
+  return {
+    status: 200,
+    body: {
+      storeId, threadId, generation, itemCount,
+      storeVersion: Number(head.rows[0].through_event_seq),
+      trace, projectionVersion: 2, totalTraceItems: null,
+      nextCursor: before > 1 ? `t2:${generation}:${before}:${snapshotCount}` : null,
     },
   };
 }

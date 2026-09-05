@@ -341,17 +341,30 @@ export async function normalizeImportedThreadHistoryModes(pool) {
   return normalized;
 }
 
-export async function listImportedThreads(pool, storeId = defaultStoreId, limit = 200) {
+export async function listImportedThreads(pool, storeId = defaultStoreId, limit = 200, threadId = null) {
   const id = safeStoreId(storeId);
   if (!id) throw Object.assign(new Error("invalid store id"), { statusCode: 400, code: "invalid_request" });
   const result = await pool.query(
     `SELECT projections.thread_id, projections.parent_thread_id, projections.source_kind,
             projections.title, projections.cwd, projections.item_count::text,
-            projections.active_generation::text, projections.updated_at,
+            projections.active_generation::text, activity.updated_at,
             imports.import_id, imports.source_node_id, imports.source_codex_version,
             imports.created_at AS imported_at, runtimes.node_id AS runtime_node_id,
             runtimes.bound_at AS runtime_bound_at
      FROM codex_thread_projections projections
+     LEFT JOIN LATERAL (
+       -- Projection rebuilds touch every row; use the conversation's own clock.
+       SELECT value::timestamptz AS updated_at
+       FROM (VALUES
+         (1, projections.state #>> '{metadata,updated_at}'),
+         (2, projections.state #>> '{metadata,advance_recency_at}'),
+         (3, projections.state #>> '{metadata,created_at}'),
+         (4, projections.state #>> '{createdThread,metadata,timestamp}')
+       ) timestamps(priority, value)
+       WHERE value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+         AND pg_input_is_valid(value, 'timestamp with time zone')
+       ORDER BY priority LIMIT 1
+     ) activity ON TRUE
      LEFT JOIN LATERAL (
        SELECT import_id, source_node_id, source_codex_version, created_at
        FROM mira_codex_session_imports
@@ -360,15 +373,15 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
      ) imports ON TRUE
      LEFT JOIN mira_codex_thread_runtimes runtimes
        ON runtimes.store_id = projections.store_id AND runtimes.thread_id = projections.thread_id
-     WHERE projections.store_id = $1
-     ORDER BY projections.updated_at DESC LIMIT $2`,
-    [id, limit],
+     WHERE projections.store_id = $1 AND ($3::text IS NULL OR projections.thread_id = $3)
+     ORDER BY activity.updated_at DESC NULLS LAST, projections.thread_id DESC LIMIT $2`,
+    [id, limit, threadId],
   );
   return result.rows.map((row) => ({
     threadId: row.thread_id, parentThreadId: row.parent_thread_id,
     sourceKind: row.source_kind, title: row.title, cwd: row.cwd,
     itemCount: Number(row.item_count), generation: Number(row.active_generation),
-    updatedAt: row.updated_at.toISOString(), importId: row.import_id,
+    updatedAt: row.updated_at?.toISOString() ?? null, importId: row.import_id,
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,
     importedAt: row.imported_at?.toISOString() ?? null,
     runtimeNodeId: row.runtime_node_id, runtimeBoundAt: row.runtime_bound_at?.toISOString() ?? null,

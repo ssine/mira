@@ -15,6 +15,15 @@ try {
   const page = await context.newPage();
   const pageErrors = [];
   const cspErrors = [];
+  const threadA = "00000000-0000-4000-8000-0000000000a1";
+  const threadB = "00000000-0000-4000-8000-0000000000b2";
+  const summary = (threadId) => ({ threadId, title: `Conversation ${threadId}`, updatedAt: "2026-09-05T00:00:00Z", itemCount: 1 });
+  await page.route("**/v1/codex/threads?*", (route) => route.fulfill({ json: { data: [summary(threadA)] } }));
+  await page.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: summary(threadB) }));
+  await page.route("**/v1/codex/threads/*/transcript?*", (route) => {
+    const threadId = new URL(route.request().url()).pathname.split("/").at(-2);
+    return route.fulfill({ json: { generation: 1, trace: [{ key: "message", turnId: "turn", kind: "assistant", body: `History ${threadId}` }] } });
+  });
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("console", (message) => {
     if (message.type() === "error" && /content security policy/i.test(message.text())) cspErrors.push(message.text());
@@ -42,19 +51,44 @@ try {
   assert.equal(await page.locator(".chat-shell").count(), 1);
   assert.equal(await page.locator(".topbar").isVisible(), false, "chat has its own dedicated shell");
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
-  await page.locator("#agentThreadDrawerToggle").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
   assert.equal(await page.locator("#agentHome").isVisible(), true);
   assert.equal(await page.locator("#agentManage").isVisible(), true);
   await page.locator("#agentThreadDrawerClose").click();
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
+  await page.locator("#agentThreadDrawerToggle").click();
   if (screenshotDirectory) await page.screenshot({ path: `${screenshotDirectory}/agent-light.png`, fullPage: true });
+
+  await page.locator(`[data-thread-id="${threadA}"]`).click();
+  await page.waitForURL(`**/?thread=${threadA}`);
+  await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
+  await page.reload({ waitUntil: "networkidle" });
+  await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
+  // A bookmarked conversation outside the recent list must still resolve.
+  await page.goto(`${serverUrl}/?thread=${threadB}`, { waitUntil: "networkidle" });
+  await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadB}` }).waitFor();
+  await page.goBack();
+  await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
+  await page.locator("#agentNewThread").click();
+  await page.waitForURL("**/?view=agent");
+  await page.goBack();
+  await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
+  await page.locator("#agentHome").click();
+  await page.locator("#logoutButton").click();
+  await page.goto(`${serverUrl}/?thread=${threadA}`);
+  await page.locator("#loginView:not(.hidden)").waitFor();
+  await page.locator("#password").fill(password);
+  await page.locator("#loginForm button[type=submit]").click();
+  await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
 
   await page.locator("#agentThemeToggle").click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
   await page.reload({ waitUntil: "networkidle" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
-  await page.locator("#dashboardView:not(.hidden)").waitFor();
+  await page.locator("#agentView:not(.hidden)").waitFor();
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim()), "#6cb8f6");
+  await page.locator("#agentHome").click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.locator("#globalNodes").isVisible(), true);

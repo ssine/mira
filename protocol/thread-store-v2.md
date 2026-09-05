@@ -231,6 +231,17 @@ PoC 的 E2E 已验证这个 quiescent handoff。生产版仍应把它升级为�
 GET /v1/codex/threads/{threadId}/transcript?storeId=personal&limit=60&cursor={nextCursor}
 ```
 
+新版 Web 使用 `tail=1`，通过主键倒序读取最多 `max(120, limit * 4)` 条原始记录，先显示最近
+一页。只补读前一个 turn 的起始标记以保持 turn ID 和时间语义，不读取整个 store state 或全量
+会话历史。`t2:` cursor 记录 generation、排他的原始序号边界和首次读取时的 item count；追加不
+影响向前翻页，generation 变化返回 `409 stale_transcript_cursor`。这一模式不为计数扫描完整
+历史，因此 `totalTraceItems` 为 `null`，一页可能少于 `limit` 条。跨页工具输入、输出和 materialized
+记录通过 `toolFragment` 与稳定的 turn/call key 合并。分页不修改任何权威事件。
+
+不带 `tail=1` 的旧版数字 cursor 继续兼容。Web 读取最近消息与运行节点连接并行；
+`thread/resume` 使用 `excludeTurns: true`，模型恢复上下文不再阻塞消息首屏。页面在可见且联网时
+退避重连，在前台恢复、网络恢复和 BFCache 恢复时检查通道，补读最近历史；重连不重放 `turn/start`。
+
 Server 在同一个 store head 上读取 active generation，并从权威 rollout items 重建有序的
 `user`、`assistant`、`reasoning`、`tool` 和 `system` 轨迹。投影会配对原始
 `custom_tool_call` / `custom_tool_call_output`，也能读取 paginated rollout 的
