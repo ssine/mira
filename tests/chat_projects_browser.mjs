@@ -26,6 +26,15 @@ try {
   await context.route("**/v1/nodes", route=>route.fulfill({json:{data:nodes}}));
   for (const node of nodes) await context.route(`**/v1/nodes/${node.nodeId}`, route=>route.fulfill({json:node}));
   const messages=[]; let rejectStop = true; const forkId=crypto.randomUUID();
+  let forkCreations = 0, loseTitleReply = true;
+  const titleRequests = [];
+  await context.route('**/fork-title?storeId=personal', async route => {
+    titleRequests.push(route.request().postData());
+    const response = await route.fetch();
+    assert.equal(response.status(), 200);
+    if (loseTitleReply) { loseTitleReply = false; return route.abort('failed'); }
+    return route.fulfill({ response });
+  });
   await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket=>socket.onMessage(async data=>{
     const request=JSON.parse(data); if (request.id === undefined) return;
     messages.push(request);
@@ -38,12 +47,14 @@ try {
       assert.equal(request.params.excludeTurns,true);
       assert.equal(request.params.deferGoalContinuation,true);
       assert.match(request.params.miraRequestId,/^[0-9a-f-]{36}$/);
+      if (forkCreations) { send({thread:{id:forkId,name:'Runtime source name'},cwd:'/work/project'}); return; }
+      forkCreations++;
       const original=await getSnapshot(pool,'personal');
       original.snapshot.histories[forkId]=[];
       original.snapshot.metadata_updates[forkId]={title:'Forked thread',cwd:'/work/project',updated_at:new Date().toISOString()};
       assert.equal((await putSnapshot(pool,'personal',{expectedVersion:original.version,snapshot:original.snapshot},{'x-codex-operation-id':crypto.randomUUID()})).status,200);
       await pool.query("INSERT INTO mira_codex_thread_runtimes (store_id,thread_id,node_id) VALUES ('personal',$1,$2)",[forkId,nodes[0].nodeId]);
-      send({thread:{id:forkId},cwd:'/work/project'});
+      send({thread:{id:forkId,name:'Runtime source name'},cwd:'/work/project'});
     }
     else if(request.method==='thread/start')send({thread:{id:crypto.randomUUID()},cwd:request.params.cwd});
     else if(request.method==='turn/start')send({turn:{id:'active-turn',status:'inProgress'}});
@@ -153,10 +164,21 @@ try {
   await page.locator('#conversationInput').fill('Draft kept while creating a fork');
   await page.locator('#conversationMenuToggle').click();
   await page.locator('#threadFork').click();
+  await page.waitForFunction(() => document.querySelector('#conversationNotice').textContent.includes('Failed to fetch'));
+  assert.equal((await getSnapshot(pool,'personal')).snapshot.names[forkId], '项目的新标题 (1)');
+  await page.locator('#conversationMenuToggle').click();
+  await page.locator('#threadFork').click();
   await page.waitForURL(`**/?thread=${forkId}`);
+  await page.waitForFunction(() => document.title === '项目的新标题 (1) · Mira');
+  assert.equal((await getSnapshot(pool,'personal')).snapshot.names[forkId], '项目的新标题 (1)');
   await page.waitForFunction(()=>!document.querySelector('#agentNewThread').disabled);
   assert.equal(await page.locator('#conversationInput').inputValue(),'Draft kept while creating a fork');
-  assert.equal(messages.filter(m=>m.method==='thread/fork').length,1);
+  assert.equal(messages.filter(m=>m.method==='thread/fork').length,2);
+  assert.equal(forkCreations,1,'retry reuses the acknowledged fork');
+  assert.equal(titleRequests.length,2);
+  assert.equal(titleRequests[0],titleRequests[1],'lost title response reuses the exact operation and body');
+  assert.equal((await context.request.post(`${origin}/v1/codex/threads/${forkId}/fork-title`,{data:JSON.parse(titleRequests[0])})).status(),403);
+  assert.equal((await fetch(`${origin}/v1/codex/threads/${forkId}/fork-title`,{method:'POST',headers:{'content-type':'application/json'},body:titleRequests[0]})).status,401);
   assert.equal(await page.locator(`[data-thread-row="${ids[0]}"]`).count(),1,'fork preserves the source conversation');
   assert.equal(await page.locator(`[data-thread-row="${forkId}"]`).evaluate(e=>e.closest('.thread-project').dataset.projectKey),await page.locator(`[data-thread-row="${ids[0]}"]`).evaluate(e=>e.closest('.thread-project').dataset.projectKey));
   await page.locator(`button[data-thread-id="${ids[0]}"]`).click();

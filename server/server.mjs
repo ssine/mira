@@ -17,7 +17,7 @@ import { currentSchemaVersion, initializeDatabase } from "./db.mjs";
 import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
 import { NodeChannel } from "./node-channel.mjs";
 import { SSHRelay } from "./ssh-relay.mjs";
-import { manageThread, renameThread } from "./thread-management.mjs";
+import { manageThread, nameForkThread, renameThread } from "./thread-management.mjs";
 import { startThreadErasureWorker, threadErasureStatus } from "./thread-erasure.mjs";
 import {
   approveEnrollment, createEnrollment, getEnrollment, listEnrollments, rejectEnrollment,
@@ -390,6 +390,19 @@ async function route(request, response) {
     if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
     const result = await manageThread(pool, storeId, match[1], match[2] ?? "delete", await readJson(request));
     sendJson(response, result.status, result.body);
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})\/fork-title$/i);
+  if (request.method === "POST" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
+    if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
+    const result = await nameForkThread(pool, storeId, match[1], await readJson(request));
+    if (result.status !== 200) { sendJson(response, result.status, result.body); return; }
+    const [thread] = await listImportedThreads(pool, storeId, 1, match[1]);
+    if (!thread) errorJson(response, 404, "分支会话不存在或已删除", "not_found");
+    else sendJson(response, 200, thread);
     return;
   }
   match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})$/i);

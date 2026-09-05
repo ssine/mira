@@ -9,7 +9,7 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { commitDelta, getStoreHead, getThreadHistory, getSnapshot } from "../server/thread-store.mjs";
-import { manageThread, renameThread } from "../server/thread-management.mjs";
+import { manageThread, nameForkThread, renameThread } from "../server/thread-management.mjs";
 
 const binary = process.env.CODEX_TEST_BINARY;
 assert(binary && path.isAbsolute(binary), "CODEX_TEST_BINARY must name the candidate runtime");
@@ -96,10 +96,10 @@ try {
   assert.deepEqual(after.histories[parent],before,'fork cannot rewrite the source');
   assert.match(JSON.stringify(after.histories[child]),/FORK_HISTORY/,'fork retains source messages');
   head=await getStoreHead(pool,store);
-  assert.equal((await renameThread(pool,store,child,{name:'Fork title',expectedName:head.state.names?.[child]??null,generation:head.historyManifest[child].generation,operationId:crypto.randomUUID()})).status,200);
+  assert.equal((await nameForkThread(pool,store,child,{sourceThreadId:parent,expectedName:head.state.names?.[child]??null,generation:head.historyManifest[child].generation,operationId:crypto.randomUUID()})).status,200);
   const third=await client('third');
   const recovered=await third.call('thread/resume',{threadId:child,excludeTurns:true,approvalPolicy:'never',sandbox:'read-only'});
-  assert.equal(recovered.thread.name,'Fork title');
+  assert.equal(recovered.thread.name,'Source title (1)');
   await third.turn(child);
   const final=(await getSnapshot(pool,store)).snapshot;
   assert.deepEqual(final.histories[parent],before,'continuing the fork keeps source history independent');

@@ -152,6 +152,7 @@ const agent = {
   rename: null,
   forkPromise: null,
   forkRequests: new Map(),
+  forkTitleRequests: new Map(),
   showArchived: false,
   threadActionPromise: null,
   deleteTarget: null,
@@ -3066,6 +3067,17 @@ async function forkThreadFromMenu() {
       agent.forkRequests.set(sourceId, request);
     }
     const result = await forkWithNode(node, request);
+    let titleRequest = agent.forkTitleRequests.get(request.miraRequestId);
+    if (!titleRequest) {
+      const fork = await api(`/v1/codex/threads/${encodeURIComponent(result.thread.id)}?storeId=personal`);
+      titleRequest = JSON.stringify({ sourceThreadId: sourceId, expectedName: fork.name ?? null,
+        generation: fork.generation, operationId: request.miraRequestId });
+      agent.forkTitleRequests.set(request.miraRequestId, titleRequest);
+    }
+    await api(`/v1/codex/threads/${encodeURIComponent(result.thread.id)}/fork-title?storeId=personal`, {
+      method: "POST", body: titleRequest,
+    });
+    agent.forkTitleRequests.delete(request.miraRequestId);
     agent.forkRequests.delete(sourceId);
     await loadAgentThreads();
     const created = agent.threads.find((thread) => thread.threadId === result.thread.id);

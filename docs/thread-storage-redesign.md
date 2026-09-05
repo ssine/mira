@@ -133,7 +133,9 @@ store and should be handled under the administrator's normal backup retention.
   deletion fences, shared fork provenance, erasure failure/retry and concurrent writes.
 - `tests/session_transfer_e2e.mjs`: raw/unknown fields, subagent metadata, imported
   fork lineage, large streamed import and compatibility reads.
-- `tests/thread_fork_e2e.mjs`: real Codex App Server fork and fresh-process resume.
+- `tests/fork_titles_e2e.mjs`: inherited fork names, numbered collisions (including archived
+  threads), concurrent allocation, idempotent retries and preservation of manual edits.
+- `tests/thread_fork_e2e.mjs`: real Codex App Server fork, inherited name and fresh-process resume.
 - `tests/thread_cli_e2e.mjs`: CLI creation and resume with a fresh `CODEX_HOME`,
   reconstructing the previous model context entirely from PostgreSQL.
 - `tests/runtime_reliability_e2e.mjs`: streaming, lost replies, UUID-stable retry,

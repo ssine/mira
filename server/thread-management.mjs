@@ -1,6 +1,65 @@
 import { commitDelta, getStoreHead } from "./thread-store.mjs";
 import { lockScope, beginReceipt, publishReceipt } from "./storage-rows.mjs";
 
+export function nextForkTitle(sourceTitle, usedTitles) {
+  const base = (sourceTitle || "新会话").replace(/[\u0000-\u001f\u007f]/g, " ").trim()
+    .replace(/ \([1-9]\d*\)$/, "") || "新会话";
+  const used = new Set(usedTitles);
+  for (let number = 1; ; number++) {
+    const suffix = ` (${number})`;
+    // The rename API's limit is UTF-16 length; keep Unicode pairs intact.
+    const title = base.slice(0, 200 - suffix.length).replace(/[\uD800-\uDBFF]$/, "").trimEnd() + suffix;
+    if (!used.has(title)) return title;
+  }
+}
+
+// Allocate against the complete central list, including archived conversations.
+// One store-scoped allocation lock prevents simultaneous forks from taking the same number.
+export async function nameForkThread(pool, storeId, threadId, body) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!body || typeof body.sourceThreadId !== "string" || !uuid.test(body.sourceThreadId) || body.sourceThreadId === threadId ||
+      typeof body.operationId !== "string" || !uuid.test(body.operationId) ||
+      !Number.isSafeInteger(body.generation) || body.generation < 1 ||
+      !(body.expectedName === null || typeof body.expectedName === "string")) {
+    return { status: 400, body: { error: "无效的分支标题参数", code: "invalid_request" } };
+  }
+  const identity = { action: "fork-title", threadId, ...body };
+  const headers = { "x-codex-operation-id": body.operationId, "x-codex-version": "mira-web" };
+  const client = await pool.connect();
+  const lock = JSON.stringify(["mira-fork-title", storeId]);
+  // Reuse this leased connection for the existing canonical commit transaction,
+  // so allocation also works with a one-connection pool. No history is rewritten.
+  const connection = { query: (...args) => client.query(...args), connect: async () => ({ query: (...args) => client.query(...args), release() {} }) };
+  let releaseError;
+  try {
+    await client.query("SELECT pg_advisory_lock(hashtextextended($1,0))", [lock]);
+    const previous = await client.query("SELECT 1 FROM codex_store_events WHERE store_id=$1 AND operation_id=$2", [storeId, body.operationId]);
+    if (previous.rowCount) return await commitDelta(connection, storeId,
+      { expectedVersion: 0, stateChanges: [], historyChanges: [] }, headers, identity);
+    const head = await getStoreHead(connection, storeId, [threadId]);
+    const entry = head.historyManifest[threadId];
+    if (!entry) return { status: 404, body: { error: "分支会话不存在或已删除", code: "not_found" } };
+    const titles = await client.query(
+      "SELECT thread_id, COALESCE(NULLIF(state->>'name',''),title) AS title FROM codex_thread_projections WHERE store_id=$1", [storeId]);
+    const source = titles.rows.find(row => row.thread_id === body.sourceThreadId);
+    if (!source) return { status: 404, body: { error: "原会话不存在或已删除", code: "not_found" } };
+    const name = nextForkTitle(source.title, titles.rows.filter(row => row.thread_id !== threadId).map(row => row.title));
+    const expected = body.expectedName === null && !Object.hasOwn(head.state.names ?? {}, threadId)
+      ? { exists: false } : { exists: true, value: body.expectedName };
+    const result = await commitDelta(connection, storeId, {
+      expectedVersion: head.version,
+      stateChanges: [{ path: ["names", threadId], mode: "set", conflictPolicy: "compareAndSwap", expected, value: name }],
+      historyChanges: [{ threadId, mode: "append", expectedGeneration: body.generation, expectedItemCount: entry.itemCount, items: [] }],
+    }, headers, identity);
+    if (result.status === 409) return { status: 409, body: { error: "分支标题已被修改，原标题已保留。", code: "thread_changed" } };
+    return result;
+  } finally {
+    try { await client.query("SELECT pg_advisory_unlock(hashtextextended($1,0))", [lock]); }
+    catch (error) { releaseError = error; }
+    client.release(releaseError);
+  }
+}
+
 // Use Codex's existing name field and append-only store commits. Renaming never
 // loads or rewrites transcript items and works while the execution Node is offline.
 export async function renameThread(pool, storeId, threadId, body) {
