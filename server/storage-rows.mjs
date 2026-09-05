@@ -15,6 +15,8 @@ const stable = (value) =>
 export const requestDigest = (value) =>
   crypto.createHash("sha256").update(stable(value)).digest("hex");
 const equal = (left, right) => stable(left) === stable(right);
+const ownValue = (value, key) =>
+  object(value) && Object.hasOwn(value, key) ? value[key] : undefined;
 const scopeThread = (field, key, value) =>
   field === "rollout_paths" ? (typeof value === "string" ? value : null) : key;
 
@@ -197,7 +199,12 @@ function changesBetween(before, after, path = [], output = []) {
   if (equal(before, after)) return output;
   if (object(before) && object(after)) {
     for (const key of new Set([...Object.keys(before), ...Object.keys(after)]))
-      changesBetween(before[key], after[key], [...path, key], output);
+      changesBetween(
+        ownValue(before, key),
+        ownValue(after, key),
+        [...path, key],
+        output,
+      );
   } else if (object(after)) {
     output.push({ path, mode: "set", value: {} });
     for (const [key, value] of Object.entries(after))
@@ -278,8 +285,7 @@ export async function persistState(
   // each new value to its own thread.
   for (let index = 0; index < changes.length; index++) {
     const change = changes[index];
-    const lookup = (state) =>
-      change.path.reduce((value, key) => value?.[key], state);
+    const lookup = (state) => change.path.reduce(ownValue, state);
     const threadId =
       change.path.length >= 2
         ? scopeThread(

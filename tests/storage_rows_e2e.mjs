@@ -324,6 +324,51 @@ try {
     headers(),
   );
   assert.equal(recreated.body.historyManifest[a].generation, 2);
+  const unknown = JSON.parse(
+    '{"__proto__":{"opaque":true},"constructor":null}',
+  );
+  let unknownCommit = await commitDelta(
+    pool,
+    store,
+    {
+      expectedVersion: recreated.body.version,
+      stateChanges: [
+        {
+          path: ["created_threads", a, "future_fields"],
+          mode: "set",
+          conflictPolicy: "compareAndSwap",
+          expected: { exists: false },
+          value: unknown,
+        },
+      ],
+      historyChanges: [],
+    },
+    headers(),
+  );
+  assert.equal(unknownCommit.status, 200);
+  unknownCommit = await commitDelta(
+    pool,
+    store,
+    {
+      expectedVersion: unknownCommit.body.version,
+      stateChanges: [
+        {
+          path: ["created_threads", a, "future_fields", "__proto__"],
+          mode: "remove",
+          conflictPolicy: "compareAndSwap",
+          expected: { exists: true, value: { opaque: true } },
+        },
+      ],
+      historyChanges: [],
+    },
+    headers(),
+  );
+  assert.equal(unknownCommit.status, 200);
+  await rebuildSnapshot(pool, store);
+  assert.deepEqual(
+    (await getStoreHead(pool, store)).state.created_threads[a].future_fields,
+    { constructor: null },
+  );
   const compatibility = await getSnapshot(pool, store);
   assert.equal(
     (
