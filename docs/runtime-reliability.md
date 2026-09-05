@@ -151,6 +151,14 @@ V1/V2 history consistency, fresh-process resume, permanent-error termination, an
 malformed-history termination in both debug and release builds. It never uses a
 production identity or runs the historic failing command.
 
+Fixture cleanup waits for PostgreSQL's backends to disconnect after `pool.end()`
+and only then drops its uniquely named test database, without `FORCE`. A pool's
+end promise can resolve before the underlying sockets have finished closing;
+forcing a database drop in that gap can fail the process after all assertions
+passed. Leaked connections time out and fail cleanup rather than being hidden.
+`node --test tests/runtime_fixture_cleanup_test.mjs` covers this ordering and
+failure handling without requiring a compiler or model.
+
 ## CI cache policy
 
 GitHub caches are immutable and ref-scoped. A new release tag cannot read a
@@ -218,5 +226,9 @@ for cache saving; abrupt runner loss can still lose unsaved work. Cache save/res
 do not bypass compilation or release checks. No account storage/billing limit is increased.
 The first batched run uses a new cache namespace and must warm it; old per-object GHA
 entries are not copied into the local cache. Existing entries are left to normal eviction.
+Completed canonical candidate packages are retained as diagnostic artifacts even
+when subsequent acceptance fails. A retained candidate from a failed run is not a
+release: packaging/promotion still require all platform jobs to pass. This avoids
+losing the evidence needed to diagnose a post-compilation failure.
 `tests/compiler_cache_snapshot_e2e.mjs` verifies a cold native compile, an archived-cache
 restore hit and invalidation after a header change (GCC on Linux, MSVC on Windows).

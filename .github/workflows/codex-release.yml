@@ -12,6 +12,7 @@ on:
       - patches/codex/**
       - node/internal/codex-runtime.json
       - tests/runtime_reliability_e2e.mjs
+      - tests/runtime_fixture_cleanup*.mjs
       - tests/compiler_cache_snapshot_e2e.mjs
       - .github/workflows/codex-release.yml
   workflow_dispatch:
@@ -65,6 +66,7 @@ jobs:
         run: node scripts/check-codex-runtime.mjs
 
       - name: Reuse an unchanged, checksummed Codex package
+        id: reuse
         if: inputs.codex_release != ''
         shell: bash
         env:
@@ -324,6 +326,7 @@ jobs:
           done
 
       - name: Assemble canonical Codex package
+        id: package
         if: inputs.codex_release == ''
         shell: bash
         env:
@@ -361,6 +364,7 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --prefix server
+          node --test tests/runtime_fixture_cleanup_test.mjs
           docker run -d --name mira-codex-test-postgres \
             -e POSTGRES_USER=mira -e POSTGRES_PASSWORD=mira-local -e POSTGRES_DB=mira \
             -p 127.0.0.1:55432:5432 postgres:17-alpine
@@ -380,6 +384,9 @@ jobs:
             node tests/runtime_reliability_e2e.mjs
 
       - uses: actions/upload-artifact@v4
+        # Retain a completed candidate for diagnosis even if acceptance fails.
+        # The release job and promotion validator still require passing jobs.
+        if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success')
         with:
           name: mira-codex-${{ matrix.target }}
           path: ${{ matrix.package }}
@@ -387,7 +394,7 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success') && matrix.target == 'x86_64-unknown-linux-musl'
         with:
           name: codex-upstream-notices
           path: |

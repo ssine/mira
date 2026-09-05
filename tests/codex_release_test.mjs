@@ -88,3 +88,21 @@ test("compiler objects use bounded batched snapshots, not per-object GHA uploads
   const buildTimeout = Number(workflow.match(/name: Build Mira-compatible Codex\n\s+timeout-minutes: (\d+)/)[1]);
   assert(jobTimeout - buildTimeout >= 10, 'a timed-out build must leave time for cache/diagnostics');
 });
+
+test("post-build failures retain diagnostic packages without making failed runs publishable", async () => {
+  const workflow = await fs.readFile(path.join(root, ".github/workflows/codex-release.yml"), "utf8");
+  assert.match(workflow, /name: Assemble canonical Codex package\n\s+id: package/);
+  assert.match(workflow, /name: Reuse an unchanged, checksummed Codex package\n\s+id: reuse/);
+  const steps = workflow.split("\n      - ");
+  for (const name of ["mira-codex-${{ matrix.target }}", "codex-upstream-notices"]) {
+    const upload = steps.find((step) => step.includes(`name: ${name}\n`));
+    assert(upload, `missing ${name} upload`);
+    assert(upload.includes("if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success')"));
+  }
+  const fault = steps.find((step) => step.startsWith("name: Fault-inject persistence"));
+  assert(fault.includes("node --test tests/runtime_fixture_cleanup_test.mjs"));
+  assert.doesNotMatch(fault, /continue-on-error/);
+  const releaseHeader = workflow.split("\n  release:\n")[1].split("    steps:")[0];
+  assert.match(releaseHeader, /needs: codex/);
+  assert.doesNotMatch(releaseHeader, /if:/, "do not bypass failed platform jobs for release packaging");
+});

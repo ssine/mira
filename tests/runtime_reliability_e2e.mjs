@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { initializeDatabase } from "../server/db.mjs";
 import { commitDelta, getStoreHead, getThreadHistory, getSnapshot, putSnapshot } from "../server/thread-store.mjs";
+import { closeRuntimeFixtureDatabase } from "./runtime_fixture_cleanup.mjs";
 
 const binary = process.env.CODEX_TEST_BINARY;
 assert(binary && path.isAbsolute(binary), "CODEX_TEST_BINARY must name the candidate Codex binary");
@@ -313,8 +314,7 @@ try {
   }
   fixture.closeAllConnections();
   await new Promise((resolve) => fixture.close(resolve));
-  await pool?.end();
-  if (created) await admin.query(`DROP DATABASE ${database} WITH (FORCE)`);
+  if (created) await closeRuntimeFixtureDatabase(pool, admin, database);
   await admin.end();
   await fs.rm(directory, { recursive: true, force: true });
 }
