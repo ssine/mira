@@ -219,8 +219,8 @@ try {
   assert.equal(await page.locator(".trace-card.assistant .trace-head").count(), 0, "Codex messages have no redundant heading");
   assert.equal(await page.locator(".trace-card.user .trace-head").count(), 0, "user identity is expressed by alignment and bubble only");
   assert.equal(await page.locator(".trace-card.user .trace-footer").count(), 0, "user messages need no elapsed time or copy action");
-  assert.match(await page.locator(".trace-card.assistant .trace-completed").textContent(), /完成$/);
-  assert.match(await page.locator(".trace-card.assistant .trace-elapsed").textContent(), /^耗时 /);
+  assert.match(await page.locator(".trace-card.assistant .trace-completed").textContent(), /^\d{2}:\d{2}:\d{2}$/);
+  assert.equal(await page.locator(".trace-card.assistant .trace-elapsed").isVisible(), false);
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy svg").count(), 1);
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy").getAttribute("aria-label"), "复制这条消息的原文");
 
@@ -469,6 +469,38 @@ try {
     h.renderTranscript();
   }, projectCodexTranscript([{ type: "compacted", payload: { message: "Internal summary" } }])[0]);
   assert.equal(await page.locator(".trace-card.compaction").count(), 1, "durable compaction replaces the live notice without duplication");
+  assert.ok(await page.locator(".trace-card.compaction").evaluate((node) => node.getBoundingClientRect().height < 18), "compaction stays a compact single line");
+  const turnFooters = await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.clear(); h.agent.threadId = null;
+    h.agent.turnTimings.set("timed", { startedAt: Date.now() - 20000 });
+    for (const [id, clock] of [["first", "2026-09-05T10:00:02.000Z"], ["last", "2026-09-05T10:00:08.000Z"]]) {
+      h.notify({ method: "item/completed", params: { turnId: "timed", item: { id, type: "agentMessage", text: id, completedAt: clock } } });
+    }
+    const clocks = () => [...document.querySelectorAll(".trace-completed")].map((node) => node.textContent);
+    const totals = () => [...document.querySelectorAll(".trace-elapsed:not([hidden])")].map((node) => ({ text: node.textContent, body: node.closest(".trace-card").querySelector(".trace-body")._miraSource }));
+    const before = clocks(); const running = totals();
+    h.notify({ method: "turn/completed", params: { turn: { id: "timed", status: "completed", durationMs: 12542 } } });
+    const completed = totals(); const after = clocks();
+    h.agent.turnTimings.clear();
+    h.agent.transcriptItems = ["first", "last"].map((body, i) => ({ key: body, kind: "assistant", turnId: "timed", body,
+      completedAt: "2026-09-05T10:00:12.000Z", timingScope: "turn", elapsedMs: 12542, sourceItemSeq: i + 1 }));
+    h.renderTranscript();
+    return { before, after, refreshed: clocks(), running, completed, recovered: totals() };
+  });
+  assert.deepEqual(turnFooters.running, []);
+  assert.deepEqual(turnFooters.before, turnFooters.after, "turn completion preserves each paragraph's clock");
+  assert.deepEqual(turnFooters.before, turnFooters.refreshed, "history refresh preserves precise live clocks");
+  assert.equal(turnFooters.completed.length, 1);
+  assert.equal(turnFooters.completed[0].body, "last");
+  assert.match(turnFooters.completed[0].text, /^本轮总耗时 12\.5/);
+  assert.deepEqual(turnFooters.recovered, turnFooters.completed, "reconnect keeps the total only on the final paragraph");
+  const paragraphGap = await page.evaluate(() => {
+    const card = window.traceHarness.upsertTrace("spacing", "assistant", "Codex", "First paragraph.\n\nSecond paragraph.", "");
+    const [first, second] = card.querySelectorAll("p");
+    return second.getBoundingClientRect().top - first.getBoundingClientRect().bottom;
+  });
+  assert.ok(paragraphGap >= 7 && paragraphGap <= 9, `Markdown block separators must not add blank text lines: ${paragraphGap}`);
   await page.evaluate(() => { window.traceHarness.agent.threadId = "progress-thread"; window.traceHarness.clear(); });
 
   const uploaded = await page.evaluate(async () => {
@@ -633,7 +665,7 @@ try {
       parent: document.querySelector("#conversationForm").parentElement.id,
       barBorder: getComputedStyle(document.querySelector("#conversationForm")).borderTopWidth };
   });
-  assert.equal(flow.parent, "conversationScroll", "composer belongs to the conversation scroll flow");
+  assert.equal(flow.parent, "conversationComposer", "composer has its own anchored workspace row");
   assert.equal(flow.barBorder, "0px", "composer does not draw a full-width bottom bar");
   assert.ok(flow.trace.width <= 808 && Math.abs(flow.form.width - flow.trace.width) < 1);
   assert.ok(Math.abs(flow.user.right - flow.assistant.right) < 1, "user messages align right inside the same reading column");
@@ -649,6 +681,17 @@ try {
   assert.ok(agentViewport.documentHeight <= agentViewport.viewportBottom + 1,
     "dedicated conversation page must not leave document-level space below the viewport");
   assert.equal(agentViewport.bodyOverflow, "hidden", "only the transcript may scroll in conversation mode");
+  for (const position of [0, 0.5, 1]) {
+    const anchored = await page.locator("#conversationScroll").evaluate(async (scroll, position) => {
+      scroll.scrollTop = (scroll.scrollHeight - scroll.clientHeight) * position;
+      await new Promise(requestAnimationFrame);
+      const form = document.querySelector("#conversationForm").getBoundingClientRect();
+      const composer = document.querySelector("#conversationComposer").getBoundingClientRect();
+      return { bottom: form.bottom, viewport: innerHeight, seam: Math.abs(scroll.getBoundingClientRect().bottom - composer.top) };
+    }, position);
+    assert.ok(Math.abs(anchored.bottom - anchored.viewport) <= 1, `composer remains at bottom at scroll ${position}`);
+    assert.ok(anchored.seam <= 1, "no extra scrollable space below the composer");
+  }
 
   if (process.env.MIRA_TRACE_WIDE_SCREENSHOT) {
     await page.screenshot({ path: process.env.MIRA_TRACE_WIDE_SCREENSHOT, fullPage: true });

@@ -121,12 +121,14 @@
               <button id="agentThreadDrawerToggle" class="chat-icon-button drawer-toggle" type="button" aria-label="打开会话侧边栏" aria-expanded="false" title="会话">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13M3.5 10h13M3.5 15h13"></path></svg>
               </button>
-              <div class="conversation-identity"><h2 id="conversationTitle" class="visually-hidden">选择或新建会话</h2><p id="conversationMeta" class="muted"><span class="conversation-directory">默认目录</span><span class="conversation-meta-separator">·</span><span class="conversation-model">默认模型</span></p><p id="conversationConnection" class="hidden" role="status"></p></div>
+              <div class="conversation-identity"><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted"><span class="conversation-directory">默认目录</span><span class="conversation-meta-separator">·</span><span class="conversation-model">默认模型</span></p><p id="conversationConnection" class="hidden" role="status"></p></div>
               <div class="conversation-actions"><button id="agentThemeToggle" class="chat-icon-button" type="button" aria-label="切换外观" title="切换外观">◐</button><button id="agentInterrupt" class="danger hidden" type="button">中断</button></div>
             </header>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
+            </div>
+            <div id="conversationComposer" class="conversation-compose-area">
             <form id="conversationForm" class="conversation-composer">
               <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span><button id="conversationUploadCancel" class="composer-cancel hidden" type="button" aria-label="取消上传" title="取消上传">×</button></div>
               <input id="conversationCwd" type="hidden">

@@ -1669,14 +1669,50 @@ function setTraceMetadata(card, options = {}) {
   if (Object.hasOwn(options, "elapsedMs")) card._miraElapsedMs = options.elapsedMs;
   if (Object.hasOwn(options, "timingScope")) card._miraTimingScope = options.timingScope;
   if (Object.hasOwn(options, "elapsedApproximate")) card._miraElapsedApproximate = options.elapsedApproximate;
+  for (const field of ["turnCompletedAt", "turnElapsedMs", "turnElapsedApproximate"]) {
+    if (options[field] != null) card[`_mira${field[0].toUpperCase()}${field.slice(1)}`] = options[field];
+  }
   const completed = footer.querySelector(".trace-completed");
   const elapsed = footer.querySelector(".trace-elapsed");
-  const clock = traceClock(card._miraCompletedAt);
-  completed.textContent = clock ? `${clock} ${card._miraTimingScope === "turn" ? "本轮完成" : card._miraTimingScope === "recorded" ? "记录" : "完成"}` : "";
+  const clock = card._miraTimingScope === "turn" ? "" : traceClock(card._miraCompletedAt);
+  completed.textContent = clock;
+  completed.title = card._miraTimingScope === "recorded" ? "消息记录时间" : "消息时间";
   completed.hidden = !clock;
-  const duration = formatActivityDuration(card._miraElapsedMs);
-  elapsed.textContent = duration ? `${card._miraElapsedApproximate || card._miraTimingScope === "recorded" ? "约耗时" : card._miraTimingScope === "turn" ? "本轮耗时" : "耗时"} ${duration}` : "";
-  elapsed.hidden = !duration;
+  elapsed.textContent = "";
+  elapsed.hidden = true;
+}
+
+function refreshTurnFooters(turnId = null) {
+  const turns = new Map();
+  for (const card of $("#conversationTrace").querySelectorAll(".trace-card.assistant")) {
+    const id = card.dataset.turnId;
+    if (turnId && id !== turnId) continue;
+    setTraceMetadata(card);
+    if (!id || !card.querySelector(".trace-body")._miraSource) continue;
+    if (!turns.has(id)) turns.set(id, []);
+    turns.get(id).push(card);
+  }
+  for (const [id, cards] of turns) {
+    const last = cards.at(-1);
+    const stored = cards.findLast((card) => Number.isFinite(card._miraTurnElapsedMs));
+    const legacy = cards.findLast((card) => card._miraTimingScope === "turn" && Number.isFinite(card._miraElapsedMs));
+    const live = agent.turnTimings.get(id);
+    const elapsedMs = stored?._miraTurnElapsedMs ?? (live?.completedAt ? live.elapsedMs : null) ?? legacy?._miraElapsedMs;
+    const completedAt = stored?._miraTurnCompletedAt ?? live?.completedAt ?? legacy?._miraCompletedAt;
+    const approximate = stored?._miraTurnElapsedApproximate ?? live?.elapsedApproximate ?? legacy?._miraElapsedApproximate;
+    // Retain the aggregate through a disconnect or a refresh before storage catches up.
+    setTraceMetadata(last, { turnCompletedAt: completedAt, turnElapsedMs: elapsedMs, turnElapsedApproximate: approximate });
+    const elapsed = last.querySelector(".trace-elapsed");
+    const duration = formatActivityDuration(elapsedMs);
+    elapsed.textContent = duration ? `本轮总耗时${approximate ? "约" : ""} ${duration}` : "";
+    elapsed.hidden = !duration;
+    const clock = last.querySelector(".trace-completed");
+    if (clock.hidden && traceClock(completedAt)) {
+      clock.textContent = traceClock(completedAt);
+      clock.title = "本轮结束时间（历史未记录单条消息时间）";
+      clock.hidden = false;
+    }
+  }
 }
 
 function updateTraceBodyState(card, value, kind) {
@@ -1854,6 +1890,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.querySelector(".trace-status").textContent = "";
   }
   updateToolGroup(card.closest(".tool-group"));
+  if (kind === "assistant" && !options.deferTurnFooter) refreshTurnFooters(options.turnId);
   if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
   return card;
 }
@@ -2075,13 +2112,16 @@ function renderThread(thread) {
       const view = itemView(item);
       if (["assistant", "reasoning"].includes(view.kind) && !view.body) continue;
       upsertTrace(liveTraceKey({ turnId: turn.id }, item.id ?? crypto.randomUUID?.() ?? Math.random()), view.kind, view.title, view.body, item.status ?? "", {
-        autoScroll: false, activity: view.activity, summaryParts: view.summaryParts, turnId: turn.id,
+        autoScroll: false, deferTurnFooter: true, activity: view.activity, summaryParts: view.summaryParts, turnId: turn.id,
         completedAt: item.completedAt ?? item.updatedAt ?? item.createdAt,
-        elapsedMs: item.elapsedMs ?? item.durationMs,
+        ...(["completed", "failed", "interrupted"].includes(turn.status) ? {
+          turnCompletedAt: turn.completedAt, turnElapsedMs: turn.durationMs ?? turn.elapsedMs,
+        } : {}),
       });
     }
   }
   if (!turns.length) trace.append(element("div", "conversation-empty", "此会话还没有可显示的消息。"));
+  refreshTurnFooters();
   const last = trace.lastElementChild;
   requestAnimationFrame(() => { if (trace.lastElementChild === last) scrollTraceToBottom(trace); });
 }
@@ -2152,7 +2192,11 @@ function renderTranscript(fallbackThread, options = {}) {
   const preciseClocks = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
     .filter((card) => card._miraCompletedAt && !card._miraTimingScope)
     .map((card) => [JSON.stringify([card.dataset.turnId ?? null, card.querySelector('.trace-body')._miraSource]),
-      { completedAt: card._miraCompletedAt, elapsedMs: card._miraElapsedMs }]));
+      { completedAt: card._miraCompletedAt }]));
+  const knownTurnTimings = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
+    .filter((card) => card.dataset.turnId && Number.isFinite(card._miraTurnElapsedMs))
+    .map((card) => [card.dataset.turnId, { turnCompletedAt: card._miraTurnCompletedAt,
+      turnElapsedMs: card._miraTurnElapsedMs, turnElapsedApproximate: card._miraTurnElapsedApproximate }]));
   const expandedItems = new Set([...$("#conversationTrace").querySelectorAll(".trace-detail[open]")]
     .map((details) => details.closest(".trace-card").dataset.traceKey));
   const expandedGroups = new Set([...$("#conversationTrace").querySelectorAll(".tool-group[open] .trace-card")]
@@ -2163,9 +2207,12 @@ function renderTranscript(fallbackThread, options = {}) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      autoScroll: false, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId,
+      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId,
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
+      ...(Number.isFinite(item.turnElapsedMs) ? {
+        turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs, turnElapsedApproximate: item.turnElapsedApproximate,
+      } : knownTurnTimings.get(item.turnId)),
       ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
     });
     if (expandedItems.has(key) && card.querySelector(".trace-detail")) card.querySelector(".trace-detail").open = true;
@@ -2193,6 +2240,7 @@ function renderTranscript(fallbackThread, options = {}) {
     }
     return;
   }
+  refreshTurnFooters();
   const last = trace.lastElementChild;
   const scroll = traceScroller();
   const scrollTop = scroll.scrollTop;
@@ -2328,20 +2376,14 @@ function handleAgentNotification(message) {
     const completedAt = Date.now();
     const timing = completedTurnId ? (agent.turnTimings.get(completedTurnId) ?? {}) : {};
     timing.completedAt = completedAt;
+    timing.elapsedMs = turn.durationMs ?? turn.elapsedMs ?? (Number.isFinite(timing.startedAt) ? Math.max(0, completedAt - timing.startedAt) : null);
     if (completedTurnId) agent.turnTimings.set(completedTurnId, timing);
     if (threadId && (!completedTurnId || agent.activeTurns.get(threadId) === completedTurnId)) {
       agent.activeTurns.delete(threadId);
     }
     if (completedTurnId) agent.turnThreads.delete(completedTurnId);
     if (completedTurnId && threadId === agent.threadId) {
-      for (const card of $("#conversationTrace").querySelectorAll(`.trace-card[data-turn-id="${CSS.escape(completedTurnId)}"]`)) {
-        if (!["user", "assistant"].includes(card.dataset.traceKind)) continue;
-        const itemCompletedAt = card._miraCompletedAt ?? completedAt;
-        const elapsedMs = Number.isFinite(timing.startedAt)
-          ? Math.max(0, new Date(itemCompletedAt).getTime() - timing.startedAt)
-          : null;
-        setTraceMetadata(card, { completedAt: itemCompletedAt, elapsedMs });
-      }
+      refreshTurnFooters(completedTurnId);
     }
     syncActiveTurnUi();
     void loadAgentThreads().catch((error) => console.warn("Unable to refresh thread list after turn completion", error));
@@ -2367,18 +2409,14 @@ function handleAgentNotification(message) {
     const existing = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(itemKey)}"]`);
     const emptyNarrative = ["assistant", "reasoning"].includes(view.kind) && !view.body;
     if (emptyNarrative && !existing) return;
-    const timing = agent.turnTimings.get(params.turnId);
-    const completedAt = method.endsWith("completed") ? new Date().toISOString() : undefined;
-    const elapsedMs = completedAt && Number.isFinite(timing?.startedAt)
-      ? Math.max(0, Date.parse(completedAt) - timing.startedAt)
-      : undefined;
+    const completedAt = method.endsWith("completed") ? item.completedAt ?? new Date().toISOString() : undefined;
     const completedStreamBody = method.endsWith("completed") && emptyNarrative
       ? existing?.querySelector(".trace-body")?._miraSource
       : undefined;
     upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? completedStreamBody : view.body,
       method.endsWith("started") ? "运行中" : (item.status ?? "完成"), {
         activity: view.activity, summaryParts: view.summaryParts, turnId: params.turnId,
-        ...(completedAt ? { completedAt, elapsedMs } : {}),
+        ...(completedAt ? { completedAt } : {}),
       });
     return;
   }
@@ -2956,11 +2994,13 @@ function renderComposerAttachments() {
 
 function resizeConversationInput() {
   const input = $("#conversationInput");
+  const follow = traceNearBottom();
   const maximum = 144;
   input.style.height = "36px";
   const height = Math.min(maximum, Math.max(36, input.scrollHeight));
   input.style.height = `${height}px`;
   input.style.overflowY = input.scrollHeight > maximum ? "auto" : "hidden";
+  if (follow) scrollTraceToBottom();
 }
 
 function addComposerFiles(files) {
@@ -3181,6 +3221,11 @@ const conversationOverlayObserver = new ResizeObserver(() => {
 });
 conversationOverlayObserver.observe($(".conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
+const conversationWidthObserver = new ResizeObserver(() => {
+  const scroll = traceScroller();
+  $(".conversation-card").style.setProperty("--conversation-scrollbar-width", `${scroll.offsetWidth - scroll.clientWidth}px`);
+});
+conversationWidthObserver.observe(traceScroller());
 $("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
 $("#agentThreadList").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-thread-id]");

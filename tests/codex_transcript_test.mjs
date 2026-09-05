@@ -128,6 +128,8 @@ test("projects durable completion clocks and turn elapsed time for narrative mes
   assert.equal(result[0].elapsedMs, 120);
   assert.equal(result[1].completedAt, "2026-09-05T10:00:06.250Z");
   assert.equal(result[1].elapsedMs, 6250);
+  assert.equal(result[1].turnElapsedMs, 6400);
+  assert.equal(result[1].turnCompletedAt, "2026-09-05T10:00:06.400Z");
 });
 
 test("native ThreadStore timing fields survive without outer rollout timestamps", () => {
@@ -164,6 +166,7 @@ test("deduplication keeps precise item timing and does not fabricate missing clo
   assert.equal(trace[0].completedAt, "2026-09-05T10:00:04.250Z");
   assert.equal(trace[0].elapsedMs, 4250);
   assert.equal(trace[0].timingScope, undefined);
+  assert.equal(trace[0].turnElapsedMs, 12542, "turn duration is independent of the last prose timestamp");
   assert.equal(projectCodexTranscript([record("event_msg", { type: "agent_message", message: "Unknown" })])[0].completedAt, undefined);
 });
 
@@ -181,6 +184,24 @@ test("legacy turn_context prevents resumed messages inheriting a previous turn's
   assert.equal(trace[0].completedAt, "2026-09-05T11:00:20.000Z");
   assert.equal(trace[0].elapsedMs, 20000);
   assert.equal(trace[0].elapsedApproximate, true);
+  assert.equal(trace[0].turnElapsedMs, undefined, "an unfinished turn has no total duration");
+});
+
+test("native paragraph clocks stay separate from the completed turn total", () => {
+  const records = [
+    record("event_msg", { type: "task_started", turn_id: "native", started_at: 1788602400 }),
+    record("event_msg", { type: "agent_message", message: "Working" }),
+    record("event_msg", { type: "agent_message", message: "Done" }),
+    record("event_msg", { type: "task_complete", turn_id: "native", completed_at: 1788602412, duration_ms: 12542 }),
+  ];
+  const recordedAt = new Map([[2, "2026-09-05T10:00:02.000Z"], [3, "2026-09-05T10:00:08.000Z"]]);
+  const trace = projectCodexTranscript(records, { recordedAt });
+  assert.deepEqual(trace.map((item) => item.completedAt), [...recordedAt.values()]);
+  assert.deepEqual(trace.map((item) => item.timingScope), ["recorded", "recorded"]);
+  assert.deepEqual(trace.map((item) => item.turnElapsedMs), [12542, 12542]);
+  const page = projectCodexTranscript(records.slice(1, 2), { itemOffset: 1, initialTurnId: "native", recordedAt, timingRecords: [records[3]] });
+  assert.equal(page[0].completedAt, recordedAt.get(2));
+  assert.equal(page[0].turnElapsedMs, 12542);
 });
 
 test("canonical compaction remains a small durable transcript notice", () => {

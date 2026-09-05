@@ -95,7 +95,8 @@ try {
   assert.equal(header.directoryClipped, true);
   assert.equal(header.modelClipped, false, "a long directory must leave the model readable");
   assert.equal(header.meta.includes(thread), false);
-  assert.equal(await page.locator("#conversationTitle").evaluate((node) => getComputedStyle(node).clipPath === "inset(50%)" || node.getBoundingClientRect().width <= 1), true);
+  assert.equal(await page.locator("#conversationTitle").isVisible(), true);
+  assert.ok(await page.locator("#conversationTitle").evaluate((node) => getComputedStyle(node).clipPath === "none" && node.getBoundingClientRect().width > 1));
   await page.setViewportSize({ width: 393, height: 851 });
 
   // A real cold document load uses the install start URL and restores the route.
@@ -121,6 +122,32 @@ try {
   assert.ok(measure.scrollWidth <= measure.width + 1);
   assert.equal(measure.font, "14px");
   assert.ok(measure.touchTarget >= 44);
+  const inputAlignment = await page.evaluate(() => {
+    const input = document.querySelector("#conversationInput").getBoundingClientRect();
+    const send = document.querySelector("#conversationSend").getBoundingClientRect();
+    return Math.abs((input.top + input.bottom) / 2 - (send.top + send.bottom) / 2);
+  });
+  assert.ok(inputAlignment <= 1, `single-line text is centered beside the send button: ${inputAlignment}`);
+  await page.evaluate(() => {
+    const trace = document.querySelector("#conversationTrace");
+    for (let i = 0; i < 40; i++) trace.append(trace.querySelector(".trace-card.assistant").cloneNode(true));
+  });
+  for (const position of [0, .5, 1]) {
+    const anchored = await page.locator("#conversationScroll").evaluate(async (scroll, position) => {
+      scroll.scrollTop = position * (scroll.scrollHeight - scroll.clientHeight);
+      await new Promise(requestAnimationFrame);
+      const form = document.querySelector("#conversationForm").getBoundingClientRect();
+      return { bottom: form.bottom, viewport: visualViewport.height + visualViewport.offsetTop,
+        documentHeight: document.documentElement.scrollHeight, windowHeight: innerHeight };
+    }, position);
+    assert.ok(Math.abs(anchored.bottom - anchored.viewport) <= 1, `mobile composer anchored at scroll ${position}`);
+    assert.ok(anchored.documentHeight <= anchored.windowHeight + 1);
+  }
+  await page.locator("#conversationInput").fill("多行草稿\n".repeat(20));
+  const multiline = await layout();
+  assert.ok(multiline.bottom <= multiline.height + 1 && multiline.top >= 0);
+  assert.ok(await page.locator("#conversationInput").evaluate((node) => node.getBoundingClientRect().height <= 144));
+  await page.locator("#conversationInput").fill("未发送的草稿");
   assert.equal(await page.locator("#conversationInput").inputValue(), "未发送的草稿");
   await page.setViewportSize({ width: 851, height: 393 });
   await page.waitForFunction(() => document.querySelector("#conversationInput").getBoundingClientRect().bottom <= visualViewport.height + 1);

@@ -199,6 +199,7 @@ export function projectCodexTranscript(items, options = {}) {
         const startedAt = turnStartedAt(record);
         if (startedAt) { timing.startedAt = startedAt; timing.startedApproximate = false; }
         timing.completedAt = recordTimestamp(record);
+        timing.finished = true;
         if (Number.isFinite(payload.duration_ms) && payload.duration_ms >= 0) timing.elapsedMs = payload.duration_ms;
       }
       turnTimings.set(turnId, timing);
@@ -223,9 +224,14 @@ export function projectCodexTranscript(items, options = {}) {
     const timing = turnTimings.get(entry.turnId);
     const itemClock = entry.completedAt ?? recordTimestamp(records[(entry.sourceItemSeq ?? (offset + 1)) - offset - 1]);
     const recordedAt = options.recordedAt?.get(entry.sourceItemSeq);
-    const completedAt = itemClock ?? (["assistant", "user"].includes(entry.kind) ? timing?.completedAt ?? recordedAt : null);
+    const completedAt = itemClock ?? (["assistant", "user"].includes(entry.kind) ? recordedAt ?? timing?.completedAt : null);
     if (completedAt) entry.completedAt = completedAt;
-    if (!itemClock && completedAt) entry.timingScope = timing?.completedAt ? "turn" : "recorded";
+    if (!itemClock && completedAt) entry.timingScope = recordedAt ? "recorded" : "turn";
+    if (entry.kind === "assistant" && timing?.finished) {
+      entry.turnCompletedAt = timing.completedAt;
+      entry.turnElapsedMs = timing.elapsedMs ?? elapsedMilliseconds(timing.startedAt, timing.completedAt);
+      entry.turnElapsedApproximate = timing.elapsedMs == null && Boolean(timing.startedApproximate);
+    }
     if (["user", "assistant"].includes(entry.kind) && entry.elapsedMs == null) {
       entry.elapsedMs = !itemClock && timing?.elapsedMs != null ? timing.elapsedMs : elapsedMilliseconds(timing?.startedAt, completedAt);
       if (timing?.startedApproximate && (itemClock || timing?.elapsedMs == null)) entry.elapsedApproximate = true;
@@ -518,7 +524,7 @@ export async function getCodexTranscriptTail(pool, storeId, threadId, options = 
   let projected = projectCodexTranscript(rows.map((row) => row.payload), projectionOptions);
   // A page can end inside a turn. Its completion marker may be in the newer
   // page; read just that marker within the same immutable snapshot boundary.
-  if (end <= snapshotCount && projected.some((item) => item.kind === "assistant" && (!item.completedAt || item.timingScope === "recorded"))) {
+  if (end <= snapshotCount && projected.some((item) => item.kind === "assistant" && item.turnCompletedAt == null && item.turnElapsedMs == null)) {
     let after = end - 1;
     while (after < snapshotCount) {
       const candidates = await pool.query(
