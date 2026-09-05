@@ -273,7 +273,7 @@ try {
   await page.locator('#threadArchive').click();
   await page.waitForFunction(id=>!document.querySelector(`[data-thread-row="${id}"]`),ids[1]);
   await page.reload();
-  await page.locator('.thread-project').first().waitFor();
+  await page.locator('.thread-project').first().waitFor({ state: 'attached' });
   assert.equal(await page.locator(`[data-thread-row="${ids[1]}"]`).count(),0,'archive survives reload');
   await page.locator('#agentThreadDrawerToggle').click();
   await sidebarAction(page, "agentArchiveToggle");

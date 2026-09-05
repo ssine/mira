@@ -19,6 +19,7 @@ let dashboardNodes = new Map();
 const themeStorageKey = "mira.theme";
 const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
 let agentThreadDrawerOpen = agentThreadDrawerWide.matches;
+let resetAgentDrawerDrag = () => {};
 let browserRouteEpoch = 0;
 
 function writeBrowserRoute(view, threadId = null, { replace = false } = {}) {
@@ -477,6 +478,7 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   const backdrop = $("#agentThreadDrawerBackdrop");
   const toggle = $("#agentThreadDrawerToggle");
   if (!drawer || !backdrop || !toggle) return;
+  resetAgentDrawerDrag();
   if (!open) closeSidebarPopovers();
   agentThreadDrawerOpen = open;
   syncAccountSidebar();
@@ -500,55 +502,95 @@ function closeAgentThreadDrawerOnMobile() {
 }
 
 function installAgentDrawerSwipe() {
-  const surface = $("#conversationScroll");
+  const surface = $(".chat-shell");
+  const drawer = $("#agentThreadDrawer");
+  const backdrop = $("#agentThreadDrawerBackdrop");
   let gesture = null;
+  let suppressClickUntil = 0;
   const enabled = () => document.body.dataset.view === "agentView" && !agentThreadDrawerWide.matches &&
-    !agentThreadDrawerOpen && (window.visualViewport?.scale ?? 1) <= 1.05;
+    (window.visualViewport?.scale ?? 1) <= 1.05;
   const selectedText = () => window.getSelection()?.type === "Range";
-  surface.addEventListener("touchstart", event => {
+  resetAgentDrawerDrag = () => {
     gesture = null;
+    surface.classList.remove("drawer-dragging");
+    drawer.style.removeProperty("transform");
+    backdrop.style.removeProperty("opacity");
+  };
+  const move = (touch, time) => {
+    const dx = touch.clientX - gesture.x;
+    gesture.position = Math.max(0, Math.min(gesture.width, (gesture.open ? gesture.width : 0) + dx));
+    if (gesture.samples.at(-1).x !== touch.clientX) {
+      gesture.samples.push({ x: touch.clientX, time });
+      while (gesture.samples.length > 2 && gesture.samples[1].time < time - 100) gesture.samples.shift();
+    }
+    drawer.style.transform = `translate3d(${gesture.position - gesture.width}px, 0, 0)`;
+    backdrop.style.opacity = String(gesture.position / gesture.width);
+  };
+  surface.addEventListener("touchstart", event => {
+    resetAgentDrawerDrag();
+    suppressClickUntil = 0;
     if (!enabled() || event.touches.length !== 1 || selectedText() ||
         document.querySelector("dialog[open], [popover]:popover-open")) return;
     const target = event.target instanceof Element ? event.target : event.target.parentElement;
-    if (target.closest("a, button, input, textarea, select, summary, [role=button], [contenteditable]:not([contenteditable=false]), img, video, audio, canvas")) return;
-    // Code blocks and tables keep their own horizontal pan, even at a scroll boundary.
+    if (!target || target.closest("input, textarea, select, [role=slider], [contenteditable]:not([contenteditable=false]), video, audio, canvas")) return;
+    // Links, images and tool summaries can be dragged; taps and long presses still
+    // belong to those controls. Editable content and horizontal scrollers keep their gestures.
     for (let node = target; node && node !== surface; node = node.parentElement) {
       if (node.scrollWidth > node.clientWidth + 2 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowX)) return;
     }
     const touch = event.touches[0];
-    // Start inside the reading surface, away from Android's system back edges.
-    if (touch.clientX < 32 || touch.clientX > innerWidth - 32) return;
-    gesture = { id: touch.identifier, x: touch.clientX, y: touch.clientY, startedAt: performance.now(), horizontal: false };
+    gesture = {
+      id: touch.identifier, x: touch.clientX, y: touch.clientY, startedAt: event.timeStamp,
+      open: agentThreadDrawerOpen, width: drawer.getBoundingClientRect().width,
+      horizontal: false, samples: [{ x: touch.clientX, time: event.timeStamp }],
+    };
   }, { passive: true });
   surface.addEventListener("touchmove", event => {
     if (!gesture) return;
-    if (!enabled() || event.touches.length !== 1 || selectedText()) { gesture = null; return; }
+    if (!enabled() || event.touches.length !== 1 || selectedText()) { resetAgentDrawerDrag(); return; }
     const touch = [...event.touches].find(touch => touch.identifier === gesture.id);
-    if (!touch) { gesture = null; return; }
+    if (!touch) { resetAgentDrawerDrag(); return; }
     const dx = touch.clientX - gesture.x, dy = Math.abs(touch.clientY - gesture.y);
     if (!gesture.horizontal) {
-      // Long presses belong to selection; vertical/diagonal starts belong to scrolling.
-      if (performance.now() - gesture.startedAt > 450 || dy > 10 && dy >= Math.abs(dx) * 0.6 || dx < -10) {
-        gesture = null; return;
-      }
-      if (dx < 10) return;
+      // Lock the intended axis early, before native scrolling claims the gesture.
+      // Once dragging, slow movement and pauses do not cancel the user's progress.
+      if (event.timeStamp - gesture.startedAt > 450 || dy > 8 && dy >= Math.abs(dx) ||
+          (gesture.open ? dx > 8 : dx < -8)) { resetAgentDrawerDrag(); return; }
+      if (Math.abs(dx) < 8 || Math.abs(dx) < dy * 1.15) return;
       gesture.horizontal = true;
+      surface.classList.add("drawer-dragging");
     }
-    if (!event.cancelable) { gesture = null; return; }
+    if (!event.cancelable) { resetAgentDrawerDrag(); return; }
     event.preventDefault();
+    move(touch, event.timeStamp);
   }, { passive: false });
   surface.addEventListener("touchend", event => {
-    const finished = gesture;
-    gesture = null;
-    if (!finished?.horizontal || !enabled() || event.touches.length || selectedText()) return;
-    const touch = [...event.changedTouches].find(touch => touch.identifier === finished.id);
-    if (!touch) return;
-    const dx = touch.clientX - finished.x, dy = Math.abs(touch.clientY - finished.y);
-    if (dx < 64 || dy > dx * 0.6 || performance.now() - finished.startedAt > 1500) return;
+    if (!gesture?.horizontal) { resetAgentDrawerDrag(); return; }
+    const touch = [...event.changedTouches].find(touch => touch.identifier === gesture.id);
+    if (!touch || !enabled() || event.touches.length || selectedText()) { resetAgentDrawerDrag(); return; }
     if (event.cancelable) event.preventDefault();
-    setAgentThreadDrawer(true);
+    move(touch, event.timeStamp);
+    const first = gesture.samples[0];
+    const last = gesture.samples.at(-1);
+    const elapsed = last.time - first.time;
+    const velocity = elapsed > 0 && event.timeStamp - last.time < 100 ? (last.x - first.x) / elapsed : 0;
+    const distance = touch.clientX - gesture.x;
+    const open = Math.abs(distance) >= 32 && Math.abs(velocity) >= 0.45
+      ? velocity > 0 : gesture.position >= gesture.width * (gesture.open ? 0.6 : 0.4);
+    suppressClickUntil = performance.now() + 400;
+    // Flush the last dragged position before letting CSS settle to its endpoint.
+    drawer.getBoundingClientRect();
+    setAgentThreadDrawer(open, { focus: false });
   }, { passive: false });
-  surface.addEventListener("touchcancel", () => { gesture = null; }, { passive: true });
+  surface.addEventListener("touchcancel", resetAgentDrawerDrag, { passive: true });
+  surface.addEventListener("click", event => {
+    if (event.detail && performance.now() < suppressClickUntil) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }
+  }, { capture: true });
+  window.addEventListener("resize", resetAgentDrawerDrag);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) resetAgentDrawerDrag(); });
 }
 
 function toast(message) {

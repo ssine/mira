@@ -31,18 +31,29 @@ try {
   const drawer = page.locator('#agentThreadDrawer');
   const closed = async () => assert.equal(await drawer.getAttribute('aria-hidden'), 'true');
   const touch = (x, y, id = 0) => ({ x, y, id, radiusX: 2, radiusY: 2, force: 1 });
-  const swipe = async (x, y, dx, dy = 0, { cancel = false, delay = 12, hold = 0 } = {}) => {
+  const swipe = async (x, y, dx, dy = 0, { cancel = false, delay = 12, hold = 0, steps = 8 } = {}) => {
     const points = (xx, yy) => [touch(xx, yy)];
     await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: points(x, y) });
     if (hold) await page.waitForTimeout(hold);
-    for (let step = 1; step <= 8; step++) {
-      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: points(x + dx * step / 8, y + dy * step / 8) });
+    for (let step = 1; step <= steps; step++) {
+      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: points(x + dx * step / steps, y + dy * step / steps) });
       await page.waitForTimeout(delay);
     }
     await session.send('Input.dispatchTouchEvent', { type: cancel ? 'touchCancel' : 'touchEnd', touchPoints: [] });
     await page.waitForTimeout(100);
     assert.equal(await page.evaluate(() => window.touchCount), 0, 'all test fingers are lifted');
   };
+  const beginDrag = (x, y) => session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [touch(x, y)] });
+  const dragTo = async (x, y) => {
+    await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [touch(x, y)] });
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => resolve())));
+  };
+  const endDrag = async () => {
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+    await page.waitForTimeout(250);
+  };
+  const revealed = () => drawer.evaluate(element => element.getBoundingClientRect().right);
+  const follows = async expected => assert.ok(Math.abs(await revealed() - expected) <= 2, `drawer follows the finger to ${expected}px`);
   const readingPosition = async () => {
     await scroll.evaluate(element => { element.scrollTop = 300; });
     await page.waitForTimeout(100);
@@ -57,6 +68,45 @@ try {
   assert.equal(new URL(page.url()).searchParams.get('thread'), threadId, 'right swipe does not navigate browser history');
   await page.locator('#agentThreadDrawerClose').tap(); await closed();
   await readingPosition();
+  // Inspect intermediate frames with the finger still down, including reversal
+  // and a pause longer than the old 1.5 second gesture timeout.
+  await beginDrag(90, 300);
+  await dragTo(130, 300); await follows(40);
+  await dragTo(200, 308); await follows(110);
+  const shade = await page.locator('#agentThreadDrawerBackdrop').evaluate(element => Number(getComputedStyle(element).opacity));
+  assert.ok(Math.abs(shade - 110 / 340) < 0.02, 'backdrop tracks the same progress');
+  await dragTo(250, 312); await follows(160);
+  await page.waitForTimeout(1600);
+  await follows(160);
+  await endDrag();
+  assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'paused drag settles by distance');
+  await beginDrag(250, 300);
+  await dragTo(190, 300); await follows(280);
+  await dragTo(80, 300); await follows(170);
+  await endDrag(); await closed();
+  // A fast short flick commits; a slow short drag returns to its starting state.
+  await readingPosition();
+  await swipe(100, 300, 80, 0, { steps: 4, delay: 0 });
+  assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'short flick opens the drawer');
+  await page.locator('#agentThreadDrawerClose').tap();
+  await readingPosition(); await beginDrag(100, 300); await dragTo(170, 300);
+  await page.waitForTimeout(200); await endDrag(); await closed();
+  await readingPosition(); await beginDrag(90, 300); await dragTo(270, 300); await follows(180);
+  await dragTo(190, 300); await follows(100);
+  await dragTo(120, 300); await follows(30);
+  await endDrag(); await closed();
+  // There is no narrow start band: both the gutter and right half work.
+  for (const x of [20, 245]) {
+    await readingPosition(); await swipe(x, 300, 100, 0, { steps: 4, delay: 0 });
+    assert.equal(await drawer.getAttribute('aria-hidden'), 'false', `flick from x=${x}`);
+    await page.locator('#agentThreadDrawerClose').tap();
+  }
+  await readingPosition(); await swipe(100, 300, 160, 110);
+  assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'mostly horizontal diagonal drag remains usable');
+  assert.equal(await scroll.evaluate(element => element.scrollTop), 300, 'horizontal axis lock preserves reading position');
+  await page.locator('#agentThreadDrawerClose').tap();
+  await readingPosition();
+
   await swipe(170, 430, 5, -190);
   await closed();
   assert.ok(await scroll.evaluate(element => element.scrollTop) > 400, 'vertical touch scroll still moves the transcript');
@@ -82,8 +132,22 @@ try {
   const link = page.locator('.trace-body a');
   await link.scrollIntoViewIfNeeded();
   const linkBounds = await link.boundingBox();
-  await swipe(linkBounds.x + 20, linkBounds.y + linkBounds.height / 2, 120); await closed();
+  await link.evaluate(element => { window.linkTaps = 0; element.addEventListener('click', event => { event.preventDefault(); window.linkTaps++; }); });
+  await swipe(linkBounds.x + 20, linkBounds.y + linkBounds.height / 2, 140);
+  assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'swipes starting on a link also open the drawer');
+  assert.equal(await page.evaluate(() => window.linkTaps), 0, 'drag does not activate its starting link');
   assert.equal(new URL(page.url()).searchParams.get('thread'), threadId);
+  await page.locator('#agentThreadDrawerClose').tap(); await page.waitForTimeout(250);
+  await link.tap(); assert.equal(await page.evaluate(() => window.linkTaps), 1, 'ordinary link taps still work');
+  // Tool summaries have the same drag/tap distinction as links.
+  await page.locator('.trace-body').evaluate(element => { const details = document.createElement('details'); details.innerHTML = '<summary>Tool details</summary><p>Tool evidence</p>'; element.append(details); });
+  const summary = page.locator('.trace-body summary'); await summary.scrollIntoViewIfNeeded();
+  const summaryBounds = await summary.boundingBox();
+  await swipe(summaryBounds.x + 30, summaryBounds.y + summaryBounds.height / 2, 150);
+  assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'tool rows accept dragging');
+  assert.equal(await summary.evaluate(element => element.parentElement.open), false, 'drag does not toggle tool evidence');
+  await page.locator('#agentThreadDrawerClose').tap(); await page.waitForTimeout(250);
+  await summary.tap(); assert.equal(await summary.evaluate(element => element.parentElement.open), true, 'tool evidence still expands on tap');
   const input = page.locator('#conversationInput');
   await input.fill('Unchanged draft');
   const inputBounds = await input.boundingBox();
@@ -95,8 +159,11 @@ try {
   await swipe(90, 300, 180, 0);
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'gesture also works with reduced motion');
   await page.locator('#agentThreadDrawerClose').tap();
+  await readingPosition(); await beginDrag(90, 300); await dragTo(170, 300); await follows(80);
   await page.setViewportSize({ width: 1200, height: 900 });
+  await session.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
   await page.waitForFunction(() => !document.querySelector('#agentThreadDrawer').hasAttribute('inert'));
+  assert.equal(await drawer.evaluate(element => element.style.transform), '', 'resize clears unfinished drag styles');
   await page.locator('#agentThreadDrawerClose').tap();
   await readingPosition(); await swipe(400, 300, 160, 0); await closed();
   // Multi-touch uses Chromium's native gesture synthesizer on a fresh mobile page.
@@ -109,5 +176,5 @@ try {
   await closed();
   assert.equal(await page.evaluate(() => window.maxTouches), 2, 'multi-finger input does not open the drawer');
   assert.deepEqual(errors, []);
-  console.log('PASS: interior right swipe, drawer accessibility, stable history/scroll, vertical and code panning, direction/threshold/cancel/multitouch/selection, draft preservation, reduced motion and wide-layout exclusion');
+  console.log('PASS: continuous opening/closing drag, progress/reversal/pause/flick, broad touch targets, drawer accessibility, stable history/scroll, vertical and code panning, direction/threshold/cancel/multitouch/selection, draft preservation, reduced motion and wide-layout exclusion');
 } finally { await browser?.close(); }
