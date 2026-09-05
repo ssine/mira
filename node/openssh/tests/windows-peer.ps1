@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$BinaryDirectory,[Parameter(Mandatory=$true)][string]$ServerUrl,[Parameter(Mandatory=$true)][string]$NodeKey,[switch]$DebugOpenSSH)
+param([Parameter(Mandatory=$true)][string]$BinaryDirectory,[Parameter(Mandatory=$true)][string]$ServerUrl,[Parameter(Mandatory=$true)][string]$NodeKey,[switch]$DebugOpenSSH,[switch]$Tray)
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
 $env:PATHEXT=[Environment]::GetEnvironmentVariable('PATHEXT','Machine')
@@ -22,13 +22,18 @@ function Read-Log([string]$Path){
     try{return $reader.ReadToEnd()}finally{$reader.Dispose()}
 }
 try{
-    $nodeProcess=Start-Process -FilePath (Join-Path $BinaryDirectory 'mira-node.exe') -ArgumentList @('--config',(Quote-Arg $config)) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $fixture 'node.out') -RedirectStandardError (Join-Path $fixture 'node.err')
+    $nodeArguments=@('--config',(Quote-Arg $config))
+    if($Tray){$nodeArguments=@('--tray')+$nodeArguments}
+    $nodeProcess=Start-Process -FilePath (Join-Path $BinaryDirectory 'mira-node.exe') -ArgumentList $nodeArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $fixture 'node.out') -RedirectStandardError (Join-Path $fixture 'node.err')
     $handle=$nodeProcess.Handle
     @{type='ready';fixture=$fixture;pid=$nodeProcess.Id;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name}|ConvertTo-Json -Compress
     while($null -ne ($line=[Console]::ReadLine())){
         $request=$line|ConvertFrom-Json
         if($request.op -eq 'quit'){break}
-        if($request.op -eq 'logs'){@{id=$request.id;stdout=(Read-Log (Join-Path $fixture 'node.out'));stderr=(Read-Log (Join-Path $fixture 'node.err'))}|ConvertTo-Json -Compress;continue}
+        if($request.op -eq 'logs'){
+            $outPath=if($Tray){Join-Path $fixture 'logs\node.log'}else{Join-Path $fixture 'node.out'}
+            @{id=$request.id;stdout=(Read-Log $outPath);stderr=(Read-Log (Join-Path $fixture 'node.err'))}|ConvertTo-Json -Compress;continue
+        }
         if($request.op -eq 'probe'){
             $pidFile=Join-Path $fixture 'remote.pid';$remoteProcess=$null;$remotePid=$null
             if(Test-Path $pidFile){$remotePid=[int](Read-Log $pidFile);$remoteProcess=Get-Process -Id $remotePid -ErrorAction SilentlyContinue}

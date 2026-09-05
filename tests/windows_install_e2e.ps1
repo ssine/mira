@@ -45,7 +45,9 @@ try {
     }
     if ($TestService) {
         $task = Get-ScheduledTask -TaskName $taskName
-        if ($task.State -ne "Running" -or $task.Actions.Execute -notlike "*\$CurrentVersion\mira-node.exe") { throw "Scheduled task did not update to the new binary" }
+        $encoded = ($task.Actions.Arguments -split ' ')[-1]
+        $launcher = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded))
+        if ($task.State -ne "Running" -or -not $launcher.Contains("\$CurrentVersion\mira-node.exe") -or -not $launcher.Contains('--tray --config')) { throw "Scheduled task did not update to the new tray binary" }
         Write-Output "WINDOWS_SERVICE_UPDATE_OK"
     }
     Write-Output "WINDOWS_INSTALL_UPDATE_OK"

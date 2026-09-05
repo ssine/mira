@@ -45,6 +45,12 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 - 身份与配置：`%USERPROFILE%\.mira\identity.json`、`node.json`。
   凭据 DACL 只允许当前用户、SYSTEM 和管理员，移除继承的宽泛访问权限。
 - 计划任务：`MiraNode-<用户名>`，登录后启动；不承诺用户注销后继续运行。
+- Windows 托盘模式（当前源码）：以当前用户在后台运行，不显示 Node 日志控制台。
+  单击托盘图标或开始菜单的 **Mira Node** 打开状态窗口；显示连接状态、接入验证码、Codex 状态及活动会话数。
+  关闭窗口或按 Esc 只收回托盘；右键菜单中的 **退出 Mira Node** 会确认后停止本机 Node 与其托管会话，
+  下次登录时仍会自动启动。断网时会自动重连，资源管理器重启后恢复图标。
+  日志位于身份目录的 `logs\node.log`（默认 `%USERPROFILE%\.mira\logs`），单文件 4 MiB、保留 3 份旧日志。
+  同一身份重复启动托盘会打开已有窗口。手动运行 `mira-node --tray` 可使用托盘；不带 `--tray` 保留前台调试方式。
 - 终端是真实 ConPTY，支持 VT、交互输入、Ctrl-C、窗口尺寸同步。
   普通非 PTY 子进程的 `SIGTERM`/`SIGKILL` 在 Windows 上使用终止进程，并不等同于 Unix 信号。
 - 如调用系统程序，请使用 `.exe` 后缀；原生 PATH 与 WSL PATH 是不同环境。

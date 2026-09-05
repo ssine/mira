@@ -81,6 +81,56 @@ function Set-VersionLaunchers([string]$SelectedVersion) {
     [IO.File]::WriteAllText($versionFile, $SelectedVersion, $utf8)
 }
 
+function New-MiraTrayAction([string]$Program, [switch]$Show) {
+    # Keep the task alive for exactly the Node lifetime, including its exit code
+    # for Task Scheduler failure recovery. Never detach an untracked child.
+    $code = @'
+$ErrorActionPreference = 'Stop'
+$start = New-Object Diagnostics.ProcessStartInfo
+$start.FileName = '__PROGRAM__'
+$start.Arguments = '__ARGUMENTS__'
+$start.WorkingDirectory = '__CWD__'
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$process = [Diagnostics.Process]::Start($start)
+try { $process.WaitForExit(); exit $process.ExitCode }
+finally { $process.Dispose() }
+'@
+    $arguments = if ($Show) { '--tray --show --config "' + $configPath + '"' } else { '--tray --config "' + $configPath + '"' }
+    $code = $code.Replace('__PROGRAM__', $Program.Replace("'", "''")).Replace('__ARGUMENTS__', $arguments.Replace("'", "''")).Replace('__CWD__', $env:USERPROFILE.Replace("'", "''"))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    return New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded" -WorkingDirectory $env:USERPROFILE
+}
+
+function Test-MiraTraySupport([string]$Program) {
+    $outFile = Join-Path $stage 'tray-probe.stdout'
+    $errFile = Join-Path $stage 'tray-probe.stderr'
+    $process = Start-Process -FilePath $Program -ArgumentList '--mira-tray-build' -PassThru -WindowStyle Hidden -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $handle = $process.Handle
+    try {
+        if (-not $process.WaitForExit(10000)) { $process.Kill(); throw 'Mira tray capability probe timed out' }
+        return $process.ExitCode -eq 0 -and ([IO.File]::ReadAllText($outFile)).Trim() -eq 'MIRA_WINDOWS_TRAY_V1'
+    } finally { $process.Dispose() }
+}
+
+function Set-TrayShortcut($Action) {
+    $programs = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
+    $shell = New-Object -ComObject WScript.Shell
+    $shortcutPath = Join-Path $programs 'Mira Node.lnk'
+    $shortcut = $shell.CreateShortcut($shortcutPath)
+    if ((Test-Path $shortcutPath) -and $shortcut.Description -ne 'Mira Node status and tray') { throw 'Refusing to replace an independently managed Mira Node shortcut' }
+    if ($null -eq $Action) {
+        if (Test-Path $shortcutPath) { Remove-Item -LiteralPath $shortcutPath }
+        return
+    }
+    $shortcut.TargetPath = $Action.Execute
+    $shortcut.Arguments = $Action.Arguments
+    $shortcut.WorkingDirectory = $env:USERPROFILE
+    $shortcut.WindowStyle = 7
+    $shortcut.Description = 'Mira Node status and tray'
+    $shortcut.Save()
+}
+
 function Add-MiraPath {
     # SetEnvironmentVariable(..., User) broadcasts synchronously to every desktop
     # window. A hung window can stall installation for minutes. Persist first,
@@ -151,6 +201,7 @@ try {
     if ($nativeManifest.schemaVersion -ne 1 -or $nativeManifest.backend -ne 'embedded-openssh' -or $nativeManifest.platform -ne 'windows' -or $nativeManifest.arch -ne 'amd64' -or $nativeManifest.image -ne 'mira-node.exe' -or (Get-FileHash $nativeImage -Algorithm SHA256).Hash -ne $nativeManifest.sha256) { throw 'Invalid embedded OpenSSH manifest' }
     Run-Mira $nativeImage @('--mira-openssh-build')
     if (([IO.File]::ReadAllText((Join-Path $stage 'command.stdout'))).Trim() -ne 'MIRA_LINKED_OPENSSH_WINDOWS_FULL_V1') { throw 'Release has no embedded OpenSSH' }
+    $supportsTray = Test-MiraTraySupport $nativeImage
     # Fixed role names, never arbitrary manifest-supplied paths; no admin needed.
     foreach ($role in @('mira','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen','ssh-shellhost','ssh-agent','ssh-add','ssh-keyscan','ssh-sk-helper','ssh-pkcs11-helper')) {
         New-Item -ItemType HardLink -Path (Join-Path $packageDirectory ($role+'.exe')) -Target $nativeImage | Out-Null
@@ -176,7 +227,8 @@ try {
         $previousTaskXml = if ($previousTask) { Export-ScheduledTask -TaskName $taskName } else { $null }
         if ($previousTask) { Stop-ScheduledTask -TaskName $taskName }
         try {
-            $action = New-ScheduledTaskAction -Execute (Join-Path $versionDirectory "mira-node.exe") -Argument ('--config "' + $configPath + '"') -WorkingDirectory $env:USERPROFILE
+            $action = if ($supportsTray) { New-MiraTrayAction (Join-Path $versionDirectory "mira-node.exe") }
+                else { New-ScheduledTaskAction -Execute (Join-Path $versionDirectory 'mira-node.exe') -Argument ('--config "' + $configPath + '"') -WorkingDirectory $env:USERPROFILE }
             $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
             $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
             $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
@@ -192,12 +244,17 @@ try {
             }
             throw "Service update failed; previous version restored where available. $($_.Exception.Message)"
         }
+        try {
+            if ($supportsTray) { Set-TrayShortcut (New-MiraTrayAction (Join-Path $versionDirectory "mira-node.exe") -Show) }
+            else { Set-TrayShortcut $null }
+        } catch { Write-Warning "Could not update the Mira Node Start menu shortcut: $($_.Exception.Message)" }
         for ($attempt = 0; $attempt -lt 15 -and -not (Test-Path $identityPath); $attempt++) { Start-Sleep -Seconds 1 }
         Run-Mira (Join-Path $versionDirectory "mira.exe") @("status")
     } else { Write-Host "Start the Node with: $versionDirectory\mira-node.exe" }
     [IO.File]::WriteAllText($optionsFile, (@{noService=[bool]$NoService; noPath=[bool]$NoPath} | ConvertTo-Json -Compress), $utf8)
     Write-Host "Mira $Version installed. Open the Server website to approve a new Node."
     Write-Host "Open a new terminal, then use: mira status / mira update"
+    if (-not $NoService -and $supportsTray) { Write-Host "Mira Node runs in the notification area. Use its tray icon or the Start menu to view status. Closing the status window keeps it running." }
     Write-Host "Identity and configuration are preserved separately from versioned binaries. Previous versions remain available for rollback."
 }
 finally {

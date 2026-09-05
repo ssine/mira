@@ -124,3 +124,8 @@ jobs:
       - name: Test native Windows capabilities and ConPTY
         working-directory: node
         run: go test -v ./...
+      - name: Test Windows tray startup, close, duplicate launch and exit
+        shell: pwsh
+        run: |
+          go -C node build -o "$env:RUNNER_TEMP/mira-tray.exe" ./cmd/mira-node
+          & tests/windows_tray_e2e.ps1 -Binary "$env:RUNNER_TEMP/mira-tray.exe"

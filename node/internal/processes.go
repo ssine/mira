@@ -273,7 +273,7 @@ func (runtime *capabilityRuntime) startProcess(params processParams) (any, error
 	if err != nil {
 		return nil, err
 	}
-	command := exec.Command(params.Command, params.Args...)
+	command := backgroundCommand(exec.Command(params.Command, params.Args...))
 	command.Dir = resolvedCWD
 	command.Env = os.Environ()
 	for name, value := range params.Env {

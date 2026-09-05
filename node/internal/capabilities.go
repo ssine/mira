@@ -122,7 +122,7 @@ func (runtime *capabilityRuntime) execute(
 }
 
 func commandOutput(ctx context.Context, name string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, name, args...)
+	command := backgroundCommand(exec.CommandContext(ctx, name, args...))
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("%s failed: %s", name, strings.TrimSpace(string(output)))
@@ -132,7 +132,7 @@ func commandOutput(ctx context.Context, name string, args ...string) (string, er
 
 func commandOutputLimited(ctx context.Context, maximum int, name string, args ...string) (string, bool, error) {
 	output := &boundedCommandBuffer{limit: maximum}
-	command := exec.CommandContext(ctx, name, args...)
+	command := backgroundCommand(exec.CommandContext(ctx, name, args...))
 	command.Stdout = output
 	command.Stderr = output
 	err := command.Run()

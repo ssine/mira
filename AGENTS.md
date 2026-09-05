@@ -191,6 +191,13 @@ Discovery is read-only. Import is an explicit administrator action: preserve eve
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing
 divergent PostgreSQL history.
 
+Windows installation uses a current-user login task and the native `--tray` Node mode. Closing its
+status window hides it; explicit tray exit cancels the Node and cleans up its managed sessions.
+Keep console CLI/OpenSSH roles and foreground Node debugging intact. Captured background children
+must not create consoles. Local diagnostic logs rotate with bounded retention; the tray is only an
+in-memory status projection, never a conversation store. Probe tray support when installing an older
+release and preserve that release's foreground launch path for rollback.
+
 Mira Node/Server/APK releases (`v<VERSION>`) and optional Codex runtime releases
 (`codex-v<upstream>-mira.<revision>`) are independent. Never mark a Codex release as GitHub's latest
 Mira release. Node archives and the Node container must not bundle/download Codex during installation.

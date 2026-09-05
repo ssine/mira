@@ -24,6 +24,10 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	return runConfigured(ctx, configuration, nil)
+}
+
+func runConfigured(ctx context.Context, configuration config, status *desktopStatus) error {
 	if configuration.ExitWithParent {
 		if err := enableParentExitGuard(); err != nil {
 			return err
@@ -36,9 +40,14 @@ func Run(ctx context.Context) error {
 	defer capabilities.close()
 
 	client := newControlClient(configuration, capabilities)
+	client.desktop = status
+	if status != nil {
+		status.attach(client)
+	}
 	defer client.close()
 	for ctx.Err() == nil {
 		if err := client.register(ctx); err != nil {
+			client.updateDesktopRegistration()
 			Log("Mira Node registration failed", map[string]any{"error": err.Error()})
 			if !sleepContext(ctx, 3*time.Second) {
 				break

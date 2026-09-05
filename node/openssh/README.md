@@ -112,5 +112,10 @@ Nodes. `MIRA_TEST_DATABASE_URL` defaults to a **local disposable** database on p
   Set `MIRA_TEST_ADB_SERIAL` and `MIRA_OPENSSH_TEST_PUBLIC_URL` for the fixture.
 
 ADB is installation/configuration/inspection only, not the tested SSH channel.
+Set `MIRA_TEST_WINDOWS_TRAY=1` with the Windows hook to run its Node in tray mode
+while exercising the same linked-image SSH, ConPTY, transfer and revocation tests.
+`tests/windows_tray_e2e.ps1 -Binary <image> -Installer scripts/install.ps1` separately
+tests the installer launcher in an isolated user task, window close/reopen, duplicate
+launch, log output and confirmed exit without replacing the installed Node task.
 Tests exercise Mira enrollment, identities and reverse relay. See
 [protocol/ssh-v1.md](../../protocol/ssh-v1.md) for boundaries and CLI changes.

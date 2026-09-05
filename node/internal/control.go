@@ -17,6 +17,7 @@ import (
 )
 
 type controlClient struct {
+	desktop       *desktopStatus
 	configuration config
 	runtime       *capabilityRuntime
 	appServer     *appServerManager
@@ -340,6 +341,7 @@ func (client *controlClient) websocketURL() (string, error) {
 }
 
 func (client *controlClient) serve(ctx context.Context) error {
+	defer client.desktop.update("reconnecting", "")
 	endpoint, err := client.websocketURL()
 	if err != nil {
 		return err
@@ -389,6 +391,7 @@ func (client *controlClient) serve(ctx context.Context) error {
 		return err
 	}
 	Log("connected reverse capability channel", map[string]any{"nodeId": client.nodeID})
+	client.desktop.update("online", "")
 
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()

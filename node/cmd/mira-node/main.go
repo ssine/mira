@@ -11,6 +11,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--mira-tray-build" {
+		if !miranode.SupportsTray() {
+			os.Exit(1)
+		}
+		fmt.Println("MIRA_WINDOWS_TRAY_V1")
+		return
+	}
 	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "version") {
 		if err := miranode.PrintVersion("mira-node", false); err != nil {
 			os.Exit(1)
@@ -27,6 +34,13 @@ func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--internal-ssh-worker" {
 		if err := miranode.RunSSHWorker(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "SSH worker:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "--tray" {
+		if err := miranode.RunTray(ctx, os.Args[2:]); err != nil && err != context.Canceled {
+			miranode.Log("Mira Node tray failed", map[string]any{"error": err.Error()})
 			os.Exit(1)
 		}
 		return

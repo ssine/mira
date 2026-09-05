@@ -119,8 +119,8 @@ func inspectCodex(parent context.Context, path string) codexInstallation {
 	installation := codexInstallation{Path: path, ValidatedAt: time.Now().UTC().Format(time.RFC3339Nano)}
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
-	versionOutput, versionErr := exec.CommandContext(ctx, path, "--version").CombinedOutput()
-	helpOutput, helpErr := exec.CommandContext(ctx, path, "app-server", "--help").CombinedOutput()
+	versionOutput, versionErr := backgroundCommand(exec.CommandContext(ctx, path, "--version")).CombinedOutput()
+	helpOutput, helpErr := backgroundCommand(exec.CommandContext(ctx, path, "app-server", "--help")).CombinedOutput()
 	if versionErr != nil || helpErr != nil {
 		installation.ValidationError = strings.TrimSpace(fmt.Sprintf("version: %v; app-server help: %v", versionErr, helpErr))
 		return installation
@@ -147,7 +147,7 @@ func supportsRemoteThreadStore(ctx context.Context, path string) bool {
 		"-c", `experimental_thread_store.store_id="mira-probe"`,
 		"features", "list",
 	)
-	return probe.Run() == nil
+	return backgroundCommand(probe).Run() == nil
 }
 
 func (manager *appServerManager) installationsView() []codexInstallation {
@@ -405,7 +405,7 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 	for _, override := range desired.ConfigOverrides {
 		arguments = append(arguments, "-c", override)
 	}
-	command := exec.Command(codex.Path, arguments...)
+	command := backgroundCommand(exec.Command(codex.Path, arguments...))
 	command.Env = os.Environ()
 	if manager.nodeToken != "" {
 		// The patched ThreadStore reads this environment variable when

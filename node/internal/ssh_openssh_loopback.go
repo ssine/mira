@@ -22,7 +22,7 @@ func runOpenSSHLoopback(ctx context.Context, program, config string, in io.Reade
 	address := reservation.Addr().String()
 	port := reservation.Addr().(*net.TCPAddr).Port
 	reservation.Close()
-	command := exec.Command(program, "-D", "-e", "-f", config, "-p", strconv.Itoa(port), "-o", "ListenAddress=127.0.0.1")
+	command := backgroundCommand(exec.Command(program, "-D", "-e", "-f", config, "-p", strconv.Itoa(port), "-o", "ListenAddress=127.0.0.1"))
 	if os.Getenv("MIRA_OPENSSH_DEBUG") == "1" {
 		command.Args = append(command.Args, "-ddd")
 	}

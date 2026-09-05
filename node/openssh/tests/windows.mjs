@@ -19,7 +19,7 @@ export default async function(ctx){
   }
   const windowsPath=p=>execFileSync('wslpath',['-w',p],{encoding:'utf8'}).trim();
   const key='openssh-windows-'+crypto.randomUUID();
-  const peer=spawn('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',windowsPath(path.join(repo,'node/openssh/tests/windows-peer.ps1')),'-BinaryDirectory',windowsPath(directory),'-ServerUrl',publicURL,'-NodeKey',key,...(process.env.MIRA_TEST_OPENSSH_DEBUG==='1'?['-DebugOpenSSH']:[])]);
+  const peer=spawn('/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe',['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',windowsPath(path.join(repo,'node/openssh/tests/windows-peer.ps1')),'-BinaryDirectory',windowsPath(directory),'-ServerUrl',publicURL,'-NodeKey',key,...(process.env.MIRA_TEST_OPENSSH_DEBUG==='1'?['-DebugOpenSSH']:[]),...(process.env.MIRA_TEST_WINDOWS_TRAY==='1'?['-Tray']:[])]);
   let peerErrors='';peer.stderr.on('data',b=>peerErrors+=b);
   const pending=new Map();let readyResolve;
   const ready=new Promise(r=>readyResolve=r);

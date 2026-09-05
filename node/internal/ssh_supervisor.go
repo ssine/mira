@@ -51,7 +51,7 @@ func (client *controlClient) runSSHWorker(ctx context.Context, message controlMe
 	}
 	// Cancellation closes the transport first, allowing the worker to reap its
 	// children. CommandContext's default immediate Kill would orphan shells.
-	command := exec.Command(executable, "--internal-ssh-worker")
+	command := backgroundCommand(exec.Command(executable, "--internal-ssh-worker"))
 	command.Stderr = os.Stderr
 	command.WaitDelay = 2 * time.Second
 	input, err := command.StdinPipe()
