@@ -1,25 +1,25 @@
-From 538bb3fe4d4187facfba9bc9ba3e0b2cf29959ea Mon Sep 17 00:00:00 2001
+From 72fa975fe854f526c38486b10180af9adb559055 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 5 Sep 2026 04:09:03 +0800
 Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
 
 ---
- codex-rs/Cargo.lock                           | 299 ++++----
+ codex-rs/Cargo.lock                           | 299 +++----
  codex-rs/app-server/src/message_processor.rs  |   1 +
  .../request_processors/thread_processor.rs    |  16 +-
  codex-rs/config/src/config_toml.rs            |   5 +
  codex-rs/core/config.schema.json              |  25 +
  codex-rs/core/src/codex_delegate.rs           |   2 +-
  codex-rs/core/src/codex_thread.rs             |   6 +
- codex-rs/core/src/config/mod.rs               |  15 +
+ codex-rs/core/src/config/mod.rs               |  17 +
  codex-rs/core/src/session/mod.rs              |   9 +
  codex-rs/core/src/thread_manager.rs           |  23 +
- codex-rs/core/src/thread_manager_tests.rs     |  45 ++
+ codex-rs/core/src/thread_manager_tests.rs     |  45 +
  codex-rs/thread-store/Cargo.toml              |   1 +
- codex-rs/thread-store/src/in_memory.rs        |  26 +-
+ codex-rs/thread-store/src/in_memory.rs        |  84 +-
  codex-rs/thread-store/src/lib.rs              |   2 +
- codex-rs/thread-store/src/remote_http.rs      | 645 ++++++++++++++++++
- 15 files changed, 958 insertions(+), 162 deletions(-)
+ codex-rs/thread-store/src/remote_http.rs      | 838 ++++++++++++++++++
+ 15 files changed, 1211 insertions(+), 162 deletions(-)
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
 
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
@@ -1512,7 +1512,7 @@ index 172726f..4d93fe8 100644
      pub fn session_telemetry(&self) -> SessionTelemetry {
          self.session.services.session_telemetry.clone()
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index dca329a..2384ba1 100644
+index dca329a..ab6634c 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -598,6 +598,12 @@ pub enum ThreadStoreConfig {
@@ -1528,7 +1528,7 @@ index dca329a..2384ba1 100644
      /// In-memory thread store for test and debug configurations.
      InMemory { id: String },
  }
-@@ -2422,6 +2428,15 @@ fn resolve_tool_suggest_config_from_config(
+@@ -2422,6 +2428,17 @@ fn resolve_tool_suggest_config_from_config(
  fn thread_store_config(thread_store: Option<ThreadStoreToml>) -> ThreadStoreConfig {
      match thread_store {
          Some(ThreadStoreToml::Local {}) => ThreadStoreConfig::Local,
@@ -1539,7 +1539,9 @@ index dca329a..2384ba1 100644
 +        }) => ThreadStoreConfig::RemoteHttp {
 +            endpoint,
 +            store_id,
-+            bearer_token: bearer_token.or_else(|| std::env::var("MIRA_NODE_TOKEN").ok()).unwrap_or_default(),
++            bearer_token: bearer_token
++                .or_else(|| std::env::var("MIRA_NODE_TOKEN").ok())
++                .unwrap_or_default(),
 +        },
          Some(ThreadStoreToml::InMemory { id }) => ThreadStoreConfig::InMemory { id },
          None => ThreadStoreConfig::Local,
@@ -1716,7 +1718,7 @@ index b0d2b15..64cb882 100644
  serde_json = { workspace = true }
  sqlx = { workspace = true }
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 9ea7e2b..05fe625 100644
+index 9ea7e2b..1bc5fa1 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -20,6 +20,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
@@ -1740,9 +1742,21 @@ index 9ea7e2b..05fe625 100644
      calls: InMemoryThreadStoreCalls,
      created_threads: HashMap<ThreadId, CreateThreadParams>,
      histories: HashMap<ThreadId, Vec<RolloutItem>>,
-@@ -513,6 +517,26 @@ struct InMemoryThreadStoreState {
+@@ -512,7 +516,85 @@ struct InMemoryThreadStoreState {
+     rollout_paths: HashMap<PathBuf, ThreadId>,
  }
  
++#[derive(Serialize)]
++struct InMemoryThreadStoreStateView<'a> {
++    created_threads: &'a HashMap<ThreadId, CreateThreadParams>,
++    metadata_updates: &'a HashMap<ThreadId, ThreadMetadataPatch>,
++    sections: &'a HashMap<ThreadId, String>,
++    section_positions: &'a HashMap<ThreadId, i64>,
++    section_entered_at: &'a HashMap<ThreadId, DateTime<Utc>>,
++    names: &'a HashMap<ThreadId, Option<String>>,
++    rollout_paths: &'a HashMap<PathBuf, ThreadId>,
++}
++
  impl InMemoryThreadStore {
 +    pub(crate) fn from_snapshot(snapshot: Option<serde_json::Value>) -> ThreadStoreResult<Self> {
 +        let state = snapshot
@@ -1758,10 +1772,57 @@ index 9ea7e2b..05fe625 100644
 +        })
 +    }
 +
-+    pub(crate) async fn snapshot(&self) -> ThreadStoreResult<serde_json::Value> {
-+        serde_json::to_value(&*self.state.lock().await).map_err(|err| ThreadStoreError::Internal {
-+            message: format!("failed to serialize remote thread-store snapshot: {err}"),
-+        })
++    pub(crate) async fn snapshot_for_threads(
++        &self,
++        thread_ids: &HashSet<ThreadId>,
++    ) -> ThreadStoreResult<serde_json::Value> {
++        let state = self.state.lock().await;
++        let view = InMemoryThreadStoreStateView {
++            created_threads: &state.created_threads,
++            metadata_updates: &state.metadata_updates,
++            sections: &state.sections,
++            section_positions: &state.section_positions,
++            section_entered_at: &state.section_entered_at,
++            names: &state.names,
++            rollout_paths: &state.rollout_paths,
++        };
++        let mut snapshot =
++            serde_json::to_value(view).map_err(|err| ThreadStoreError::Internal {
++                message: format!("failed to serialize remote thread-store state: {err}"),
++            })?;
++        let histories = thread_ids
++            .iter()
++            .filter_map(|thread_id| {
++                state
++                    .histories
++                    .get(thread_id)
++                    .map(|history| (*thread_id, history))
++            })
++            .collect::<HashMap<_, _>>();
++        snapshot
++            .as_object_mut()
++            .expect("serialized thread-store state is an object")
++            .insert(
++                "histories".to_string(),
++                serde_json::to_value(histories).map_err(|err| ThreadStoreError::Internal {
++                    message: format!("failed to serialize selected thread histories: {err}"),
++                })?,
++            );
++        Ok(snapshot)
++    }
++
++    pub(crate) async fn install_history(
++        &self,
++        thread_id: ThreadId,
++        items: Vec<serde_json::Value>,
++    ) -> ThreadStoreResult<()> {
++        let history = serde_json::from_value(serde_json::Value::Array(items)).map_err(|err| {
++            ThreadStoreError::Internal {
++                message: format!("failed to deserialize remote history for {thread_id}: {err}"),
++            }
++        })?;
++        self.state.lock().await.histories.insert(thread_id, history);
++        Ok(())
 +    }
 +
      /// Returns the store associated with `id`, creating it if needed.
@@ -1789,10 +1850,10 @@ index a8b6a36..3fbd587 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..a670e97
+index 0000000..86c06f9
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,645 @@
+@@ -0,0 +1,838 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::time::Duration;
@@ -1896,6 +1957,7 @@ index 0000000..a670e97
 +struct CachedStore {
 +    version: u64,
 +    history_manifest: HashMap<String, HistoryManifestEntry>,
++    loaded_histories: HashSet<ThreadId>,
 +    store: InMemoryThreadStore,
 +}
 +
@@ -1957,7 +2019,12 @@ index 0000000..a670e97
 +    }
 +
 +    async fn load(&self, head: HeadResponse) -> ThreadStoreResult<CachedStore> {
-+        let mut snapshot = match head.state {
++        let HeadResponse {
++            version,
++            state,
++            mut history_manifest,
++        } = head;
++        let mut snapshot = match state {
 +            serde_json::Value::Object(state) => state,
 +            _ => {
 +                return Err(ThreadStoreError::Internal {
@@ -1965,16 +2032,37 @@ index 0000000..a670e97
 +                });
 +            }
 +        };
-+        let mut histories = serde_json::Map::new();
-+        for (thread_id, entry) in &head.history_manifest {
++        let incompatible = filter_incompatible_threads(&mut snapshot, cfg!(windows));
++        for thread_id in incompatible {
++            history_manifest.remove(&thread_id);
++        }
++        snapshot.insert("histories".to_string(), serde_json::json!({}));
++        Ok(CachedStore {
++            version,
++            history_manifest,
++            loaded_histories: HashSet::new(),
++            store: InMemoryThreadStore::from_snapshot(Some(serde_json::Value::Object(snapshot)))?,
++        })
++    }
++
++    async fn ensure_history(
++        &self,
++        cached: &mut CachedStore,
++        thread_id: ThreadId,
++    ) -> ThreadStoreResult<()> {
++        if cached.loaded_histories.contains(&thread_id) {
++            return Ok(());
++        }
++        let thread_id_text = thread_id.to_string();
++        if let Some(entry) = cached.history_manifest.get(&thread_id_text) {
 +            let response = self
 +                .client
 +                .get(format!(
-+                    "{}/threads/{thread_id}/history?generation={}&throughVersion={}",
-+                    self.store_url, entry.generation, head.version
++                    "{}/threads/{thread_id_text}/history?generation={}&throughVersion={}",
++                    self.store_url, entry.generation, cached.version
 +                ))
 +                .bearer_auth(&self.bearer_token)
-+                .timeout(Duration::from_secs(10))
++                .timeout(Duration::from_secs(120))
 +                .send()
 +                .await
 +                .map_err(remote_error)?;
@@ -1988,17 +2076,13 @@ index 0000000..a670e97
 +                    message: format!("remote history changed while loading thread {thread_id}"),
 +                });
 +            }
-+            histories.insert(thread_id.clone(), serde_json::Value::Array(history.items));
++            cached
++                .store
++                .install_history(thread_id, history.items)
++                .await?;
 +        }
-+        snapshot.insert(
-+            "histories".to_string(),
-+            serde_json::Value::Object(histories),
-+        );
-+        Ok(CachedStore {
-+            version: head.version,
-+            history_manifest: head.history_manifest,
-+            store: InMemoryThreadStore::from_snapshot(Some(serde_json::Value::Object(snapshot)))?,
-+        })
++        cached.loaded_histories.insert(thread_id);
++        Ok(())
 +    }
 +
 +    async fn refresh(&self, cache: &mut Option<CachedStore>) -> ThreadStoreResult<()> {
@@ -2083,6 +2167,7 @@ index 0000000..a670e97
 +
 +    async fn read<T: Send>(
 +        &self,
++        thread_ids: Vec<ThreadId>,
 +        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
 +    ) -> ThreadStoreResult<T> {
 +        let _permit = self
@@ -2093,7 +2178,10 @@ index 0000000..a670e97
 +        let mut cache = self.take_cache();
 +        let result = async {
 +            self.refresh(&mut cache).await?;
-+            let cached = cache.as_ref().ok_or_else(cache_missing)?;
++            let cached = cache.as_mut().ok_or_else(cache_missing)?;
++            for thread_id in thread_ids {
++                self.ensure_history(cached, thread_id).await?;
++            }
 +            operation(&cached.store).await
 +        }
 +        .await;
@@ -2103,6 +2191,7 @@ index 0000000..a670e97
 +
 +    async fn mutate<T: Send>(
 +        &self,
++        thread_ids: Vec<ThreadId>,
 +        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
 +    ) -> ThreadStoreResult<T> {
 +        let _permit = self
@@ -2115,9 +2204,19 @@ index 0000000..a670e97
 +        let result = async {
 +            self.refresh(&mut cache).await?;
 +            let cached = cache.as_mut().ok_or_else(cache_missing)?;
-+            let before = cached.store.snapshot().await?;
-+            let output = operation(&cached.store).await?;
-+            let after = cached.store.snapshot().await?;
++            let selected = thread_ids.iter().copied().collect::<HashSet<_>>();
++            for thread_id in &selected {
++                self.ensure_history(cached, *thread_id).await?;
++            }
++            let before = cached.store.snapshot_for_threads(&selected).await?;
++            let output = match operation(&cached.store).await {
++                Ok(output) => output,
++                Err(error) => {
++                    invalidate_cache = true;
++                    return Err(error);
++                }
++            };
++            let after = cached.store.snapshot_for_threads(&selected).await?;
 +            match self
 +                .save(cached.version, &cached.history_manifest, before, after)
 +                .await
@@ -2145,6 +2244,67 @@ index 0000000..a670e97
 +        self.replace_cache(cache);
 +        result
 +    }
++}
++
++fn cwd_is_compatible(cwd: &str, windows: bool) -> bool {
++    if cwd.is_empty() {
++        return true;
++    }
++    if windows {
++        let bytes = cwd.as_bytes();
++        return cwd.starts_with("\\\\")
++            || bytes.get(1).is_some_and(|separator| *separator == b':')
++                && bytes
++                    .get(2)
++                    .is_some_and(|separator| *separator == b'\\' || *separator == b'/')
++                && bytes.first().is_some_and(u8::is_ascii_alphabetic);
++    }
++    cwd.starts_with('/')
++}
++
++fn filter_incompatible_threads(
++    state: &mut serde_json::Map<String, serde_json::Value>,
++    windows: bool,
++) -> HashSet<String> {
++    let incompatible = state
++        .get("created_threads")
++        .and_then(serde_json::Value::as_object)
++        .into_iter()
++        .flat_map(|threads| threads.iter())
++        .filter_map(|(thread_id, created)| {
++            let cwd = created
++                .pointer("/metadata/cwd")
++                .and_then(serde_json::Value::as_str)
++                .unwrap_or_default();
++            (!cwd_is_compatible(cwd, windows)).then(|| thread_id.clone())
++        })
++        .collect::<HashSet<_>>();
++    for field in [
++        "created_threads",
++        "metadata_updates",
++        "sections",
++        "section_positions",
++        "section_entered_at",
++        "names",
++    ] {
++        if let Some(values) = state
++            .get_mut(field)
++            .and_then(serde_json::Value::as_object_mut)
++        {
++            values.retain(|thread_id, _| !incompatible.contains(thread_id));
++        }
++    }
++    if let Some(paths) = state
++        .get_mut("rollout_paths")
++        .and_then(serde_json::Value::as_object_mut)
++    {
++        paths.retain(|_, thread_id| {
++            thread_id
++                .as_str()
++                .is_none_or(|thread_id| !incompatible.contains(thread_id))
++        });
++    }
++    incompatible
 +}
 +
 +fn split_snapshot(
@@ -2257,15 +2417,24 @@ index 0000000..a670e97
 +    }
 +
 +    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::create_thread(store, params)))
++        let thread_id = params.thread_id;
++        Box::pin(self.mutate(vec![thread_id], move |store| {
++            ThreadStore::create_thread(store, params)
++        }))
 +    }
 +
 +    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::resume_thread(store, params)))
++        let thread_id = params.thread_id;
++        Box::pin(self.mutate(vec![thread_id], move |store| {
++            ThreadStore::resume_thread(store, params)
++        }))
 +    }
 +
 +    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::append_items(store, params)))
++        let thread_id = params.thread_id;
++        Box::pin(self.mutate(vec![thread_id], move |store| {
++            ThreadStore::append_items(store, params)
++        }))
 +    }
 +
 +    fn persist_thread(
@@ -2273,74 +2442,127 @@ index 0000000..a670e97
 +        thread_id: ThreadId,
 +        context: PersistContext,
 +    ) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::persist_thread(store, thread_id, context)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::persist_thread(store, thread_id, context)
++        }))
 +    }
 +
 +    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::flush_thread(store, thread_id)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::flush_thread(store, thread_id)
++        }))
 +    }
 +
 +    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::shutdown_thread(store, thread_id)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::shutdown_thread(store, thread_id)
++        }))
 +    }
 +
 +    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::discard_thread(store, thread_id)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::discard_thread(store, thread_id)
++        }))
 +    }
 +
 +    fn load_history(
 +        &self,
 +        params: LoadThreadHistoryParams,
 +    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
-+        Box::pin(self.read(move |store| ThreadStore::load_history(store, params)))
++        let thread_id = params.thread_id;
++        Box::pin(self.read(vec![thread_id], move |store| {
++            ThreadStore::load_history(store, params)
++        }))
 +    }
 +
 +    fn load_latest_model_context(
 +        &self,
 +        params: LoadThreadHistoryParams,
 +    ) -> ThreadStoreFuture<'_, StoredModelContext> {
-+        Box::pin(self.read(move |store| ThreadStore::load_latest_model_context(store, params)))
++        let thread_id = params.thread_id;
++        Box::pin(self.read(vec![thread_id], move |store| {
++            ThreadStore::load_latest_model_context(store, params)
++        }))
 +    }
 +
 +    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-+        Box::pin(self.read(move |store| ThreadStore::read_thread(store, params)))
++        let histories = params
++            .include_history
++            .then_some(params.thread_id)
++            .into_iter()
++            .collect();
++        Box::pin(self.read(histories, move |store| {
++            ThreadStore::read_thread(store, params)
++        }))
 +    }
 +
 +    fn read_thread_by_rollout_path(
 +        &self,
 +        params: ReadThreadByRolloutPathParams,
 +    ) -> ThreadStoreFuture<'_, StoredThread> {
-+        Box::pin(self.read(move |store| ThreadStore::read_thread_by_rollout_path(store, params)))
++        Box::pin(async move {
++            if !params.include_history {
++                return self
++                    .read(Vec::new(), move |store| {
++                        ThreadStore::read_thread_by_rollout_path(store, params)
++                    })
++                    .await;
++            }
++            let mut metadata_params = params.clone();
++            metadata_params.include_history = false;
++            let thread = self
++                .read(Vec::new(), move |store| {
++                    ThreadStore::read_thread_by_rollout_path(store, metadata_params)
++                })
++                .await?;
++            self.read(vec![thread.thread_id], move |store| {
++                ThreadStore::read_thread_by_rollout_path(store, params)
++            })
++            .await
++        })
 +    }
 +
 +    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
-+        Box::pin(self.read(move |store| ThreadStore::list_threads(store, params)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::list_threads(store, params)
++        }))
 +    }
 +
 +    fn update_thread_metadata(
 +        &self,
 +        params: UpdateThreadMetadataParams,
 +    ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
-+        Box::pin(self.mutate(move |store| ThreadStore::update_thread_metadata(store, params)))
++        Box::pin(self.mutate(Vec::new(), move |store| {
++            ThreadStore::update_thread_metadata(store, params)
++        }))
 +    }
 +
 +    fn move_thread_to_section(
 +        &self,
 +        params: MoveThreadToSectionParams,
 +    ) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::move_thread_to_section(store, params)))
++        Box::pin(self.mutate(Vec::new(), move |store| {
++            ThreadStore::move_thread_to_section(store, params)
++        }))
 +    }
 +
 +    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::archive_thread(store, params)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::archive_thread(store, params)
++        }))
 +    }
 +
 +    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-+        Box::pin(self.mutate(move |store| ThreadStore::unarchive_thread(store, params)))
++        Box::pin(self.read(Vec::new(), move |store| {
++            ThreadStore::unarchive_thread(store, params)
++        }))
 +    }
 +
 +    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.mutate(move |store| ThreadStore::delete_thread(store, params)))
++        let thread_id = params.thread_id;
++        Box::pin(self.mutate(vec![thread_id], move |store| {
++            ThreadStore::delete_thread(store, params)
++        }))
 +    }
 +}
 +
@@ -2436,6 +2658,38 @@ index 0000000..a670e97
 +        );
 +        assert_eq!(changes[0].value, Some(serde_json::json!(["a", "c"])));
 +        assert_eq!(changes[0].conflict_policy, "compareAndSwap");
++    }
++
++    #[test]
++    fn platform_projection_keeps_foreign_cwds_canonical_but_not_executable() {
++        let unix_id = "018f0000-0000-7000-8000-000000000001";
++        let windows_id = "018f0000-0000-7000-8000-000000000002";
++        let mut state = serde_json::json!({
++            "created_threads": {
++                (unix_id): {"metadata": {"cwd": "/home/sine/project"}},
++                (windows_id): {"metadata": {"cwd": "C:\\Users\\Sine\\project"}}
++            },
++            "metadata_updates": {(unix_id): {"title": "unix"}, (windows_id): {"title": "windows"}},
++            "names": {(unix_id): "unix", (windows_id): "windows"},
++            "rollout_paths": {"/tmp/unix": unix_id, "C:\\tmp\\windows": windows_id}
++        })
++        .as_object()
++        .expect("state object")
++        .clone();
++
++        let removed = filter_incompatible_threads(&mut state, true);
++        assert_eq!(removed, HashSet::from([unix_id.to_string()]));
++        assert!(state["created_threads"].get(unix_id).is_none());
++        assert!(state["metadata_updates"].get(unix_id).is_none());
++        assert!(state["names"].get(unix_id).is_none());
++        assert_eq!(state["rollout_paths"].as_object().expect("paths").len(), 1);
++        assert!(state["created_threads"].get(windows_id).is_some());
++
++        assert!(cwd_is_compatible("C:\\Users\\Sine", true));
++        assert!(cwd_is_compatible("C:/Users/Sine", true));
++        assert!(!cwd_is_compatible("/home/sine", true));
++        assert!(cwd_is_compatible("/home/sine", false));
++        assert!(!cwd_is_compatible("C:\\Users\\Sine", false));
 +    }
 +}
 -- 
