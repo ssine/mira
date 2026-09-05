@@ -1,6 +1,7 @@
 const routeKey = "mira.app.route";
 const standalone = window.matchMedia("(display-mode: standalone)");
-const isInstalled = () => standalone.matches || navigator.standalone === true;
+let installedWindow = standalone.matches || navigator.standalone === true;
+const isInstalled = () => installedWindow;
 
 function appRoute(url) {
   const thread = url.searchParams.get("thread");
@@ -75,7 +76,44 @@ function installControls() {
     controls.forEach((button) => button.classList.add("hidden"));
     dialog.close();
   });
-  standalone.addEventListener("change", sync);
+  standalone.addEventListener("change", () => {
+    // Fullscreen temporarily changes display-mode in an installed app window.
+    installedWindow ||= standalone.matches;
+    sync();
+  });
+  sync();
+}
+
+function fullscreenControls() {
+  const button = document.querySelector("#agentFullscreenToggle");
+  const status = document.querySelector("#agentFullscreenStatus");
+  let pending = false;
+  const supported = document.fullscreenEnabled && typeof document.documentElement.requestFullscreen === "function";
+  const sync = () => {
+    const active = Boolean(document.fullscreenElement);
+    button.disabled = pending || !supported;
+    button.setAttribute("aria-pressed", String(active));
+    document.querySelector("#agentFullscreenLabel").textContent = active ? "退出全屏" : "全屏模式";
+    document.querySelector("#agentFullscreenHint").textContent = !supported ? "当前浏览器不支持全屏" : active ? "恢复普通显示模式" : "隐藏系统栏，扩大阅读空间";
+  };
+  button.addEventListener("click", async () => {
+    if (pending || !supported) return;
+    pending = true;
+    status.classList.add("hidden");
+    sync();
+    try {
+      // Call directly in the click handler: fullscreen requires user activation.
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+    } catch {
+      status.textContent = "未能切换全屏，请重试或检查浏览器是否允许全屏。";
+      status.classList.remove("hidden");
+    } finally {
+      pending = false;
+      sync();
+    }
+  });
+  document.addEventListener("fullscreenchange", sync);
   sync();
 }
 
@@ -98,6 +136,7 @@ function mobileViewport() {
   viewport.addEventListener("resize", schedule);
   viewport.addEventListener("scroll", schedule);
   window.addEventListener("pageshow", schedule);
+  document.addEventListener("fullscreenchange", schedule);
   touch.addEventListener("change", schedule);
   update();
 }
@@ -105,6 +144,7 @@ function mobileViewport() {
 export function initializePwa() {
   restoreAppLaunch();
   installControls();
+  fullscreenControls();
   mobileViewport();
   if ("serviceWorker" in navigator && window.isSecureContext) {
     void navigator.serviceWorker.register("/service-worker.js", { scope: "/", updateViaCache: "none" }).catch(() => {

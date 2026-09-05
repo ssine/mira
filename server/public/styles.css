@@ -374,6 +374,7 @@ tbody tr:hover { background: var(--hover); }
 .chat-manage-link > span:last-child { display: grid; gap: 3px; min-width: 0; }
 .chat-manage-link strong { font-size: 11px; font-weight: 600; }
 .chat-manage-link small { color: var(--muted); font-size: 9px; }
+.fullscreen-status { margin: 0; padding: 0 8px 6px; color: var(--warning); font-size: 10px; }
 .runtime-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
 .runtime-page-head h1 { margin: 7px 0 5px; font-size: 30px; font-weight: 620; letter-spacing: -.025em; }
 .runtime-page-head p:last-child { margin: 0; font-size: 12px; }
