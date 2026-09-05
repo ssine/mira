@@ -18,8 +18,10 @@ class Socket extends EventEmitter {
 class ThreadStartPool {
   records = new Map();
   runtimeWrites = [];
+  deleted = new Set();
 
   async query(sql, params = []) {
+    if (sql.startsWith("SELECT thread_id FROM mira_thread_actions")) return { rowCount: params[1].some(id => this.deleted.has(id)) ? 1 : 0, rows: [] };
     const key = params.length >= 3 ? params.slice(0, 3).join("\n") : null;
     if (sql.includes("INSERT INTO mira_appserver_thread_start_requests")) {
       if (this.records.has(key)) return { rowCount: 0, rows: [] };
@@ -152,7 +154,7 @@ test("App Server proxy persists its store-scoped thread runtime binding", async 
 test("App Server proxy tells Codex to use the absolute Mira CLI without adding SSH tools", async () => {
   const channel = new NodeChannel({
     server: new EventEmitter(), authService: {},
-    pool: { query: async () => ({ rowCount: 1 }) },
+    pool: { query: async sql => ({ rowCount: sql.includes("mira_thread_actions") ? 0 : 1 }) },
   });
   const node = new Socket();
   channel.attachNode("node-1", node);
@@ -199,6 +201,7 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
       ].join("\n"),
     },
   }));
+  await setImmediate();
   const resume = JSON.parse(node.sent.at(-1).payload);
   assert.equal(resume.params.approvalPolicy, "never");
   assert.equal(resume.params.sandbox, "danger-full-access");
@@ -208,6 +211,7 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   assert.equal(resume.params.developerInstructions.match(/MIRA_CLI_INSTRUCTIONS_V1_BEGIN/g)?.length, 1);
 
   client.emit("message", JSON.stringify({ id: 4, method: "thread/fork", params: { threadId: "source-thread", excludeTurns: true } }));
+  await setImmediate();
   const fork = JSON.parse(node.sent.at(-1).payload);
   assert.equal(fork.params.cwd, undefined, "fork inherits its source directory");
   assert.equal(fork.params.approvalPolicy, "never");
@@ -283,6 +287,14 @@ for (const method of ["thread/start", "thread/fork"]) test(`App Server proxy coa
   await setImmediate();
   assert.match(third.sent.at(-1).error.message, /reused/, "creation request IDs cannot cross methods");
   assert(pool.runtimeWrites.some((values) => values[1] === "thread-1"), "created thread is bound to its execution Node");
+  pool.records.values().next().value.response = { deleted: true };
+  third.emit("message", JSON.stringify({ id: 50, method, params: { ...baseParams, cwd: "/work", miraRequestId: requestId } }));
+  await setImmediate();
+  assert.equal(third.sent.at(-1).error.code, -32004, "deleted creation cannot be replayed from cached content");
+  pool.deleted.add("thread-1");
+  third.emit("message", JSON.stringify({ id: 60, method: "thread/resume", params: { threadId: "thread-1" } }));
+  await setImmediate();
+  assert.equal(third.sent.at(-1).error.code, -32004, "deleted threads cannot be restored from runtime memory");
   channel.close();
 });
 

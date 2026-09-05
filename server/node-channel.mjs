@@ -8,6 +8,7 @@ import {
   dynamicToolSpecs,
 } from "./dynamic-tools.mjs";
 import { getNode, setNodeChannelStatus } from "./node-registry.mjs";
+import { assertThreadsNotDeleted } from "./thread-store.mjs";
 
 function jsonMessage(data) {
   return JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
@@ -384,6 +385,10 @@ export class NodeChannel {
       return { action: "handled" };
     }
     if (row.status === "completed") {
+      if (row.response?.deleted) {
+        this.sendProxyError(proxy, message.id, "此会话已永久删除。", -32004);
+        return { action: "handled" };
+      }
       this.bindProxyThread(proxy, row.thread_id);
       this.sendProxyResult(proxy, message.id, row.response);
       return { action: "handled" };
@@ -421,7 +426,9 @@ export class NodeChannel {
     if (typeof threadId === "string") {
       await this.pool.query(
         `UPDATE mira_appserver_thread_start_requests
-         SET status = 'completed', thread_id = $4, response = $5::jsonb, updated_at = NOW()
+         SET status = 'completed', thread_id = $4,
+             response = CASE WHEN EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$4 AND action='delete')
+               THEN '{"deleted":true}'::jsonb ELSE $5::jsonb END, updated_at = NOW()
          WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3`,
         [storeId, actorKey, clientRequestId, threadId, JSON.stringify(message.result)],
       );
@@ -533,7 +540,7 @@ export class NodeChannel {
     proxy.boundThreadIds.add(threadId);
     void this.pool.query(
       `INSERT INTO mira_codex_thread_runtimes (store_id, thread_id, node_id, bound_at)
-       VALUES ($1, $2, $3, NOW())
+       SELECT $1, $2, $3, NOW() WHERE NOT EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$2 AND action='delete')
        ON CONFLICT (store_id, thread_id) DO UPDATE SET
          node_id = EXCLUDED.node_id, bound_at = EXCLUDED.bound_at`,
       [proxy.storeId, threadId, proxy.targetNodeId],
@@ -550,6 +557,14 @@ export class NodeChannel {
         type: "appserver.message", sessionId: proxy.sessionId, payload,
       })) proxy.ws.close(1011, "node disconnected");
       return;
+    }
+    if (["thread/resume", "thread/fork", "thread/read", "thread/turns/list", "thread/items/list", "turn/start", "turn/steer"].includes(message.method) && typeof message.params?.threadId === "string") {
+      try { await assertThreadsNotDeleted(this.pool, proxy.storeId, [message.params.threadId]); }
+      catch (error) {
+        if (error.code !== "thread_deleted") throw error;
+        this.sendProxyError(proxy, message.id ?? null, error.message, -32004);
+        return;
+      }
     }
     if (message.method === "initialize") {
       message.params ??= {};

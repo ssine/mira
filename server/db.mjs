@@ -456,6 +456,65 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 15,
+    name: "web-thread-archive-and-permanent-delete",
+    sql: `
+      CREATE TABLE mira_thread_actions (
+        action_seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        store_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('archive', 'restore', 'delete')),
+        operation_id UUID NOT NULL,
+        generation BIGINT NOT NULL CHECK (generation > 0),
+        item_count BIGINT CHECK (item_count >= 0),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (store_id, operation_id)
+      );
+      CREATE INDEX mira_thread_actions_latest_idx ON mira_thread_actions(store_id, thread_id, action_seq DESC);
+      CREATE UNIQUE INDEX mira_thread_actions_deleted_idx ON mira_thread_actions(store_id, thread_id) WHERE action = 'delete';
+
+      CREATE FUNCTION mira_without_thread_state(value JSONB, target TEXT) RETURNS JSONB
+      LANGUAGE SQL IMMUTABLE AS $$
+        SELECT COALESCE(jsonb_object_agg(key, CASE
+          WHEN key = 'rollout_paths' AND jsonb_typeof(entry) = 'object' THEN
+            COALESCE((SELECT jsonb_object_agg(path, id) FROM jsonb_each(entry) AS paths(path, id) WHERE id <> to_jsonb(target)), '{}'::jsonb)
+          WHEN jsonb_typeof(entry) = 'object' THEN entry - target
+          ELSE entry END), '{}'::jsonb)
+        FROM jsonb_each(value) AS fields(key, entry)
+      $$;
+
+      -- Keep the erasure fence effective even if an older Server is rolled back.
+      CREATE FUNCTION mira_reject_deleted_thread_event() RETURNS TRIGGER
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=NEW.store_id AND action='delete'
+          AND (NEW.history_manifest ? thread_id OR NEW.state <> mira_without_thread_state(NEW.state,thread_id))) THEN
+          RAISE EXCEPTION 'permanently deleted thread cannot be recreated' USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+      END;
+      $$;
+      CREATE TRIGGER codex_store_events_deleted_thread_fence BEFORE INSERT ON codex_store_events
+        FOR EACH ROW EXECUTE FUNCTION mira_reject_deleted_thread_event();
+
+      -- Ordinary import provenance stays immutable. Explicit permanent deletion
+      -- may remove source records only after no surviving lineage references them.
+      CREATE OR REPLACE FUNCTION mira_reject_import_record_mutation() RETURNS TRIGGER
+      LANGUAGE plpgsql AS $$
+      BEGIN
+        IF TG_OP = 'DELETE' AND EXISTS (
+          SELECT 1 FROM mira_codex_session_imports imports JOIN mira_thread_actions actions
+            ON actions.store_id = imports.store_id AND actions.thread_id = imports.thread_id AND actions.action = 'delete'
+          WHERE imports.import_id = OLD.import_id
+        ) AND NOT EXISTS (SELECT 1 FROM mira_codex_session_import_segments WHERE source_import_id = OLD.import_id) THEN
+          RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'mira_codex_session_import_records is append-only';
+      END;
+      $$;
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool) {

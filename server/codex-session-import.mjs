@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 import { appendAudit } from "./auth.mjs";
-import { commitDelta, commitImportedHistory, getStoreHead, getThreadHistory } from "./thread-store.mjs";
+import { assertThreadsNotDeleted, commitDelta, commitImportedHistory, getStoreHead, getThreadHistory } from "./thread-store.mjs";
 import { stageSessionTransfer } from "./session-transfer.mjs";
 import { stageSessionLineage } from "./session-lineage.mjs";
 
@@ -183,8 +183,9 @@ export async function scanCodexSessions(pool, capabilityService, principal, node
   const imported = paths.length === 0 ? { rows: [] } : await pool.query(
     `SELECT DISTINCT ON (source_path) source_path, source_sha256, status, thread_id,
             store_id, source_size_bytes::text, source_modified_at, import_id, created_at
-     FROM mira_codex_session_imports
+     FROM mira_codex_session_imports imports
      WHERE source_node_id = $1 AND source_path = ANY($2::text[])
+       AND NOT EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=imports.store_id AND thread_id=imports.thread_id AND action='delete')
      ORDER BY source_path, created_at DESC`,
     [nodeId, paths],
   );
@@ -215,6 +216,7 @@ export async function importCodexSession(pool, capabilityService, principal, nod
   const summary = scan.sessions.find((session) => session.path === body.path);
   if (!summary) return { status: 404, body: { error: "Session was not found in a detected local Codex directory", code: "not_found" } };
   if (!validThreadId(summary.threadId)) return { status: 409, body: { error: "Invalid thread id", code: "invalid_session" } };
+  await assertThreadsNotDeleted(pool, storeId, [summary.threadId]);
   const runtimeNodeId = await validImportRuntime(
     pool,
     body.runtimeNodeId ?? summary.suggestedRuntimeNodeId,
@@ -341,18 +343,23 @@ export async function normalizeImportedThreadHistoryModes(pool) {
   return normalized;
 }
 
-export async function listImportedThreads(pool, storeId = defaultStoreId, limit = 200, threadId = null) {
+export async function listImportedThreads(pool, storeId = defaultStoreId, limit = 200, threadId = null, archived = null) {
   const id = safeStoreId(storeId);
   if (!id) throw Object.assign(new Error("invalid store id"), { statusCode: 400, code: "invalid_request" });
   const result = await pool.query(
     `SELECT projections.thread_id, projections.parent_thread_id, projections.source_kind,
             COALESCE(NULLIF(projections.state->>'name', ''), projections.title) AS title,
-            projections.state->>'name' AS name, projections.cwd, projections.item_count::text,
+            projections.state->>'name' AS name, COALESCE(actions.action='archive',false) AS archived,
+            projections.cwd, projections.item_count::text,
             projections.active_generation::text, activity.updated_at,
             imports.import_id, imports.source_node_id, imports.source_codex_version,
             imports.created_at AS imported_at, runtimes.node_id AS runtime_node_id,
             runtimes.bound_at AS runtime_bound_at
      FROM codex_thread_projections projections
+     LEFT JOIN LATERAL (
+       SELECT action FROM mira_thread_actions WHERE store_id=projections.store_id AND thread_id=projections.thread_id
+       ORDER BY action_seq DESC LIMIT 1
+     ) actions ON TRUE
      LEFT JOIN LATERAL (
        -- Projection rebuilds touch every row; use the conversation's own clock.
        SELECT value::timestamptz AS updated_at
@@ -375,12 +382,13 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
      LEFT JOIN mira_codex_thread_runtimes runtimes
        ON runtimes.store_id = projections.store_id AND runtimes.thread_id = projections.thread_id
      WHERE projections.store_id = $1 AND ($3::text IS NULL OR projections.thread_id = $3)
+       AND ($4::boolean IS NULL OR COALESCE(actions.action='archive',false)=$4)
      ORDER BY activity.updated_at DESC NULLS LAST, projections.thread_id DESC LIMIT $2`,
-    [id, limit, threadId],
+    [id, limit, threadId, archived],
   );
   return result.rows.map((row) => ({
     threadId: row.thread_id, parentThreadId: row.parent_thread_id,
-    sourceKind: row.source_kind, title: row.title, name: row.name, cwd: row.cwd,
+    sourceKind: row.source_kind, title: row.title, name: row.name, archived: row.archived, cwd: row.cwd,
     itemCount: Number(row.item_count), generation: Number(row.active_generation),
     updatedAt: row.updated_at?.toISOString() ?? null, importId: row.import_id,
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,

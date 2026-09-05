@@ -135,6 +135,43 @@ try {
   await page.locator('#projectForm button[type=submit]').click();
   assert.equal(await page.locator('#agentRuntimeNode').inputValue(),nodes[1].nodeId);
   assert.equal(await page.locator('#conversationCwd').inputValue(),'/work/new-project');
+  await page.locator('#agentThreadDrawerToggle').click();
+  await page.locator(`[data-thread-menu="${ids[1]}"]`).click();
+  await page.locator('#threadArchive').click();
+  await page.waitForFunction(id=>!document.querySelector(`[data-thread-row="${id}"]`),ids[1]);
+  await page.reload();
+  await page.locator('.thread-project').first().waitFor();
+  assert.equal(await page.locator(`[data-thread-row="${ids[1]}"]`).count(),0,'archive survives reload');
+  await page.locator('#agentThreadDrawerToggle').click();
+  await page.locator('#agentArchiveToggle').click();
+  await page.locator(`[data-thread-row="${ids[1]}"]`).waitFor();
+  assert.equal(await page.locator('[data-thread-row]').count(),1,'archive view excludes normal conversations');
+  await page.locator(`[data-thread-menu="${ids[1]}"]`).click();
+  assert.equal(await page.locator('#threadArchive').textContent(),'恢复对话');
+  await page.locator('#threadArchive').click();
+  await page.waitForFunction(()=>document.querySelectorAll('[data-thread-row]').length===0);
+  await page.locator('#agentArchiveToggle').click();
+  await page.locator(`button[data-thread-id="${ids[1]}"]`).click();
+  await page.waitForURL(`**/?thread=${ids[1]}`);
+  await page.locator('#conversationMenuToggle').click();
+  await page.locator('#threadDelete').click();
+  await page.locator('#threadDeleteCancel').click();
+  assert.equal((await context.request.get(`${origin}/v1/codex/threads/${ids[1]}`)).status(),200,'cancel never deletes');
+  await page.locator('#conversationMenuToggle').click();
+  await page.locator('#threadDelete').click();
+  const deleting=page.waitForRequest(request=>request.method()==='DELETE');
+  await page.locator('#threadDeleteConfirm').click();
+  const deletion=await deleting;
+  await page.waitForURL(url=>!url.searchParams.has('thread'));
+  assert.equal((await context.request.get(`${origin}/v1/codex/threads/${ids[1]}`)).status(),404,'deleted conversation has no DB projection');
+  const session=await (await context.request.get(`${origin}/v1/admin/session`)).json();
+  const replay=await context.request.delete(deletion.url(),{data:deletion.postDataJSON(),headers:{'x-mira-csrf':session.csrfToken}});
+  assert.equal(replay.status(),200); assert.equal((await replay.json()).duplicate,true);
+  for(const [method,route] of [['delete',`/v1/codex/threads/${ids[2]}`],['post',`/v1/codex/threads/${ids[2]}/archive`]]) {
+    assert.equal((await context.request[method](origin+route,{data:{}})).status(),403,'thread actions require CSRF');
+    assert.equal((await fetch(origin+route,{method:method.toUpperCase(),headers:{'content-type':'application/json'},body:'{}'})).status,401,'thread actions require authentication');
+  }
   assert.deepEqual(errors,[]);
   console.log('PASS: project identity/order/inheritance, hidden IDs, desktop/mobile menus, durable rename, fork navigation/source preservation, CSRF/auth, mobile Enter, stop/retry/completion and draft preservation');
+  console.log('PASS: archive/reload/restore, mobile deletion confirmation/cancel, route cleanup, deletion replay and mutation authorization');
 } finally { await browser?.close(); await pool.end(); }

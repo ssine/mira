@@ -257,3 +257,24 @@ Server 在同一个 store head 上读取 active generation，并从权威 rollou
 `thread/resume` 中可能返回不完整展示 items 的问题；继续对话仍由官方 App Server 完成。投影可以
 在任何时候从 `codex_thread_events` 重建，未知原始字段继续完整保存在数据库。为避免单个工具输出
 拖垮浏览器，每条投影正文最多 1 MiB，截断只发生在 Web 响应中。
+
+## 10. 管理员归档和永久删除
+
+Schema 15 的 `mira_thread_actions` 记录不含正文的归档、恢复和删除操作，按操作 UUID 幂等。
+Web 归档只改变列表可见性，不改变 Codex history 或中断运行；默认列表排除归档，
+`GET /v1/codex/threads?archived=1` 可查询归档。投影重建不会丢失归档状态。
+
+管理员 `POST /v1/codex/threads/{id}/archive` 和 `/restore` 接收 `generation`、`operationId`。
+`DELETE /v1/codex/threads/{id}` 还要求确认时的 `itemCount`，会话已变化时返回 409。
+这三个接口均要求管理员 cookie 和 CSRF。Web 在删除前确认，并要求先停止已知的运行。
+
+永久删除是明确的管理员内容擦除，区别于普通 v2 history delete：在同一 store writer lock 和
+数据库事务中，删除该会话所有 generation 的 rollout、投影和运行绑定，擦除旧 store event 的
+对应 metadata/manifest，失效兼容 snapshot，清理创建响应与不再被其他分支引用的导入原文。
+已有独立分支保留自己的 canonical history；仍供分支使用的共享导入 provenance 也保留。
+此操作只删除数据库会话，不删除执行机器上的工作文件或原始 Desktop rollout 文件。
+
+内容为空的永久删除操作记录用于拒绝旧进程继续写入该 thread ID；v1 snapshot、v2 delta、
+导入及 App Server 恢复均不可复活该会话，持久化写入返回 410 `thread_deleted`。
+store version 前进，其余会话的事件和历史保持可读取、可重建。普通工具执行和 runtime 的
+history delete 不获得管理员擦除能力。

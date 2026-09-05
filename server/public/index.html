@@ -110,6 +110,7 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
+              <button id="agentArchiveToggle" class="chat-nav-link chat-manage-link" type="button" aria-pressed="false"><span aria-hidden="true">▤</span><span><strong id="agentArchiveLabel">归档对话</strong></span></button>
               <button id="agentThemeToggle" class="chat-nav-link chat-manage-link" type="button" aria-label="切换外观"><span aria-hidden="true">◐</span><span><strong>切换外观</strong></span></button>
               <button id="agentFullscreenToggle" class="chat-nav-link chat-manage-link" type="button" aria-pressed="false" disabled>
                 <span aria-hidden="true">⛶</span><span><strong id="agentFullscreenLabel">全屏模式</strong><small id="agentFullscreenHint">隐藏系统栏，扩大阅读空间</small></span>
@@ -303,7 +304,18 @@
       <button id="threadFork" type="button" role="menuitem">分支新对话</button>
       <button id="threadCopyId" type="button" role="menuitem">复制对话 ID</button>
       <a id="threadOpenWindow" href="/?view=agent" target="_blank" rel="noopener" role="menuitem">在新窗口打开</a>
+      <button id="threadArchive" type="button" role="menuitem">归档对话</button>
+      <button id="threadDelete" class="thread-delete-action" type="button" role="menuitem">删除对话</button>
     </div>
+    <dialog id="threadDeleteDialog" class="chat-edit-dialog" aria-labelledby="threadDeleteTitle">
+      <form id="threadDeleteForm">
+        <h2 id="threadDeleteTitle">永久删除对话？</h2>
+        <p id="threadDeleteName"></p>
+        <p class="muted">此对话及其数据库历史将被删除，无法撤销。已有分支会保留。</p>
+        <p id="threadDeleteError" class="chat-edit-error" role="status"></p>
+        <div class="chat-edit-actions"><button id="threadDeleteCancel" class="ghost" type="button">取消</button><button id="threadDeleteConfirm" class="danger" type="submit">永久删除</button></div>
+      </form>
+    </dialog>
     <dialog id="threadRenameDialog" class="chat-edit-dialog" aria-labelledby="threadRenameTitle">
       <form id="threadRenameForm">
         <h2 id="threadRenameTitle">修改对话标题</h2>

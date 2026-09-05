@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { assertThreadsNotDeleted } from "./thread-store.mjs";
 
 // The temporary table is transaction-local. A cancelled or broken transfer
 // rolls it back; a complete source becomes immutable import provenance.
@@ -92,6 +93,10 @@ export async function stageSessionTransfer(pool, capabilityService, principal, n
     if (boundary && nextOrdinal !== boundary.end_ordinal_exclusive) throw Object.assign(new Error("祖先字节边界与序号边界不一致"), { code: "invalid_history_base" });
     check();
     const sha256 = hash.digest("hex");
+    await client.query("SELECT version FROM codex_store_heads WHERE store_id=$1 FOR UPDATE", [storeId]);
+    // A surviving fork may still explicitly import an ancestor as its provenance.
+    // Publishing the deleted thread itself is forbidden, including a staging race.
+    if (!boundary) await assertThreadsNotDeleted(client, storeId, [meta.id]);
     const inserted = await client.query(`INSERT INTO mira_codex_session_imports
       (store_id, thread_id, source_node_id, source_path, source_sha256, source_size_bytes,
        source_modified_at, source_codex_version, source_item_count, source_boundary, status)

@@ -516,7 +516,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .composer-icon svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
 .composer-attach { border: 0; background: transparent; color: var(--muted); }
 .composer-attach:hover { background: var(--hover); color: var(--accent); }
-.composer-send { min-width: 36px; }
+.composer-send { min-width: 36px; box-shadow: none; }
 .composer-cancel { display: inline-grid; place-items: center; width: 24px; min-width: 24px; min-height: 24px; padding: 0; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--danger); font-size: 17px; }
 .composer-cancel:hover { background: var(--danger-soft); }
 .conversation-attachments { display: flex; flex-wrap: wrap; gap: 6px; max-height: 145px; padding: 7px 7px 1px; overflow: auto; }
@@ -689,9 +689,11 @@ progress { width: 100%; accent-color: var(--accent); }
 .thread-menu-toggle { margin-right: 5px; }
 .conversation-menu-toggle { grid-area: conversation-head; justify-self: end; align-self: start; z-index: 3; margin: 6px 9px 0 0; }
 .composer-submit-slot { display: grid; place-items: center; }
-.composer-stop { color: var(--text); background: var(--surface-hover, var(--hover)); }
+.composer-stop { appearance: none; border: 0; box-shadow: none; color: var(--text); background: transparent; }
+.composer-stop:hover { background: var(--hover); }
 .composer-stop svg { fill: currentColor; stroke: none; }
 .thread-options-menu { position: fixed; inset: auto; width: 194px; margin: 0; padding: 5px; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text); background: var(--surface-raised); box-shadow: var(--shadow-float); }
+.thread-options-menu .thread-delete-action { color: var(--danger); }
 .thread-options-menu > * { display: block; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: var(--radius-control); color: var(--text); background: transparent; font-size: 13px; text-align: left; text-decoration: none; }
 .thread-options-menu > *:hover, .thread-options-menu > *:focus-visible { background: var(--hover); }
 .chat-edit-dialog { width: min(420px, calc(100% - 28px)); max-height: calc(100dvh - 28px); padding: 20px; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text); background: var(--surface-raised); box-shadow: var(--shadow-float); }

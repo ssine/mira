@@ -30,7 +30,7 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/app.js") body = body.replace("void bootstrap();", `
       show("agentView");
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
-        loadAgentTranscript, resetAgentTranscript, closeAgentSocket, syncActiveTurnUi,
+        loadAgentTranscript, resetAgentTranscript, closeAgentSocket, syncActiveTurnUi, restoreAgentThread, refreshActiveTurn,
         upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
         show, renderNodes, renderEnrollments, renderAudit,
         message: onAgentSocketMessage, nodes: dashboardNodes, connectAgentSocket, resumeAgentThread, recoverAgentSession, stopAgentRecovery, mergeTranscriptItems,
@@ -81,6 +81,8 @@ try {
       const message = JSON.parse(data);
       if (message.method === "initialize") {
         socket.send(JSON.stringify({ id: message.id, result: {} }));
+      } else if (message.method === "thread/turns/list") {
+        socket.send(JSON.stringify({ id: message.id, result: { data: [] } }));
       } else if (message.id !== undefined) {
         reconnectMessages.push(message);
         if (message.method === "thread/resume" && automaticResume) {
@@ -236,7 +238,7 @@ try {
     await h.connectAgentSocket("test-node");
   });
   await page.locator("#conversationInput").fill("Continue after restart");
-  await page.locator("#conversationSend").click();
+  await page.locator("#conversationInput").press("Enter");
   await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
   // A second submit while resume is pending must remain single-flight.
   await page.locator("#conversationForm").evaluate((form) => form.requestSubmit());
@@ -251,7 +253,7 @@ try {
   assert.equal(await page.locator("#conversationProgress").isVisible(), false);
   assert.equal(reconnectMessages.length, 1, "failed resume must not send a turn or create a replacement thread");
 
-  await page.locator("#conversationSend").click();
+  await page.locator("#conversationInput").press("Enter");
   await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
   assert.equal(reconnectMessages[1].method, "thread/resume", "failed restoration must remain retryable");
   reconnectedSocket.send(JSON.stringify({ id: reconnectMessages[1].id, result: { thread: { id: "progress-thread" }, cwd: "/project" } }));
@@ -970,6 +972,92 @@ try {
     assert.deepEqual(activity.prose, { visible: true, text: "Codex 正在回复…" });
     assert.deepEqual(activity.returned, activity.prose);
     for (const state of ["switched", "completed", "failed", "disconnected"]) assert.equal(activity[state].visible, false, state);
+    const controls = await historyPage.evaluate(async () => {
+      const h = window.traceHarness;
+      h.agent.threadId = "stop-lifecycle";
+      h.agent.selectionEpoch++;
+      h.agent.threads = [{ threadId: "stop-lifecycle", cwd: "/project" }];
+      let latest = { id: "whole-turn", status: "inProgress" };
+      let held;
+      let hold = false;
+      const socket = { readyState: WebSocket.OPEN, close() {}, send(data) {
+        const request = JSON.parse(data);
+        const result = request.method === "thread/resume"
+          ? { thread: { id: "stop-lifecycle", status: { type: "idle" } }, cwd: "/project" }
+          : { data: [latest] };
+        const reply = () => h.message({ data: JSON.stringify({ id: request.id, result }) });
+        if (hold) held = reply; else queueMicrotask(reply);
+      } };
+      const attach = () => { h.agent.socket = socket; h.agent.socketInitialized = true; h.agent.loadedThreadIds.add("stop-lifecycle"); h.syncActiveTurnUi(); };
+      const send = (method, params = {}) => h.notify({ method, params: { threadId: "stop-lifecycle", turnId: latest.id, ...params } });
+      const state = () => ({ stop: !document.querySelector("#agentInterrupt").classList.contains("hidden"), disabled: document.querySelector("#agentInterrupt").disabled, send: !document.querySelector("#conversationSend").classList.contains("hidden") });
+      attach();
+      send("turn/started", { turn: latest });
+      send("item/completed", { item: { id: "paragraph", type: "agentMessage", text: "I am still working." } });
+      const paragraph = state();
+      send("item/completed", { item: { id: "tool-finished", type: "commandExecution", command: "pwd", status: "completed" } });
+      const tool = state();
+      h.closeAgentSocket();
+      const disconnected = state();
+      attach();
+      await h.restoreAgentThread("stop-lifecycle", socket);
+      const resumed = state();
+      latest = { ...latest, status: "completed" };
+      hold = true;
+      const staleRead = h.refreshActiveTurn("stop-lifecycle", socket);
+      send("turn/started", { turn: { id: "newer-turn", status: "inProgress" } });
+      held(); await staleRead;
+      const stale = { ...state(), turnId: h.agent.turnId };
+      hold = false;
+      latest = { id: "newer-turn", status: "interrupted" };
+      await h.refreshActiveTurn("stop-lifecycle", socket);
+      const completed = state();
+      send("item/completed", { item: { id: "late-item", type: "agentMessage", text: "Late completed item" } });
+      const late = state();
+      latest = { id: "missed-start", status: "inProgress" };
+      send("item/agentMessage/delta", { itemId: "recover-prose", delta: "Continuing after reconnect" });
+      const missedStart = state();
+      send("turn/completed", { turn: { ...latest, status: "completed" } });
+      hold = true;
+      send("thread/status/changed", { status: { type: "active", activeFlags: [] } });
+      const pendingId = state();
+      latest = { id: "status-only-turn", status: "inProgress" };
+      // The status-triggered read was captured before changing latest.
+      held(); await h.agent.turnStateRequests.get("stop-lifecycle")?.promise;
+      hold = false;
+      await h.refreshActiveTurn("stop-lifecycle", socket);
+      const statusRecovered = state();
+      send("turn/completed", { turn: { ...latest, status: "completed" } });
+      return { paragraph, tool, disconnected, resumed, stale, completed, late, missedStart, pendingId, statusRecovered };
+    });
+    const stoppable = { stop: true, disabled: false, send: false };
+    for (const name of ["paragraph", "tool", "resumed", "missedStart", "statusRecovered"]) assert.deepEqual(controls[name], stoppable, name);
+    for (const name of ["disconnected", "pendingId"]) assert.deepEqual(controls[name], { stop: true, disabled: true, send: false }, name);
+    assert.deepEqual(controls.stale, { ...stoppable, turnId: "newer-turn" }, "stale completion cannot end a newer turn");
+    for (const name of ["completed", "late"]) assert.equal(controls[name].send, true, name);
+    const reconciledOrder = await historyPage.evaluate(() => {
+      const h = window.traceHarness;
+      h.clear(); h.agent.threadId = "ordered-thread";
+      h.resetAgentTranscript("ordered-thread");
+      const key = id => `item-${JSON.stringify(["ordered-thread", "ordered-turn", id])}`;
+      const add = (id, kind, title, body) => h.upsertTrace(key(id), kind, title, body, "完成", { turnId: "ordered-turn", autoScroll: false });
+      add("wrapper", "tool", "Wrapper", "Wrapper output");
+      add("nested-one", "tool", "Nested 1", "First internal command");
+      add("nested-two", "tool", "Nested 2", "Second internal command");
+      add("final", "assistant", "Codex", "Final answer");
+      add("actual-later-tool", "tool", "After final", "A tool really invoked later");
+      h.agent.transcriptItems = [
+        { key: "stored-wrapper", itemId: "wrapper", sourceItemSeq: 10, turnId: "ordered-turn", kind: "tool", title: "Wrapper", body: "Wrapper output", status: "完成" },
+        { key: "stored-final", sourceItemSeq: 20, turnId: "ordered-turn", kind: "assistant", title: "Codex", body: "Final answer" },
+      ];
+      const orders = [];
+      for (let i = 0; i < 3; i++) {
+        h.renderTranscript(null, { preserveLive: true });
+        orders.push([...document.querySelectorAll("#conversationTrace .trace-card")].map(card => card.dataset.traceTitle));
+      }
+      return orders;
+    });
+    for (const order of reconciledOrder) assert.deepEqual(order, ["Wrapper", "Nested 1", "Nested 2", "Codex", "After final"], "repeated history reconciliation retains nested tool order without moving real post-reply calls");
     await historyPage.close();
   }
   assert.deepEqual(errors, []);

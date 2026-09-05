@@ -17,7 +17,7 @@ import { currentSchemaVersion, initializeDatabase } from "./db.mjs";
 import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
 import { NodeChannel } from "./node-channel.mjs";
 import { SSHRelay } from "./ssh-relay.mjs";
-import { renameThread } from "./thread-management.mjs";
+import { manageThread, renameThread } from "./thread-management.mjs";
 import {
   approveEnrollment, createEnrollment, getEnrollment, listEnrollments, rejectEnrollment,
 } from "./node-enrollment.mjs";
@@ -373,7 +373,17 @@ async function route(request, response) {
     if (!principal) return;
     const storeId = url.searchParams.get("storeId") ?? defaultStoreId;
     const limit = boundedInteger(url.searchParams.get("limit"), 200, 1, 500);
-    sendJson(response, 200, { storeId, data: await listImportedThreads(pool, storeId, limit) });
+    sendJson(response, 200, { storeId, data: await listImportedThreads(pool, storeId, limit, null, url.searchParams.get("archived") === "1") });
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})(?:\/(archive|restore))?$/i);
+  if (match && ((request.method === "DELETE" && !match[2]) || (request.method === "POST" && match[2]))) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
+    if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
+    const result = await manageThread(pool, storeId, match[1], match[2] ?? "delete", await readJson(request));
+    sendJson(response, result.status, result.body);
     return;
   }
   match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})$/i);

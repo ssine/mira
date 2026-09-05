@@ -9,7 +9,7 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { commitDelta, getStoreHead, getThreadHistory, getSnapshot } from "../server/thread-store.mjs";
-import { renameThread } from "../server/thread-management.mjs";
+import { manageThread, renameThread } from "../server/thread-management.mjs";
 
 const binary = process.env.CODEX_TEST_BINARY;
 assert(binary && path.isAbsolute(binary), "CODEX_TEST_BINARY must name the candidate runtime");
@@ -104,8 +104,15 @@ try {
   const final=(await getSnapshot(pool,store)).snapshot;
   assert.deepEqual(final.histories[parent],before,'continuing the fork keeps source history independent');
   assert(final.histories[child].length>after.histories[child].length);
+  head=await getStoreHead(pool,store);
+  assert.equal((await manageThread(pool,store,parent,'delete',{generation:head.historyManifest[parent].generation,itemCount:head.historyManifest[parent].itemCount,operationId:crypto.randomUUID()})).status,200);
+  const fourth=await client('fourth');
+  await assert.rejects(fourth.call('thread/resume',{threadId:parent,excludeTurns:true,approvalPolicy:'never',sandbox:'read-only'}),/not found|no rollout|does not exist/i);
+  const surviving=await fourth.call('thread/resume',{threadId:child,excludeTurns:true,approvalPolicy:'never',sandbox:'read-only'});
+  assert.equal(surviving.thread.id,child,'deleting the source does not delete its fork');
+  await fourth.turn(child);
   if(fixtureError)throw fixtureError;
-  console.log('PASS: real Codex central rename, full-history fork, source preservation, new-process resume, v1 snapshot and independent continuation');
+  console.log('PASS: real Codex central rename, full-history fork, new-process resume, permanent source deletion and independent fork continuation');
 } finally {
   for(const proc of children) if(proc.exitCode===null)proc.kill('SIGTERM');
   await Promise.all(children.filter(proc=>proc.exitCode===null).map(proc=>new Promise(resolve=>proc.once('exit',resolve))));

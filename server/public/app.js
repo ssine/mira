@@ -148,7 +148,11 @@ const agent = {
   rename: null,
   forkPromise: null,
   forkRequests: new Map(),
+  showArchived: false,
+  threadActionPromise: null,
+  deleteTarget: null,
   activeTurns: new Map(),
+  turnStateRequests: new Map(),
   turnThreads: new Map(),
   turnTimings: new Map(),
   turnActivity: new Map(),
@@ -216,7 +220,7 @@ function renderReplyProgress() {
 function renderTurnActivity(submitting) {
   const turnId = agent.activeTurns.get(agent.threadId);
   const phase = agent.turnActivity.get(turnId) ?? "working";
-  const visible = Boolean(turnId && !submitting && phase !== "failed" && agent.socket?.readyState === WebSocket.OPEN);
+  const visible = Boolean(agent.activeTurns.has(agent.threadId) && !submitting && phase !== "failed" && agent.socket?.readyState === WebSocket.OPEN);
   const status = $("#conversationActivity");
   if (status.classList.contains("hidden") === visible) {
     const follow = traceNearBottom();
@@ -1454,13 +1458,13 @@ function scheduleAgentRecovery(delay = null) {
   }, delay ?? backoff + Math.random() * 250);
 }
 
-function stopAgentRecovery() {
+function stopAgentRecovery({ resetTurnState = false } = {}) {
   agent.connectionWanted = false;
   agent.selectionEpoch++;
   agent.runtimePromise = null;
   clearTimeout(agent.reconnectTimer);
   clearTimeout(agent.heartbeatTimer);
-  closeAgentSocket();
+  closeAgentSocket({ resetTurnState });
 }
 
 function scheduleAgentHeartbeat() {
@@ -1492,6 +1496,7 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
         await startAgentRuntime({ allowStart: false });
         if (epoch !== agent.selectionEpoch || !agentRecoveryAllowed()) return;
         if (threadId && !agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
+        else if (threadId && agent.activeTurns.has(threadId)) await refreshActiveTurn(threadId, agent.socket);
       })();
       const results = await Promise.allSettled([history, connection]);
       const failure = results.find((result) => result.status === "rejected");
@@ -1533,16 +1538,19 @@ function syncActiveTurnUi() {
 
 function syncConversationSendUi() {
   const selectedNode = $("#agentRuntimeNode")?.value;
-  const busy = Boolean(agent.sendPromise || agent.forkPromise);
+  const busy = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
   $("#threadFork").disabled = busy;
-  const running = Boolean(agent.turnId);
+  $("#threadArchive").disabled = busy;
+  $("#threadDelete").disabled = busy;
+  const running = agent.activeTurns.has(agent.threadId);
   const stopping = agent.interruptRequests.has(JSON.stringify([agent.threadId, agent.turnId]));
   $("#conversationSend").classList.toggle("hidden", running);
   $("#conversationSend").disabled = busy || !selectedNode;
   const stop = $("#agentInterrupt");
   stop.classList.toggle("hidden", !running);
-  stop.disabled = stopping || agent.socket?.readyState !== WebSocket.OPEN;
-  stop.title = stopping ? "正在停止…" : "停止 Agent";
+  const connected = agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN;
+  stop.disabled = stopping || !connected || !agent.turnId || !agent.loadedThreadIds.has(agent.threadId);
+  stop.title = stopping ? "正在停止…" : !connected ? "正在重连，连接恢复后可停止" : !agent.turnId ? "正在确认运行状态…" : "停止 Agent";
   stop.setAttribute("aria-label", stop.title);
   $("#agentRuntimeNode").disabled = busy;
   $("#agentNewThread").disabled = busy;
@@ -1554,7 +1562,7 @@ function syncConversationSendUi() {
   for (const button of $("#agentThreadList").querySelectorAll("button[data-project-new]")) button.disabled = busy || !button.dataset.projectNode;
 }
 
-function closeAgentSocket({ preserveSubmission = false } = {}) {
+function closeAgentSocket({ preserveSubmission = false, resetTurnState = false } = {}) {
   replyProgress.clear(preserveSubmission ? agent.replySubmission : null);
   agent.runtimeStartEpoch++;
   const socket = agent.socket;
@@ -1566,10 +1574,15 @@ function closeAgentSocket({ preserveSubmission = false } = {}) {
   clearTimeout(agent.heartbeatTimer);
   for (const pending of agent.pending.values()) pending.reject(new Error("App Server connection closed"));
   agent.pending.clear();
-  agent.activeTurns.clear();
-  agent.turnThreads.clear();
-  agent.turnTimings.clear();
-  agent.turnActivity.clear();
+  agent.turnStateRequests.clear();
+  // A transport disconnect does not end the Codex turn. Keep the stop control
+  // visible (disabled offline) until a completion event or a fresh turn read.
+  if (resetTurnState) {
+    agent.activeTurns.clear();
+    agent.turnThreads.clear();
+    agent.turnTimings.clear();
+    agent.turnActivity.clear();
+  }
   syncActiveTurnUi();
   if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
   syncConversationSendUi();
@@ -1881,15 +1894,15 @@ function updateToolGroup(group) {
   group.classList.toggle("has-running-tool", running > 0);
 }
 
-function ensureToolGroup(trace, turnId = "") {
-  let group = trace.lastElementChild;
+function ensureToolGroup(trace, turnId = "", before = null) {
+  let group = before ? before.previousElementSibling : trace.lastElementChild;
   if (group?.classList.contains("tool-group") && group.dataset.turnId === turnId) return group;
   group = element("details", "tool-group");
   group.dataset.turnId = turnId;
   const summary = element("summary", "tool-group-summary");
   summary.append(element("span", "tool-group-total"), element("span", "tool-group-latest"), element("span", "tool-group-counts"));
   group.append(summary, element("div", "tool-group-items"));
-  trace.append(group);
+  trace.insertBefore(group, before);
   return group;
 }
 
@@ -2305,6 +2318,7 @@ function scheduleOlderTranscriptLoad() {
 
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
+  const previousCards = [...existingTrace.querySelectorAll(".trace-card")];
   const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
     ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction), .trace-card[data-pending-user="true"]')]
     : [];
@@ -2345,17 +2359,31 @@ function renderTranscript(fallbackThread, options = {}) {
   const narrativeKey = (card) => JSON.stringify([card.dataset.turnId, card.dataset.traceKind, card.querySelector(".trace-body")._miraSource]);
   const renderedByKey = new Map(renderedCards.map((card) => [card.dataset.traceKey, card]));
   const renderedByBody = new Map(renderedCards.map((card) => [narrativeKey(card), card]));
-  for (const card of liveCards) {
+  const preservedCards = new Set(liveCards);
+  let nextLiveAnchor = null;
+  for (const card of previousCards.reverse()) {
     const replacement = renderedByKey.get(card.dataset.traceKey) ?? renderedByBody.get(narrativeKey(card));
     if (replacement) {
       // Canonical completion supersedes an older partial live item. Prepending
       // older pages must instead keep the still-running tail untouched.
-      if (options.preserveViewport?.mode === "prepend") replacement.replaceWith(card);
+      if (preservedCards.has(card) && options.preserveViewport?.mode === "prepend") { replacement.replaceWith(card); nextLiveAnchor = card; }
+      else nextLiveAnchor = replacement;
     }
-    else if (card.dataset.traceKind === "tool") ensureToolGroup(trace, card.dataset.turnId ?? "").querySelector(".tool-group-items").append(card);
-    else trace.append(card);
-    updateToolGroup(card.closest(".tool-group"));
+    else if (preservedCards.has(card)) {
+      // Nested tool notifications may have no rollout counterpart. Preserve
+      // their position before the next known live item (often the final reply),
+      // instead of appending them after the completed turn during reconciliation.
+      const anchorGroup = nextLiveAnchor?.closest(".tool-group");
+      const before = anchorGroup ?? nextLiveAnchor;
+      if (card.dataset.traceKind === "tool") {
+        const sameGroup = anchorGroup?.dataset.turnId === (card.dataset.turnId ?? "");
+        const group = sameGroup ? anchorGroup : ensureToolGroup(trace, card.dataset.turnId ?? "", before);
+        group.querySelector(".tool-group-items").insertBefore(card, sameGroup ? nextLiveAnchor : null);
+      } else trace.insertBefore(card, before);
+      nextLiveAnchor = card;
+    }
   }
+  for (const group of trace.querySelectorAll(".tool-group")) updateToolGroup(group);
   const storedCompactions = new Map();
   for (const item of agent.transcriptItems.filter((item) => item.kind === "compaction")) {
     const turn = item.turnId ?? "";
@@ -2512,7 +2540,7 @@ async function refreshCompletedTranscript(threadId) {
 function handleAgentNotification(message) {
   const method = message.method ?? "";
   const params = message.params ?? {};
-  if (notificationIsForOpenThread(params) && /^(item|turn)\//.test(method)) agent.liveRevision++;
+  if (notificationIsForOpenThread(params) && (/^(item|turn)\//.test(method) || method === "thread/status/changed")) agent.liveRevision++;
   if (method === "thread/closed") agent.loadedThreadIds.delete(params.threadId);
   if (message.id !== undefined) {
     if (notificationIsForOpenThread(params)) {
@@ -2520,6 +2548,25 @@ function handleAgentNotification(message) {
         "当前网页客户端未启用交互审批；本界面发起的 Turn 使用 never。", "等待处理");
     }
     agent.socket?.send(JSON.stringify({ id: message.id, error: { code: -32601, message: "interactive request is not supported by Mira Web" } }));
+    return;
+  }
+  // Live output can arrive after reconnect without replaying turn/started.
+  // It proves that this turn is active; finishing an item never finishes a turn.
+  const liveTurnId = params.turnId;
+  const liveThreadId = notificationThreadId(params);
+  if (method.startsWith("item/") && liveThreadId && liveTurnId &&
+      !agent.activeTurns.get(liveThreadId) && !agent.turnTimings.get(liveTurnId)?.completedAt) {
+    agent.activeTurns.set(liveThreadId, liveTurnId);
+    agent.turnThreads.set(liveTurnId, liveThreadId);
+    syncActiveTurnUi();
+  }
+  if (method === "thread/status/changed") {
+    const threadId = params.threadId;
+    if (threadId && params.status?.type === "active" && !agent.activeTurns.has(threadId)) agent.activeTurns.set(threadId, null);
+    syncActiveTurnUi();
+    if (threadId === agent.threadId && agent.activeTurns.has(threadId) && agent.loadedThreadIds.has(threadId)) {
+      void refreshActiveTurn(threadId, agent.socket);
+    }
     return;
   }
   replyProgress.observe(method, { ...params, threadId: notificationThreadId(params) });
@@ -2744,7 +2791,7 @@ function projectForThread(thread) {
 function renderAgentThreads() {
   const list = clear($("#agentThreadList"));
   const groups = new Map();
-  const threads = [...agent.threads].sort((a, b) =>
+  const threads = agent.threads.filter(thread => Boolean(thread.archived) === agent.showArchived).sort((a, b) =>
     (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || b.threadId.localeCompare(a.threadId));
   for (const thread of threads) {
     const project = projectForThread(thread);
@@ -2752,7 +2799,7 @@ function renderAgentThreads() {
     groups.get(project.key).threads.push(thread);
   }
   if (agent.draftProject && !groups.has(agent.draftProject.key)) groups.set(agent.draftProject.key, { ...agent.draftProject, threads: [] });
-  if (!groups.size) list.append(element("div", "agent-list-empty", "添加项目目录，开始新的对话"));
+  if (!groups.size) list.append(element("div", "agent-list-empty", agent.showArchived ? "没有已归档的对话" : "添加项目目录，开始新的对话"));
   for (const group of groups.values()) {
     const project = element("details", "thread-project");
     project.dataset.projectKey = group.key;
@@ -2770,7 +2817,7 @@ function renderAgentThreads() {
     add.dataset.projectNew = group.key;
     add.dataset.projectNode = node?.capabilities?.appServer === true ? group.nodeId : "";
     add.dataset.projectPath = group.cwd;
-    add.disabled = Boolean(agent.sendPromise || agent.forkPromise) || !add.dataset.projectNode;
+    add.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise) || !add.dataset.projectNode;
     add.title = add.dataset.projectNode ? `在 ${group.cwd || "默认目录"} 新建对话` : "该项目未关联可运行 Codex 的机器";
     add.setAttribute("aria-label", add.title);
     summary.append(copy, add);
@@ -2780,7 +2827,7 @@ function renderAgentThreads() {
       row.dataset.threadRow = thread.threadId;
       const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
       button.type = "button";
-      button.disabled = Boolean(agent.sendPromise || agent.forkPromise);
+      button.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
       button.dataset.threadId = thread.threadId;
       button.title = thread.title || "未命名会话";
       button.append(element("strong", "", button.title), element("span", "", `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
@@ -2815,6 +2862,7 @@ function openThreadMenu(threadId, anchor, point = null) {
   agent.menuThreadId = threadId;
   const menu = $("#threadOptionsMenu");
   $("#threadOpenWindow").href = `/?thread=${encodeURIComponent(threadId)}`;
+  $("#threadArchive").textContent = agent.threads.find(thread => thread.threadId === threadId)?.archived ? "恢复对话" : "归档对话";
   menu.showPopover();
   const bounds = anchor.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(point?.x ?? bounds.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
@@ -2879,7 +2927,7 @@ async function forkWithNode(node, params) {
 }
 
 async function forkThreadFromMenu() {
-  if (agent.sendPromise || agent.forkPromise) return;
+  if (agent.sendPromise || agent.forkPromise || agent.threadActionPromise) return;
   const sourceId = agent.menuThreadId;
   const epoch = agent.selectionEpoch;
   $("#threadOptionsMenu").hidePopover();
@@ -2922,12 +2970,61 @@ async function showProjectDialog() {
 }
 
 async function loadAgentThreads() {
-  const response = await api("/v1/codex/threads?storeId=personal&limit=300");
+  const archived = agent.showArchived;
+  const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
+  if (archived !== agent.showArchived) return;
+  const selected = currentAgentThread();
   agent.threads = response.data ?? [];
+  if (selected && !agent.threads.some(thread => thread.threadId === selected.threadId) && Boolean(selected.archived) !== archived) agent.threads.push(selected);
   if (currentAgentThread()) agent.draftProject = null;
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
   renderAgentThreads();
+}
+
+function removeThreadFromWindow(threadId, deleted) {
+  const selected = agent.threadId === threadId;
+  const project = selected ? projectForThread(currentAgentThread()) : null;
+  agent.threads = agent.threads.filter(thread => thread.threadId !== threadId);
+  if (deleted) {
+    agent.activeTurns.delete(threadId);
+    agent.loadedThreadIds.delete(threadId);
+    for (const [key, diagnostic] of agent.diagnostics) if (diagnostic.threadId === threadId) agent.diagnostics.delete(key);
+  }
+  if (selected) newAgentThread({ project, force: deleted });
+  renderAgentThreads();
+}
+
+async function archiveThreadFromMenu() {
+  if (agent.threadActionPromise || agent.sendPromise || agent.forkPromise) return;
+  const threadId = agent.menuThreadId;
+  const action = agent.threads.find(thread => thread.threadId === threadId)?.archived ? "restore" : "archive";
+  $("#threadOptionsMenu").hidePopover();
+  const operation = (async () => {
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+    await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/${action}?storeId=personal`, {
+      method: "POST", body: JSON.stringify({ generation: thread.generation, operationId: crypto.randomUUID() }),
+    });
+    removeThreadFromWindow(threadId, false);
+    threadMetadataChannel?.postMessage({ threadId, action });
+    await loadAgentThreads();
+    toast(action === "archive" ? "已归档，可从侧栏的归档对话中恢复" : "已恢复到对话列表");
+  })();
+  agent.threadActionPromise = operation; syncConversationSendUi();
+  try { await operation; } catch (error) { toast(error.message); }
+  finally { agent.threadActionPromise = null; syncConversationSendUi(); }
+}
+
+async function showDeleteThreadDialog() {
+  const threadId = agent.menuThreadId;
+  $("#threadOptionsMenu").hidePopover();
+  if (agent.activeTurns.has(threadId)) { toast("请先停止此对话的运行，再删除。"); return; }
+  const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+  agent.deleteTarget = { ...thread, operationId: crypto.randomUUID() };
+  $("#threadDeleteName").textContent = thread.title || "未命名会话";
+  $("#threadDeleteError").textContent = "";
+  $("#threadDeleteDialog").showModal();
+  $("#threadDeleteCancel").focus();
 }
 
 function renderLocalSessions() {
@@ -3151,23 +3248,42 @@ async function restoreAgentThread(threadId, socket) {
   const resumedCwd = result.cwd ?? projectedCwd;
   setConversationMeta(resumedCwd, result.model);
   $("#conversationCwd").value = resumedCwd ?? "";
-  // Reopening an already-running thread may not emit turn/started again.
-  // Read one turn's metadata, without loading its items or the full history.
-  if (result.thread.status?.type === "active" && !agent.activeTurns.has(threadId)) {
+  if (result.thread.status?.type === "active" && agent.liveRevision === revision && !agent.activeTurns.has(threadId)) agent.activeTurns.set(threadId, null);
+  syncActiveTurnUi();
+  if (agent.activeTurns.has(threadId)) await refreshActiveTurn(threadId, socket);
+  return result.thread;
+}
+
+async function refreshActiveTurn(threadId, socket) {
+  if (!socket || agent.socket !== socket || agent.threadId !== threadId) return;
+  const pending = agent.turnStateRequests.get(threadId);
+  if (pending?.socket === socket) return pending.promise;
+  const revision = agent.liveRevision;
+  const epoch = agent.selectionEpoch;
+  const operation = (async () => {
     try {
-      const turns = await rpc("thread/turns/list", { threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 15_000);
-      const turn = turns.data?.find((value) => value.status === "inProgress");
-      if (agent.socket === socket && agent.threadId === threadId && turn &&
-          !agent.turnTimings.get(turn.id)?.completedAt && !agent.activeTurns.has(threadId)) {
+      // Only the latest turn's metadata is needed, never its messages or tools.
+      const result = await rpc("thread/turns/list", { threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 15_000);
+      if (agent.socket !== socket || agent.threadId !== threadId || agent.selectionEpoch !== epoch || agent.liveRevision !== revision) return;
+      const turn = result.data?.[0];
+      if (turn?.status === "inProgress" && !agent.turnTimings.get(turn.id)?.completedAt) {
         agent.activeTurns.set(threadId, turn.id);
         agent.turnThreads.set(turn.id, threadId);
+      } else if (turn && ["completed", "failed", "interrupted"].includes(turn.status) &&
+          (!agent.activeTurns.get(threadId) || agent.activeTurns.get(threadId) === turn.id)) {
+        agent.activeTurns.delete(threadId);
+        agent.turnThreads.delete(turn.id);
+        const timing = agent.turnTimings.get(turn.id) ?? {};
+        timing.completedAt ??= Date.now();
+        agent.turnTimings.set(turn.id, timing);
+        void refreshCompletedTranscript(threadId);
       }
-    } catch { /* live turn notifications can still recover the running state */ }
-  } else if (result.thread.status?.type === "idle" && agent.liveRevision === revision) {
-    agent.activeTurns.delete(threadId);
-  }
-  if (agent.socket === socket && agent.threadId === threadId) syncActiveTurnUi();
-  return result.thread;
+      syncActiveTurnUi();
+    } catch { /* Preserve the last known active state until it can be confirmed. */ }
+  })();
+  agent.turnStateRequests.set(threadId, { socket, promise: operation });
+  try { await operation; }
+  finally { if (agent.turnStateRequests.get(threadId)?.promise === operation) agent.turnStateRequests.delete(threadId); }
 }
 
 async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
@@ -3223,8 +3339,8 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   await history;
 }
 
-function newAgentThread({ updateRoute = true, project = null } = {}) {
-  if (agent.sendPromise) return;
+function newAgentThread({ updateRoute = true, project = null, force = false } = {}) {
+  if (agent.sendPromise && !force) return;
   project ??= agent.threadId ? projectForThread(currentAgentThread()) : agent.draftProject;
   if (project?.nodeId) {
     if (![...$("#agentRuntimeNode").options].some((option) => option.value === project.nodeId)) {
@@ -3538,7 +3654,7 @@ $("#logoutButton").addEventListener("click", async () => {
     csrfToken = null;
     agent.diagnostics.clear();
     clearAppRoute();
-    stopAgentRecovery();
+    stopAgentRecovery({ resetTurnState: true });
     disposeTerminal();
     workspace.node = null;
     show("loginView");
@@ -3682,7 +3798,7 @@ $("#localSessionList").addEventListener("click", (event) => {
 });
 $("#conversationForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (agent.sendPromise || agent.forkPromise) return;
+  if (agent.sendPromise || agent.forkPromise || agent.threadActionPromise) return;
   const text = $("#conversationInput").value.trim();
   const attachments = [...agent.attachments];
   if (!text && !attachments.length) return;
@@ -3717,7 +3833,7 @@ $("#conversationInput").addEventListener("keydown", (event) => {
   composerShiftEnter = event.key === "Enter" && event.shiftKey;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
-    if (!event.repeat && !agent.sendPromise && !agent.forkPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
+    if (!event.repeat && !agent.sendPromise && !agent.forkPromise && !agent.threadActionPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
   }
 });
 // Some Android keyboards use beforeinput for the IME action instead of Enter.
@@ -3726,7 +3842,7 @@ $("#conversationInput").addEventListener("keyup", () => { composerShiftEnter = f
 $("#conversationInput").addEventListener("beforeinput", (event) => {
   if (!["insertParagraph", "insertLineBreak"].includes(event.inputType) || event.isComposing || composerShiftEnter) return;
   event.preventDefault();
-  if (!agent.sendPromise && !agent.forkPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
+  if (!agent.sendPromise && !agent.forkPromise && !agent.threadActionPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
 });
 $("#conversationInput").addEventListener("input", resizeConversationInput);
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
@@ -3803,8 +3919,46 @@ $("#threadCopyId").addEventListener("click", async () => {
 $("#threadOpenWindow").addEventListener("click", (event) => { openThreadWindow(event, event.currentTarget); $("#threadOptionsMenu").hidePopover(); });
 $("#threadRenameCancel").addEventListener("click", () => $("#threadRenameDialog").close());
 const threadMetadataChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("mira.thread.metadata") : null;
-threadMetadataChannel?.addEventListener("message", () => {
+threadMetadataChannel?.addEventListener("message", (event) => {
+  if (event.data?.action === "delete") removeThreadFromWindow(event.data.threadId, true);
+  else if (["archive", "restore"].includes(event.data?.action)) {
+    const thread = agent.threads.find(thread => thread.threadId === event.data.threadId);
+    if (thread) thread.archived = event.data.action === "archive";
+  }
   if (["agentView", "runtimeView"].includes(document.body.dataset.view)) void loadAgentThreads().catch(() => {});
+});
+$("#threadArchive").addEventListener("click", archiveThreadFromMenu);
+$("#threadDelete").addEventListener("click", () => showDeleteThreadDialog().catch(error => toast(error.message)));
+$("#agentArchiveToggle").addEventListener("click", () => {
+  agent.showArchived = !agent.showArchived;
+  $("#agentArchiveToggle").setAttribute("aria-pressed", String(agent.showArchived));
+  $("#agentArchiveLabel").textContent = agent.showArchived ? "返回对话列表" : "归档对话";
+  void loadAgentThreads().catch(error => toast(error.message));
+});
+$("#threadDeleteCancel").addEventListener("click", () => $("#threadDeleteDialog").close());
+$("#threadDeleteForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const thread = agent.deleteTarget;
+  if (!thread || agent.threadActionPromise || agent.sendPromise || agent.forkPromise) return;
+  if (agent.activeTurns.has(thread.threadId)) { $("#threadDeleteError").textContent = "请先停止此对话的运行，再删除。"; return; }
+  const operation = (async () => {
+    await api(`/v1/codex/threads/${encodeURIComponent(thread.threadId)}?storeId=personal`, {
+      method: "DELETE", body: JSON.stringify({ generation: thread.generation, itemCount: thread.itemCount, operationId: thread.operationId }),
+    });
+    removeThreadFromWindow(thread.threadId, true);
+    threadMetadataChannel?.postMessage({ threadId: thread.threadId, action: "delete" });
+    $("#threadDeleteDialog").close();
+    await loadAgentThreads();
+    toast("对话已永久删除");
+  })();
+  agent.threadActionPromise = operation; syncConversationSendUi();
+  $("#threadDeleteConfirm").disabled = true;
+  $("#threadDeleteConfirm").textContent = "正在删除…";
+  try { await operation; } catch (error) { $("#threadDeleteError").textContent = error.message; }
+  finally {
+    agent.threadActionPromise = null; syncConversationSendUi();
+    $("#threadDeleteConfirm").disabled = false; $("#threadDeleteConfirm").textContent = "永久删除";
+  }
 });
 $("#threadRenameForm").addEventListener("submit", async (event) => {
   event.preventDefault();

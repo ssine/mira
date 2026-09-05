@@ -33,6 +33,17 @@ function stateFromSnapshot(snapshot) {
   return state;
 }
 
+export async function assertThreadsNotDeleted(client, storeId, threadIds) {
+  if (!threadIds.length) return;
+  const result = await client.query("SELECT thread_id FROM mira_thread_actions WHERE store_id=$1 AND action='delete' AND thread_id=ANY($2::text[]) LIMIT 1", [storeId, threadIds]);
+  if (result.rowCount) throw Object.assign(new Error("此会话已永久删除，不能继续写入或恢复。"), { statusCode: 410, code: "thread_deleted" });
+}
+
+function snapshotThreadIds(snapshot) {
+  return Object.entries(objectOrEmpty(snapshot)).flatMap(([key, value]) =>
+    key === "rollout_paths" ? Object.values(objectOrEmpty(value)) : Object.keys(objectOrEmpty(value)));
+}
+
 function canonicalJson(value) {
   if (Array.isArray(value)) return value.map(canonicalJson);
   if (value !== null && typeof value === "object") {
@@ -341,6 +352,7 @@ async function putSnapshotTransaction(pool, storeId, body, headers) {
       };
     }
 
+    await assertThreadsNotDeleted(client, storeId, snapshotThreadIds(body.snapshot));
     const latestEvent = await client.query(
       `SELECT history_manifest FROM codex_store_events
        WHERE store_id = $1 ORDER BY event_seq DESC LIMIT 1`,
@@ -825,6 +837,12 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
       };
     }
 
+    await assertThreadsNotDeleted(client, storeId, [
+      ...body.historyChanges.filter(change => change.mode !== "delete").map(change => change.threadId),
+      ...body.stateChanges.filter(change => change.mode !== "remove").flatMap(change =>
+        change.path.length > 1 ? (change.path[0] === "rollout_paths" ? [change.value] : [change.path[1]])
+          : snapshotThreadIds({ [change.path[0]]: change.value })),
+    ].filter(value => typeof value === "string"));
     const current = await getStoreHead(client, storeId);
     if (current.version !== lockedVersion) {
       throw new Error(`store head ${lockedVersion} is missing its canonical event`);
@@ -997,6 +1015,7 @@ export async function commitImportedHistory(pool, storeId, value, context = {}) 
       await client.query("BEGIN");
       check();
       await acquireStoreWriteLock(client, storeId);
+      await assertThreadsNotDeleted(client, storeId, [threadId]);
       const head = await getStoreHead(client, storeId);
       const existing = head.historyManifest[threadId];
       const previousCount = existing?.itemCount ?? 0;
