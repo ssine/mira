@@ -165,7 +165,7 @@ for (const wiring of [
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
 }
-for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentManage", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
+for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentManage", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationScroll", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
@@ -182,17 +182,22 @@ assert(assets["/app.js"].includes('sandbox: "danger-full-access"') &&
 assert(!assets["/app.js"].includes('"Turn", "Codex 正在处理…", "运行中"'),
   "website still renders normal Turn lifecycle notifications as transcript cards");
 const compactCss = assets["/styles.css"].replace(/\s+/g, "");
+const rule = (selector) => compactCss.split(`${selector}{`)[1]?.split("}")[0] ?? "";
 assert(compactCss.includes(".trace-card{flex:00auto") &&
   compactCss.includes(".history-loader{flex:00auto") &&
-  compactCss.includes(".conversation-trace{min-height:0;overflow-y:auto") &&
+  rule(".conversation-scroll").includes("min-height:0;") &&
+  rule(".conversation-scroll").includes("overflow-y:auto;") &&
+  !/overflow(?:-y)?:(?:auto|scroll)/.test(rule(".conversation-trace")) &&
   !/\.trace-body\{[^}]*max-height/.test(compactCss),
 "website conversation cards may shrink, nest scrollbars, or omit the history loader");
-assert(assets["/styles.css"].includes(".tool-group{") && assets["/styles.css"].includes(".tool-group-items{"),
+assert(compactCss.includes(".tool-group{") && compactCss.includes(".tool-group-items{"),
   "website omitted collapsed tool-call groups");
-assert(compactCss.includes('grid-template-areas:"conversation-head""conversation-notice""conversation-trace""conversation-composer"'),
+assert(compactCss.includes('grid-template-areas:"conversation-head""conversation-notice""conversation-scroll""conversation-composer"'),
   "website conversation rows can shift when the optional notice is hidden");
-assert(compactCss.includes('body[data-view="agentView"]{height:100dvh;min-height:0;overflow:hidden;}') &&
-  compactCss.includes('.chat-shell{position:relative;display:grid;width:100%;height:100%;min-height:0;overflow:hidden'),
+assert(["height:100dvh;", "min-height:0;", "overflow:hidden;"].every((declaration) =>
+  rule('body[data-view="agentView"]').includes(declaration)) &&
+  ["position:relative;", "display:grid;", "width:100%;", "height:100%;", "min-height:0;", "overflow:hidden;"].every((declaration) =>
+    rule(".chat-shell").includes(declaration)),
 "dedicated conversation shell can escape the viewport or leave document-level blank space");
 for (const operation of ['invoke("file"', 'invoke("process"', 'invoke("pty"']) {
   assert(assets["/app.js"].includes(operation), `website omitted ${operation} integration`);
@@ -398,8 +403,9 @@ try {
     "unified Codex thread projection omitted the imported session");
   assert(importedProjection.cwd === temporary,
     "unified Codex thread projection did not preserve the imported working directory");
-  assert(importedProjection.runtimeNodeId === null && importedProjection.sourceNodeId === nodeId,
-    "imported thread did not preserve a source-node fallback before its first runtime binding");
+  assert(importedProjection.runtimeNodeId === (discovered.suggestedRuntimeNodeId ?? null) &&
+    importedProjection.sourceNodeId === nodeId,
+    "imported thread did not preserve its suggested execution node and original storage node");
   const transcript = await admin(
     `/v1/codex/threads/${importedThreadId}/transcript?storeId=${encodeURIComponent(importStoreId)}`,
   );
