@@ -346,7 +346,7 @@ func availableAppServerListenURL(value string) (string, error) {
 		if parsed.Port() != "0" {
 			return value, nil
 		}
-	} else if !errors.Is(err, syscall.EADDRINUSE) {
+	} else if !appServerAddressInUse(err) {
 		return "", fmt.Errorf("probe App Server listen URL: %w", err)
 	}
 	if listener == nil {
@@ -359,6 +359,13 @@ func availableAppServerListenURL(value string) (string, error) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	parsed.Host = net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port))
 	return parsed.String(), nil
+}
+
+func appServerAddressInUse(err error) bool {
+	// Winsock reports WSAEADDRINUSE (10048), not the POSIX EADDRINUSE
+	// value exported by syscall on Windows.
+	return errors.Is(err, syscall.EADDRINUSE) ||
+		(runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(10048)))
 }
 
 func appServerFailureMessage(instance *appServerInstance, fallback string) string {
