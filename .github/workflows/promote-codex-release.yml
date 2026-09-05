@@ -61,23 +61,28 @@ jobs:
           set -euo pipefail
           metadata="$RUNNER_TEMP/codex-promotion"
           commit=$(jq -r .head_sha "$metadata/run.json")
+          release_commit=$(git rev-parse HEAD)
           version=$(jq -r .version "$metadata/lock.json")
           tag="codex-v$version"
           marker="Verified source run $SOURCE_RUN ($commit)."
           if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
-            test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$commit"
+            test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$release_commit"
           fi
           gh api "repos/$GH_REPO/releases?per_page=100" --paginate --slurp |
             jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' > "$metadata/existing.json"
           count=$(jq length "$metadata/existing.json")
           if [[ "$count" == 0 ]]; then
-            # The workflow GITHUB_TOKEN avoids a tag-triggered full rebuild.
-            gh release create "$tag" --target "$commit" --draft --latest=false \
+            # Only runtime-identical main can promote the older tested build.
+            # Target current main: historical workflow differences require a
+            # Workflows permission unavailable to GITHUB_TOKEN. Preserve the
+            # original build commit in the notes, never relabel/rebuild its bytes.
+            # GITHUB_TOKEN also avoids a tag-triggered full rebuild.
+            gh release create "$tag" --target "$release_commit" --draft --latest=false \
               --title "Mira-compatible Codex $version" \
-              --notes "$marker Independent optional Codex runtime, not a Mira Node/Server/APK update. Keep each complete canonical package together. Source baseline and patch are recorded in this tag; upstream LICENSE and NOTICE accompany the assets."
+              --notes "$marker Publication commit $release_commit has the identical Codex baseline, runtime lock and patch. Assets are the unchanged binaries from the source run, not rebuilt at the publication commit. Independent optional Codex runtime, not a Mira Node/Server/APK update. Keep each complete canonical package together. Upstream LICENSE and NOTICE accompany the assets."
           else
             test "$count" = 1
-            jq -e --arg commit "$commit" --arg marker "$marker" \
+            jq -e --arg commit "$release_commit" --arg marker "$marker" \
               '.[0] | .draft == true and .target_commitish == $commit and (.body | startswith($marker))' "$metadata/existing.json"
           fi
           gh release view "$tag" --json assets > "$metadata/assets.json"

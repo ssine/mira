@@ -166,9 +166,15 @@ rejected. The GitHub artifact digest, release checksums, canonical manifests and
 every archived file are checked without executing downloaded binaries.
 
 Publication uses the workflow's `GITHUB_TOKEN`, so creating the runtime tag does
-not trigger another full build. Assets first enter a draft and are downloaded back
+not trigger another full build. The tag targets the promotion checkout on `main`,
+whose Codex baseline/patch/lock are verified identical to the original build. The
+release notes distinguish the original build SHA from the publication SHA; the
+binary bytes and embedded build identity are never relabeled. This also avoids
+GitHub's [additional workflow permission requirement for historical targets](https://docs.github.com/en/rest/releases/releases#create-a-release)
+whose workflow files differ from the default branch. No broader token is installed.
+Assets first enter a draft and are downloaded back
 for byte-for-byte verification before publication. A partial upload may resume only
-the same source-run draft; no asset is overwritten, and an existing public release
+the same source-run/publication-commit draft; no asset is overwritten, and an existing public release
 is refused. Codex is always published with `--latest=false`. Nodes must still pass
 platform-specific acceptance and an idle check before activation. This workflow
 does not deploy nodes, rebuild clients or change any production configuration.

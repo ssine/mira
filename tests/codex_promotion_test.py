@@ -125,6 +125,9 @@ class PromotionTests(unittest.TestCase):
         self.assertIn(".draft == true", workflow)
         self.assertIn("--is-ancestor", workflow)
         self.assertIn("github.token", workflow)
+        self.assertIn('--target "$release_commit"', workflow)
+        self.assertIn('git diff --exit-code "$commit" HEAD -- CODEX_VERSION patches/codex/ node/internal/codex-runtime.json', workflow)
+        self.assertIn("Assets are the unchanged binaries from the source run", workflow)
         self.assertLess(workflow.index('diff -qr'), workflow.index('--draft=false'))
 
 
