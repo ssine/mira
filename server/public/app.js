@@ -147,6 +147,11 @@ const agent = {
   requestId: 0,
   threadId: null,
   turnId: null,
+  persistedActivity: new Map(),
+  liveActivity: new Map(),
+  activityTimer: null,
+  activityRequest: null,
+  activityCheckedAt: 0,
   interruptRequests: new Set(),
   projectOpen: new Map(),
   draftProject: null,
@@ -182,6 +187,8 @@ const agent = {
   transcriptLoadingOlder: false,
   transcriptOlderError: null,
   transcriptTailVersion: null,
+  transcriptActivityCount: null,
+  transcriptGap: null,
   transcriptReconciliations: new Map(),
   // Ephemeral diagnostics, not a second transcript store. Keep failures across
   // history refresh/reconnect/selection until explicitly dismissed (or page close).
@@ -243,18 +250,125 @@ function renderReplyProgress() {
 }
 
 function renderTurnActivity(submitting) {
-  const turnId = agent.activeTurns.get(agent.threadId);
+  const activity = threadActivity(agent.threadId);
+  const turnId = activity.turnId ?? agent.activeTurns.get(agent.threadId);
   const phase = agent.turnActivity.get(turnId) ?? "working";
-  const visible = Boolean(agent.activeTurns.has(agent.threadId) && !submitting && phase !== "failed" && agent.socket?.readyState === WebSocket.OPEN);
+  const visible = Boolean(["running", "unknown"].includes(activity.state) && !submitting && phase !== "failed");
   const status = $("#conversationActivity");
+  status.classList.toggle("activity-unknown", activity.state === "unknown");
   if (status.classList.contains("hidden") === visible) {
     const follow = traceNearBottom();
     status.classList.toggle("hidden", !visible);
     if (follow) scrollTraceToBottom();
   }
-  const text = phase === "replying" ? "Codex 正在回复…" : phase === "tool" ? "Codex 正在调用工具…" : "Codex 仍在处理中…";
+  const text = activity.state === "unknown" ? activityLabel(activity) : phase === "replying" ? "Codex 正在回复…" : phase === "tool" ? "Codex 正在调用工具…" : "Codex 仍在处理中…";
   const label = $("#conversationActivityText");
   if (visible && label.textContent !== text) label.textContent = text;
+}
+
+function activityLabel(activity) {
+  if (activity.state === "running") return "Codex 正在运行";
+  if (activity.state === "failed") return "上轮运行失败";
+  if (activity.state === "interrupted") return "上轮已中断";
+  if (activity.reason === "offline") return "节点离线，运行状态待确认";
+  if (activity.reason === "runtime") return "运行环境已停止或重启，状态待确认";
+  if (activity.reason === "history") return "历史任务未记录结束，状态待确认";
+  return "运行状态待确认，正在同步…";
+}
+
+function threadActivity(threadId) {
+  const stored = agent.persistedActivity.get(threadId);
+  const live = agent.liveActivity.get(threadId);
+  let activity = stored ?? { state: "idle" };
+  if (live) {
+    const acknowledged = stored?.turnId === live.turnId &&
+      (live.state === "running" || ["idle", "failed", "interrupted"].includes(stored.state));
+    const newerTurn = stored?.turnId && stored.turnId !== live.turnId &&
+      stored.turnId !== live.previousTurnId && (stored.generation > live.generation ||
+        (stored.generation === live.generation && stored.itemCount > live.itemCount));
+    activity = acknowledged || newerTurn ? stored : live;
+    if (live.state === "running" && stored?.state === "unknown" && stored.checkedAt > live.observedAt) activity = stored;
+  } else if (agent.activeTurns.has(threadId) && !stored) {
+    activity = { state: "running", turnId: agent.activeTurns.get(threadId) };
+  }
+  const confirmedAt = Math.max(agent.activityCheckedAt, live && live.turnId === activity.turnId ? live.observedAt : 0);
+  if (activity.state === "running" && (!navigator.onLine ||
+    (confirmedAt && Date.now() - confirmedAt > 20_000))) return { ...activity, state: "unknown", reason: "connection" };
+  return activity;
+}
+
+function recordLiveActivity(threadId, turnId, state) {
+  if (!threadId) return;
+  const stored = agent.persistedActivity.get(threadId);
+  agent.liveActivity.set(threadId, { state, turnId, previousTurnId: stored?.turnId,
+    generation: stored?.generation ?? 0, itemCount: stored?.itemCount ?? 0, observedAt: Date.now() });
+}
+
+function acceptThreadActivity(thread, checkedAt = Date.now()) {
+  const incoming = thread.activity;
+  if (!incoming) return;
+  const previous = agent.persistedActivity.get(thread.threadId);
+  if (previous && (incoming.generation < previous.generation ||
+    (incoming.generation === previous.generation && (incoming.itemCount < previous.itemCount ||
+      (incoming.itemCount === previous.itemCount && checkedAt < previous.checkedAt))))) return;
+  agent.persistedActivity.set(thread.threadId, { ...incoming, checkedAt });
+  const current = threadActivity(thread.threadId);
+  if (["idle", "interrupted", "failed"].includes(current.state) && current.turnId &&
+    agent.activeTurns.get(thread.threadId) === current.turnId) {
+    agent.activeTurns.delete(thread.threadId);
+    agent.turnTimings.set(current.turnId, { ...agent.turnTimings.get(current.turnId), completedAt: Date.now() });
+  }
+}
+
+function renderThreadActivityIcons() {
+  for (const icon of $("#agentThreadList").querySelectorAll("[data-thread-activity]")) {
+    const activity = threadActivity(icon.dataset.threadActivity);
+    icon.hidden = !["running", "unknown", "failed", "interrupted"].includes(activity.state);
+    icon.dataset.state = activity.state;
+    icon.title = activityLabel(activity);
+    icon.setAttribute("aria-label", icon.title);
+  }
+}
+
+function scheduleThreadActivity(delay = threadActivity(agent.threadId).state === "running" ? 2_000 : 5_000) {
+  clearTimeout(agent.activityTimer);
+  if (document.hidden || document.body.dataset.view !== "agentView") return;
+  agent.activityTimer = setTimeout(() => void refreshThreadActivity(), delay);
+}
+
+async function refreshThreadActivity() {
+  if (agent.activityRequest) return agent.activityRequest;
+  const checkedAt = Date.now();
+  const operation = (async () => {
+    try {
+      const signal = AbortSignal.timeout(12_000);
+      const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${agent.showArchived ? 1 : 0}`, { signal });
+      if (document.body.dataset.view !== "agentView") return;
+      const rows = response.data ?? [];
+      const selected = agent.threadId;
+      if (selected && !rows.some(thread => thread.threadId === selected)) {
+        rows.push(await api(`/v1/codex/threads/${encodeURIComponent(selected)}?storeId=personal`, { signal }));
+      }
+      if (document.body.dataset.view !== "agentView") return;
+      agent.activityCheckedAt = Date.now();
+      for (const thread of rows) acceptThreadActivity(thread, checkedAt);
+      const current = rows.find(thread => thread.threadId === agent.threadId);
+      // A read-only window may have no App Server subscription (including CLI
+      // threads on another Node). Follow the canonical history in every window.
+      // Avoid interrupting older-page loads or resetting a reader's position.
+      if (current && Number.isSafeInteger(current.itemCount) && !agent.transcriptLoadingOlder &&
+          (agent.transcriptGap || agent.transcriptGeneration !== current.generation || agent.transcriptActivityCount !== current.itemCount)) {
+        await syncPersistedTranscript(current.threadId, signal);
+      }
+    } catch { /* Keep the last known state; stale running states become unknown. */ }
+    finally {
+      syncActiveTurnUi();
+      scheduleThreadActivity();
+    }
+  })();
+  agent.activityRequest = operation;
+  try { await operation; }
+  finally { if (agent.activityRequest === operation) agent.activityRequest = null; }
 }
 
 function observeTurnActivity(method, params) {
@@ -270,6 +384,10 @@ function observeTurnActivity(method, params) {
     phase = ["commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "websearch", "collabagenttoolcall"].includes(type) ? "tool" : "working";
   } else if (method === "error" && !params.willRetry) phase = "failed";
   if (phase) agent.turnActivity.set(turnId, phase);
+  if (phase === "failed") {
+    recordLiveActivity(notificationThreadId(params), turnId, "failed");
+    renderThreadActivityIcons();
+  }
 }
 
 function updateReplyProgress(entry, values) {
@@ -343,6 +461,7 @@ function show(view) {
   $("#globalRuntime").classList.toggle("active", view === "runtimeView");
   $("#globalRuntime").setAttribute("aria-current", view === "runtimeView" ? "page" : "false");
   document.body.dataset.view = view;
+  scheduleThreadActivity();
   document.title = view === "agentView" ? `${$("#conversationTitle").textContent} · Mira` : "Mira";
   if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
   else if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
@@ -1631,6 +1750,7 @@ function syncActiveTurnUi() {
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
   syncConversationSendUi();
   renderReplyProgress();
+  renderThreadActivityIcons();
 }
 
 function syncConversationSendUi() {
@@ -1677,6 +1797,9 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
   // A transport disconnect does not end the Codex turn. Keep the stop control
   // visible (disabled offline) until a completion event or a fresh turn read.
   if (resetTurnState) {
+    agent.persistedActivity.clear();
+    agent.liveActivity.clear();
+    agent.activityCheckedAt = 0;
     agent.activeTurns.clear();
     agent.turnThreads.clear();
     agent.turnTimings.clear();
@@ -2335,6 +2458,8 @@ function resetAgentTranscript(threadId = null) {
   agent.transcriptLoadingOlder = false;
   agent.transcriptOlderError = null;
   agent.transcriptTailVersion = null;
+  agent.transcriptActivityCount = null;
+  agent.transcriptGap = null;
 }
 
 function retainTurnError(threadId, turnId, message) {
@@ -2561,7 +2686,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const liveRevision = agent.liveRevision;
   const query = new URLSearchParams({ storeId: "personal", tail: "1", limit: String(options.limit ?? transcriptPageSize) });
   if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
-  const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`);
+  const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal: options.signal });
   if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || request !== agent.transcriptRequest) return transcript;
 
   const incoming = Array.isArray(transcript.trace) ? transcript.trace : [];
@@ -2569,7 +2694,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     agent.transcriptGeneration === transcript.generation;
   const tailVersion = transcript.storeVersion == null ? null
     : JSON.stringify([transcript.generation, transcript.storeVersion, transcript.itemCount]);
-  if (sameThread && options.preserveLoaded && !options.prepend && tailVersion !== null &&
+  if (sameThread && options.preserveLoaded && !options.prepend && options.cursor == null && tailVersion !== null &&
       agent.transcriptTailVersion === tailVersion) {
     renderTurnDiagnostics();
     return transcript; // No changed canonical items: avoid rebuilding Markdown/DOM.
@@ -2607,8 +2732,37 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     preserveLive: options.preserveLoaded && sameThread,
     anchorBottom: options.anchorBottom !== false,
   });
-  if (!options.prepend) agent.transcriptTailVersion = tailVersion;
+  if (!options.prepend && options.cursor == null) {
+    agent.transcriptTailVersion = tailVersion;
+    agent.transcriptActivityCount = transcript.itemCount ?? null;
+  }
   return transcript;
+}
+
+async function syncPersistedTranscript(threadId, signal) {
+  const epoch = agent.selectionEpoch;
+  const current = () => agent.threadId === threadId && agent.selectionEpoch === epoch;
+  const read = cursor => loadAgentTranscript(threadId, null, { preserveLoaded: true, anchorBottom: traceNearBottom(), signal, cursor });
+  const boundary = cursor => Number(/^t2:\d+:(\d+):\d+$/.exec(cursor ?? "")?.[1]);
+  if (!agent.transcriptGap) {
+    const previousCount = agent.transcriptActivityCount;
+    const generation = agent.transcriptGeneration;
+    const tail = await read();
+    if (!current()) return;
+    if (Number.isSafeInteger(previousCount) && previousCount > 0 && generation === tail.generation &&
+        boundary(tail.nextCursor) > previousCount + 1) {
+      agent.transcriptGap = { cursor: tail.nextCursor, after: previousCount, generation };
+    }
+  }
+  // A suspended window can miss more than one tail page. Fill that interval in
+  // bounded pages, retaining its cursor if the connection drops midway.
+  while (current() && agent.transcriptGap) {
+    const gap = agent.transcriptGap;
+    const page = await read(gap.cursor);
+    if (!current()) return;
+    agent.transcriptGap = page.generation === gap.generation && page.nextCursor !== gap.cursor &&
+      boundary(page.nextCursor) > gap.after + 1 ? { ...gap, cursor: page.nextCursor } : null;
+  }
 }
 
 async function loadOlderAgentTranscript() {
@@ -2684,9 +2838,12 @@ function handleAgentNotification(message) {
   // It proves that this turn is active; finishing an item never finishes a turn.
   const liveTurnId = params.turnId;
   const liveThreadId = notificationThreadId(params);
+  const liveActivity = agent.liveActivity.get(liveThreadId);
+  if (method.startsWith("item/") && liveActivity && liveActivity.turnId === liveTurnId && liveActivity.state === "running") liveActivity.observedAt = Date.now();
   if (method.startsWith("item/") && liveThreadId && liveTurnId &&
       !agent.activeTurns.get(liveThreadId) && !agent.turnTimings.get(liveTurnId)?.completedAt) {
     agent.activeTurns.set(liveThreadId, liveTurnId);
+    recordLiveActivity(liveThreadId, liveTurnId, "running");
     agent.turnThreads.set(liveTurnId, liveThreadId);
     syncActiveTurnUi();
   }
@@ -2707,6 +2864,7 @@ function handleAgentNotification(message) {
     const threadId = params.threadId ?? agent.threadId;
     if (threadId && turnId) {
       agent.activeTurns.set(threadId, turnId);
+      recordLiveActivity(threadId, turnId, "running");
       agent.turnThreads.set(turnId, threadId);
       const timing = agent.turnTimings.get(turnId) ?? {};
       timing.startedAt ??= replyProgress.current(threadId)?.startedAt ?? Date.now();
@@ -2724,6 +2882,9 @@ function handleAgentNotification(message) {
     timing.completedAt = completedAt;
     timing.elapsedMs = turn.durationMs ?? turn.elapsedMs ?? (Number.isFinite(timing.startedAt) ? Math.max(0, completedAt - timing.startedAt) : null);
     if (completedTurnId) agent.turnTimings.set(completedTurnId, timing);
+    if (!agent.activeTurns.get(threadId) || agent.activeTurns.get(threadId) === completedTurnId) {
+      recordLiveActivity(threadId, completedTurnId, ["failed", "interrupted"].includes(turn.status) ? turn.status : "idle");
+    }
     if (threadId && (!completedTurnId || agent.activeTurns.get(threadId) === completedTurnId)) {
       agent.activeTurns.delete(threadId);
     }
@@ -2983,8 +3144,12 @@ function renderAgentThreads() {
       button.dataset.threadId = thread.threadId;
       if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
       button.title = thread.title || "未命名会话";
+      const activityIcon = element("i", "thread-activity-icon");
+      activityIcon.dataset.threadActivity = thread.threadId;
+      activityIcon.setAttribute("role", "img");
       button.append(element("strong", "", button.title), element("span", "", agent.titleJobs.has(thread.threadId)
         ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
+      button.append(activityIcon);
       const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
       menu.type = "button";
       menu.dataset.threadMenu = thread.threadId;
@@ -2997,6 +3162,7 @@ function renderAgentThreads() {
     project.append(conversations);
     list.append(project);
   }
+  renderThreadActivityIcons();
 }
 
 function openThreadWindow(event, link) {
@@ -3199,11 +3365,14 @@ async function showProjectDialog() {
 
 async function loadAgentThreads() {
   const request = ++agent.threadListRequest;
+  const checkedAt = Date.now();
   const archived = agent.showArchived;
   const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
   if (request !== agent.threadListRequest || archived !== agent.showArchived) return;
   const selected = currentAgentThread();
   agent.threads = response.data ?? [];
+  agent.activityCheckedAt = Date.now();
+  for (const thread of agent.threads) acceptThreadActivity(thread, checkedAt);
   for (const [threadId, summary] of agent.pendingThreadSummaries) {
     if (agent.threads.some(thread => thread.threadId === threadId)) agent.pendingThreadSummaries.delete(threadId);
     else if (Boolean(summary.archived) === archived) agent.threads.push(summary);
@@ -3213,6 +3382,8 @@ async function loadAgentThreads() {
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
   renderAgentThreads();
+  renderReplyProgress();
+  scheduleThreadActivity();
 }
 
 function removeThreadFromWindow(threadId, deleted) {
@@ -3503,10 +3674,12 @@ async function refreshActiveTurn(threadId, socket) {
       const turn = result.data?.[0];
       if (turn?.status === "inProgress" && !agent.turnTimings.get(turn.id)?.completedAt) {
         agent.activeTurns.set(threadId, turn.id);
+        recordLiveActivity(threadId, turn.id, "running");
         agent.turnThreads.set(turn.id, threadId);
       } else if (turn && ["completed", "failed", "interrupted"].includes(turn.status) &&
           (!agent.activeTurns.get(threadId) || agent.activeTurns.get(threadId) === turn.id)) {
         agent.activeTurns.delete(threadId);
+        recordLiveActivity(threadId, turn.id, turn.status === "completed" ? "idle" : turn.status);
         agent.turnThreads.delete(turn.id);
         const timing = agent.turnTimings.get(turn.id) ?? {};
         timing.completedAt ??= Date.now();
@@ -3543,6 +3716,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
       projected = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
       if (epoch !== agent.selectionEpoch) return;
       agent.threads.push(projected);
+      acceptThreadActivity(projected);
     } catch (error) {
       if (epoch !== agent.selectionEpoch) return;
       stopAgentRecovery();
@@ -3847,6 +4021,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       !["completed", "failed", "interrupted"].includes(result.turn.status)) {
     updateReplyProgress(progress, { turnId: result.turn.id });
     agent.activeTurns.set(turnThreadId, result.turn.id);
+    recordLiveActivity(turnThreadId, result.turn.id, "running");
     agent.turnThreads.set(result.turn.id, turnThreadId);
     const timing = agent.turnTimings.get(result.turn.id) ?? {};
     timing.startedAt ??= progress?.startedAt ?? Date.now();
@@ -3975,17 +4150,19 @@ $("#agentRuntimeNode").addEventListener("change", () => {
 
 document.addEventListener("visibilitychange", () => {
   syncAccountSidebar();
+  scheduleThreadActivity(0);
   if (document.hidden) {
     clearTimeout(agent.reconnectTimer);
     clearTimeout(agent.heartbeatTimer);
   } else void recoverAgentSession({ probe: true });
 });
-window.addEventListener("pageshow", (event) => { syncAccountSidebar(); if (event.persisted) void recoverAgentSession({ probe: true }); });
-window.addEventListener("pagehide", () => accountSidebar.select(null, false));
-document.addEventListener("resume", () => { void recoverAgentSession({ probe: true }); });
-window.addEventListener("online", () => { syncAccountSidebar(); void recoverAgentSession({ probe: true }); });
+window.addEventListener("pageshow", (event) => { syncAccountSidebar(); if (event.persisted) { scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); } });
+window.addEventListener("pagehide", () => { accountSidebar.select(null, false); clearTimeout(agent.activityTimer); });
+document.addEventListener("resume", () => { scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); });
+window.addEventListener("online", () => { syncAccountSidebar(); scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); });
 window.addEventListener("offline", () => {
   syncAccountSidebar();
+  syncActiveTurnUi();
   clearTimeout(agent.reconnectTimer);
   clearTimeout(agent.heartbeatTimer);
   if (agent.connectionWanted) setAgentRuntimeState("网络已断开，恢复后将自动连接", "offline");

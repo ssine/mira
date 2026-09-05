@@ -79,3 +79,4 @@ jobs:
           MIRA_STORAGE_ROWS_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/storage_rows_e2e.mjs
           MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_management_e2e.mjs
           MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/fork_titles_e2e.mjs
+          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_activity_e2e.mjs

@@ -35,7 +35,7 @@ const server = http.createServer(async (request, response) => {
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
         loadAgentTranscript, loadAgentThreads, resetAgentTranscript, closeAgentSocket, syncActiveTurnUi, restoreAgentThread, refreshActiveTurn,
         upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
-        show, renderNodes, renderEnrollments, renderAudit,
+        show, renderNodes, renderEnrollments, renderAudit, acceptThreadActivity, threadActivity, recordLiveActivity, syncPersistedTranscript,
         message: onAgentSocketMessage, nodes: dashboardNodes, connectAgentSocket, resumeAgentThread, recoverAgentSession, stopAgentRecovery, mergeTranscriptItems,
         setInvoke: (fn) => { invokeNode = fn; }, clear: () => clear($("#conversationTrace")) };
     `);
@@ -1095,7 +1095,64 @@ try {
     assert.deepEqual(activity.tool, { visible: true, text: "Codex 正在调用工具…" });
     assert.deepEqual(activity.prose, { visible: true, text: "Codex 正在回复…" });
     assert.deepEqual(activity.returned, activity.prose);
-    for (const state of ["switched", "completed", "failed", "disconnected"]) assert.equal(activity[state].visible, false, state);
+    for (const state of ["switched", "completed", "failed"]) assert.equal(activity[state].visible, false, state);
+    assert.deepEqual(activity.disconnected, activity.gap, "disconnecting the Web socket does not stop the task indicator");
+    const durable = await historyPage.evaluate(() => {
+      const h = window.traceHarness, id = "durable-thread";
+      h.agent.threadId = id;
+      h.agent.activityCheckedAt = Date.now();
+      const accept = (state, turnId, count, checkedAt) => h.acceptThreadActivity({ threadId: id, activity: { state, turnId, generation: 1, itemCount: count } }, checkedAt);
+      accept("idle", "old-turn", 10);
+      h.notify({ method: "turn/started", params: { threadId: id, turn: { id: "new-turn" } } });
+      accept("idle", "old-turn", 11);
+      const staleIdle = h.threadActivity(id).state;
+      accept("running", "new-turn", 12);
+      h.closeAgentSocket(); h.syncActiveTurnUi();
+      const disconnect = !document.querySelector("#conversationActivity").classList.contains("hidden");
+      accept("idle", "new-turn", 13);
+      const completed = h.threadActivity(id).state;
+      accept("running", "new-turn", 12);
+      const staleRunning = h.threadActivity(id).state;
+      h.notify({ method: "turn/started", params: { threadId: id, turn: { id: "third-turn" } } });
+      h.notify({ method: "turn/completed", params: { threadId: id, turn: { id: "new-turn", status: "completed" } } });
+      const oldCompletion = h.threadActivity(id).state;
+      h.notify({ method: "turn/completed", params: { threadId: id, turn: { id: "third-turn", status: "completed" } } });
+      accept("running", "third-turn", 14);
+      const latePersistence = h.threadActivity(id).state;
+      accept("running", "fourth-turn", 15);
+      const otherClient = h.threadActivity(id).state;
+      accept("unknown", "fourth-turn", 15, Date.now() - 1000);
+      const delayedOffline = h.threadActivity(id).state;
+      h.agent.activityCheckedAt = Date.now() - 21_000;
+      const staleConnection = h.threadActivity(id).state;
+      h.agent.activityCheckedAt = Date.now();
+      return { staleIdle, disconnect, completed, staleRunning, oldCompletion, latePersistence, otherClient, delayedOffline, staleConnection };
+    });
+    assert.deepEqual(durable, { staleIdle: "running", disconnect: true, completed: "idle", staleRunning: "idle", oldCompletion: "running", latePersistence: "idle", otherClient: "running", delayedOffline: "running", staleConnection: "unknown" });
+    const gapCursors = [];
+    await historyPage.route("**/v1/codex/threads/gap-thread/transcript?*", route => {
+      const cursor = new URL(route.request().url()).searchParams.get("cursor");
+      gapCursors.push(cursor);
+      const end = cursor ? Number(cursor.split(":")[2]) : 501;
+      const start = Math.max(1, end - 100);
+      return route.fulfill({ json: { generation: 1, itemCount: 500, storeVersion: 2,
+        nextCursor: start > 1 ? `t2:1:${start}:500` : null,
+        trace: Array.from({ length: end - start }, (_, index) => ({ key: `gap-${start + index}`, kind: "assistant", body: `Gap message ${start + index}`, sourceItemSeq: start + index })) } });
+    });
+    const gapResult = await historyPage.evaluate(async () => {
+      const h = window.traceHarness;
+      h.agent.threadId = "gap-thread";
+      h.agent.selectionEpoch++;
+      h.resetAgentTranscript("gap-thread");
+      h.agent.transcriptGeneration = 1;
+      h.agent.transcriptActivityCount = 100;
+      h.agent.transcriptItems = Array.from({ length: 100 }, (_, index) => ({ key: `gap-${index + 1}`, kind: "assistant", body: `Gap message ${index + 1}`, sourceItemSeq: index + 1 }));
+      h.renderTranscript();
+      await h.syncPersistedTranscript("gap-thread", AbortSignal.timeout(10_000));
+      return { count: h.agent.transcriptItems.length, gap: h.agent.transcriptGap, through: h.agent.transcriptActivityCount };
+    });
+    assert.deepEqual(gapResult, { count: 500, gap: null, through: 500 }, "background catch-up fills every missed page");
+    assert.deepEqual(gapCursors, [null, "t2:1:401:500", "t2:1:301:500", "t2:1:201:500"]);
     const controls = await historyPage.evaluate(async () => {
       const h = window.traceHarness;
       h.agent.threadId = "stop-lifecycle";

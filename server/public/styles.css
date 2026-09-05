@@ -527,6 +527,13 @@ progress { width: 100%; accent-color: var(--accent); }
 #conversationProgressText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #conversationProgressTime { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reply-spinner { width: 11px; height: 11px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: reply-spin 1s linear infinite; }
+.activity-unknown .reply-spinner { animation: none; border-color: var(--muted); border-style: dotted; }
+.agent-thread:has(.thread-activity-icon:not([hidden])) { position: relative; padding-right: 24px; }
+.thread-activity-icon { position: absolute; right: 6px; top: 12px; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; }
+.thread-activity-icon[data-state="running"] { animation: reply-spin 1s linear infinite; }
+.thread-activity-icon[data-state="unknown"] { border-color: var(--muted); border-style: dotted; }
+.thread-activity-icon[data-state="failed"] { border-color: var(--danger); }
+.thread-activity-icon[data-state="interrupted"] { border-color: var(--muted); border-radius: 2px; }
 .conversation-drop-zone { border: 1px solid color-mix(in srgb, var(--input-border) 55%, var(--canvas)); border-radius: 8px; background: var(--canvas); box-shadow: 0 2px 8px rgb(22 34 52 / 4%); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }
 .conversation-drop-zone.dragging { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent), 0 3px 12px rgb(22 34 52 / 5%); }
 .conversation-drop-zone.dragging { background: var(--accent-soft); }

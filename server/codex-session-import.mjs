@@ -4,6 +4,7 @@ import { appendAudit } from "./auth.mjs";
 import { assertThreadsNotDeleted, commitDelta, commitImportedHistory, getStoreHead, getThreadHistory } from "./thread-store.mjs";
 import { stageSessionTransfer } from "./session-transfer.mjs";
 import { stageSessionLineage } from "./session-lineage.mjs";
+import { addThreadActivities } from "./thread-activity.mjs";
 
 const defaultStoreId = process.env.MIRA_CODEX_STORE_ID ?? "personal";
 
@@ -351,6 +352,8 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
             COALESCE(NULLIF(projections.state->>'name', ''), projections.title) AS title,
             projections.state->>'name' AS name, COALESCE(actions.action='archive',false) AS archived,
             projections.cwd, projections.item_count::text,
+            COALESCE(projections.state #>> '{createdThread,metadata,timestamp}',
+                     projections.state #>> '{metadata,created_at}') AS created_at,
             projections.active_generation::text, activity.updated_at,
             imports.import_id, imports.source_node_id, imports.source_codex_version,
             imports.created_at AS imported_at, runtimes.node_id AS runtime_node_id,
@@ -386,15 +389,16 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
      ORDER BY activity.updated_at DESC NULLS LAST, projections.thread_id DESC LIMIT $2`,
     [id, limit, threadId, archived],
   );
-  return result.rows.map((row) => ({
+  return addThreadActivities(pool, id, result.rows.map((row) => ({
     threadId: row.thread_id, parentThreadId: row.parent_thread_id,
     sourceKind: row.source_kind, title: row.title, name: row.name, archived: row.archived, cwd: row.cwd,
     itemCount: Number(row.item_count), generation: Number(row.active_generation),
+    createdAt: row.created_at ?? null,
     updatedAt: row.updated_at?.toISOString() ?? null, importId: row.import_id,
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,
     importedAt: row.imported_at?.toISOString() ?? null,
     runtimeNodeId: row.runtime_node_id, runtimeBoundAt: row.runtime_bound_at?.toISOString() ?? null,
-  }));
+  })));
 }
 
 export { defaultStoreId };

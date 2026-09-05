@@ -538,6 +538,13 @@ const migrations = [
     `,
   },
   { version: 17, name: "normalized-thread-records-cutover", sql: storageRowsMigration },
+  {
+    version: 18,
+    name: "thread-lifecycle-lookup",
+    sql: `CREATE INDEX codex_thread_events_lifecycle_idx
+      ON codex_thread_events(store_id, thread_id, generation, item_seq DESC)
+      WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|task_complete|turn_complete|turn_aborted|error)"';`,
+  },
 ];
 
 export async function initializeDatabase(pool, { throughVersion = Infinity } = {}) {
