@@ -359,6 +359,58 @@ function closeAgentThreadDrawerOnMobile() {
   if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
 }
 
+function installAgentDrawerSwipe() {
+  const surface = $("#conversationScroll");
+  let gesture = null;
+  const enabled = () => document.body.dataset.view === "agentView" && !agentThreadDrawerWide.matches &&
+    !agentThreadDrawerOpen && (window.visualViewport?.scale ?? 1) <= 1.05;
+  const selectedText = () => window.getSelection()?.type === "Range";
+  surface.addEventListener("touchstart", event => {
+    gesture = null;
+    if (!enabled() || event.touches.length !== 1 || selectedText() ||
+        document.querySelector("dialog[open], [popover]:popover-open")) return;
+    const target = event.target instanceof Element ? event.target : event.target.parentElement;
+    if (target.closest("a, button, input, textarea, select, summary, [role=button], [contenteditable]:not([contenteditable=false]), img, video, audio, canvas")) return;
+    // Code blocks and tables keep their own horizontal pan, even at a scroll boundary.
+    for (let node = target; node && node !== surface; node = node.parentElement) {
+      if (node.scrollWidth > node.clientWidth + 2 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowX)) return;
+    }
+    const touch = event.touches[0];
+    // Start inside the reading surface, away from Android's system back edges.
+    if (touch.clientX < 32 || touch.clientX > innerWidth - 32) return;
+    gesture = { id: touch.identifier, x: touch.clientX, y: touch.clientY, startedAt: performance.now(), horizontal: false };
+  }, { passive: true });
+  surface.addEventListener("touchmove", event => {
+    if (!gesture) return;
+    if (!enabled() || event.touches.length !== 1 || selectedText()) { gesture = null; return; }
+    const touch = [...event.touches].find(touch => touch.identifier === gesture.id);
+    if (!touch) { gesture = null; return; }
+    const dx = touch.clientX - gesture.x, dy = Math.abs(touch.clientY - gesture.y);
+    if (!gesture.horizontal) {
+      // Long presses belong to selection; vertical/diagonal starts belong to scrolling.
+      if (performance.now() - gesture.startedAt > 450 || dy > 10 && dy >= Math.abs(dx) * 0.6 || dx < -10) {
+        gesture = null; return;
+      }
+      if (dx < 10) return;
+      gesture.horizontal = true;
+    }
+    if (!event.cancelable) { gesture = null; return; }
+    event.preventDefault();
+  }, { passive: false });
+  surface.addEventListener("touchend", event => {
+    const finished = gesture;
+    gesture = null;
+    if (!finished?.horizontal || !enabled() || event.touches.length || selectedText()) return;
+    const touch = [...event.changedTouches].find(touch => touch.identifier === finished.id);
+    if (!touch) return;
+    const dx = touch.clientX - finished.x, dy = Math.abs(touch.clientY - finished.y);
+    if (dx < 64 || dy > dx * 0.6 || performance.now() - finished.startedAt > 1500) return;
+    if (event.cancelable) event.preventDefault();
+    setAgentThreadDrawer(true);
+  }, { passive: false });
+  surface.addEventListener("touchcancel", () => { gesture = null; }, { passive: true });
+}
+
 function toast(message) {
   $("#toast").textContent = message;
   $("#toast").classList.remove("hidden");
@@ -3849,6 +3901,7 @@ $("#agentManage").addEventListener("click", () => navigateGlobal("runtime").catc
 $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
 $("#agentThreadDrawerClose").addEventListener("click", () => setAgentThreadDrawer(false));
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
+installAgentDrawerSwipe();
 window.addEventListener("popstate", () => {
   if (["loginView", "setupView"].includes(document.body.dataset.view)) return;
   agent.selectionEpoch++;
