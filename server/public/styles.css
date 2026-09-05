@@ -663,11 +663,6 @@ progress { width: 100%; accent-color: var(--accent); }
   .chat-icon-button, .composer-icon { width: 44px; min-width: 44px; height: 44px; min-height: 44px; }
   .composer-input-row { grid-template-columns: 44px minmax(0, 1fr) 44px; }
   .conversation-composer { padding-left: 0; padding-right: 0; }
-  #conversationInput { font-size: 16px; }
-  .agent-thread strong, .chat-manage-link strong { font-size: 13px; }
-  .agent-thread span, .chat-manage-link small { font-size: 11px; }
-  .conversation-head h2 { font-size: 16px; }
-  .trace-card.assistant .trace-body { font-size: 16px; line-height: 1.75; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 @media (prefers-reduced-transparency: reduce) { .topbar, .workspace-bar, .conversation-head, .chat-drawer, .toast { background: var(--surface-raised); backdrop-filter: none; -webkit-backdrop-filter: none; } }

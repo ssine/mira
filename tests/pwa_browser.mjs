@@ -100,7 +100,7 @@ try {
   let measure = await layout();
   assert.ok(measure.bottom <= measure.height + 1 && measure.top >= 0);
   assert.ok(measure.scrollWidth <= measure.width + 1);
-  assert.equal(measure.font, "16px");
+  assert.equal(measure.font, "14px");
   assert.ok(measure.touchTarget >= 44);
   assert.equal(await page.locator("#conversationInput").inputValue(), "未发送的草稿");
   await page.setViewportSize({ width: 851, height: 393 });
