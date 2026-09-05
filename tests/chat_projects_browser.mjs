@@ -101,9 +101,11 @@ try {
       list: getComputedStyle(project.closest('.chat-drawer')).backgroundColor,
     };
   });
-  assert.ok(hierarchy.indent >= 8, 'conversations sit visibly inside their project');
+  assert.ok(Math.abs(hierarchy.indent) <= 1, 'project and conversation titles share the available width');
   assert.ok(hierarchy.projectSize > hierarchy.threadSize, 'project headings have a distinct type hierarchy');
   assert.notEqual(hierarchy.header, hierarchy.list, 'project headers have their own surface');
+  assert.equal(await firstProject.locator('summary svg').count(), 0, 'project headers have no leading folder icon');
+  assert.equal(await page.locator('[data-open-thread-window]').count(), 0, 'rows have no separate new-window action');
   await projectSummary.focus();
   await projectSummary.press('Enter');
   await page.waitForFunction(() => !document.querySelector('.thread-project').open);
@@ -120,10 +122,19 @@ try {
     }
   }
   await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
-  assert.notEqual(await firstProject.locator('.thread-project-threads').evaluate(e => getComputedStyle(e).borderLeftStyle), 'none');
-  assert.equal(await firstProject.locator('.thread-project-icon').isVisible(), true);
+  assert.equal(await row.locator('.agent-thread.active').evaluate(e => getComputedStyle(e).borderLeftStyle), 'solid', 'selection remains marked in forced colors');
   await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'no-preference' });
   await page.locator('#agentThemeToggle').click();
+  const rowMenu = row.locator('[data-thread-menu]');
+  await page.mouse.move(1400, 850);
+  assert.equal(await rowMenu.evaluate(e => getComputedStyle(e).opacity), '0', 'mouse users see no menu until hover or focus');
+  await row.hover();
+  assert.equal(await rowMenu.evaluate(e => getComputedStyle(e).opacity), '1', 'hover reveals the menu');
+  await page.mouse.move(1400, 850);
+  await row.locator('[data-thread-id]').focus();
+  assert.equal(await rowMenu.evaluate(e => getComputedStyle(e).opacity), '1', 'keyboard focus reveals the menu');
+  await row.locator('[data-thread-id]').press('Tab');
+  assert.equal(await rowMenu.evaluate(e => e === document.activeElement), true, 'the menu remains keyboard accessible');
   await row.click({button:'right'});
   await page.locator('#threadCopyId').click();
   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),ids[0]);
@@ -215,6 +226,7 @@ try {
   assert.equal(await draftProject.locator('.thread-project-count').textContent(), '1 对话');
   assert.equal(await draftProject.locator('.thread-project-empty').count(), 0, 'first submission replaces the empty project hint immediately');
   await page.locator('#agentThreadDrawerToggle').click();
+  await page.locator(`[data-thread-row="${ids[1]}"]`).hover();
   await page.locator(`[data-thread-menu="${ids[1]}"]`).click();
   await page.locator('#threadArchive').click();
   await page.waitForFunction(id=>!document.querySelector(`[data-thread-row="${id}"]`),ids[1]);
@@ -226,6 +238,7 @@ try {
   await page.locator(`[data-thread-row="${ids[1]}"]`).waitFor();
   assert.equal(await page.locator('[data-thread-row]').count(),1,'archive view excludes normal conversations');
   assert.equal(await page.locator('.thread-project-count').textContent(), '1 对话', 'archive count reflects only visible conversations');
+  await page.locator(`[data-thread-row="${ids[1]}"]`).hover();
   await page.locator(`[data-thread-menu="${ids[1]}"]`).click();
   assert.equal(await page.locator('#threadArchive').textContent(),'恢复对话');
   await page.locator('#threadArchive').click();
@@ -258,6 +271,17 @@ try {
   }
   await page.waitForTimeout(3200);
   assert.equal(cleanupRefreshes,0,'successful deletion does not wait for or poll background erasure');
+  const touchContext = await browser.newContext({ storageState: await context.storageState(), viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const touchPage = await touchContext.newPage();
+  await touchPage.goto(`${origin}/?thread=${ids[0]}`);
+  await touchPage.locator('#agentView:not(.hidden)').waitFor();
+  await touchPage.locator('#agentThreadDrawerToggle').tap();
+  const touchMenu = touchPage.locator(`[data-thread-menu="${ids[0]}"]`);
+  assert.equal(await touchPage.evaluate(() => matchMedia('(pointer: coarse)').matches), true);
+  assert.equal(await touchMenu.evaluate(e => getComputedStyle(e).opacity), '1', 'touch menus remain visible without hover');
+  await touchMenu.tap();
+  assert.equal(await touchPage.locator('#threadRename').isVisible(), true, 'touch users can open conversation actions');
+  await touchContext.close();
   assert.deepEqual(errors,[]);
   console.log('PASS: project identity/order/inheritance, hidden IDs, desktop/mobile menus, durable rename, fork navigation/source preservation, CSRF/auth, mobile Enter, stop/retry/completion and draft preservation');
   console.log('PASS: archive/reload/restore, mobile deletion confirmation/cancel, route cleanup, deletion replay and mutation authorization');

@@ -2839,13 +2839,6 @@ function renderAgentThreads() {
     project.open = agent.projectOpen.get(group.key) ?? true;
     project.addEventListener("toggle", () => agent.projectOpen.set(group.key, project.open));
     const summary = element("summary", "thread-project-summary");
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("class", "thread-project-icon");
-    icon.setAttribute("viewBox", "0 0 20 20");
-    icon.setAttribute("aria-hidden", "true");
-    const folder = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    folder.setAttribute("d", "M2.5 5.5V4a1 1 0 0 1 1-1h4l2 2h7a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V5.5h15");
-    icon.append(folder);
     const copy = element("span", "thread-project-identity");
     const name = group.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || group.cwd || "未分配目录";
     const node = dashboardNodes.get(group.nodeId);
@@ -2875,7 +2868,7 @@ function renderAgentThreads() {
     add.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise) || !add.dataset.projectNode;
     add.title = add.dataset.projectNode ? `在 ${group.cwd || "默认目录"} 新建对话` : "该项目未关联可运行 Codex 的机器";
     add.setAttribute("aria-label", add.title);
-    summary.append(icon, copy, count, add, details);
+    summary.append(copy, count, add, details);
     project.append(summary);
     const conversations = element("div", "thread-project-threads");
     conversations.setAttribute("role", "group");
@@ -2891,20 +2884,13 @@ function renderAgentThreads() {
       if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
       button.title = thread.title || "未命名会话";
       button.append(element("strong", "", button.title), element("span", "", `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
-      const openWindow = element("a", "chat-icon-button thread-open-window", "↗");
-      openWindow.href = `/?thread=${encodeURIComponent(thread.threadId)}`;
-      openWindow.target = "_blank";
-      openWindow.rel = "noopener";
-      openWindow.dataset.openThreadWindow = thread.threadId;
-      openWindow.title = `在新窗口打开：${button.title}`;
-      openWindow.setAttribute("aria-label", openWindow.title);
       const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
       menu.type = "button";
       menu.dataset.threadMenu = thread.threadId;
       menu.title = `对话选项：${button.title}`;
       menu.setAttribute("aria-label", menu.title);
       menu.setAttribute("aria-haspopup", "menu");
-      row.append(button, openWindow, menu);
+      row.append(button, menu);
       conversations.append(row);
     }
     project.append(conversations);
@@ -3841,11 +3827,6 @@ $("#agentThreadList").addEventListener("click", (event) => {
   }
   const menu = event.target.closest("button[data-thread-menu]");
   if (menu) { openThreadMenu(menu.dataset.threadMenu, menu); return; }
-  const openWindow = event.target.closest("a[data-open-thread-window]");
-  if (openWindow) {
-    openThreadWindow(event, openWindow);
-    return;
-  }
   const button = event.target.closest("button[data-thread-id]");
   if (button) {
     closeAgentThreadDrawerOnMobile();
