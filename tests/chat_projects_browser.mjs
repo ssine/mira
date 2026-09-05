@@ -10,8 +10,8 @@ if (!process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL) throw new Error("a di
 const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8789";
 const pool = new pg.Pool({ connectionString: process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL });
 const ids = Array.from({ length: 4 }, () => crypto.randomUUID());
-const nodes = ["Machine A", "Machine B"].map((hostname) => ({ nodeId: crypto.randomUUID(), hostname, platform: "linux", status: "online", capabilities: { appServer: true }, reportedAppServer: { status: "running" }, desiredAppServer: { defaultCwd: "/default" } }));
-const paths = ["/work/project", "/work/project", "/work/project", "/work/elsewhere"];
+const nodes = ["Machine A", "Machine B"].map((hostname, i) => ({ nodeId: crypto.randomUUID(), hostname, platform: "linux", nodeMode: i === 0 ? "wsl" : "linux", status: "online", capabilities: { appServer: true }, reportedAppServer: { status: "running" }, desiredAppServer: { defaultCwd: "/default" } }));
+const paths = ["/work/project", "/work/project", "/work/project", "/home/developer/workspaces/clients/a-very-long-parent-directory/elsewhere"];
 let browser;
 try {
   for (const node of nodes) await pool.query(`INSERT INTO codex_nodes (node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status) VALUES ($1::uuid,$1::text,$2,'linux','amd64','linux','test','{"appServer":true}','[]','approved')`, [node.nodeId, node.hostname]);
@@ -68,6 +68,62 @@ try {
   for(const id of ids)assert.equal((await page.locator('#agentThreadList').textContent()).includes(id),false,'IDs are hidden in the reading list');
   const row=page.locator(`[data-thread-row="${ids[0]}"]`);
   assert.equal(await row.locator('strong').evaluate(e=>getComputedStyle(e).fontSize),'13px');
+  const firstProject = page.locator('.thread-project').first();
+  const projectSummary = firstProject.locator('.thread-project-summary');
+  assert.equal(await firstProject.locator('.thread-project-count').textContent(), '2 对话');
+  assert.equal(await firstProject.locator('.thread-project-platform').textContent(), 'WSL');
+  assert.equal(await page.locator('.thread-project').nth(1).locator('.thread-project-platform').count(), 0, 'Linux machines are not mislabeled as WSL');
+  const projectPath = firstProject.locator('.thread-project-path');
+  assert.equal(await projectPath.evaluate(e => getComputedStyle(e).direction), 'rtl', 'path ellipsis starts on the left');
+  assert.equal(await projectPath.locator('bdi').getAttribute('dir'), 'ltr', 'native path order is preserved');
+  assert.match(await firstProject.locator('.thread-project-location').getAttribute('title'), /Machine A · WSL · \/work\/project/);
+  const longPath = page.locator('.thread-project').nth(2).locator('.thread-project-path');
+  const suffixVisible = await longPath.evaluate(path => {
+    const text = path.querySelector('bdi').firstChild;
+    const suffix = document.createRange();
+    suffix.setStart(text, text.length - 'elsewhere'.length);
+    suffix.setEnd(text, text.length);
+    const visible = path.getBoundingClientRect();
+    const tail = suffix.getBoundingClientRect();
+    return path.scrollWidth > path.clientWidth && tail.left >= visible.left && tail.right <= visible.right + 1;
+  });
+  assert.equal(suffixVisible, true, 'overflow keeps the final project directory visible');
+  assert.equal(await row.locator('[aria-current="page"]').count(), 1, 'selected conversation is announced');
+  const hierarchy = await firstProject.evaluate(project => {
+    const summary = project.querySelector('summary');
+    const name = summary.querySelector('strong');
+    const thread = project.querySelector('.agent-thread strong');
+    return {
+      indent: thread.getBoundingClientRect().left - name.getBoundingClientRect().left,
+      projectSize: parseFloat(getComputedStyle(name).fontSize),
+      threadSize: parseFloat(getComputedStyle(thread).fontSize),
+      header: getComputedStyle(summary).backgroundColor,
+      list: getComputedStyle(project.closest('.chat-drawer')).backgroundColor,
+    };
+  });
+  assert.ok(hierarchy.indent >= 8, 'conversations sit visibly inside their project');
+  assert.ok(hierarchy.projectSize > hierarchy.threadSize, 'project headings have a distinct type hierarchy');
+  assert.notEqual(hierarchy.header, hierarchy.list, 'project headers have their own surface');
+  await projectSummary.focus();
+  await projectSummary.press('Enter');
+  await page.waitForFunction(() => !document.querySelector('.thread-project').open);
+  assert.equal(await row.isVisible(), false, 'keyboard collapse hides conversations');
+  assert.equal(await firstProject.locator('.thread-project-count').isVisible(), true, 'collapsed projects retain their conversation count');
+  await projectSummary.press('Enter');
+  await row.waitFor({ state: 'visible' });
+  for (const theme of ['light', 'dark']) {
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#agentThemeToggle').click();
+    assert.equal(await row.locator('[aria-current="page"]').isVisible(), true);
+    if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
+      await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
+      await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/chat-projects-desktop-${theme}.png`, animations: 'disabled' });
+    }
+  }
+  await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+  assert.notEqual(await firstProject.locator('.thread-project-threads').evaluate(e => getComputedStyle(e).borderLeftStyle), 'none');
+  assert.equal(await firstProject.locator('.thread-project-icon').isVisible(), true);
+  await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'no-preference' });
+  await page.locator('#agentThemeToggle').click();
   await row.click({button:'right'});
   await page.locator('#threadCopyId').click();
   assert.equal(await page.evaluate(()=>navigator.clipboard.readText()),ids[0]);
@@ -108,12 +164,19 @@ try {
     await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/chat-projects-mobile.png`, animations: "disabled" });
   }
   await page.locator('.thread-project').first().locator('[data-project-new]').click();
+  assert.equal(await page.locator('.thread-project').first().evaluate(e => e.open), true, 'new conversation keeps its project expanded');
   assert.equal(await page.locator('#conversationCwd').inputValue(),'/work/project');
   assert.equal(await page.locator('#agentRuntimeNode').inputValue(),nodes[0].nodeId);
   await page.locator('#conversationInput').fill('Start in this project');
   await page.locator('#conversationInput').press('Enter');
   await page.locator('#agentInterrupt:not(.hidden)').waitFor();
   assert.equal(messages.find(m=>m.method==='thread/start').params.cwd,'/work/project');
+  const createdThreadId = new URL(page.url()).searchParams.get('thread');
+  const createdThreadRow = page.locator(`[data-thread-row="${createdThreadId}"]`);
+  assert.equal(await createdThreadRow.count(), 1, 'creation immediately inserts a sidebar item without a reload');
+  assert.equal(await createdThreadRow.locator('[aria-current="page"]').count(), 1);
+  assert.equal(await createdThreadRow.locator('strong').textContent(), 'Start in this project');
+  assert.equal(await createdThreadRow.evaluate(e => e.closest('.thread-project').dataset.projectKey), JSON.stringify([nodes[0].nodeId, '/work/project']));
   assert.equal(await page.locator('#agentInterrupt').evaluate(e=>e.closest('#conversationForm')!==null),true);
   assert.equal(await page.locator('#conversationSend').isVisible(),false);
   await page.waitForFunction(()=>document.querySelector('#conversationInput').value==='');
@@ -138,6 +201,19 @@ try {
   await page.locator('#projectForm button[type=submit]').click();
   assert.equal(await page.locator('#agentRuntimeNode').inputValue(),nodes[1].nodeId);
   assert.equal(await page.locator('#conversationCwd').inputValue(),'/work/new-project');
+  const draftProject = page.locator('.thread-project').filter({ hasText: 'new-project' });
+  assert.equal(await draftProject.locator('.thread-project-count').textContent(), '0 对话');
+  assert.equal(await draftProject.locator('.thread-project-empty').count(), 1, 'an empty project explains how to start its first conversation');
+  await page.locator('#conversationInput').fill('First conversation in a new project');
+  await page.locator('#conversationInput').press('Enter');
+  await page.waitForFunction(() => document.querySelector('#conversationInput').value === '');
+  const newProjectThreadId = new URL(page.url()).searchParams.get('thread');
+  const newProjectRow = page.locator(`[data-thread-row="${newProjectThreadId}"]`);
+  assert.equal(await newProjectRow.locator('strong').textContent(), 'First conversation in a new project');
+  assert.equal(await newProjectRow.locator('[aria-current="page"]').count(), 1);
+  assert.equal(await newProjectRow.evaluate(e => e.closest('.thread-project').dataset.projectKey), JSON.stringify([nodes[1].nodeId, '/work/new-project']));
+  assert.equal(await draftProject.locator('.thread-project-count').textContent(), '1 对话');
+  assert.equal(await draftProject.locator('.thread-project-empty').count(), 0, 'first submission replaces the empty project hint immediately');
   await page.locator('#agentThreadDrawerToggle').click();
   await page.locator(`[data-thread-menu="${ids[1]}"]`).click();
   await page.locator('#threadArchive').click();
@@ -149,6 +225,7 @@ try {
   await page.locator('#agentArchiveToggle').click();
   await page.locator(`[data-thread-row="${ids[1]}"]`).waitFor();
   assert.equal(await page.locator('[data-thread-row]').count(),1,'archive view excludes normal conversations');
+  assert.equal(await page.locator('.thread-project-count').textContent(), '1 对话', 'archive count reflects only visible conversations');
   await page.locator(`[data-thread-menu="${ids[1]}"]`).click();
   assert.equal(await page.locator('#threadArchive').textContent(),'恢复对话');
   await page.locator('#threadArchive').click();

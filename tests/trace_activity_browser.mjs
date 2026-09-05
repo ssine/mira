@@ -30,7 +30,7 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/app.js") body = body.replace("void bootstrap();", `
       show("agentView");
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
-        loadAgentTranscript, resetAgentTranscript, closeAgentSocket, syncActiveTurnUi, restoreAgentThread, refreshActiveTurn,
+        loadAgentTranscript, loadAgentThreads, resetAgentTranscript, closeAgentSocket, syncActiveTurnUi, restoreAgentThread, refreshActiveTurn,
         upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
         show, renderNodes, renderEnrollments, renderAudit,
         message: onAgentSocketMessage, nodes: dashboardNodes, connectAgentSocket, resumeAgentThread, recoverAgentSession, stopAgentRecovery, mergeTranscriptItems,
@@ -56,6 +56,13 @@ try {
   let expireLogin = false;
   let transcriptRequests = 0;
   let missingTranscript = false;
+  let deferThreadLists = false;
+  const pendingThreadLists = [];
+  let threadListData = [];
+  await page.route("**/v1/codex/threads?*", route => {
+    if (deferThreadLists) pendingThreadLists.push(route);
+    else return route.fulfill({ json: { data: threadListData } });
+  });
   await page.route("**/v1/nodes/test-node", (route) => {
     nodeRequests++;
     return route.fulfill({ status: expireLogin ? 401 : 200, json: expireLogin
@@ -180,11 +187,49 @@ try {
   assert.match(await page.locator("#conversationProgressText").textContent(), /创建/);
   await page.keyboard.press("Enter");
   assert.equal(await page.evaluate(() => window.rpcMessages.filter((m) => m.method === "thread/start").length), 1, "Enter while sending stays single-flight");
+  assert.equal(await page.locator('[data-thread-row]').count(), 0, 'unacknowledged creation has no phantom conversation');
   await page.evaluate(() => {
     const request = window.rpcMessages.find((m) => m.method === "thread/start");
+    window.traceHarness.message({ data: JSON.stringify({ id: request.id, error: { message: 'Temporary creation failure' } }) });
+  });
+  await page.waitForFunction(() => !window.traceHarness.agent.sendPromise);
+  assert.equal(await page.locator('[data-thread-row]').count(), 0, 'failed creation has no phantom conversation');
+  assert.equal(await page.locator('#conversationInput').inputValue(), 'Waiting hint test\n', 'creation failure preserves the draft');
+  await page.keyboard.press('Enter');
+  await page.waitForFunction(() => window.rpcMessages.filter(m => m.method === 'thread/start').length === 2);
+  assert.equal(await page.evaluate(() => new Set(window.rpcMessages.filter(m => m.method === 'thread/start').map(m => m.params.miraRequestId)).size), 1, 'creation retry reuses its request ID');
+  await page.evaluate(() => {
+    const request = window.rpcMessages.filter((m) => m.method === "thread/start").at(-1);
     window.traceHarness.message({ data: JSON.stringify({ id: request.id, result: { thread: { id: "progress-thread" }, cwd: "/project" } }) });
   });
   await page.waitForFunction(() => window.rpcMessages.some((m) => m.method === "turn/start"));
+  const createdRow = page.locator('[data-thread-row="progress-thread"]');
+  assert.equal(await createdRow.count(), 1, 'new conversation appears before turn/start acknowledgement');
+  assert.equal(await createdRow.locator('[aria-current="page"]').count(), 1);
+  assert.equal(await createdRow.locator('strong').textContent(), 'Waiting hint test');
+  assert.equal(await createdRow.evaluate(e => e.closest('.thread-project').dataset.projectKey), JSON.stringify(['test-node', '/project']));
+  await page.evaluate(() => window.traceHarness.loadAgentThreads());
+  assert.equal(await createdRow.count(), 1, 'an empty list response cannot erase an acknowledged creation');
+  assert.equal(await page.locator('.thread-project-count').textContent(), '1 对话');
+  deferThreadLists = true;
+  await page.evaluate(() => { window.olderList = window.traceHarness.loadAgentThreads(); });
+  await page.waitForFunction(() => window.traceHarness.agent.threadListRequest >= 3);
+  await page.evaluate(() => { window.newerList = window.traceHarness.loadAgentThreads(); });
+  for (let attempt = 0; pendingThreadLists.length < 2 && attempt < 100; attempt++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(pendingThreadLists.length, 2, 'both refresh requests are held before delivering them out of order');
+  threadListData = [{ threadId: 'progress-thread', title: 'Canonical conversation title', cwd: '/project', runtimeNodeId: 'test-node', updatedAt: new Date().toISOString() }];
+  await pendingThreadLists[1].fulfill({ json: { data: threadListData } });
+  await page.evaluate(() => window.newerList);
+  await pendingThreadLists[0].fulfill({ json: { data: [] } });
+  await page.evaluate(() => window.olderList);
+  deferThreadLists = false;
+  assert.equal(await createdRow.count(), 1, 'out-of-order list responses cannot remove the new conversation');
+  assert.equal(await createdRow.locator('strong').textContent(), 'Canonical conversation title');
+  assert.equal(await page.evaluate(() => window.traceHarness.agent.pendingThreadSummaries.size), 0, 'canonical metadata replaces the temporary preview');
+  threadListData[0] = { ...threadListData[0], name: 'Native Codex title', title: 'Native Codex title' };
+  await page.evaluate(() => window.traceHarness.notify({ method: 'thread/name/updated', params: { threadId: 'progress-thread', threadName: 'Older notification title' } }));
+  await page.waitForFunction(() => document.title === 'Native Codex title · Mira');
+  assert.equal(await createdRow.locator('strong').textContent(), 'Native Codex title', 'native title updates use the current canonical name, not a stale notification payload');
   await page.evaluate(() => {
     const h = window.traceHarness;
     h.notify({ method: "turn/started", params: { threadId: "progress-thread", turn: { id: "progress-turn" } } });

@@ -164,6 +164,10 @@ const agent = {
   sessionScanEpoch: 0,
   sessionVisibleLimit: 40,
   threads: [],
+  threadListRequest: 0,
+  // Acknowledged creations remain visible while the PostgreSQL list catches up.
+  // These in-memory previews are replaced by canonical summaries on the next read.
+  pendingThreadSummaries: new Map(),
   transcriptThreadId: null,
   transcriptGeneration: null,
   transcriptItems: [],
@@ -2570,6 +2574,12 @@ function handleAgentNotification(message) {
     agent.socket?.send(JSON.stringify({ id: message.id, error: { code: -32601, message: "interactive request is not supported by Mira Web" } }));
     return;
   }
+  if (method === "thread/name/updated") {
+    // Native clients can name a thread while a turn is still running. Read the
+    // canonical name so a late notification cannot overwrite a newer rename.
+    void loadAgentThreads().catch(error => console.warn("Unable to refresh thread name", error));
+    return;
+  }
   // Live output can arrive after reconnect without replaying turn/started.
   // It proves that this turn is active; finishing an item never finishes a turn.
   const liveTurnId = params.turnId;
@@ -2829,12 +2839,34 @@ function renderAgentThreads() {
     project.open = agent.projectOpen.get(group.key) ?? true;
     project.addEventListener("toggle", () => agent.projectOpen.set(group.key, project.open));
     const summary = element("summary", "thread-project-summary");
+    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    icon.setAttribute("class", "thread-project-icon");
+    icon.setAttribute("viewBox", "0 0 20 20");
+    icon.setAttribute("aria-hidden", "true");
+    const folder = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    folder.setAttribute("d", "M2.5 5.5V4a1 1 0 0 1 1-1h4l2 2h7a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-13a1 1 0 0 1-1-1V5.5h15");
+    icon.append(folder);
     const copy = element("span", "thread-project-identity");
     const name = group.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || group.cwd || "未分配目录";
     const node = dashboardNodes.get(group.nodeId);
-    const location = `${node?.hostname || (group.nodeId ? "未连接的机器" : "未关联运行机器")} · ${group.cwd || "目录未知"}`;
-    copy.append(element("strong", "", name), element("small", "", location));
+    const machine = node?.hostname || (group.nodeId ? "未连接的机器" : "未关联运行机器");
+    const isWsl = node?.nodeMode === "wsl";
+    const location = `${machine}${isWsl ? " · WSL" : ""} · ${group.cwd || "目录未知"}`;
+    copy.append(element("strong", "", name));
     copy.title = location;
+    const details = element("small", "thread-project-location");
+    details.title = location;
+    details.append(element("span", "thread-project-machine", machine));
+    if (isWsl) details.append(element("span", "thread-project-platform", "WSL"));
+    const separator = element("span", "", "·");
+    separator.setAttribute("aria-hidden", "true");
+    const path = element("span", "thread-project-path");
+    const pathText = element("bdi", "", group.cwd || "目录未知");
+    pathText.dir = "ltr";
+    path.append(pathText);
+    details.append(separator, path);
+    const count = element("span", "thread-project-count", `${group.threads.length} 对话`);
+    count.setAttribute("aria-label", `${group.threads.length} 个${agent.showArchived ? "已归档" : ""}对话`);
     const add = element("button", "chat-icon-button project-new-thread", "+");
     add.type = "button";
     add.dataset.projectNew = group.key;
@@ -2843,8 +2875,12 @@ function renderAgentThreads() {
     add.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise) || !add.dataset.projectNode;
     add.title = add.dataset.projectNode ? `在 ${group.cwd || "默认目录"} 新建对话` : "该项目未关联可运行 Codex 的机器";
     add.setAttribute("aria-label", add.title);
-    summary.append(copy, add);
+    summary.append(icon, copy, count, add, details);
     project.append(summary);
+    const conversations = element("div", "thread-project-threads");
+    conversations.setAttribute("role", "group");
+    conversations.setAttribute("aria-label", `${name} · ${location} 的对话`);
+    if (!group.threads.length) conversations.append(element("p", "thread-project-empty", "发送第一条消息，开始项目对话"));
     for (const thread of group.threads) {
       const row = element("div", "agent-thread-row");
       row.dataset.threadRow = thread.threadId;
@@ -2852,6 +2888,7 @@ function renderAgentThreads() {
       button.type = "button";
       button.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
       button.dataset.threadId = thread.threadId;
+      if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
       button.title = thread.title || "未命名会话";
       button.append(element("strong", "", button.title), element("span", "", `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
       const openWindow = element("a", "chat-icon-button thread-open-window", "↗");
@@ -2868,8 +2905,9 @@ function renderAgentThreads() {
       menu.setAttribute("aria-label", menu.title);
       menu.setAttribute("aria-haspopup", "menu");
       row.append(button, openWindow, menu);
-      project.append(row);
+      conversations.append(row);
     }
+    project.append(conversations);
     list.append(project);
   }
 }
@@ -2993,11 +3031,16 @@ async function showProjectDialog() {
 }
 
 async function loadAgentThreads() {
+  const request = ++agent.threadListRequest;
   const archived = agent.showArchived;
   const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
-  if (archived !== agent.showArchived) return;
+  if (request !== agent.threadListRequest || archived !== agent.showArchived) return;
   const selected = currentAgentThread();
   agent.threads = response.data ?? [];
+  for (const [threadId, summary] of agent.pendingThreadSummaries) {
+    if (agent.threads.some(thread => thread.threadId === threadId)) agent.pendingThreadSummaries.delete(threadId);
+    else if (Boolean(summary.archived) === archived) agent.threads.push(summary);
+  }
   if (selected && !agent.threads.some(thread => thread.threadId === selected.threadId) && Boolean(selected.archived) !== archived) agent.threads.push(selected);
   if (currentAgentThread()) agent.draftProject = null;
   const title = currentAgentThread()?.title;
@@ -3009,6 +3052,7 @@ function removeThreadFromWindow(threadId, deleted) {
   const selected = agent.threadId === threadId;
   const project = selected ? projectForThread(currentAgentThread()) : null;
   agent.threads = agent.threads.filter(thread => thread.threadId !== threadId);
+  agent.pendingThreadSummaries.delete(threadId);
   if (deleted) {
     agent.activeTurns.delete(threadId);
     agent.loadedThreadIds.delete(threadId);
@@ -3582,6 +3626,25 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     const startedCwd = started.cwd ?? cwd;
     setConversationMeta(startedCwd, started.model);
     $("#conversationCwd").value = startedCwd ?? "";
+    const summary = {
+      threadId: agent.threadId,
+      title: started.thread.name || started.thread.preview || text.trim().replace(/\s+/g, " ").slice(0, 160) || "新会话",
+      cwd: startedCwd,
+      runtimeNodeId: agent.threadRuntimeNodeId,
+      model: started.model,
+      updatedAt: new Date().toISOString(),
+      archived: false,
+    };
+    agent.pendingThreadSummaries.set(summary.threadId, summary);
+    agent.threads = [...agent.threads.filter(thread => thread.threadId !== summary.threadId), summary];
+    agent.draftProject = null;
+    agent.projectOpen.set(projectForThread(summary).key, true);
+    agent.showArchived = false;
+    $("#agentArchiveToggle").setAttribute("aria-pressed", "false");
+    $("#agentArchiveLabel").textContent = "归档对话";
+    setConversationTitle(summary.title);
+    renderAgentThreads();
+    void loadAgentThreads().catch(error => console.warn("Unable to refresh thread list after creation", error));
   }
   updateReplyProgress(progress, { threadId: agent.threadId, phase: attachments.length ? "正在上传附件…" : "正在发送…" });
   const prepared = await prepareTurnInput(text, attachments, progress);
@@ -3967,6 +4030,7 @@ const threadMetadataChannel = typeof BroadcastChannel === "function" ? new Broad
 threadMetadataChannel?.addEventListener("message", (event) => {
   if (event.data?.action === "delete") removeThreadFromWindow(event.data.threadId, true);
   else if (["archive", "restore"].includes(event.data?.action)) {
+    agent.pendingThreadSummaries.delete(event.data.threadId);
     const thread = agent.threads.find(thread => thread.threadId === event.data.threadId);
     if (thread) thread.archived = event.data.action === "archive";
   }
