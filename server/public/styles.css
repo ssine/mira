@@ -434,13 +434,13 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-card.error { padding: 8px 11px; border-left: 2px solid var(--danger); background: var(--danger-soft); }
 .trace-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 4px; }
 .trace-kind { color: var(--muted); font-size: 11px; font-weight: 500; }
-.trace-status { color: var(--quiet); font-size: 9px; }
+.trace-status { color: var(--quiet); font-size: 11px; }
 .trace-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; flex: none; }
 .trace-copy { display: inline-grid; place-items: center; width: 28px; min-width: 28px; min-height: 28px; padding: 0; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--muted); }
 .trace-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.25; }
 .trace-copy:hover { background: var(--hover); color: var(--accent); }
 .trace-copy:disabled { cursor: wait; opacity: .5; }
-.trace-footer { display: flex; align-items: center; gap: 7px; min-height: 22px; margin-top: 2px; color: var(--quiet); font-size: 9px; font-variant-numeric: tabular-nums; }
+.trace-footer { display: flex; align-items: center; gap: 7px; min-height: 22px; margin-top: 2px; color: var(--quiet); font-size: 11px; font-variant-numeric: tabular-nums; }
 .trace-footer .trace-copy { position: relative; width: 24px; min-width: 24px; min-height: 24px; margin-left: -3px; }
 .trace-completed:not([hidden]) + .trace-elapsed:not([hidden])::before { margin-right: 8px; content: "·"; }
 .trace-body { margin: 0; overflow: visible; overflow-wrap: anywhere; color: var(--text); font: 12px/1.6 var(--font-code); white-space: pre-wrap; }
@@ -450,7 +450,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-card-empty .trace-head { margin-bottom: 0; }
 .trace-detail > .trace-head { margin: 0; padding: 3px 8px; cursor: pointer; list-style: none; }
 .trace-detail > .trace-head::-webkit-details-marker { display: none; }
-.trace-detail > .trace-head .trace-kind { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.trace-detail > .trace-head .trace-kind { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 12px; line-height: 1.25; }
 .trace-detail > .trace-head .trace-kind::before { display: inline-block; margin-right: 7px; color: var(--accent); content: "›"; }
 .trace-detail[open] > .trace-head .trace-kind::before { transform: rotate(90deg); }
 .trace-detail[open] > .trace-head { border-bottom: 1px solid var(--line); }
@@ -489,11 +489,11 @@ progress { width: 100%; accent-color: var(--accent); }
 .tool-group { flex: 0 0 auto; width: 100%; min-width: 0; margin: -3px 0; border: 0; background: transparent; }
 .tool-group-summary { display: flex; align-items: center; gap: 10px; min-height: 24px; padding: 1px 0; cursor: pointer; list-style: none; color: var(--muted); white-space: nowrap; }
 .tool-group-summary::-webkit-details-marker { display: none; }
-.tool-group-total { display: flex; flex: none; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 500; }
+.tool-group-total { display: flex; flex: none; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; font-weight: 500; }
 .tool-group-total::before { color: var(--accent); font-size: 16px; content: "›"; }
 .tool-group[open] .tool-group-total::before { transform: rotate(90deg); }
-.tool-group-counts { flex: 0 1 auto; min-width: 0; max-width: 28%; overflow: hidden; text-overflow: ellipsis; font: 9px/1.4 var(--font-code); }
-.tool-group-latest { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.5; text-overflow: ellipsis; }
+.tool-group-counts { flex: 0 1 auto; min-width: 0; max-width: 28%; overflow: hidden; text-overflow: ellipsis; font: 11px/1.4 var(--font-code); }
+.tool-group-latest { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.375; text-overflow: ellipsis; }
 .tool-group-items{display:grid;gap:1px;padding:0;border-top:1px solid var(--line);background:var(--line)}
 .tool-group .trace-card.tool { width: 100%; max-width: 100%; border-left: 0; background: var(--canvas); }
 .has-running-tool { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
