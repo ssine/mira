@@ -354,7 +354,9 @@ export class NodeChannel {
       this.sendProxyError(proxy, message.id ?? null, "miraRequestId must be a UUID on a thread/start request");
       return { action: "handled" };
     }
-    const digest = requestDigest(message.params);
+    // Keep released thread/start fingerprints stable; fork requests use a
+    // separate method-qualified digest in the same durable creation ledger.
+    const digest = requestDigest(message.method === "thread/fork" ? { method: message.method, params: message.params } : message.params);
     const key = this.threadStartKey(proxy, clientRequestId);
     const inserted = await this.pool.query(
       `INSERT INTO mira_appserver_thread_start_requests (
@@ -554,15 +556,16 @@ export class NodeChannel {
       message.params.capabilities ??= {};
       message.params.capabilities.experimentalApi = true;
     }
-    if (message.method === "thread/start" || message.method === "thread/resume") {
+    if (["thread/start", "thread/resume", "thread/fork"].includes(message.method)) {
       message.params ??= {};
-      if (message.method === "thread/start" && message.params.miraRequestId !== undefined) {
+      if (["thread/start", "thread/fork"].includes(message.method) && message.params.miraRequestId !== undefined) {
         const reservation = await this.reserveThreadStart(proxy, message);
         if (reservation.action === "handled") return;
       }
       message.params.approvalPolicy ??= "never";
       message.params.sandbox ??= "danger-full-access";
-      message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
+      // Fork inherits the source tools; ThreadForkParams has no dynamicTools field.
+      if (message.method !== "thread/fork") message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
       if (message.method === "thread/start" &&
           (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {
         message.params.cwd = targetDefaultCwd(proxy.target) ?? message.params.cwd;
@@ -572,7 +575,7 @@ export class NodeChannel {
         miraCLIInstructions(proxy.target),
       );
     }
-    if (["thread/start", "thread/resume", "turn/start"].includes(message.method) && message.id !== undefined) {
+    if (["thread/start", "thread/resume", "thread/fork", "turn/start"].includes(message.method) && message.id !== undefined) {
       proxy.threadRequestBindings.set(String(message.id),
         typeof message.params?.threadId === "string" ? message.params.threadId : null);
     }

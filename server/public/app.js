@@ -141,6 +141,13 @@ const agent = {
   requestId: 0,
   threadId: null,
   turnId: null,
+  interruptRequests: new Set(),
+  projectOpen: new Map(),
+  draftProject: null,
+  menuThreadId: null,
+  rename: null,
+  forkPromise: null,
+  forkRequests: new Map(),
   activeTurns: new Map(),
   turnThreads: new Map(),
   turnTimings: new Map(),
@@ -1519,20 +1526,32 @@ function notificationIsForOpenThread(params = {}) {
 
 function syncActiveTurnUi() {
   agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
-  $("#agentInterrupt").classList.toggle("hidden", !agent.turnId);
+  $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
+  syncConversationSendUi();
   renderReplyProgress();
 }
 
 function syncConversationSendUi() {
   const selectedNode = $("#agentRuntimeNode")?.value;
-  const busy = Boolean(agent.sendPromise);
+  const busy = Boolean(agent.sendPromise || agent.forkPromise);
+  $("#threadFork").disabled = busy;
+  const running = Boolean(agent.turnId);
+  const stopping = agent.interruptRequests.has(JSON.stringify([agent.threadId, agent.turnId]));
+  $("#conversationSend").classList.toggle("hidden", running);
   $("#conversationSend").disabled = busy || !selectedNode;
+  const stop = $("#agentInterrupt");
+  stop.classList.toggle("hidden", !running);
+  stop.disabled = stopping || agent.socket?.readyState !== WebSocket.OPEN;
+  stop.title = stopping ? "正在停止…" : "停止 Agent";
+  stop.setAttribute("aria-label", stop.title);
   $("#agentRuntimeNode").disabled = busy;
   $("#agentNewThread").disabled = busy;
+  $("#agentNewProject").disabled = busy;
   $("#conversationAttach").disabled = busy;
   $("#conversationCwd").disabled = busy;
   for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
+  for (const button of $("#agentThreadList").querySelectorAll("button[data-project-new]")) button.disabled = busy || !button.dataset.projectNode;
 }
 
 function closeAgentSocket({ preserveSubmission = false } = {}) {
@@ -2690,6 +2709,7 @@ async function refreshAgentNodes() {
     setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
   }
   syncConversationSendUi();
+  renderAgentThreads();
 }
 
 async function saveAgentRuntimeDefaultCwd() {
@@ -2711,38 +2731,200 @@ async function saveAgentRuntimeDefaultCwd() {
   toast(defaultCwd ? "已保存该节点的默认工作目录" : "已清除该节点的默认工作目录");
 }
 
+function projectForThread(thread) {
+  const nodeId = thread?.runtimeNodeId || thread?.sourceNodeId || "";
+  const cwd = thread?.cwd || "";
+  const node = dashboardNodes.get(nodeId);
+  const windows = node?.platform === "windows" || /^[a-z]:[\\/]|^\\\\/i.test(cwd);
+  let path = windows ? cwd.replaceAll("\\", "/").toLowerCase() : cwd;
+  path = path.replace(/\/+$/, "") || "/";
+  return { key: JSON.stringify([nodeId, cwd ? path : ""]), nodeId, cwd };
+}
+
 function renderAgentThreads() {
   const list = clear($("#agentThreadList"));
-  if (!agent.threads.length) {
-    list.append(element("div", "agent-list-empty", "统一数据库里还没有会话"));
-    return;
+  const groups = new Map();
+  const threads = [...agent.threads].sort((a, b) =>
+    (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || b.threadId.localeCompare(a.threadId));
+  for (const thread of threads) {
+    const project = projectForThread(thread);
+    if (!groups.has(project.key)) groups.set(project.key, { ...project, threads: [] });
+    groups.get(project.key).threads.push(thread);
   }
-  for (const thread of agent.threads) {
-    const row = element("div", "agent-thread-row");
-    const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
-    button.type = "button";
-    button.disabled = Boolean(agent.sendPromise);
-    button.dataset.threadId = thread.threadId;
-    button.append(
-      element("strong", "", thread.title || "未命名会话"),
-      element("span", "", `${thread.itemCount} items · ${when(thread.updatedAt)}`),
-      element("small", "", thread.parentThreadId ? `subagent · ${thread.threadId}` : thread.threadId),
-    );
-    const openWindow = element("a", "chat-icon-button thread-open-window", "↗");
-    openWindow.href = `/?thread=${encodeURIComponent(thread.threadId)}`;
-    openWindow.target = "_blank";
-    openWindow.rel = "noopener";
-    openWindow.dataset.openThreadWindow = thread.threadId;
-    openWindow.title = `在新窗口打开：${thread.title || "未命名会话"}`;
-    openWindow.setAttribute("aria-label", openWindow.title);
-    row.append(button, openWindow);
-    list.append(row);
+  if (agent.draftProject && !groups.has(agent.draftProject.key)) groups.set(agent.draftProject.key, { ...agent.draftProject, threads: [] });
+  if (!groups.size) list.append(element("div", "agent-list-empty", "添加项目目录，开始新的对话"));
+  for (const group of groups.values()) {
+    const project = element("details", "thread-project");
+    project.dataset.projectKey = group.key;
+    project.open = agent.projectOpen.get(group.key) ?? true;
+    project.addEventListener("toggle", () => agent.projectOpen.set(group.key, project.open));
+    const summary = element("summary", "thread-project-summary");
+    const copy = element("span", "thread-project-identity");
+    const name = group.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || group.cwd || "未分配目录";
+    const node = dashboardNodes.get(group.nodeId);
+    const location = `${node?.hostname || (group.nodeId ? "未连接的机器" : "未关联运行机器")} · ${group.cwd || "目录未知"}`;
+    copy.append(element("strong", "", name), element("small", "", location));
+    copy.title = location;
+    const add = element("button", "chat-icon-button project-new-thread", "+");
+    add.type = "button";
+    add.dataset.projectNew = group.key;
+    add.dataset.projectNode = node?.capabilities?.appServer === true ? group.nodeId : "";
+    add.dataset.projectPath = group.cwd;
+    add.disabled = Boolean(agent.sendPromise || agent.forkPromise) || !add.dataset.projectNode;
+    add.title = add.dataset.projectNode ? `在 ${group.cwd || "默认目录"} 新建对话` : "该项目未关联可运行 Codex 的机器";
+    add.setAttribute("aria-label", add.title);
+    summary.append(copy, add);
+    project.append(summary);
+    for (const thread of group.threads) {
+      const row = element("div", "agent-thread-row");
+      row.dataset.threadRow = thread.threadId;
+      const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
+      button.type = "button";
+      button.disabled = Boolean(agent.sendPromise || agent.forkPromise);
+      button.dataset.threadId = thread.threadId;
+      button.title = thread.title || "未命名会话";
+      button.append(element("strong", "", button.title), element("span", "", `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
+      const openWindow = element("a", "chat-icon-button thread-open-window", "↗");
+      openWindow.href = `/?thread=${encodeURIComponent(thread.threadId)}`;
+      openWindow.target = "_blank";
+      openWindow.rel = "noopener";
+      openWindow.dataset.openThreadWindow = thread.threadId;
+      openWindow.title = `在新窗口打开：${button.title}`;
+      openWindow.setAttribute("aria-label", openWindow.title);
+      const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
+      menu.type = "button";
+      menu.dataset.threadMenu = thread.threadId;
+      menu.title = `对话选项：${button.title}`;
+      menu.setAttribute("aria-label", menu.title);
+      menu.setAttribute("aria-haspopup", "menu");
+      row.append(button, openWindow, menu);
+      project.append(row);
+    }
+    list.append(project);
   }
+}
+
+function openThreadWindow(event, link) {
+  if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+  event.preventDefault();
+  window.open(link.href, "_blank", `width=${Math.min(1100, screen.availWidth)},height=${Math.min(900, screen.availHeight)},noopener`);
+}
+
+function openThreadMenu(threadId, anchor, point = null) {
+  if (!threadId) return;
+  agent.menuThreadId = threadId;
+  const menu = $("#threadOptionsMenu");
+  $("#threadOpenWindow").href = `/?thread=${encodeURIComponent(threadId)}`;
+  menu.showPopover();
+  const bounds = anchor.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(point?.x ?? bounds.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(point?.y ?? bounds.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`;
+  $("#threadRename").focus();
+}
+
+async function editThreadTitle() {
+  const threadId = agent.menuThreadId;
+  $("#threadOptionsMenu").hidePopover();
+  // Fetch the latest name for compare-and-swap, including edits from another window.
+  const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+  agent.rename = { threadId, expectedName: thread.name ?? null, generation: thread.generation };
+  $("#threadRenameInput").value = thread.title || "";
+  $("#threadRenameError").textContent = "";
+  $("#threadRenameDialog").showModal();
+  $("#threadRenameInput").select();
+}
+
+async function forkWithNode(node, params) {
+  if (node.status !== "online") throw new Error("运行机器离线，连接后才能创建分支。");
+  if (node.reportedAppServer?.status !== "running") {
+    await api(`/v1/codex/runtimes/${node.nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+    const deadline = Date.now() + 120_000;
+    while (node.reportedAppServer?.status !== "running") {
+      if (Date.now() >= deadline) throw new Error("等待运行机器启动超时，请稍后重试。");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      node = await api(`/v1/nodes/${node.nodeId}`);
+      if (node.status !== "online") throw new Error("运行机器已离线，请连接后重试。");
+    }
+  }
+  // A separate connection keeps the current conversation and its live stream intact.
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${node.nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
+  const pending = new Map();
+  let next = 0;
+  socket.addEventListener("message", (event) => {
+    let message; try { message = JSON.parse(event.data); } catch { return; }
+    if (!Object.hasOwn(message, "result") && !Object.hasOwn(message, "error")) return;
+    const request = pending.get(message.id);
+    if (!request) return;
+    message.error ? request.reject(new Error(readableErrorMessage(message.error) || "创建分支失败")) : request.resolve(message.result);
+  });
+  socket.addEventListener("close", () => { for (const request of pending.values()) request.reject(new Error("分支连接已断开，请重试。")); });
+  const call = (method, values) => new Promise((resolve, reject) => {
+    const id = ++next;
+    const timer = setTimeout(() => finish(reject, new Error("创建分支超时，请重试。")), 120_000);
+    const finish = (callback, result) => { clearTimeout(timer); pending.delete(id); callback(result); };
+    pending.set(id, { resolve: (result) => finish(resolve, result), reject: (error) => finish(reject, error) });
+    socket.send(JSON.stringify({ id, method, params: values }));
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("连接运行机器超时。")), 15_000);
+      socket.addEventListener("open", () => { clearTimeout(timer); resolve(); }, { once: true });
+      for (const event of ["close", "error"]) socket.addEventListener(event, () => { clearTimeout(timer); reject(new Error("无法连接运行机器。")); }, { once: true });
+    });
+    await call("initialize", { clientInfo: { name: "mira_web_fork", version: "1" }, capabilities: { experimentalApi: true } });
+    socket.send(JSON.stringify({ method: "initialized" }));
+    return await call("thread/fork", params);
+  } finally { socket.close(); }
+}
+
+async function forkThreadFromMenu() {
+  if (agent.sendPromise || agent.forkPromise) return;
+  const sourceId = agent.menuThreadId;
+  const epoch = agent.selectionEpoch;
+  $("#threadOptionsMenu").hidePopover();
+  setConversationNotice("正在创建对话分支…");
+  const operation = (async () => {
+    const source = await api(`/v1/codex/threads/${encodeURIComponent(sourceId)}?storeId=personal`);
+    const nodeId = source.runtimeNodeId || source.sourceNodeId;
+    if (!nodeId) throw new Error("请先为该对话选择运行机器，再创建分支。");
+    const node = await api(`/v1/nodes/${nodeId}`);
+    if (node.capabilities?.appServer !== true) throw new Error("该机器不能运行 Codex，请先选择兼容的运行机器。");
+    let request = agent.forkRequests.get(sourceId);
+    if (!request) {
+      request = { threadId: sourceId, excludeTurns: true, deferGoalContinuation: true, miraRequestId: crypto.randomUUID(),
+        approvalPolicy: "never", sandbox: "danger-full-access", ...(source.cwd ? { cwd: source.cwd } : {}) };
+      agent.forkRequests.set(sourceId, request);
+    }
+    const result = await forkWithNode(node, request);
+    agent.forkRequests.delete(sourceId);
+    await loadAgentThreads();
+    const created = agent.threads.find((thread) => thread.threadId === result.thread.id);
+    if (created && !created.runtimeNodeId) created.runtimeNodeId = nodeId;
+    if (agent.selectionEpoch === epoch && document.body.dataset.view === "agentView") await resumeAgentThread(result.thread.id);
+    else toast("分支已创建，可在项目下打开。");
+  })();
+  agent.forkPromise = operation;
+  syncConversationSendUi();
+  try { await operation; }
+  catch (error) { setConversationNotice(error.message, "error"); }
+  finally { if (agent.forkPromise === operation) agent.forkPromise = null; syncConversationSendUi(); }
+}
+
+async function showProjectDialog() {
+  await refreshAgentNodes();
+  $("#projectNode").replaceChildren(...[...$("#agentRuntimeNode").options].map((option) => option.cloneNode(true)));
+  $("#projectNode").value = $("#agentRuntimeNode").value;
+  $("#projectPath").value = $("#conversationCwd").value || dashboardNodes.get($("#projectNode").value)?.desiredAppServer?.defaultCwd || "";
+  $("#projectError").textContent = "";
+  $("#projectDialog").showModal();
+  $("#projectPath").focus();
 }
 
 async function loadAgentThreads() {
   const response = await api("/v1/codex/threads?storeId=personal&limit=300");
   agent.threads = response.data ?? [];
+  if (currentAgentThread()) agent.draftProject = null;
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
   renderAgentThreads();
@@ -2956,6 +3138,7 @@ async function restoreAgentThread(threadId, socket) {
   const projectedThread = agent.threads.find((thread) => thread.threadId === threadId);
   const projectedCwd = typeof projectedThread?.cwd === "string" ? projectedThread.cwd.trim() : "";
   const params = { threadId, excludeTurns: true };
+  const revision = agent.liveRevision;
   if (projectedCwd) params.cwd = projectedCwd;
   const result = await rpc("thread/resume", params, 120_000);
   if (agent.socket !== socket) throw new Error("恢复会话时 App Server 通道已变更，请重新发送");
@@ -2963,10 +3146,27 @@ async function restoreAgentThread(threadId, socket) {
   if (agent.threadId !== threadId) return result.thread;
   agent.previousRuntimeNodeId = projectedThread?.runtimeNodeId ?? projectedThread?.sourceNodeId ?? null;
   agent.threadRuntimeNodeId = agent.socketNodeId;
-  setConversationTitle(result.thread.name || result.thread.preview || projectedThread?.title || "Codex 会话");
+  const currentProjection = agent.threads.find((thread) => thread.threadId === threadId) ?? projectedThread;
+  setConversationTitle(currentProjection?.name || result.thread.name || result.thread.preview || currentProjection?.title || "Codex 会话");
   const resumedCwd = result.cwd ?? projectedCwd;
   setConversationMeta(resumedCwd, result.model);
   $("#conversationCwd").value = resumedCwd ?? "";
+  // Reopening an already-running thread may not emit turn/started again.
+  // Read one turn's metadata, without loading its items or the full history.
+  if (result.thread.status?.type === "active" && !agent.activeTurns.has(threadId)) {
+    try {
+      const turns = await rpc("thread/turns/list", { threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 15_000);
+      const turn = turns.data?.find((value) => value.status === "inProgress");
+      if (agent.socket === socket && agent.threadId === threadId && turn &&
+          !agent.turnTimings.get(turn.id)?.completedAt && !agent.activeTurns.has(threadId)) {
+        agent.activeTurns.set(threadId, turn.id);
+        agent.turnThreads.set(turn.id, threadId);
+      }
+    } catch { /* live turn notifications can still recover the running state */ }
+  } else if (result.thread.status?.type === "idle" && agent.liveRevision === revision) {
+    agent.activeTurns.delete(threadId);
+  }
+  if (agent.socket === socket && agent.threadId === threadId) syncActiveTurnUi();
   return result.thread;
 }
 
@@ -2997,6 +3197,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
     }
   }
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
+  agent.projectOpen.set(projectForThread(projected).key, true);
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
   if (preferredNode && [...$("#agentRuntimeNode").options].some((option) => option.value === preferredNode)) {
     $("#agentRuntimeNode").value = preferredNode;
@@ -3022,8 +3223,18 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   await history;
 }
 
-function newAgentThread({ updateRoute = true } = {}) {
+function newAgentThread({ updateRoute = true, project = null } = {}) {
   if (agent.sendPromise) return;
+  project ??= agent.threadId ? projectForThread(currentAgentThread()) : agent.draftProject;
+  if (project?.nodeId) {
+    if (![...$("#agentRuntimeNode").options].some((option) => option.value === project.nodeId)) {
+      toast("此项目的运行机器不可用，请先添加或选择运行机器。");
+      return;
+    }
+    $("#agentRuntimeNode").value = project.nodeId;
+  }
+  agent.draftProject = project;
+  if (project) agent.projectOpen.set(project.key, true);
   if (updateRoute) writeBrowserRoute("agent");
   agent.selectionEpoch++;
   agent.threadId = null;
@@ -3035,7 +3246,7 @@ function newAgentThread({ updateRoute = true } = {}) {
   resetAgentTranscript();
   setConversationTitle("新会话");
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
-  $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
+  $("#conversationCwd").value = project?.cwd || node?.desiredAppServer?.defaultCwd || "";
   setConversationMeta($("#conversationCwd").value);
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
@@ -3406,16 +3617,19 @@ conversationWidthObserver.observe(traceScroller());
 traceScroller().addEventListener("scroll", scheduleOlderTranscriptLoad, { passive: true });
 $("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
 $("#agentThreadList").addEventListener("click", (event) => {
+  const project = event.target.closest("button[data-project-new]");
+  if (project) {
+    event.preventDefault();
+    newAgentThread({ project: { key: project.dataset.projectNew, nodeId: project.dataset.projectNode, cwd: project.dataset.projectPath } });
+    closeAgentThreadDrawerOnMobile();
+    $("#conversationInput").focus();
+    return;
+  }
+  const menu = event.target.closest("button[data-thread-menu]");
+  if (menu) { openThreadMenu(menu.dataset.threadMenu, menu); return; }
   const openWindow = event.target.closest("a[data-open-thread-window]");
   if (openWindow) {
-    // Keep modifier/middle-click link behavior. A direct user gesture with window
-    // dimensions requests a separate desktop/PWA window; no shared UI state is changed.
-    if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) {
-      event.preventDefault();
-      const width = Math.min(1100, screen.availWidth);
-      const height = Math.min(900, screen.availHeight);
-      window.open(openWindow.href, "_blank", `width=${width},height=${height},noopener`);
-    }
+    openThreadWindow(event, openWindow);
     return;
   }
   const button = event.target.closest("button[data-thread-id]");
@@ -3468,7 +3682,7 @@ $("#localSessionList").addEventListener("click", (event) => {
 });
 $("#conversationForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (agent.sendPromise) return;
+  if (agent.sendPromise || agent.forkPromise) return;
   const text = $("#conversationInput").value.trim();
   const attachments = [...agent.attachments];
   if (!text && !attachments.length) return;
@@ -3500,10 +3714,19 @@ $("#conversationForm").addEventListener("submit", async (event) => {
   }
 });
 $("#conversationInput").addEventListener("keydown", (event) => {
+  composerShiftEnter = event.key === "Enter" && event.shiftKey;
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
     event.preventDefault();
-    if (!event.repeat && !agent.sendPromise && !$("#conversationSend").disabled) $("#conversationForm").requestSubmit();
+    if (!event.repeat && !agent.sendPromise && !agent.forkPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
   }
+});
+// Some Android keyboards use beforeinput for the IME action instead of Enter.
+let composerShiftEnter = false;
+$("#conversationInput").addEventListener("keyup", () => { composerShiftEnter = false; });
+$("#conversationInput").addEventListener("beforeinput", (event) => {
+  if (!["insertParagraph", "insertLineBreak"].includes(event.inputType) || event.isComposing || composerShiftEnter) return;
+  event.preventDefault();
+  if (!agent.sendPromise && !agent.forkPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
 });
 $("#conversationInput").addEventListener("input", resizeConversationInput);
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
@@ -3541,9 +3764,87 @@ $("#conversationDropZone").addEventListener("drop", (event) => {
 $("#nodeFileClose").addEventListener("click", () => $("#nodeFileDialog").close());
 $("#nodeFileTextMore").addEventListener("click", () => loadMoreFilePreview().catch((error) => toast(error.message)));
 $("#nodeFileDialog").addEventListener("close", resetNodeFileDialog);
-$("#agentInterrupt").addEventListener("click", () => {
-  if (!agent.threadId || !agent.turnId) return;
-  rpc("turn/interrupt", { threadId: agent.threadId, turnId: agent.turnId }).catch((error) => toast(error.message));
+$("#agentInterrupt").addEventListener("click", async () => {
+  const threadId = agent.threadId;
+  const turnId = agent.turnId;
+  const key = JSON.stringify([threadId, turnId]);
+  if (!threadId || !turnId || agent.interruptRequests.has(key)) return;
+  agent.interruptRequests.add(key);
+  syncConversationSendUi();
+  try { await rpc("turn/interrupt", { threadId, turnId }); }
+  catch (error) { toast(error.message); }
+  finally { agent.interruptRequests.delete(key); syncConversationSendUi(); }
+});
+
+$("#conversationMenuToggle").addEventListener("click", (event) => openThreadMenu(agent.threadId, event.currentTarget));
+$("#agentThreadList").addEventListener("contextmenu", (event) => {
+  const row = event.target.closest("[data-thread-row]");
+  if (!row) return;
+  event.preventDefault();
+  openThreadMenu(row.dataset.threadRow, row, { x: event.clientX, y: event.clientY });
+});
+$("#agentThreadList").addEventListener("keydown", (event) => {
+  if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+  const row = event.target.closest("[data-thread-row]");
+  if (row) { event.preventDefault(); openThreadMenu(row.dataset.threadRow, row); }
+});
+$("#threadOptionsMenu").addEventListener("keydown", (event) => {
+  const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]')];
+  const index = items.indexOf(document.activeElement);
+  const next = { ArrowDown: (index + 1) % items.length, ArrowUp: (index + items.length - 1) % items.length, Home: 0, End: items.length - 1 }[event.key];
+  if (next !== undefined) { event.preventDefault(); items[next].focus(); }
+});
+$("#threadFork").addEventListener("click", forkThreadFromMenu);
+$("#threadRename").addEventListener("click", () => editThreadTitle().catch((error) => toast(error.message)));
+$("#threadCopyId").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText(agent.menuThreadId); $("#threadOptionsMenu").hidePopover(); toast("已复制对话 ID"); }
+  catch { toast("复制失败，请允许剪贴板访问后重试。"); }
+});
+$("#threadOpenWindow").addEventListener("click", (event) => { openThreadWindow(event, event.currentTarget); $("#threadOptionsMenu").hidePopover(); });
+$("#threadRenameCancel").addEventListener("click", () => $("#threadRenameDialog").close());
+const threadMetadataChannel = typeof BroadcastChannel === "function" ? new BroadcastChannel("mira.thread.metadata") : null;
+threadMetadataChannel?.addEventListener("message", () => {
+  if (["agentView", "runtimeView"].includes(document.body.dataset.view)) void loadAgentThreads().catch(() => {});
+});
+$("#threadRenameForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const rename = agent.rename;
+  const save = $("#threadRenameSave");
+  if (!rename || save.disabled) return;
+  const name = $("#threadRenameInput").value.trim();
+  if (rename.name !== name) { rename.name = name; rename.operationId = crypto.randomUUID(); }
+  save.disabled = true;
+  $("#threadRenameError").textContent = "";
+  try {
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(rename.threadId)}?storeId=personal`, {
+      method: "PATCH", body: JSON.stringify({ name, expectedName: rename.expectedName, generation: rename.generation, operationId: rename.operationId }),
+    });
+    agent.threads = agent.threads.map((value) => value.threadId === thread.threadId ? thread : value);
+    if (agent.threadId === thread.threadId) setConversationTitle(thread.title);
+    renderAgentThreads();
+    threadMetadataChannel?.postMessage({ threadId: thread.threadId });
+    $("#threadRenameDialog").close();
+    toast("标题已保存");
+  } catch (error) { $("#threadRenameError").textContent = error.message; }
+  finally { save.disabled = false; }
+});
+$("#agentNewProject").addEventListener("click", () => showProjectDialog().catch((error) => toast(error.message)));
+$("#projectCancel").addEventListener("click", () => $("#projectDialog").close());
+$("#projectNode").addEventListener("change", () => { $("#projectPath").value = dashboardNodes.get($("#projectNode").value)?.desiredAppServer?.defaultCwd || ""; });
+$("#projectForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  if (agent.sendPromise) return;
+  const nodeId = $("#projectNode").value;
+  const cwd = $("#projectPath").value.trim();
+  const windows = dashboardNodes.get(nodeId)?.platform === "windows";
+  if (!nodeId || !(windows ? /^(?:[a-z]:[\\/]|\\\\[^\\]+\\[^\\]+)/i.test(cwd) : cwd.startsWith("/"))) {
+    $("#projectError").textContent = "请选择运行机器，并填写该机器上的绝对路径。";
+    return;
+  }
+  newAgentThread({ project: projectForThread({ runtimeNodeId: nodeId, cwd }) });
+  $("#projectDialog").close();
+  closeAgentThreadDrawerOnMobile();
+  $("#conversationInput").focus();
 });
 
 $("#refreshButton").addEventListener("click", () => loadDashboard().then(() => toast("状态已刷新")).catch((error) => toast(error.message)));

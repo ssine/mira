@@ -346,7 +346,8 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
   if (!id) throw Object.assign(new Error("invalid store id"), { statusCode: 400, code: "invalid_request" });
   const result = await pool.query(
     `SELECT projections.thread_id, projections.parent_thread_id, projections.source_kind,
-            projections.title, projections.cwd, projections.item_count::text,
+            COALESCE(NULLIF(projections.state->>'name', ''), projections.title) AS title,
+            projections.state->>'name' AS name, projections.cwd, projections.item_count::text,
             projections.active_generation::text, activity.updated_at,
             imports.import_id, imports.source_node_id, imports.source_codex_version,
             imports.created_at AS imported_at, runtimes.node_id AS runtime_node_id,
@@ -379,7 +380,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
   );
   return result.rows.map((row) => ({
     threadId: row.thread_id, parentThreadId: row.parent_thread_id,
-    sourceKind: row.source_kind, title: row.title, cwd: row.cwd,
+    sourceKind: row.source_kind, title: row.title, name: row.name, cwd: row.cwd,
     itemCount: Number(row.item_count), generation: Number(row.active_generation),
     updatedAt: row.updated_at?.toISOString() ?? null, importId: row.import_id,
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,

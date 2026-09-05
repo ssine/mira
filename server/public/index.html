@@ -106,12 +106,11 @@
               <button id="agentThreadDrawerClose" class="chat-icon-button" type="button" aria-label="关闭会话侧边栏" title="关闭侧边栏">×</button>
             </div>
             <section class="thread-browser">
-              <div class="agent-side-head"><div><p class="eyebrow">THREADS</p><h2>统一会话</h2></div><button id="agentNewThread" class="ghost" type="button">＋ 新建</button></div>
+              <div class="agent-side-head"><h2>项目</h2><div class="project-create-actions"><button id="agentNewProject" class="ghost" type="button">＋ 项目</button><button id="agentNewThread" class="ghost" type="button">＋ 对话</button></div></div>
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
               <button id="agentThemeToggle" class="chat-nav-link chat-manage-link" type="button" aria-label="切换外观"><span aria-hidden="true">◐</span><span><strong>切换外观</strong></span></button>
-              <button id="agentInterrupt" class="chat-nav-link chat-manage-link danger hidden" type="button"><span aria-hidden="true">■</span><span><strong>中断当前回复</strong></span></button>
               <button id="agentFullscreenToggle" class="chat-nav-link chat-manage-link" type="button" aria-pressed="false" disabled>
                 <span aria-hidden="true">⛶</span><span><strong id="agentFullscreenLabel">全屏模式</strong><small id="agentFullscreenHint">隐藏系统栏，扩大阅读空间</small></span>
               </button>
@@ -129,6 +128,7 @@
               </button>
               <div class="conversation-identity hidden"><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted"><span class="conversation-directory">默认目录</span><span class="conversation-meta-separator">·</span><span class="conversation-model">默认模型</span></p></div>
             </header>
+            <button id="conversationMenuToggle" class="chat-icon-button conversation-menu-toggle hidden" type="button" aria-label="对话选项" title="对话选项" aria-haspopup="menu">⋯</button>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
@@ -144,7 +144,10 @@
                 <div class="composer-input-row">
                   <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
                   <textarea id="conversationInput" rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
-                  <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>
+                  <div class="composer-submit-slot">
+                    <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>
+                    <button id="agentInterrupt" class="composer-icon composer-stop hidden" type="button" aria-label="停止 Agent" title="停止 Agent"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"></rect></svg></button>
+                  </div>
                 </div>
               </div>
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
@@ -295,6 +298,30 @@
         </section>
       </section>
     </main>
+    <div id="threadOptionsMenu" class="thread-options-menu" popover="auto" role="menu" aria-label="对话选项">
+      <button id="threadRename" type="button" role="menuitem">修改标题</button>
+      <button id="threadFork" type="button" role="menuitem">分支新对话</button>
+      <button id="threadCopyId" type="button" role="menuitem">复制对话 ID</button>
+      <a id="threadOpenWindow" href="/?view=agent" target="_blank" rel="noopener" role="menuitem">在新窗口打开</a>
+    </div>
+    <dialog id="threadRenameDialog" class="chat-edit-dialog" aria-labelledby="threadRenameTitle">
+      <form id="threadRenameForm">
+        <h2 id="threadRenameTitle">修改对话标题</h2>
+        <label for="threadRenameInput">标题</label><input id="threadRenameInput" required maxlength="200" autocomplete="off">
+        <p id="threadRenameError" class="chat-edit-error" role="status"></p>
+        <div class="chat-edit-actions"><button id="threadRenameCancel" class="ghost" type="button">取消</button><button id="threadRenameSave" class="primary" type="submit">保存</button></div>
+      </form>
+    </dialog>
+    <dialog id="projectDialog" class="chat-edit-dialog" aria-labelledby="projectDialogTitle">
+      <form id="projectForm">
+        <h2 id="projectDialogTitle">新建项目对话</h2>
+        <label for="projectNode">运行机器</label><select id="projectNode" required></select>
+        <label for="projectPath">项目目录</label><input id="projectPath" required autocomplete="off" placeholder="填写这台机器上的完整路径">
+        <p class="muted">在此目录开始新对话，发送首条消息后保存到项目中。</p>
+        <p id="projectError" class="chat-edit-error" role="status"></p>
+        <div class="chat-edit-actions"><button id="projectCancel" class="ghost" type="button">取消</button><button class="primary" type="submit">开始对话</button></div>
+      </form>
+    </dialog>
     <dialog id="nodeFileDialog" class="node-file-dialog">
       <div class="node-file-dialog-shell">
         <header class="node-file-dialog-head">

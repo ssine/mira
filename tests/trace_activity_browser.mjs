@@ -264,7 +264,7 @@ try {
   assert.equal(await page.locator("#conversationInput").inputValue(), "");
 
   await page.locator("#conversationInput").fill("Another message on the same connection");
-  await page.locator("#conversationSend").click();
+  await page.locator("#conversationInput").press("Enter");
   await page.waitForFunction(() => document.querySelectorAll(".trace-card.user").length === 3);
   assert.equal(reconnectMessages[3].method, "turn/start", "a loaded conversation must not be resumed before every message");
   reconnectedSocket.send(JSON.stringify({ id: reconnectMessages[3].id, result: { turn: { id: "next-turn" } } }));

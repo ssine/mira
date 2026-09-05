@@ -207,6 +207,14 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   assert.doesNotMatch(resume.params.developerInstructions, /obsolete path/);
   assert.equal(resume.params.developerInstructions.match(/MIRA_CLI_INSTRUCTIONS_V1_BEGIN/g)?.length, 1);
 
+  client.emit("message", JSON.stringify({ id: 4, method: "thread/fork", params: { threadId: "source-thread", excludeTurns: true } }));
+  const fork = JSON.parse(node.sent.at(-1).payload);
+  assert.equal(fork.params.cwd, undefined, "fork inherits its source directory");
+  assert.equal(fork.params.approvalPolicy, "never");
+  assert.equal(fork.params.sandbox, "danger-full-access");
+  assert.equal(fork.params.dynamicTools, undefined, "fork protocol inherits tools rather than accepting dynamicTools");
+  assert.match(fork.params.developerInstructions, /MIRA_CLI_INSTRUCTIONS_V1_BEGIN/);
+
   client.emit("message", JSON.stringify({
     id: 3,
     method: "thread/start",
@@ -219,7 +227,8 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   channel.close();
 });
 
-test("App Server proxy coalesces and durably replays idempotent thread/start requests", async () => {
+for (const method of ["thread/start", "thread/fork"]) test(`App Server proxy coalesces and durably replays idempotent ${method} requests`, async () => {
+  const baseParams = method === "thread/fork" ? { threadId: "source-thread" } : {};
   const pool = new ThreadStartPool();
   const channel = new NodeChannel({ server: new EventEmitter(), authService: {}, pool });
   const node = new Socket();
@@ -230,7 +239,7 @@ test("App Server proxy coalesces and durably replays idempotent thread/start req
   const firstSessionId = node.sent.at(-1).sessionId;
   const requestId = "8c043d32-a487-4b37-959f-4ec51673b1eb";
   first.emit("message", JSON.stringify({
-    id: 10, method: "thread/start", params: { cwd: "/work", miraRequestId: requestId },
+    id: 10, method, params: { ...baseParams, cwd: "/work", miraRequestId: requestId },
   }));
   await setImmediate();
   const forwarded = node.sent.filter((message) => message.type === "appserver.message");
@@ -240,7 +249,7 @@ test("App Server proxy coalesces and durably replays idempotent thread/start req
   const second = new Socket();
   channel.attachProxy("node-1", second, caller, "personal");
   second.emit("message", JSON.stringify({
-    id: 20, method: "thread/start", params: { miraRequestId: requestId, cwd: "/work" },
+    id: 20, method, params: { ...baseParams, miraRequestId: requestId, cwd: "/work" },
   }));
   await setImmediate();
   assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 1,
@@ -263,13 +272,17 @@ test("App Server proxy coalesces and durably replays idempotent thread/start req
   const third = new Socket();
   channel.attachProxy("node-1", third, caller, "personal");
   third.emit("message", JSON.stringify({
-    id: 30, method: "thread/start", params: { cwd: "/work", miraRequestId: requestId },
+    id: 30, method, params: { ...baseParams, cwd: "/work", miraRequestId: requestId },
   }));
   await setImmediate();
   assert.equal(third.sent.at(-1).id, 30);
   assert.equal(third.sent.at(-1).result.thread.id, "thread-1");
   assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 1,
     "a completed duplicate was not replayed from the idempotency record");
+  third.emit("message", JSON.stringify({ id: 40, method: method === "thread/fork" ? "thread/start" : "thread/fork", params: { ...baseParams, cwd: "/work", miraRequestId: requestId } }));
+  await setImmediate();
+  assert.match(third.sent.at(-1).error.message, /reused/, "creation request IDs cannot cross methods");
+  assert(pool.runtimeWrites.some((values) => values[1] === "thread-1"), "created thread is bound to its execution Node");
   channel.close();
 });
 
