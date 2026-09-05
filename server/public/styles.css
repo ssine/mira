@@ -22,8 +22,9 @@
   --warning-soft: #fff5df;
   --danger: #a52a32;
   --danger-soft: #fff0f1;
-  --thread-running: #c9e2ff;
-  --thread-unread: #edf7f4;
+  --thread-running: oklch(89% .05 250);
+  --thread-unread: oklch(89% .05 155);
+  --thread-failed: oklch(89% .05 25);
   --glass: rgb(250 252 255 / 64%);
   --glass-header: rgb(250 252 255 / 42%);
   --glass-header-filter: blur(2px) saturate(105%);
@@ -71,8 +72,9 @@
   --warning-soft: #3b3020;
   --danger: #f1a5ad;
   --danger-soft: #40252a;
-  --thread-running: #214f78;
-  --thread-unread: #243a33;
+  --thread-running: oklch(42% .07 250);
+  --thread-unread: oklch(42% .07 155);
+  --thread-failed: oklch(42% .07 25);
   --glass: rgb(40 44 50 / 68%);
   --glass-header: rgb(40 44 50 / 46%);
   --glass-highlight: rgb(255 255 255 / 8%);
@@ -425,13 +427,15 @@ tbody tr:hover { background: var(--hover); }
 .agent-thread-row:hover { background: var(--hover); }
 .agent-thread-row[data-unread="true"] { background: var(--thread-unread); }
 .agent-thread-row[data-state="running"] { background: var(--thread-running); }
-.agent-thread-row[data-state="failed"] { background: var(--danger-soft); }
+.agent-thread-row[data-state="failed"] { background: var(--thread-failed); }
 .agent-thread-row[data-state="unknown"], .agent-thread-row[data-state="interrupted"] { background: var(--surface-soft); }
 .agent-thread-row:has(.agent-thread.active) { box-shadow: inset 0 0 0 1px var(--line-strong); }
 .agent-thread.active { border-left-color: var(--accent); }
 .agent-thread-row[data-unread="true"] strong { font-weight: 650; }
 .thread-state-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-thread-row[data-state="running"] .thread-state-label { color: var(--accent-hover); font-weight: 600; }
+.agent-thread-row[data-state="running"] .thread-state-label,
+.agent-thread-row[data-state="idle"][data-unread="true"] .thread-state-label,
+.agent-thread-row[data-state="failed"] .thread-state-label { color: var(--text); font-weight: 600; }
 .agent-thread strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .local-session strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .agent-thread span, .local-session span { color: var(--muted); font-size: 9px; }
