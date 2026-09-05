@@ -630,6 +630,60 @@ try {
     return second.getBoundingClientRect().top - first.getBoundingClientRect().bottom;
   });
   assert.ok(paragraphGap >= 7 && paragraphGap <= 9, `Markdown block separators must not add blank text lines: ${paragraphGap}`);
+  const fileReferences = await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.clear();
+    h.agent.threadRuntimeNodeId = "test-node";
+    document.querySelector("#conversationCwd").value = "C:/workspace";
+    window.fileReferenceCalls = [];
+    h.setInvoke(async (nodeId, capability, params) => {
+      window.fileReferenceCalls.push({ nodeId, capability, ...params });
+      if (params.action === "stat") return { type: "file", size: 9 };
+      return { encoding: "base64", content: btoa("# Report\n"), eof: true };
+    });
+    const body = [
+      "[排查与修复记录](C:/Users/Test/Documents/Edge-upload-diagnostics/diagnosis.md)",
+      String.raw`[Backslashes](C:\Reports\diagnosis.md:12:3)`,
+      "[File URI](file:///C:/Reports/diagnosis.md)",
+      "[Spaces](<C:/Reports/排查 记录.md>)",
+      "[Encoded](C:/Reports/%E6%8E%92%E6%9F%A5%20%E8%AE%B0%E5%BD%95.md)",
+      "[POSIX](/tmp/diagnosis.md:7)",
+      "[Relative](./reports/diagnosis.md)",
+      "[Reference][report]\n\n[report]: C:/Reports/reference.md",
+      "![Local image](C:/Reports/screenshot.png)",
+      "[Website](https://example.com/report)",
+      "[Unsafe](javascript:alert%281%29)",
+      '<img src="missing.png" onerror="window.fileReferenceXss = true"><script>window.fileReferenceXss = true</script>',
+    ].join("\n\n");
+    h.upsertTrace("file-references", "assistant", "Codex", body, "");
+    return [...document.querySelectorAll(".trace-body a.node-file-link")].map((anchor) => ({
+      path: anchor.dataset.nodeFilePath, line: anchor.dataset.nodeFileLine ?? null,
+      column: anchor.dataset.nodeFileColumn ?? null, href: anchor.getAttribute("href"),
+    }));
+  });
+  assert.deepEqual(fileReferences, [
+    ["C:/Users/Test/Documents/Edge-upload-diagnostics/diagnosis.md"],
+    ["C:\\Reports\\diagnosis.md", "12", "3"],
+    ["C:/Reports/diagnosis.md"],
+    ["C:/Reports/排查 记录.md"],
+    ["C:/Reports/排查 记录.md"],
+    ["/tmp/diagnosis.md", "7"],
+    ["C:/workspace/./reports/diagnosis.md"],
+    ["C:/Reports/reference.md"],
+  ].map(([path, line = null, column = null]) => ({ path, line, column, href: "#" })));
+  assert.equal(await page.locator('.node-file-image-link[data-node-file-path="C:/Reports/screenshot.png"]').count(), 1);
+  assert.equal(await page.getByRole("link", { name: "Website", exact: true }).getAttribute("href"), "https://example.com/report");
+  assert.equal(await page.getByText("Unsafe", { exact: true }).getAttribute("href"), null);
+  assert.equal(await page.locator(".trace-body script, .trace-body [onerror]").count(), 0);
+  assert.equal(await page.evaluate(() => window.fileReferenceXss), undefined);
+  await page.locator("a.node-file-link").filter({ hasText: "排查与修复记录" }).click({ timeout: 5000 });
+  await page.waitForFunction(() => document.querySelector("#nodeFileText").textContent === "# Report\n");
+  assert.deepEqual(await page.evaluate(() => window.fileReferenceCalls.map(({ nodeId, capability, action, path }) => ({ nodeId, capability, action, path }))),
+    ["stat", "read"].map((action) => ({ nodeId: "test-node", capability: "file", action,
+      path: "C:/Users/Test/Documents/Edge-upload-diagnostics/diagnosis.md" })));
+  assert.equal(await page.locator("#nodeFileDownload").getAttribute("download"), "diagnosis.md");
+  await page.locator("#nodeFileClose").click();
+  await page.evaluate(() => { window.traceHarness.agent.threadRuntimeNodeId = null; document.querySelector("#conversationCwd").value = "/project"; });
   await page.evaluate(() => { window.traceHarness.agent.threadId = "progress-thread"; window.traceHarness.clear(); });
 
   const uploaded = await page.evaluate(async () => {

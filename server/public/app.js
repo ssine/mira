@@ -1888,9 +1888,10 @@ function resolveNodeFileReference(value) {
   return { path: reference, line, column };
 }
 
-function decorateTraceFileReferences(root) {
+function decorateTraceFileReferences(root, fileReferences = new Map()) {
   for (const anchor of root.querySelectorAll("a[href]")) {
-    const reference = resolveNodeFileReference(anchor.getAttribute("href"));
+    const href = anchor.getAttribute("href");
+    const reference = fileReferences.get(href) ?? resolveNodeFileReference(href);
     if (reference) {
       anchor.dataset.nodeFilePath = reference.path;
       if (reference.line) anchor.dataset.nodeFileLine = String(reference.line);
@@ -1904,7 +1905,8 @@ function decorateTraceFileReferences(root) {
     }
   }
   for (const image of root.querySelectorAll("img[src]")) {
-    const reference = resolveNodeFileReference(image.getAttribute("src"));
+    const src = image.getAttribute("src");
+    const reference = fileReferences.get(src) ?? resolveNodeFileReference(src);
     if (!reference) continue;
     const button = element("button", "node-file-image-link", `▧ ${image.alt || baseName(reference.path)}`);
     button.type = "button";
@@ -2042,8 +2044,18 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const markdown = traceUsesMarkdown(kind);
   node.classList.toggle("markdown-body", markdown);
   if (markdown) {
-    node.innerHTML = DOMPurify.sanitize(marked.parse(value));
-    decorateTraceFileReferences(node);
+    const fileReferences = new Map();
+    const html = marked.parse(value, { walkTokens(token) {
+      if (token.type !== "link" && token.type !== "image") return;
+      const reference = resolveNodeFileReference(token.href);
+      if (!reference) return;
+      // Keep local paths out of browser URLs: DOMPurify correctly rejects C:
+      // and file: schemes. Restore them only as Node file actions after sanitizing.
+      token.href = `#mira-node-file-${crypto.randomUUID()}`;
+      fileReferences.set(token.href, reference);
+    } });
+    node.innerHTML = DOMPurify.sanitize(html);
+    decorateTraceFileReferences(node, fileReferences);
   }
   else node.textContent = value;
 }
