@@ -14,6 +14,7 @@ const assets = new Map([
   ["/thread-title.js", ["public/thread-title.js", "text/javascript"]],
   ["/account-status.js", ["public/account-status.js", "text/javascript"]],
   ["/trace-activity.js", ["public/trace-activity.js", "text/javascript"]],
+  ["/trace-images.js", ["public/trace-images.js", "text/javascript"]],
   ["/conversation-progress.js", ["public/conversation-progress.js", "text/javascript"]],
   ["/theme.js", ["public/theme.js", "text/javascript"]],
   ["/pwa.js", ["public/pwa.js", "text/javascript"]],
@@ -1183,7 +1184,102 @@ try {
     for (const order of reconciledOrder) assert.deepEqual(order, ["Wrapper", "Nested 1", "Nested 2", "Codex", "After final"], "repeated history reconciliation retains nested tool order without moving real post-reply calls");
     await historyPage.close();
   }
+  {
+    const imagePage = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+    imagePage.on("pageerror", (error) => errors.push(error.message));
+    await imagePage.route(`http://127.0.0.1:${server.address().port}/`, async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({ response, headers: { ...response.headers(), "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:" } });
+    });
+    await imagePage.addInitScript(() => {
+      window.imagePolicyViolations = [];
+      document.addEventListener("securitypolicyviolation", (event) => window.imagePolicyViolations.push(event.violatedDirective));
+    });
+    await imagePage.goto(`http://127.0.0.1:${server.address().port}/`);
+    await imagePage.waitForFunction(() => !!window.traceHarness);
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1UAAAAASUVORK5CYII=";
+    await imagePage.evaluate((png) => {
+      const h = window.traceHarness;
+      h.agent.threadId = "image-thread";
+      h.agent.threadRuntimeNodeId = "image-node";
+      h.resetAgentTranscript("image-thread");
+      window.imageReads = [];
+      window.imageOffline = false;
+      window.blobs = new Set();
+      const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
+      URL.createObjectURL = (blob) => { const url = create(blob); window.blobs.add(url); return url; };
+      URL.revokeObjectURL = (url) => { window.blobs.delete(url); revoke(url); };
+      h.setInvoke(async (node, capability, args) => {
+        window.imageReads.push({ node, capability, ...args });
+        if (window.imageOffline) throw new Error("运行节点离线");
+        if (window.holdImage && args.action === "stat") await new Promise((resolve) => { window.releaseImage = resolve; });
+        return args.action === "stat" ? { type: "file", size: atob(png).length } : { encoding: "base64", content: png, eof: true };
+      });
+      const params = { threadId: "image-thread", turnId: "image-turn", item: { type: "imageView", id: "view-1", path: "/tmp/chart.png" } };
+      h.notify({ method: "item/started", params });
+      h.notify({ method: "item/completed", params });
+    }, png);
+    const image = imagePage.locator("#conversationTrace > .trace-card.image img");
+    await image.waitFor({ state: "visible" });
+    assert.equal(await image.count(), 1, "started/completed share a single standalone preview");
+    assert.equal(await image.evaluate((img) => img.naturalWidth), 1);
+    assert.equal(await imagePage.locator(".tool-group[open]").count(), 0, "image remains visible while tool group is collapsed");
+    assert.equal(await imagePage.locator(".tool-group .trace-card.tool").count(), 1);
+    assert.deepEqual(await imagePage.evaluate(() => window.imageReads.map((read) => read.action)), ["stat", "read"]);
+    const durable = projectCodexTranscript([
+      { type: "event_msg", payload: { type: "task_started", turn_id: "image-turn" } },
+      { type: "response_item", payload: { type: "function_call", call_id: "view-1", name: "view_image", arguments: '{"path":"/tmp/chart.png"}' } },
+      { type: "event_msg", payload: { type: "item_completed", item: { type: "ImageView", id: "view-1", path: "file:///tmp/chart.png" } } },
+      { type: "response_item", payload: { type: "function_call_output", call_id: "view-1", output: [{ type: "input_image", image_url: `data:application/octet-stream;base64,${png}` }] } },
+    ], { fragments: true });
+    await imagePage.evaluate((trace) => {
+      const h = window.traceHarness;
+      window.imageOffline = true;
+      h.agent.transcriptItems = trace;
+      h.renderTranscript(null, { preserveLive: true });
+    }, durable);
+    await image.waitFor({ state: "visible" });
+    assert.equal(await image.count(), 1, "canonical snapshot supersedes the live path preview");
+    assert.equal(await imagePage.evaluate(() => window.imageReads.length), 2, "saved image works when the original Node is offline");
+    assert.equal(await imagePage.evaluate(() => window.blobs.size), 1, "reconciliation releases the old file blob");
+    await imagePage.evaluate(() => {
+      const h = window.traceHarness;
+      const later = h.agent.transcriptItems;
+      const earlier = [{ ...later[0], images: [{ path: "/tmp/chart.png" }] }];
+      h.agent.transcriptItems = h.mergeTranscriptItems(later, earlier);
+      h.renderTranscript(null, { preserveViewport: { mode: "prepend" } });
+    });
+    await image.waitFor({ state: "visible" });
+    assert.equal(await image.count(), 1, "older path-only fragments cannot replace a saved snapshot");
+    await imagePage.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await imagePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await imagePage.evaluate(() => {
+      const h = window.traceHarness;
+      h.clear();
+      h.upsertTrace("image-retry", "tool", "查看图片", "/tmp/missing.png", "完成", { images: [{ path: "/tmp/missing.png" }], turnId: "image-turn" });
+    });
+    await imagePage.locator(".trace-card.image button").waitFor({ state: "visible" });
+    assert.match(await imagePage.locator(".trace-image-status").textContent(), /运行节点离线/);
+    await imagePage.evaluate(() => { window.imageOffline = false; });
+    await imagePage.locator(".trace-card.image button").click();
+    await image.waitFor({ state: "visible" });
+    await imagePage.evaluate(() => {
+      const h = window.traceHarness;
+      h.clear(); window.holdImage = true;
+      h.upsertTrace("image-cancel", "tool", "查看图片", "/tmp/slow.png", "完成", { images: [{ path: "/tmp/slow.png" }], turnId: "image-turn" });
+    });
+    await imagePage.waitForFunction(() => !!window.releaseImage);
+    await imagePage.evaluate(() => { window.traceHarness.clear(); });
+    await imagePage.waitForFunction(() => window.blobs.size === 0);
+    await imagePage.evaluate(() => { window.releaseImage(); });
+    await imagePage.waitForTimeout(50);
+    assert.equal(await imagePage.evaluate(() => window.imageReads.filter((read) => read.path === "/tmp/slow.png" && read.action === "read").length), 0,
+      "switching conversations cancels pending image reads before requesting bytes");
+    assert.deepEqual(await imagePage.evaluate(() => window.imagePolicyViolations), []);
+    await imagePage.close();
+  }
   assert.deepEqual(errors, []);
+  console.log("PASS: standalone live/history images, snapshots without an online Node, pagination, mobile, retry, blob cleanup and cancellation");
   console.log("PASS: automatic top pagination on desktop/mobile, stable reading anchor, live stream preservation, empty pages, retry, exhaustion, stale-thread isolation and ongoing turn activity");
   console.log("PASS: real-browser mobile recovery, half-open probe, tail-first paint, stale resume isolation, thin glass, submission hint, cross-thread isolation, 17 MiB chunked attachments, cancellation cleanup, live/history activity and responsive layout");
 } finally {

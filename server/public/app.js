@@ -7,6 +7,7 @@ import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { AccountSidebar } from "/account-status.js";
+import { TraceImages, mergeImages } from "/trace-images.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -201,6 +202,10 @@ const agent = {
 
 const transcriptPageSize = 60;
 const accountSidebar = new AccountSidebar($("#agentAccount"));
+const traceImages = new TraceImages($("#conversationTrace"), readTraceImage, () => {
+  const follow = traceNearBottom($("#conversationTrace"));
+  return () => { if (follow) scrollTraceToBottom($("#conversationTrace")); };
+});
 
 function syncAccountSidebar() {
   const active = document.body.dataset.view === "agentView" && agentThreadDrawerOpen && !document.hidden;
@@ -566,10 +571,11 @@ async function revoke(id) {
   await loadDashboard();
 }
 
-async function invokeNode(nodeId, capability, params, timeoutMs = 30000) {
+async function invokeNode(nodeId, capability, params, timeoutMs = 30000, signal = undefined) {
   if (!nodeId) throw new Error("尚未选择节点");
   const response = await api(`/v1/nodes/${nodeId}/invoke`, {
     method: "POST",
+    signal,
     body: JSON.stringify({ capability, params, timeoutMs }),
   });
   return response.result;
@@ -2009,7 +2015,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
     card._miraExpandable = ["tool", "reasoning"].includes(kind);
-    const copy = ["user", "compaction"].includes(kind) ? null : createTraceCopyButton(card);
+    const copy = ["user", "compaction", "image"].includes(kind) ? null : createTraceCopyButton(card);
     if (card._miraExpandable) {
       const head = element("summary", "trace-head");
       const actions = element("div", "trace-actions");
@@ -2022,7 +2028,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       const footer = element("footer", "trace-footer");
       footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), copy);
       card.append(element("div", "trace-body"), footer);
-    } else if (["user", "compaction"].includes(kind)) {
+    } else if (["user", "compaction", "image"].includes(kind)) {
       card.append(element("div", "trace-body"));
     } else {
       const head = element("div", "trace-head");
@@ -2060,6 +2066,14 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.querySelector(".trace-status").textContent = "";
   }
   updateToolGroup(card.closest(".tool-group"));
+  for (const [index, source] of (options.images ?? []).entries()) {
+    const imageKey = `${key}:image:${index}`;
+    const existingImage = trace.querySelector(`[data-trace-key="${CSS.escape(imageKey)}"]`);
+    const preview = existingImage ?? upsertTrace(imageKey, "image", "图片", source.path || "图片", "", {
+      turnId: options.turnId, autoScroll: false,
+    });
+    traceImages.mount(preview.querySelector(".trace-body"), source, conversationNodeCandidates());
+  }
   if (kind === "assistant" && !options.deferTurnFooter) refreshTurnFooters(options.turnId);
   if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
   return card;
@@ -2098,16 +2112,16 @@ function bytesBase64(bytes) {
   return btoa(binary);
 }
 
-async function readNodeFile(nodeId, path, stat, controller) {
+async function readNodeFile(nodeId, path, stat, controller, progress = (text) => { $("#nodeFileLoading").textContent = text; }) {
   const size = Number(stat.size ?? 0);
   if (!Number.isSafeInteger(size) || size < 0) throw new Error("Node 返回了无效的文件大小");
   const chunks = [];
   for (let offset = 0; offset < size;) {
     controller.signal.throwIfAborted();
-    $("#nodeFileLoading").textContent = `正在从 Node 读取 ${formatBytes(offset)} / ${formatBytes(size)}…`;
+    progress(`正在从 Node 读取 ${formatBytes(offset)} / ${formatBytes(size)}…`);
     const result = await invokeNode(nodeId, "file", {
       action: "read", path, offset, length: Math.min(nodeFileChunkBytes, size - offset), encoding: "base64",
-    }, 60_000);
+    }, 60_000, controller.signal);
     controller.signal.throwIfAborted();
     if (result.encoding !== "base64") throw new Error("Node 没有返回预期的二进制文件数据");
     const chunk = base64Bytes(result.content ?? "");
@@ -2117,6 +2131,22 @@ async function readNodeFile(nodeId, path, stat, controller) {
     if (result.eof) break;
   }
   return new Blob(chunks, { type: nodeFileMimeType(path) });
+}
+
+async function readTraceImage(path, candidates, controller, progress) {
+  if (!path) throw new Error("未提供图片路径");
+  if (!candidates.length) throw new Error("会话没有可用的运行节点");
+  let failure;
+  for (const nodeId of candidates) {
+    controller.signal.throwIfAborted();
+    try {
+      const stat = await invokeNode(nodeId, "file", { action: "stat", path }, 30_000, controller.signal);
+      controller.signal.throwIfAborted();
+      if (stat.type !== "file") throw new Error("图片文件不存在");
+      return await readNodeFile(nodeId, path, stat, controller, progress);
+    } catch (error) { controller.signal.throwIfAborted(); failure = error; }
+  }
+  throw failure;
 }
 
 function resetNodeFileDialog() {
@@ -2282,7 +2312,7 @@ function renderThread(thread) {
       const view = itemView(item);
       if (["assistant", "reasoning"].includes(view.kind) && !view.body) continue;
       upsertTrace(liveTraceKey({ turnId: turn.id }, item.id ?? crypto.randomUUID?.() ?? Math.random()), view.kind, view.title, view.body, item.status ?? "", {
-        autoScroll: false, deferTurnFooter: true, activity: view.activity, summaryParts: view.summaryParts, turnId: turn.id,
+        autoScroll: false, deferTurnFooter: true, activity: view.activity, summaryParts: view.summaryParts, images: view.images, turnId: turn.id,
         completedAt: item.completedAt ?? item.updatedAt ?? item.createdAt,
         ...(["completed", "failed", "interrupted"].includes(turn.status) ? {
           turnCompletedAt: turn.completedAt, turnElapsedMs: turn.durationMs ?? turn.elapsedMs,
@@ -2347,6 +2377,7 @@ function mergeTranscriptItems(current, updates) {
       };
       merged.set(item.key, {
         ...previous, ...item, ...(materialized ?? {}),
+        images: mergeImages(previous.images, item.images),
         sourceItemSeq: Math.min(previous.sourceItemSeq, item.sourceItemSeq),
         ...(!materialized ? {
           title: fragments.input != null ? (item.toolFragment.input != null ? item.title : previous.title) : item.title,
@@ -2436,7 +2467,7 @@ function renderTranscript(fallbackThread, options = {}) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, turnId: item.turnId,
+      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, images: item.images, turnId: item.turnId,
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
       ...(Number.isFinite(item.turnElapsedMs) ? {
@@ -2741,7 +2772,7 @@ function handleAgentNotification(message) {
       : undefined;
     upsertTrace(itemKey, view.kind, view.title, emptyNarrative ? completedStreamBody : view.body,
       method.endsWith("started") ? "运行中" : (item.status ?? "完成"), {
-        activity: view.activity, summaryParts: view.summaryParts, turnId: params.turnId,
+        activity: view.activity, summaryParts: view.summaryParts, images: view.images, turnId: params.turnId,
         ...(completedAt ? { completedAt } : {}),
       });
     return;

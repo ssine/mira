@@ -1,6 +1,7 @@
 import { getStoreHead, getThreadHistory } from "./thread-store.mjs";
 import { isDeepStrictEqual } from "node:util";
 import { toolItemView, responseToolView, reasoningText, reasoningParts } from "./public/trace-activity.js";
+import { outputImages, mergeImages, imageJsonReplacer } from "./public/trace-images.js";
 
 const maximumProjectedTextBytes = 1024 * 1024;
 
@@ -64,7 +65,7 @@ function printable(value) {
   if (text) return text;
   if (typeof parsed === "string") return parsed;
   if (parsed === null || parsed === undefined) return "";
-  return JSON.stringify(parsed, null, 2);
+  return JSON.stringify(parsed, imageJsonReplacer, 2);
 }
 
 function boundedText(value) {
@@ -134,6 +135,7 @@ function projectedMaterializedItem(item, context) {
   if (["websearch", "imageview", "imagegeneration", "subagentactivity", "functioncalloutput"].includes(type)) return {
     ...base, kind: "tool", title: normalizedToolTitle(item), markdown: false,
     body: boundedText(printable(item)),
+    ...(type === "functioncalloutput" ? { images: outputImages(item.output) } : {}),
   };
   return null;
 }
@@ -208,9 +210,10 @@ export function projectCodexTranscript(items, options = {}) {
       const tool = responseToolCall(payload, offset + index + 1, index, turnId);
       if (tool?.isCall || (options.fragments && tool?.isOutput)) responseCalls.add(callKey(turnId, tool.callId));
     }
-    if (record?.type === "event_msg" && payload.type === "item_completed" && payload.item?.id) {
-      const entry = projectedMaterializedItem(payload.item, { itemSeq: offset + index + 1, index, turnId });
-      if (entry?.kind === "tool") materializedTools.set(callKey(turnId, payload.item.id), entry);
+    if (record?.type === "event_msg") {
+      const item = payload.type === "view_image_tool_call" ? { type: "imageView", id: payload.call_id, path: payload.path } : payload.type === "item_completed" ? payload.item : null;
+      const entry = item?.id && projectedMaterializedItem(item, { itemSeq: offset + index + 1, index, turnId });
+      if (entry?.kind === "tool") materializedTools.set(callKey(turnId, item.id), entry);
     }
   }
   const trace = [];
@@ -295,8 +298,8 @@ export function projectCodexTranscript(items, options = {}) {
       });
       continue;
     }
-    if (record.type === "event_msg" && payload.type === "item_completed") {
-      const materialized = payload.item;
+    if (record.type === "event_msg" && ["item_completed", "view_image_tool_call"].includes(payload.type)) {
+      const materialized = payload.type === "view_image_tool_call" ? { type: "imageView", id: payload.call_id, path: payload.path } : payload.item;
       // Only deduplicate a proven counterpart. A code-mode wrapper and its
       // nested command items are distinct; sharing a turn is not duplication.
       const materializedTurnId = payload.turn_id ?? recordTurnId;
@@ -305,9 +308,9 @@ export function projectCodexTranscript(items, options = {}) {
         const entry = projectedMaterializedItem(materialized, {
           itemSeq, index, turnId: materializedTurnId,
         });
-        if (options.fragments && entry?.kind === "tool" && entry.itemId) {
+        if ((options.fragments || entry?.images?.length) && entry?.kind === "tool" && entry.itemId) {
           entry.key = `history-tool-${entry.turnId ?? "unscoped"}-${entry.itemId}`;
-          entry.toolFragment = { materialized: true };
+          if (options.fragments) entry.toolFragment = { materialized: true };
         }
         push(entry);
       }
@@ -352,6 +355,8 @@ export function projectCodexTranscript(items, options = {}) {
       }
       if (tool.isOutput) {
         state.output = tool.output;
+        const images = mergeImages(state.entry.images, outputImages(tool.output));
+        if (images.length) state.entry.images = images;
         if (!state.materialized) state.entry.status = "完成";
       }
       if (!state.materialized) {

@@ -1,5 +1,7 @@
 // Shared, rebuildable presentation metadata for App Server items and stored
 // rollout items. Never interpret arbitrary shell/JavaScript as an activity.
+import { outputImages, imageJsonReplacer, imagePath } from "./trace-images.js";
+
 export function itemType(item) {
   return String(item?.type ?? "").replaceAll("_", "").toLowerCase();
 }
@@ -119,7 +121,11 @@ export function toolItemView(item) {
   const activity = { status: activityStatus(item.status, exitCode), durationMs: durationMs(item), exitCode, actions: [] };
   let title;
   let body;
-  if (type === "commandexecution") {
+  if (type === "imageview") {
+    const path = imagePath(item.path);
+    return { kind: "tool", title: "查看图片", body: path, markdown: false,
+      images: path ? [{ path }] : [], activity: { ...activity, actions: [{ kind: "tool", label: "查看图片" }] } };
+  } else if (type === "commandexecution") {
     title = "Shell";
     const command = Array.isArray(item.command) ? item.command.join(" ") : text(item.command);
     activity.actions = commandActions(item, command);
@@ -139,10 +145,11 @@ export function toolItemView(item) {
     activity.actions = [{ kind: "tool", label: compact(title) }];
     body = JSON.stringify({ arguments: item.arguments ?? item.input ?? item.prompt,
       result: item.result ?? item.contentItems ?? item.content_items ?? item.output,
-      error: item.error, success: item.success }, null, 2);
+      error: item.error, success: item.success }, imageJsonReplacer, 2);
     if (item.success === false || item.error) activity.status = "failed";
   } else return null;
-  return { kind: "tool", title, body, activity, markdown: false };
+  const images = outputImages(item.result ?? item.contentItems ?? item.content_items ?? item.output);
+  return { kind: "tool", title, body, activity, markdown: false, ...(images.length ? { images } : {}) };
 }
 
 // Legacy model-facing calls may have no materialized counterpart. Only use

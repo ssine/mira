@@ -443,6 +443,13 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-card.compaction { margin-block: -3px; padding: 0; color: var(--muted); text-align: center; font-size: 11px; }
 .trace-card.compaction .trace-body { padding: 0; color: var(--muted); font: 11px/1.4 var(--font-ui); }
 .trace-card.assistant { align-self: center; }
+.trace-card.image figure { margin: 0; min-height: 48px; }
+.trace-card.image a { display: block; width: fit-content; max-width: 100%; }
+.trace-card.image img { display: block; max-width: 100%; max-height: 540px; width: auto; height: auto; border-radius: 4px; }
+.trace-card.image img[hidden], .trace-card.image [hidden] { display: none; }
+.trace-card.image figcaption { margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--muted); font: 11px/1.5 var(--font-ui); }
+.trace-image-status { color: var(--muted); font: 12px/1.5 var(--font-ui); }
+.trace-card.image button { margin-left: 8px; }
 .conversation-trace > :not(.user) + .trace-card.user, .conversation-trace > .trace-card.user + :not(.user) { margin-top: 6px; }
 .trace-card.tool, .trace-card.reasoning, .trace-card.system, .trace-card.error { width: min(100%, 808px); }
 .trace-card.system { padding: 8px 11px; border-left: 2px solid var(--line); background: var(--surface); }

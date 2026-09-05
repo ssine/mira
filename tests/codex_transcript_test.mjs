@@ -5,6 +5,41 @@ import { paginateCodexTranscript, projectCodexTranscript } from "../server/codex
 
 const record = (type, payload) => ({ type, payload });
 
+test("imageView keeps a separate image descriptor, pairs durable snapshots and leaves raw history intact", () => {
+  const url = "data:image/png;base64,iVBORw0KGgo=";
+  const records = [
+    record("event_msg", { type: "task_started", turn_id: "image-turn" }),
+    record("response_item", { type: "function_call", name: "view_image", call_id: "image-1", arguments: '{"path":"/tmp/chart.png"}' }),
+    record("event_msg", { type: "item_completed", turn_id: "image-turn", item: { type: "ImageView", id: "image-1", path: "file:///tmp/chart.png" } }),
+    record("response_item", { type: "function_call_output", call_id: "image-1", output: [{ type: "input_image", image_url: url }] }),
+  ];
+  const before = structuredClone(records);
+  const trace = projectCodexTranscript(records, { fragments: true });
+  assert.equal(trace.length, 1);
+  assert.equal(trace[0].kind, "tool");
+  assert.equal(trace[0].title, "查看图片");
+  assert.deepEqual(trace[0].images, [{ path: "/tmp/chart.png", url }]);
+  assert.ok(!trace[0].body.includes("base64"));
+  assert.deepEqual(records, before);
+  // A history page containing just the output must still carry the snapshot.
+  const tail = projectCodexTranscript(records.slice(-1), { initialTurnId: "image-turn", itemOffset: 3, fragments: true });
+  assert.equal(tail[0].key, trace[0].key);
+  assert.deepEqual(tail[0].images, [{ url }]);
+  assert.ok(!tail[0].toolFragment.output.includes("base64"));
+  const legacy = projectCodexTranscript([record("event_msg", { type: "view_image_tool_call", call_id: "old", path: "C:\\images\\plot.png" })]);
+  assert.deepEqual(legacy[0].images, [{ path: "C:\\images\\plot.png" }]);
+});
+
+test("tool images survive text projection limits without permitting arbitrary external image requests", () => {
+  const url = `data:application/octet-stream;base64,${"AAAA".repeat(280_000)}`;
+  const [tool] = projectCodexTranscript([record("response_item", { type: "function_call_output", call_id: "snapshot", output: {
+    content: [{ type: "input_image", image_url: url }, { type: "input_image", image_url: "https://external.example/image.png" }],
+  } })]);
+  assert.equal(tool.images[0].url, url);
+  assert.equal(tool.images.length, 1);
+  assert.ok(tool.body.length < 300);
+});
+
 test("preserves nested command activities alongside distinct code-mode wrapper calls", () => {
   const turnId = "00000000-0000-4000-8000-000000000001";
   const result = projectCodexTranscript([
