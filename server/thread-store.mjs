@@ -593,6 +593,153 @@ function matchesStateValue(actual, expected) {
   );
 }
 
+async function activeHistoryItems(
+  client,
+  { storeId, threadId, generation, throughVersion, afterItemSeq = 0, limit = null },
+) {
+  if (limit === 0) return [];
+  const result = await client.query(
+    `SELECT payload FROM codex_thread_events
+     WHERE store_id = $1 AND thread_id = $2 AND generation = $3
+       AND store_event_seq <= $4 AND item_seq > $5
+     ORDER BY item_seq ASC
+     LIMIT $6`,
+    [storeId, threadId, generation, throughVersion, afterItemSeq, limit ?? 2_147_483_647],
+  );
+  return result.rows.map((row) => row.payload);
+}
+
+async function planHistoryDelta(client, storeId, throughVersion, entry, change) {
+  const generation = entry?.generation ?? 0;
+  const itemCount = entry?.itemCount ?? 0;
+  const appendCanRebase =
+    change.mode === "append" &&
+    change.expectedGeneration === generation &&
+    change.expectedItemCount <= itemCount;
+  const exactMatch =
+    change.expectedGeneration === generation && change.expectedItemCount === itemCount;
+  if (!(appendCanRebase || exactMatch)) {
+    return {
+      conflict: {
+        error: "thread generation conflict",
+        threadId: change.threadId,
+        currentGeneration: generation,
+        currentItemCount: itemCount,
+      },
+    };
+  }
+
+  if (change.mode === "delete") {
+    return { changed: entry !== undefined, nextEntry: null, appends: [] };
+  }
+
+  if (change.mode === "append") {
+    const overlapLimit = Math.min(
+      change.items.length,
+      Math.max(0, itemCount - change.expectedItemCount),
+    );
+    const overlapping = entry
+      ? await activeHistoryItems(client, {
+          storeId,
+          threadId: change.threadId,
+          generation,
+          throughVersion,
+          afterItemSeq: change.expectedItemCount,
+          limit: overlapLimit,
+        })
+      : [];
+    if (overlapping.length !== overlapLimit) {
+      throw new Error(
+        `canonical history ${change.threadId} expected ${overlapLimit} overlapping items, found ${overlapping.length}`,
+      );
+    }
+    let overlap = 0;
+    while (
+      overlap < overlapping.length &&
+      jsonEqual(overlapping[overlap], change.items[overlap])
+    ) {
+      overlap += 1;
+    }
+    const appended = change.items.slice(overlap);
+    const nextGeneration = entry ? generation : 1;
+    return {
+      // An empty append still creates a new empty history, matching the V1
+      // snapshot semantics. An empty append to an existing history is a no-op.
+      changed: entry === undefined || appended.length > 0,
+      nextEntry: { generation: nextGeneration, itemCount: itemCount + appended.length },
+      appends: appended.map((payload, index) => ({
+        threadId: change.threadId,
+        generation: nextGeneration,
+        itemSeq: itemCount + index + 1,
+        payload,
+      })),
+    };
+  }
+
+  const previous = entry
+    ? await activeHistoryItems(client, {
+        storeId,
+        threadId: change.threadId,
+        generation,
+        throughVersion,
+        limit: itemCount,
+      })
+    : undefined;
+  if (previous && previous.length !== itemCount) {
+    throw new Error(
+      `canonical history ${change.threadId} expected ${itemCount} items, found ${previous.length}`,
+    );
+  }
+  if (previous && jsonEqual(previous, change.items)) {
+    return { changed: false, nextEntry: entry, appends: [] };
+  }
+  const appendOnly = previous !== undefined && isPrefix(previous, change.items);
+  const nextGeneration = appendOnly ? Math.max(generation, 1) : generation + 1;
+  const startIndex = appendOnly ? previous.length : 0;
+  return {
+    changed: true,
+    nextEntry: { generation: nextGeneration, itemCount: change.items.length },
+    appends: change.items.slice(startIndex).map((payload, index) => ({
+      threadId: change.threadId,
+      generation: nextGeneration,
+      itemSeq: startIndex + index + 1,
+      payload,
+    })),
+  };
+}
+
+async function insertHistoryAppends(client, storeId, eventSeq, codexVersion, appends) {
+  const batchSize = 100;
+  for (let offset = 0; offset < appends.length; offset += batchSize) {
+    const parameters = [];
+    const tuples = [];
+    for (const item of appends.slice(offset, offset + batchSize)) {
+      const base = parameters.length;
+      parameters.push(
+        storeId,
+        item.threadId,
+        item.generation,
+        item.itemSeq,
+        eventSeq,
+        eventFormatVersion,
+        codexVersion,
+        JSON.stringify(item.payload),
+        payloadHash(item.payload),
+      );
+      tuples.push(
+        `($${base + 1},$${base + 2},$${base + 3},$${base + 4},$${base + 5},$${base + 6},$${base + 7},$${base + 8}::json,$${base + 9})`,
+      );
+    }
+    await client.query(
+      `INSERT INTO codex_thread_events (
+         store_id, thread_id, generation, item_seq, store_event_seq,
+         event_format_version, codex_version, payload, payload_sha256
+       ) VALUES ${tuples.join(",")}`,
+      parameters,
+    );
+  }
+}
+
 async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt = 0) {
   if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) {
     return { status: 400, body: { error: "expectedVersion must be a non-negative integer" } };
@@ -678,7 +825,10 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
       };
     }
 
-    const current = await canonicalStore(client, storeId, lockedVersion);
+    const current = await getStoreHead(client, storeId);
+    if (current.version !== lockedVersion) {
+      throw new Error(`store head ${lockedVersion} is missing its canonical event`);
+    }
     const rebased = current.version !== body.expectedVersion;
     if (current.version < body.expectedVersion) {
       await client.query("ROLLBACK");
@@ -687,7 +837,6 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
         body: { error: "expected version is ahead of store", currentVersion: current.version },
       };
     }
-    const histories = { ...current.histories };
     const state = structuredClone(current.state);
     for (const change of body.stateChanges) {
       const actual = statePathValue(state, change);
@@ -709,45 +858,29 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
       }
       applyStateChange(state, change);
     }
+    const manifest = structuredClone(current.historyManifest);
+    const appends = [];
+    let historyChanged = false;
     for (const change of body.historyChanges) {
-      const entry = current.manifest[change.threadId];
-      const generation = entry?.generation ?? 0;
-      const itemCount = entry?.itemCount ?? 0;
-      const appendCanRebase =
-        change.mode === "append" &&
-        change.expectedGeneration === generation &&
-        change.expectedItemCount <= itemCount;
-      const exactMatch =
-        change.expectedGeneration === generation && change.expectedItemCount === itemCount;
-      if (!(appendCanRebase || exactMatch)) {
+      const plan = await planHistoryDelta(
+        client,
+        storeId,
+        current.version,
+        current.historyManifest[change.threadId],
+        change,
+      );
+      if (plan.conflict) {
         await client.query("ROLLBACK");
-        return {
-          status: 409,
-          body: {
-            error: "thread generation conflict",
-            threadId: change.threadId,
-            currentGeneration: generation,
-            currentItemCount: itemCount,
-          },
-        };
+        return { status: 409, body: plan.conflict };
       }
-      if (change.mode === "delete") delete histories[change.threadId];
-      else if (change.mode === "replace") histories[change.threadId] = change.items;
-      else {
-        const currentItems = histories[change.threadId] ?? [];
-        let overlap = 0;
-        while (
-          overlap < change.items.length &&
-          change.expectedItemCount + overlap < currentItems.length &&
-          jsonEqual(currentItems[change.expectedItemCount + overlap], change.items[overlap])
-        ) {
-          overlap += 1;
-        }
-        histories[change.threadId] = [...currentItems, ...change.items.slice(overlap)];
+      if (plan.changed) {
+        historyChanged = true;
+        if (plan.nextEntry === null) delete manifest[change.threadId];
+        else manifest[change.threadId] = plan.nextEntry;
+        appends.push(...plan.appends);
       }
     }
-    const snapshot = { ...state, histories };
-    if (jsonEqual(snapshot, { ...current.state, histories: current.histories })) {
+    if (!historyChanged && jsonEqual(state, current.state)) {
       await client.query("ROLLBACK");
       return {
         status: 200,
@@ -756,7 +889,7 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
           operationId,
           noChange: true,
           rebased,
-          historyManifest: current.manifest,
+          historyManifest: current.historyManifest,
           appendedItemCount: 0,
           updatedAt: current.updatedAt,
         },
@@ -779,26 +912,28 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
         })),
       });
     }
-    const appendResult = await appendCanonicalEvent(client, {
-      storeId,
-      eventSeq,
-      previousEventSeq: current.version,
-      operationId,
-      codexVersion,
-      snapshot,
-      previousSnapshot: { ...current.state, histories: current.histories },
-      previousManifest: current.manifest,
-    });
-    const updated = await client.query(
-      `INSERT INTO codex_thread_store_snapshots (store_id, version, snapshot)
-       VALUES ($1, $2, $3::json)
-       ON CONFLICT (store_id) DO UPDATE SET
-         version = EXCLUDED.version,
-         snapshot = EXCLUDED.snapshot,
-         updated_at = NOW()
-       RETURNING updated_at`,
-      [storeId, eventSeq, JSON.stringify(snapshot)],
+    const inserted = await client.query(
+      `INSERT INTO codex_store_events (
+         store_id, event_seq, previous_event_seq, operation_id,
+         event_format_version, codex_version, state, history_manifest
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb)
+       RETURNING created_at`,
+      [
+        storeId,
+        eventSeq,
+        current.version,
+        operationId,
+        eventFormatVersion,
+        codexVersion,
+        JSON.stringify(state),
+        JSON.stringify(manifest),
+      ],
     );
+    await insertHistoryAppends(client, storeId, eventSeq, codexVersion, appends);
+    await replaceProjections(client, storeId, state, manifest, eventSeq);
+    // V1 snapshots are compatibility caches. Keeping a full materialized copy
+    // here turns every streaming token into an O(total store size) rewrite.
+    await client.query("DELETE FROM codex_thread_store_snapshots WHERE store_id = $1", [storeId]);
     await client.query("COMMIT");
     return {
       status: 200,
@@ -806,9 +941,9 @@ async function commitDeltaTransaction(pool, storeId, body, headers, raceAttempt 
         version: eventSeq,
         operationId,
         rebased,
-        historyManifest: appendResult.manifest,
-        appendedItemCount: appendResult.appendedItemCount,
-        updatedAt: updated.rows[0].updated_at.toISOString(),
+        historyManifest: manifest,
+        appendedItemCount: appends.length,
+        updatedAt: inserted.rows[0].created_at.toISOString(),
       },
     };
   } catch (error) {
