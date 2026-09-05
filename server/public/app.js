@@ -511,7 +511,9 @@ function installAgentDrawerSwipe() {
     (window.visualViewport?.scale ?? 1) <= 1.05;
   const selectedText = () => window.getSelection()?.type === "Range";
   resetAgentDrawerDrag = () => {
+    const previous = gesture;
     gesture = null;
+    if (previous?.source === "pointer" && surface.hasPointerCapture(previous.id)) surface.releasePointerCapture(previous.id);
     surface.classList.remove("drawer-dragging");
     drawer.style.removeProperty("transform");
     backdrop.style.removeProperty("opacity");
@@ -526,31 +528,24 @@ function installAgentDrawerSwipe() {
     drawer.style.transform = `translate3d(${gesture.position - gesture.width}px, 0, 0)`;
     backdrop.style.opacity = String(gesture.position / gesture.width);
   };
-  surface.addEventListener("touchstart", event => {
-    resetAgentDrawerDrag();
-    suppressClickUntil = 0;
-    if (!enabled() || event.touches.length !== 1 || selectedText() ||
+  const start = (target, point, time, source) => {
+    if (!enabled() || source === "touch" && selectedText() ||
         document.querySelector("dialog[open], [popover]:popover-open")) return;
-    const target = event.target instanceof Element ? event.target : event.target.parentElement;
     if (!target || target.closest("input, textarea, select, [role=slider], [contenteditable]:not([contenteditable=false]), video, audio, canvas")) return;
     // Links, images and tool summaries can be dragged; taps and long presses still
     // belong to those controls. Editable content and horizontal scrollers keep their gestures.
     for (let node = target; node && node !== surface; node = node.parentElement) {
       if (node.scrollWidth > node.clientWidth + 2 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowX)) return;
     }
-    const touch = event.touches[0];
     gesture = {
-      id: touch.identifier, x: touch.clientX, y: touch.clientY, startedAt: event.timeStamp,
+      id: point.identifier, source, x: point.clientX, y: point.clientY, startedAt: time,
       open: agentThreadDrawerOpen, width: drawer.getBoundingClientRect().width,
-      horizontal: false, samples: [{ x: touch.clientX, time: event.timeStamp }],
+      horizontal: false, samples: [{ x: point.clientX, time }],
     };
-  }, { passive: true });
-  surface.addEventListener("touchmove", event => {
-    if (!gesture) return;
-    if (!enabled() || event.touches.length !== 1 || selectedText()) { resetAgentDrawerDrag(); return; }
-    const touch = [...event.touches].find(touch => touch.identifier === gesture.id);
-    if (!touch) { resetAgentDrawerDrag(); return; }
-    const dx = touch.clientX - gesture.x, dy = Math.abs(touch.clientY - gesture.y);
+  };
+  const update = (point, event) => {
+    if (!enabled() || gesture.source === "touch" && selectedText()) { resetAgentDrawerDrag(); return; }
+    const dx = point.clientX - gesture.x, dy = Math.abs(point.clientY - gesture.y);
     if (!gesture.horizontal) {
       // Lock the intended axis early, before native scrolling claims the gesture.
       // Once dragging, slow movement and pauses do not cancel the user's progress.
@@ -559,30 +554,77 @@ function installAgentDrawerSwipe() {
       if (Math.abs(dx) < 8 || Math.abs(dx) < dy * 1.15) return;
       gesture.horizontal = true;
       surface.classList.add("drawer-dragging");
+      if (gesture.source === "pointer") surface.setPointerCapture(gesture.id);
     }
-    if (!event.cancelable) { resetAgentDrawerDrag(); return; }
-    event.preventDefault();
-    move(touch, event.timeStamp);
-  }, { passive: false });
-  surface.addEventListener("touchend", event => {
-    if (!gesture?.horizontal) { resetAgentDrawerDrag(); return; }
-    const touch = [...event.changedTouches].find(touch => touch.identifier === gesture.id);
-    if (!touch || !enabled() || event.touches.length || selectedText()) { resetAgentDrawerDrag(); return; }
+    if (gesture.source === "touch" && !event.cancelable) { resetAgentDrawerDrag(); return; }
     if (event.cancelable) event.preventDefault();
-    move(touch, event.timeStamp);
+    move(point, event.timeStamp);
+  };
+  const finish = (point, event) => {
+    if (!gesture?.horizontal) { resetAgentDrawerDrag(); return; }
+    if (!enabled() || gesture.source === "touch" && selectedText()) { resetAgentDrawerDrag(); return; }
+    if (event.cancelable) event.preventDefault();
+    move(point, event.timeStamp);
     const first = gesture.samples[0];
     const last = gesture.samples.at(-1);
     const elapsed = last.time - first.time;
     const velocity = elapsed > 0 && event.timeStamp - last.time < 100 ? (last.x - first.x) / elapsed : 0;
-    const distance = touch.clientX - gesture.x;
+    const distance = point.clientX - gesture.x;
     const open = Math.abs(distance) >= 32 && Math.abs(velocity) >= 0.45
       ? velocity > 0 : gesture.position >= gesture.width * (gesture.open ? 0.6 : 0.4);
     suppressClickUntil = performance.now() + 400;
     // Flush the last dragged position before letting CSS settle to its endpoint.
     drawer.getBoundingClientRect();
     setAgentThreadDrawer(open, { focus: false });
+  };
+  // The expanded drawer and its backdrop reserve horizontal gestures with
+  // touch-action. Pointer capture keeps a closing drag attached as rows move
+  // underneath the finger, while vertical list scrolling stays browser-native.
+  const pointerPoint = event => ({ identifier: event.pointerId, clientX: event.clientX, clientY: event.clientY });
+  surface.addEventListener("pointerdown", event => {
+    if (!agentThreadDrawerOpen || event.pointerType !== "touch") return;
+    resetAgentDrawerDrag();
+    suppressClickUntil = 0;
+    if (event.isPrimary) start(event.target, pointerPoint(event), event.timeStamp, "pointer");
+  });
+  surface.addEventListener("pointermove", event => {
+    if (gesture?.source === "pointer" && gesture.id === event.pointerId) update(pointerPoint(event), event);
+  });
+  surface.addEventListener("pointerup", event => {
+    if (gesture?.source === "pointer" && gesture.id === event.pointerId) finish(pointerPoint(event), event);
+  });
+  for (const type of ["pointercancel", "lostpointercapture"]) surface.addEventListener(type, event => {
+    // Taking capture from a row releases its implicit capture first.
+    if (type === "lostpointercapture" && event.target !== surface) return;
+    if (gesture?.source === "pointer" && gesture.id === event.pointerId) resetAgentDrawerDrag();
+  });
+  surface.addEventListener("touchstart", event => {
+    if (agentThreadDrawerOpen || gesture?.source === "pointer") return;
+    resetAgentDrawerDrag();
+    suppressClickUntil = 0;
+    if (event.touches.length !== 1) return;
+    const target = event.target instanceof Element ? event.target : event.target.parentElement;
+    start(target, event.touches[0], event.timeStamp, "touch");
+  }, { passive: true });
+  surface.addEventListener("touchmove", event => {
+    if (gesture?.source === "pointer") {
+      if (gesture.horizontal && event.cancelable) event.preventDefault();
+      return;
+    }
+    if (gesture?.source !== "touch") return;
+    const point = [...event.touches].find(touch => touch.identifier === gesture.id);
+    if (!point || event.touches.length !== 1) { resetAgentDrawerDrag(); return; }
+    update(point, event);
   }, { passive: false });
-  surface.addEventListener("touchcancel", resetAgentDrawerDrag, { passive: true });
+  surface.addEventListener("touchend", event => {
+    if (gesture?.source !== "touch") return;
+    const point = [...event.changedTouches].find(touch => touch.identifier === gesture.id);
+    if (!point || event.touches.length) { resetAgentDrawerDrag(); return; }
+    finish(point, event);
+  }, { passive: false });
+  surface.addEventListener("touchcancel", () => {
+    if (gesture?.source === "touch") resetAgentDrawerDrag();
+  }, { passive: true });
   surface.addEventListener("click", event => {
     if (event.detail && performance.now() < suppressClickUntil) {
       event.preventDefault();

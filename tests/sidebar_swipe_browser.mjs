@@ -9,7 +9,8 @@ try {
   browser = await chromium.launch({ headless: true, ...(process.env.MIRA_BROWSER_EXECUTABLE ? { executablePath: process.env.MIRA_BROWSER_EXECUTABLE } : {}) });
   const context = await browser.newContext({ ...devices['Pixel 7'] });
   const thread = { threadId, title: 'Swipe test', cwd: '/work', generation: 1 };
-  await context.route('**/v1/codex/threads?*', route => route.fulfill({ json: { data: [thread] } }));
+  let threadList = [thread];
+  await context.route('**/v1/codex/threads?*', route => route.fulfill({ json: { data: threadList } }));
   await context.route(`**/v1/codex/threads/${threadId}?*`, route => route.fulfill({ json: thread }));
   const body = 'Reading text for a swipe from the middle of the conversation.\n\n'.repeat(50) +
     '\n```text\n' + 'a long horizontal code block '.repeat(50) + '\n```\n\n[Keep link gestures](https://example.com/)';
@@ -26,7 +27,8 @@ try {
   await page.locator('.trace-card.assistant').waitFor();
   const session = await context.newCDPSession(page);
   await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-  await page.evaluate(() => { window.touchCount = 0; for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) document.addEventListener(type, event => { window.touchCount = event.touches.length; }, { passive: true, capture: true }); });
+  const trackTouches = () => { window.touchCount = 0; for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) document.addEventListener(type, event => { window.touchCount = event.touches.length; }, { passive: true, capture: true }); };
+  await page.addInitScript(trackTouches); await page.evaluate(trackTouches);
   const scroll = page.locator('#conversationScroll');
   const drawer = page.locator('#agentThreadDrawer');
   const closed = async () => assert.equal(await drawer.getAttribute('aria-hidden'), 'true');
@@ -166,12 +168,47 @@ try {
   assert.equal(await drawer.evaluate(element => element.style.transform), '', 'resize clears unfinished drag styles');
   await page.locator('#agentThreadDrawerClose').tap();
   await readingPosition(); await swipe(400, 300, 160, 0); await closed();
+  threadList = [thread, ...Array.from({ length: 24 }, (_, i) => ({ ...thread, threadId: `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, title: `Another conversation ${i + 1}` }))];
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
   // Multi-touch uses Chromium's native gesture synthesizer on a fresh mobile page.
   await page.setViewportSize(devices['Pixel 7'].viewport);
   await page.reload();
   await page.locator('.trace-card.assistant').waitFor();
   await page.evaluate(() => { window.maxTouches = 0; document.addEventListener('touchstart', event => { window.maxTouches = Math.max(window.maxTouches, event.touches.length); }, { passive:true, capture:true }); });
   await readingPosition();
+  // Start a fresh gesture after the drawer has been fully open and idle. Cover
+  // actual rows, the separate backdrop and the footer instead of empty list space.
+  const stableOpen = async () => {
+    await page.locator('#agentThreadDrawerToggle').tap();
+    await page.waitForTimeout(400); await follows(340);
+  };
+  for (const area of ['list', 'backdrop', 'footer']) {
+    await stableOpen();
+    const target = area === 'list' ? page.locator('.agent-thread').first() : area === 'footer' ? page.locator('#agentAccountToggle') : page.locator('#agentThreadDrawerBackdrop');
+    const bounds = await target.boundingBox();
+    const x = area === 'backdrop' ? devices['Pixel 7'].viewport.width - 30 : bounds.x + Math.min(230, bounds.width - 20);
+    const y = area === 'backdrop' ? 400 : bounds.y + bounds.height / 2;
+    await beginDrag(x, y);
+    await dragTo(x - 45, y); await follows(295);
+    if (area === 'list') await target.evaluate(element => {
+      // Background list refresh must not detach an in-progress closing gesture.
+      const row = element.closest('.agent-thread-row'); row.replaceWith(row.cloneNode(true));
+    });
+    await dragTo(x - 100, y); await follows(240);
+    await dragTo(x - 170, y); await follows(170);
+    await endDrag(); await closed();
+    assert.equal(new URL(page.url()).searchParams.get('thread'), threadId, `${area} drag does not activate a conversation`);
+    assert.equal(await page.locator('[popover]:popover-open').count(), 0, `${area} drag does not open menus`);
+  }
+  // Native vertical scrolling inside a populated sidebar must still work.
+  await stableOpen();
+  const list = page.locator('#agentThreadList'); await list.evaluate(element => { element.scrollTop = 0; });
+  await swipe(180, 500, 2, -180);
+  assert.equal(await drawer.getAttribute('aria-hidden'), 'false');
+  assert.ok(await list.evaluate(element => element.scrollTop) > 50, 'the expanded conversation list keeps vertical scrolling');
+  await page.locator('#agentThreadDrawerClose').tap(); await page.waitForTimeout(250);
+  await page.reload(); await page.locator('.trace-card.assistant').waitFor();
+  await page.evaluate(() => { window.maxTouches = 0; document.addEventListener('touchstart', event => { window.maxTouches = Math.max(window.maxTouches, event.touches.length); }, { passive:true, capture:true }); });
   await session.send('Input.synthesizePinchGesture', { x:190, y:300, scaleFactor:1.5, gestureSourceType:'touch' });
   await closed();
   assert.equal(await page.evaluate(() => window.maxTouches), 2, 'multi-finger input does not open the drawer');
