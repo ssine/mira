@@ -392,6 +392,16 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		return err
 	}
 	arguments := []string{"app-server", "--listen", listenURL}
+	if codex.RemoteThreadStoreSupported {
+		override, err := codexSQLiteOverride(manager.configuration.IdentityFile, codex.Path, desired.ConfigOverrides)
+		if err != nil {
+			manager.lastError = err.Error()
+			return err
+		}
+		if override != "" {
+			arguments = append(arguments, "-c", override)
+		}
+	}
 	for _, override := range desired.ConfigOverrides {
 		arguments = append(arguments, "-c", override)
 	}

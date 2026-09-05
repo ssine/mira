@@ -684,6 +684,13 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 		"-c", `approval_policy="never"`,
 		"-c", `sandbox_mode="danger-full-access"`,
 	}
+	stateOverride, err := codexSQLiteOverride(client.options.Identity, codexPath, nil)
+	if err != nil {
+		return err
+	}
+	if stateOverride != "" {
+		remoteArgs = append(remoteArgs, "-c", stateOverride)
+	}
 	command := exec.CommandContext(ctx, codexPath, append(remoteArgs, args...)...)
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	command.Env = append(os.Environ(), "MIRA_NODE_TOKEN="+client.identity.Token, "MIRA_SERVER_URL="+client.identity.ServerURL)

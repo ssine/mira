@@ -206,6 +206,12 @@ current Server endpoint, store ID and Node credential so CLI and web/App Server 
 Android never downloads or executes the Codex runtime; Linux arm64 currently requires an explicit
 compatible build. Codex runtime installation does not grant model authentication.
 
+Mira-managed compatible Codex processes use a separate `sqlite_home` under the Node identity
+directory, scoped to the pinned runtime and actual binary location. This is derived upstream runtime
+state, not authoritative history. Do not reuse Desktop's SQLite databases: even differing source line
+endings can change upstream migration checksums. Preserve `CODEX_HOME`, authentication and original
+rollouts; honor explicit `sqlite_home` arguments or `CODEX_SQLITE_HOME` overrides.
+
 Node capabilities must retain these safety properties:
 
 - file operations are confined to configured absolute roots; by default these are `/` on Unix-like systems and all visible drive roots on Windows;
