@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,8 +14,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -38,15 +41,16 @@ type desiredAppServer struct {
 }
 
 type appServerInstance struct {
-	command         *exec.Cmd
-	codex           codexInstallation
-	listenURL       string
-	codexHome       string
-	configOverrides []string
-	startedAt       time.Time
-	ready           bool
-	done            chan struct{}
-	output          outputBuffer
+	command            *exec.Cmd
+	codex              codexInstallation
+	requestedListenURL string
+	listenURL          string
+	codexHome          string
+	configOverrides    []string
+	startedAt          time.Time
+	ready              bool
+	done               chan struct{}
+	output             outputBuffer
 }
 
 type appServerManager struct {
@@ -247,7 +251,7 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 	}
 	if manager.instance != nil && !channelClosed(manager.instance.done) {
 		current := manager.instance
-		if current.listenURL == desired.ListenURL && current.codex.Path == selected.Path && current.codexHome == desired.CodexHome && stringSlicesEqual(current.configOverrides, desired.ConfigOverrides) {
+		if current.requestedListenURL == desired.ListenURL && current.codex.Path == selected.Path && current.codexHome == desired.CodexHome && stringSlicesEqual(current.configOverrides, desired.ConfigOverrides) {
 			return nil
 		}
 		if err := manager.stopLocked(); err != nil {
@@ -331,12 +335,56 @@ func validateAppServerListenURL(value string) error {
 	return nil
 }
 
+func availableAppServerListenURL(value string) (string, error) {
+	if err := validateAppServerListenURL(value); err != nil {
+		return "", err
+	}
+	parsed, _ := url.Parse(value)
+	listener, err := net.Listen("tcp", parsed.Host)
+	if err == nil {
+		defer listener.Close()
+		if parsed.Port() != "0" {
+			return value, nil
+		}
+	} else if !errors.Is(err, syscall.EADDRINUSE) {
+		return "", fmt.Errorf("probe App Server listen URL: %w", err)
+	}
+	if listener == nil {
+		listener, err = net.Listen("tcp", net.JoinHostPort(parsed.Hostname(), "0"))
+		if err != nil {
+			return "", fmt.Errorf("allocate App Server loopback port: %w", err)
+		}
+		defer listener.Close()
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	parsed.Host = net.JoinHostPort(parsed.Hostname(), strconv.Itoa(port))
+	return parsed.String(), nil
+}
+
+func appServerFailureMessage(instance *appServerInstance, fallback string) string {
+	view := instance.output.read(0)
+	chunks, _ := view["chunks"].([]outputChunk)
+	var output strings.Builder
+	for _, chunk := range chunks {
+		output.WriteString(chunk.Text)
+	}
+	message := strings.TrimSpace(output.String())
+	if len(message) > 4096 {
+		message = strings.ToValidUTF8(message[len(message)-4096:], "�")
+	}
+	if message == "" {
+		return fallback
+	}
+	return fallback + ": " + message
+}
+
 func (manager *appServerManager) startLocked(ctx context.Context, desired desiredAppServer, codex codexInstallation) error {
-	if err := validateAppServerListenURL(desired.ListenURL); err != nil {
+	listenURL, err := availableAppServerListenURL(desired.ListenURL)
+	if err != nil {
 		manager.lastError = err.Error()
 		return err
 	}
-	arguments := []string{"app-server", "--listen", desired.ListenURL}
+	arguments := []string{"app-server", "--listen", listenURL}
 	for _, override := range desired.ConfigOverrides {
 		arguments = append(arguments, "-c", override)
 	}
@@ -355,7 +403,7 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		command.Env = append(command.Env, "CODEX_HOME="+desired.CodexHome)
 	}
 	instance := &appServerInstance{
-		command: command, codex: codex, listenURL: desired.ListenURL,
+		command: command, codex: codex, requestedListenURL: desired.ListenURL, listenURL: listenURL,
 		codexHome: desired.CodexHome, configOverrides: append([]string(nil), desired.ConfigOverrides...),
 		startedAt: time.Now().UTC(), done: make(chan struct{}),
 	}
@@ -372,16 +420,16 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		close(instance.done)
 	}()
 	manager.mu.Unlock()
-	err := waitForAppServer(ctx, instance)
+	err = waitForAppServer(ctx, instance)
 	manager.mu.Lock()
 	if err != nil {
-		manager.lastError = err.Error()
+		manager.lastError = appServerFailureMessage(instance, err.Error())
 		_ = terminateProcess(command.Process, "SIGTERM")
-		return err
+		return fmt.Errorf("%s", manager.lastError)
 	}
 	instance.ready = true
 	manager.lastError = ""
-	Log("started Codex App Server", map[string]any{"listenUrl": desired.ListenURL, "codexPath": codex.Path, "pid": command.Process.Pid})
+	Log("started Codex App Server", map[string]any{"listenUrl": listenURL, "requestedListenUrl": desired.ListenURL, "codexPath": codex.Path, "pid": command.Process.Pid})
 	return nil
 }
 

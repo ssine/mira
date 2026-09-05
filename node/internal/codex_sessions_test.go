@@ -164,6 +164,24 @@ func TestDesktopArchivedSessionAndBinaryChunks(t *testing.T) {
 	}
 }
 
+func TestSessionExecutionModeSeparatesDesktopStorageFromWSLRuntime(t *testing.T) {
+	for _, test := range []struct {
+		hostMode string
+		cwd      string
+		want     string
+	}{
+		{hostMode: "windows", cwd: `C:\Users\Sine\project`, want: "windows"},
+		{hostMode: "windows", cwd: "/home/sine/project", want: "wsl"},
+		{hostMode: "windows", cwd: `\\server\share`, want: "windows"},
+		{hostMode: "wsl", cwd: "/home/sine/project", want: "wsl"},
+		{hostMode: "linux", cwd: "/srv/project", want: "linux"},
+	} {
+		if got := inferSessionExecutionMode(test.hostMode, test.cwd); got != test.want {
+			t.Fatalf("inferSessionExecutionMode(%q, %q) = %q, want %q", test.hostMode, test.cwd, got, test.want)
+		}
+	}
+}
+
 func TestFileUploadChunksAndOffsetConflict(t *testing.T) {
 	home := t.TempDir()
 	r, err := newCapabilityRuntime(config{AllowedRoots: []string{home}})

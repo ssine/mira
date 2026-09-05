@@ -2292,10 +2292,13 @@ function renderLocalSessions() {
   for (const [index, session] of filtered.slice(0, agent.sessionVisibleLimit)) {
     const card = element("article", "local-session");
     const copy = element("div");
+    const sourceNode = dashboardNodes.get(agent.sessionNodeId);
+    const executionLabel = ({ wsl: "WSL", windows: "Windows", linux: "Linux", android: "Android" })[session.executionMode] ?? session.executionMode ?? "未知";
     copy.append(
       element("strong", "", session.title || "未命名会话"),
       element("span", "session-source", `${({ desktop: "Codex Desktop", cli: "CLI", ide: "IDE 扩展", subagent: "子 Agent" })[session.clientKind] ?? "其他 / 旧节点"}${session.archived ? " · 已归档" : ""} · ${session.codexVersion || "版本未知"}`),
       element("span", "", `${formatBytes(session.sizeBytes)} · ${when(session.modifiedAt)}`),
+      element("small", "", `存储：${sourceNode?.hostname ?? "来源节点"} · 运行环境：${executionLabel}`),
       element("small", "", session.cwd || "工作目录未知"),
       element("small", "", session.threadId),
       element("small", "", session.path),
@@ -2306,6 +2309,7 @@ function renderLocalSessions() {
     button.type = "button";
     button.dataset.sessionIndex = String(index);
     if (imported) button.dataset.importedThreadId = session.import.threadId;
+    if (session.suggestedRuntimeNodeId) button.dataset.runtimeNodeId = session.suggestedRuntimeNodeId;
     button.disabled = Boolean(agent.sessionImportController);
     card.append(copy, button);
     list.append(card);
@@ -2332,8 +2336,12 @@ async function scanLocalSessions() {
   $("#sessionScanState").title = (response.warnings ?? []).join("\n");
 }
 
-async function openImportedSession(threadId) {
+async function openImportedSession(threadId, runtimeNodeId = null) {
   if (agent.sendPromise) throw new Error("请等待当前消息提交完成");
+  if (runtimeNodeId && [...$("#agentRuntimeNode").options].some((option) => option.value === runtimeNodeId)) {
+    $("#agentRuntimeNode").value = runtimeNodeId;
+    if (agent.socketNodeId !== runtimeNodeId) closeAgentSocket();
+  }
   if (!$("#agentRuntimeNode").value) throw new Error("请先选择一个 Codex 运行节点。导入来源与运行位置可以不同。");
   show("agentView");
   setAgentThreadDrawer(false);
@@ -2345,7 +2353,7 @@ async function importLocalSession(index, button) {
   const session = agent.sessions[index];
   const nodeId = agent.sessionNodeId;
   if (!session || !nodeId) return;
-  if (button.dataset.importedThreadId) return openImportedSession(button.dataset.importedThreadId);
+  if (button.dataset.importedThreadId) return openImportedSession(button.dataset.importedThreadId, button.dataset.runtimeNodeId);
   button.disabled = true;
   button.textContent = "导入中…";
   const controller = new AbortController();
@@ -2361,7 +2369,7 @@ async function importLocalSession(index, button) {
     const response = await fetch(`/v1/nodes/${nodeId}/codex-session-imports`, {
       method: "POST", credentials: "same-origin", signal: controller.signal,
       headers: { "content-type": "application/json", accept: "application/x-ndjson", "x-mira-csrf": csrfToken },
-      body: JSON.stringify({ path: session.path, storeId: "personal" }),
+      body: JSON.stringify({ path: session.path, storeId: "personal", runtimeNodeId: session.suggestedRuntimeNodeId ?? null }),
     });
     if (!response.ok) throw new Error((await response.json()).error ?? `HTTP ${response.status}`);
     const reader = response.body.getReader();
@@ -2905,10 +2913,6 @@ $("#nodeFileDialog").addEventListener("close", resetNodeFileDialog);
 $("#agentInterrupt").addEventListener("click", () => {
   if (!agent.threadId || !agent.turnId) return;
   rpc("turn/interrupt", { threadId: agent.threadId, turnId: agent.turnId }).catch((error) => toast(error.message));
-});
-$("#conversationClear").addEventListener("click", () => {
-  resetAgentTranscript(agent.threadId);
-  clear($("#conversationTrace")).append(element("div", "conversation-empty", "当前视图已清空；数据库中的会话没有删除。"));
 });
 
 $("#refreshButton").addEventListener("click", () => loadDashboard().then(() => toast("状态已刷新")).catch((error) => toast(error.message)));

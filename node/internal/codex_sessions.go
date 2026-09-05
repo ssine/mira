@@ -41,6 +41,7 @@ type codexSessionSummary struct {
 	Source         any       `json:"source,omitempty"`
 	Originator     string    `json:"originator,omitempty"`
 	ClientKind     string    `json:"clientKind"`
+	ExecutionMode  string    `json:"executionMode"`
 	HistoryMode    string    `json:"historyMode,omitempty"`
 	HistoryBase    any       `json:"historyBase,omitempty"`
 	Archived       bool      `json:"archived"`
@@ -49,6 +50,23 @@ type codexSessionSummary struct {
 	StartedAt      string    `json:"startedAt,omitempty"`
 	ModifiedAt     time.Time `json:"modifiedAt"`
 	SizeBytes      int64     `json:"sizeBytes"`
+}
+
+func inferSessionExecutionMode(hostMode, cwd string) string {
+	if hostMode == "windows" && strings.HasPrefix(cwd, "/") && !strings.HasPrefix(cwd, "//") {
+		return "wsl"
+	}
+	return hostMode
+}
+
+func localSessionHostMode() string {
+	if runtime.GOOS == "linux" {
+		release, _ := os.ReadFile("/proc/sys/kernel/osrelease")
+		if os.Getenv("WSL_DISTRO_NAME") != "" || strings.Contains(strings.ToLower(string(release)), "microsoft") {
+			return "wsl"
+		}
+	}
+	return runtime.GOOS
 }
 
 func (runtimeValue *capabilityRuntime) codexSessionHomes() ([]string, error) {
@@ -215,6 +233,7 @@ func summarizeCodexSession(pathValue, codexHome string, info fs.FileInfo) (codex
 	if result.SessionID == "" {
 		result.SessionID = result.ThreadID
 	}
+	result.ExecutionMode = inferSessionExecutionMode(localSessionHostMode(), result.Cwd)
 	return result, nil
 }
 

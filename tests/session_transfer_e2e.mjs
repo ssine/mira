@@ -12,8 +12,11 @@ if (!process.env.MIRA_TRANSFER_TEST_DATABASE_URL) throw new Error("MIRA_TRANSFER
 const pool = new Pool({ connectionString: process.env.MIRA_TRANSFER_TEST_DATABASE_URL });
 await initializeDatabase(pool);
 const nodeId = crypto.randomUUID();
-await pool.query(`INSERT INTO codex_nodes (node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations)
-  VALUES ($1::uuid,$1::text,'transfer-test','linux','amd64','test','0.12.0','{}','[]')`, [nodeId]);
+await pool.query(`INSERT INTO codex_nodes (node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status)
+  VALUES ($1::uuid,$1::text,'transfer-desktop','windows','amd64','windows','0.12.0','{"codexSessions":true}','[]','approved')`, [nodeId]);
+const wslNodeId = crypto.randomUUID();
+await pool.query(`INSERT INTO codex_nodes (node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status)
+  VALUES ($1::uuid,$1::text,'transfer-desktop','linux','amd64','wsl','0.12.0','{"appServer":true}','[]','approved')`, [wslNodeId]);
 const principal = { kind: "admin", username: "transfer-test" };
 const makeFixture = (threadId = crypto.randomUUID()) => Buffer.from([
   JSON.stringify({ type: "session_meta", payload: { id: threadId, originator: "Codex Desktop", source: "vscode", cwd: "/desktop/project", cli_version: "0.152.1", history_mode: "paginated", base_instructions: "fixture", futureField: { retain: true } } }),
@@ -43,6 +46,7 @@ try {
   const imported = await run(service, storeId, { onProgress: (p) => phases.add(p.phase) });
   assert.equal(imported.status, 200);
   assert.equal(imported.body.itemCount, 223);
+  assert.equal(imported.body.runtimeNodeId, wslNodeId, "Windows-hosted Desktop WSL session was not assigned to the matching WSL runtime");
   assert(phases.has("reading") && phases.has("publishing"));
   const head = await getStoreHead(pool, storeId);
   assert.equal(head.state.created_threads[service.summary.threadId].originator, "Codex Desktop");

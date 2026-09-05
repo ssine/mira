@@ -8,6 +8,11 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
 管理员网站已连通。durable scheduler、writer lease、完整恢复演练和服务端编排的集群批量更新仍待完成。
 
+0.13.4 将远端 ThreadStore 改为按需加载单个 thread 历史，避免 App Server 启动和每次 token 更新时
+反复读取或序列化全库；Windows 与 WSL 同机时会自动避开冲突的回环端口。Codex Desktop 放在 Windows
+目录、但 `cwd` 属于 WSL 的会话会标记为 WSL 执行并在导入后绑定到同名 WSL Node。各平台 Codex 只在
+内存投影中过滤本机无法表示的路径，PostgreSQL 中的权威会话保持完整。
+
 0.12.0 统一使用内嵌 OpenSSH，支持原生递归 SCP、SFTP 批处理、连接复用和端口转发；Go 共享实现
 直接位于 `node/internal/`，Android 是 `node/android/` 下的单一应用项目。节点升级保留身份和配置。
 

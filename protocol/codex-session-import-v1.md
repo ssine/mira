@@ -10,7 +10,8 @@ capability.
 1. The administrator asks Mira Server to scan one approved online Node.
 2. The Node walks `sessions/` and `archived_sessions/` below its detected Codex homes, accepts regular
    `rollout-*.jsonl` files, and returns at most 2,000 summaries. Summaries include `originator`,
-   `clientKind` (`desktop`, `cli`, `ide`, `subagent`, `unknown`), original cwd/version and `archived`.
+   `clientKind` (`desktop`, `cli`, `ide`, `subagent`, `unknown`), original cwd/version, inferred
+   `executionMode` and `archived`.
    `source: vscode` alone does not identify Desktop; `originator: Codex Desktop` does.
 3. The administrator selects one path. Server reads binary/base64 chunks through the reverse Node
    channel and incrementally decodes UTF-8/JSONL. Chunk size is a memory/backpressure setting,
@@ -29,8 +30,10 @@ capability.
    exposed as `legacy` to the current remote adapter because it does not yet advertise `list_turns`
    / `list_items`; the original history mode and records remain intact in import provenance.
 7. The thread becomes visible in `/v1/codex/threads` and can be resumed by a Mira-compatible Codex
-   App Server on any selected Node. The Web import list offers **Open conversation** after import;
-   it selects the source runtime and preserves its original cwd. Import alone does not run a model.
+   App Server on a platform-compatible selected Node. The Web import list offers **Open conversation**
+   after import and preserves its original cwd. When Codex Desktop stored a POSIX-cwd rollout on its
+   Windows side, Server treats Windows as the storage source but suggests/binds the approved WSL Node
+   with the same hostname as its execution runtime. Import alone does not run a model.
 
 This imports local **Codex Desktop** sessions, not ordinary cloud ChatGPT chats. Desktop source files
 are never rewritten or removed. Stop writing the source session while importing it. Fork/subagent
@@ -41,6 +44,13 @@ the child's body. Ancestor `session_meta` records are excluded. Canonical histor
 child's metadata adapted to legacy/copy semantics (history base and paginated cutoffs cleared).
 Fork/subagent parent IDs remain; only the selected child becomes a live thread. Ancestors need not
 already exist in PostgreSQL. Later ancestor turns are never copied into the fork.
+
+Storage location and execution location are deliberately independent. A Desktop rollout discovered
+through the Windows Node can belong to a WSL runtime when its authoritative metadata contains an
+absolute POSIX cwd. The inferred runtime is a UI/control-plane hint; it never rewrites the raw source
+record or canonical PostgreSQL history. Native Codex processes filter foreign cwd forms only from
+their local in-memory projection, so a Windows process never deserializes a POSIX `AbsolutePathBuf`
+and a Unix process never deserializes a Windows drive/UNC cwd.
 
 `codexSessions` adds `resolve` with `path` (source scope) and `rolloutId` (UUID filename suffix).
 It searches sessions/archives independently of the bounded summary page and rejects missing or

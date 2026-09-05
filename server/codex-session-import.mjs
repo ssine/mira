@@ -27,6 +27,63 @@ function validThreadId(value) {
   return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
+function inferredExecutionMode(session, sourceNode) {
+  if (typeof session.executionMode === "string" && session.executionMode.length > 0) {
+    return session.executionMode;
+  }
+  if (
+    sourceNode?.node_mode === "windows" &&
+    typeof session.cwd === "string" &&
+    /^\/(?!\/)/.test(session.cwd)
+  ) {
+    return "wsl";
+  }
+  return sourceNode?.node_mode ?? sourceNode?.platform ?? "unknown";
+}
+
+async function addSessionRuntimeHints(pool, sourceNodeId, sessions) {
+  const nodes = await pool.query(
+    `SELECT node_id, hostname, platform, node_mode, capabilities, last_seen_at,
+            COALESCE((channel_status->>'connected')::boolean, false) AS connected
+     FROM codex_nodes
+     WHERE approval_status = 'approved'
+     ORDER BY COALESCE((channel_status->>'connected')::boolean, false) DESC, last_seen_at DESC`,
+  );
+  const source = nodes.rows.find((node) => node.node_id === sourceNodeId);
+  return sessions.map((session) => {
+    const executionMode = inferredExecutionMode(session, source);
+    let suggestedRuntime = null;
+    if (executionMode === "wsl") {
+      suggestedRuntime = nodes.rows.find((node) =>
+        node.node_mode === "wsl" &&
+        node.capabilities?.appServer === true &&
+        (!source || node.hostname.toLowerCase() === source.hostname.toLowerCase())) ?? null;
+    }
+    return {
+      ...session,
+      executionMode,
+      storageNodeId: sourceNodeId,
+      suggestedRuntimeNodeId: suggestedRuntime?.node_id ?? null,
+    };
+  });
+}
+
+async function validImportRuntime(pool, runtimeNodeId) {
+  if (runtimeNodeId === null || runtimeNodeId === undefined || runtimeNodeId === "") return null;
+  if (!validThreadId(runtimeNodeId)) {
+    throw Object.assign(new Error("Invalid Codex runtime node id"), { statusCode: 400, code: "invalid_request" });
+  }
+  const result = await pool.query(
+    `SELECT node_id FROM codex_nodes
+     WHERE node_id=$1 AND approval_status='approved' AND capabilities->>'appServer'='true'`,
+    [runtimeNodeId],
+  );
+  if (result.rowCount === 0) {
+    throw Object.assign(new Error("Selected node cannot run Codex App Server"), { statusCode: 409, code: "capability_unavailable" });
+  }
+  return result.rows[0].node_id;
+}
+
 function baseInstructions(value) {
   if (typeof value === "string") return { text: value };
   if (value && typeof value === "object" && typeof value.text === "string") return value;
@@ -121,7 +178,8 @@ export async function scanCodexSessions(pool, capabilityService, principal, node
   const result = await capabilityService.invoke(principal, nodeId, "codexSessions", { action: "list" }, {
     request, timeoutMs: 120_000, auditMetadata: { purpose: "codex_session_scan" },
   });
-  const paths = (result.sessions ?? []).map((session) => session.path);
+  const sessions = await addSessionRuntimeHints(pool, nodeId, result.sessions ?? []);
+  const paths = sessions.map((session) => session.path);
   const imported = paths.length === 0 ? { rows: [] } : await pool.query(
     `SELECT DISTINCT ON (source_path) source_path, source_sha256, status, thread_id,
             store_id, source_size_bytes::text, source_modified_at, import_id, created_at
@@ -133,7 +191,7 @@ export async function scanCodexSessions(pool, capabilityService, principal, node
   const byPath = new Map(imported.rows.map((row) => [row.source_path, row]));
   return {
     ...result,
-    sessions: (result.sessions ?? []).map((session) => {
+    sessions: sessions.map((session) => {
       const row = byPath.get(session.path);
       return { ...session, import: row ? {
         importId: row.import_id, status: row.status, threadId: row.thread_id,
@@ -157,6 +215,10 @@ export async function importCodexSession(pool, capabilityService, principal, nod
   const summary = scan.sessions.find((session) => session.path === body.path);
   if (!summary) return { status: 404, body: { error: "Session was not found in a detected local Codex directory", code: "not_found" } };
   if (!validThreadId(summary.threadId)) return { status: 409, body: { error: "Invalid thread id", code: "invalid_session" } };
+  const runtimeNodeId = await validImportRuntime(
+    pool,
+    body.runtimeNodeId ?? summary.suggestedRuntimeNodeId,
+  );
   const staged = await stageSessionTransfer(pool, capabilityService, principal, nodeId, summary, storeId, request, context);
   try {
     const expanded = await stageSessionLineage(pool, capabilityService, principal, nodeId, summary, storeId, request, staged, context);
@@ -185,15 +247,25 @@ export async function importCodexSession(pool, capabilityService, principal, nod
       created, metadata: metadataPatch(meta, summary), normalize,
       codexVersion: summary.codexVersion || "local-jsonl-import",
     }, context);
+    if (runtimeNodeId) {
+      await pool.query(
+        `INSERT INTO mira_codex_thread_runtimes (store_id, thread_id, node_id, bound_at)
+         VALUES ($1,$2,$3,NOW())
+         ON CONFLICT (store_id,thread_id) DO UPDATE SET node_id=EXCLUDED.node_id,bound_at=EXCLUDED.bound_at`,
+        [storeId, meta.id, runtimeNodeId],
+      );
+    }
     await markImport(pool, staged.importId, "imported", committed.version);
     await appendAudit(pool, {
       action: "codex_session.imported", principal, targetNodeId: nodeId, threadId: meta.id, request,
-      metadata: { importId: staged.importId, storeId, itemCount: staged.count, sourceBytes: staged.sizeBytes },
+      metadata: { importId: staged.importId, storeId, itemCount: staged.count, sourceBytes: staged.sizeBytes,
+        executionMode: summary.executionMode, runtimeNodeId },
     });
     return { status: 200, body: {
       importId: staged.importId, storeId, threadId: meta.id, version: committed.version,
       duplicate: staged.duplicate || committed.noChange === true, itemCount: expanded.count, ancestorCount: expanded.ancestorCount,
       parentThreadId: parent ?? null,
+      runtimeNodeId,
     } };
   } catch (error) {
     await markImport(pool, staged.importId, "failed", null, error.name === "AbortError" ? "cancelled" : error.code ?? "import_failed");

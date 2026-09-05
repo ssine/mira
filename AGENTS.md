@@ -81,6 +81,9 @@ Web message submission is single-flight across App Server connection, thread cre
 Web-created threads carry a UUID `miraRequestId`; the broker strips the Mira-only field before Codex,
 coalesces an in-flight duplicate, and persists successful replay data in PostgreSQL. Do not weaken
 this to a button-only debounce: retries after a lost response must resolve to the original thread.
+Managed App Server ports are desired state, not a globally reserved host port. A Node must keep the
+listener on loopback and may choose another free loopback port when the requested one is occupied
+(notably when Windows and WSL localhost forwarding overlap); report the actual listener to Server.
 
 Codex remains a native process on the selected execution node. Mira does not reimplement Codex or
 turn model execution into a central monolith. The central service coordinates nodes and persists
@@ -102,6 +105,10 @@ PostgreSQL is the sole durable source of truth for Codex thread state and histor
 - Replacing or recreating a thread advances its generation. Reads must not combine items from
   different generations.
 - Parent thread ID, source kind and subagent identity are durable metadata, not UI-only annotations.
+- Every Codex process sees a platform-local in-memory projection of the canonical store. Filter cwd
+  values that its native `AbsolutePathBuf` cannot deserialize (Windows drive/UNC versus absolute
+  POSIX paths) without deleting or rewriting those threads in PostgreSQL. The central Web list stays
+  complete and users resume the filtered thread on a compatible execution Node.
 
 The v1 snapshot API is a compatibility adapter. The v2 event/delta API is the preferred persistence
 contract. See `protocol/thread-store-v2.md`.
@@ -117,6 +124,10 @@ Referenced Desktop forks follow upstream RolloutLineage: resolve immutable rollo
 Codex home, validate exact byte/ordinal cutoffs, skip ancestor metadata, and materialize a copied
 history under the child's identity. Preserve raw references and segment provenance (schema 14).
 Missing, ambiguous, cyclic or inconsistent sources fail without publishing a partial live thread.
+Treat the machine that stores a Desktop rollout separately from the machine that can execute it.
+Codex Desktop may store a WSL-originated rollout under Windows while its absolute POSIX `cwd` still
+requires the matching WSL Node. Scan results carry an execution-mode hint and imports bind that
+thread to the matching approved App Server Node when one is known.
 Web submission feedback is ephemeral UI state scoped to thread and turn: show it immediately and
 remove it on the first non-empty assistant prose, failure, completion or disconnect. Empty reasoning
 and ordinary lifecycle events must not become transcript cards.
