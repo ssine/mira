@@ -141,6 +141,7 @@ export async function manageThread(pool, storeId, threadId, action, body) {
       await client.query("DELETE FROM codex_thread_projections WHERE store_id=$1 AND thread_id=$2", [storeId, threadId]);
       await client.query("DELETE FROM codex_store_state_entries WHERE store_id=$1 AND thread_id=$2", [storeId, threadId]);
       await client.query("DELETE FROM mira_codex_thread_runtimes WHERE store_id=$1 AND thread_id=$2", [storeId, threadId]);
+      await client.query("DELETE FROM mira_thread_read_positions WHERE store_id=$1 AND thread_id=$2", [storeId, threadId]);
       await client.query("UPDATE mira_appserver_thread_start_requests SET response='{\"deleted\":true}'::jsonb WHERE store_id=$1 AND thread_id=$2", [storeId, threadId]);
       await client.query(`INSERT INTO mira_thread_erasures(store_id,thread_id,action_seq,through_event_seq)
         VALUES($1,$2,$3,$4)`, [storeId, threadId, recorded.rows[0].action_seq, head.version]);

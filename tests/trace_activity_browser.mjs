@@ -631,6 +631,50 @@ try {
     return second.getBoundingClientRect().top - first.getBoundingClientRect().bottom;
   });
   assert.ok(paragraphGap >= 7 && paragraphGap <= 9, `Markdown block separators must not add blank text lines: ${paragraphGap}`);
+  await page.setViewportSize({ width: 1800, height: 1000 });
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.clear();
+    h.upsertTrace("tables", "assistant", "Codex", [
+      "表格应当和正文使用同样的字号。", "",
+      "| 名称 | 状态 |", "| --- | --- |", "| Mira | 已完成 |", "",
+      `| ${Array.from({ length: 9 }, (_, i) => `机器运行信息 ${i + 1}`).join(" | ")} |`,
+      `| ${Array(9).fill("---").join(" | ")} |`,
+      `| ${Array(9).fill("这里是需要完整呈现的对话内容").join(" | ")} |`,
+    ].join("\n"), "");
+  });
+  const tableLayout = () => page.locator('[data-trace-key="tables"]').evaluate(card => {
+    const [small, wide] = card.querySelectorAll(".trace-table-scroll");
+    const bounds = node => ({ left: node.getBoundingClientRect().left, right: node.getBoundingClientRect().right, width: node.getBoundingClientRect().width });
+    const scroll = document.querySelector("#conversationScroll");
+    return { body: bounds(card), small: bounds(small), smallTable: bounds(small.querySelector("table")), wide: bounds(wide),
+      viewport: bounds(scroll), wideOverflow: wide.scrollWidth > wide.clientWidth,
+      fonts: [card.querySelector("p"), small.querySelector("th"), small.querySelector("td")].map(node => getComputedStyle(node).fontSize),
+      pageOverflow: document.documentElement.scrollWidth > innerWidth };
+  });
+  await page.waitForFunction(() => parseFloat(getComputedStyle(document.querySelector(".conversation-card")).getPropertyValue("--conversation-table-width")) > 1000);
+  let tableMetrics = await tableLayout();
+  assert.equal(new Set(tableMetrics.fonts).size, 1, "table headings, cells and prose share the same font size");
+  assert.ok(tableMetrics.small.width < tableMetrics.body.width, "short tables shrink to their contents");
+  assert.ok(Math.abs(tableMetrics.small.width - tableMetrics.smallTable.width) <= 3, "the short table border has no empty extension on the right");
+  assert.ok(tableMetrics.wide.width > tableMetrics.body.width + 100, "wide tables escape the prose measure");
+  assert.ok(tableMetrics.wide.left >= tableMetrics.viewport.left && tableMetrics.wide.right <= tableMetrics.viewport.right, "table expansion stays inside the chat workspace");
+  assert.equal(tableMetrics.pageOverflow, false);
+  if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
+    await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
+    await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/tables-desktop.png` });
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.waitForFunction(() => parseFloat(getComputedStyle(document.querySelector(".conversation-card")).getPropertyValue("--conversation-table-width")) < 390);
+  tableMetrics = await tableLayout();
+  assert.equal(tableMetrics.wideOverflow, true, "mobile wide tables scroll horizontally");
+  assert.equal(tableMetrics.pageOverflow, false);
+  assert.equal(new Set(tableMetrics.fonts).size, 1);
+  if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
+    await page.locator("#agentThreadDrawer").evaluate(drawer => Promise.all(drawer.getAnimations().map(animation => animation.finished.catch(() => {}))));
+    await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/tables-mobile.png` });
+  }
+  await page.setViewportSize({ width: 1440, height: 1100 });
   const fileReferences = await page.evaluate(() => {
     const h = window.traceHarness;
     h.clear();

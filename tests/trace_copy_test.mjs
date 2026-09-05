@@ -33,7 +33,7 @@ function fixture(clipboard) {
   });
   vm.runInContext(app.slice(start, end), context);
   function card(kind, text) {
-    const body = { classList: { toggle() {} } };
+    const body = { classList: { toggle() {} }, querySelectorAll: () => [] };
     const card = {
       dataset: { traceKind: kind },
       classList: { toggle() {} },

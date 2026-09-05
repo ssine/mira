@@ -6,6 +6,8 @@ import pg from "../server/node_modules/pg/lib/index.js";
 import { initializeDatabase } from "../server/db.mjs";
 import { putSnapshot, getSnapshot, getStoreHead, commitDelta, rebuildSnapshot } from "../server/thread-store.mjs";
 import { listImportedThreads } from "../server/codex-session-import.mjs";
+import { markThreadRead } from "../server/thread-read-state.mjs";
+import { manageThread } from "../server/thread-management.mjs";
 const databaseUrl = process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error("a disposable database is required");
 const owner = new pg.Pool({ connectionString: databaseUrl });
@@ -41,6 +43,9 @@ try {
   assert.equal((await pool.query("SELECT 1 FROM pg_indexes WHERE indexname='codex_thread_events_lifecycle_idx'")).rowCount, 1);
   const read = async () => Object.fromEntries((await listImportedThreads(pool, store)).map(row => [Object.keys(ids).find(name => ids[name] === row.threadId), row]));
   let rows = await read();
+  assert.equal(rows.idle.readState.unread, false, "migration establishes an already-read baseline for old history");
+  assert.equal(rows.idle.readState.readItemCount, 2);
+  assert.equal(rows.late.readState.latestItemSeq, 2, "a nested future tool marker with raw NUL is not a visible update");
   for (const name of ["running", "late", "replacement"]) assert.equal(rows[name].activity.state, "running", name);
   assert.equal(rows.idle.activity.state, "idle");
   assert.equal(rows.failed.activity.state, "failed");
@@ -62,6 +67,17 @@ try {
   assert.equal((await commitDelta(pool, store, changes, requestHeaders)).status, 200);
   assert.equal((await commitDelta(pool, store, changes, requestHeaders)).body.duplicate, true);
   assert.equal((await read()).running.activity.state, "idle", "a new immutable count invalidates the running cache");
+  assert.equal((await read()).running.readState.unread, true, "completion after the read baseline is unread");
+  const readHead = await getStoreHead(pool, store);
+  assert.equal((await markThreadRead(pool, store, ids.running, { generation: 1, itemCount: 1 })).status, 200);
+  assert.equal((await read()).running.readState.unread, true, "reading an older snapshot cannot consume a later result");
+  assert.equal((await markThreadRead(pool, store, ids.running, { generation: 1, itemCount: 2 })).status, 200);
+  await Promise.all([1, 2, 1].map(itemCount => markThreadRead(pool, store, ids.running, { generation: 1, itemCount })));
+  assert.equal((await read()).running.readState.readItemCount, 2, "late or concurrent clients cannot move the read cursor backward");
+  assert.equal((await read()).running.readState.unread, false);
+  assert.equal((await markThreadRead(pool, store, ids.running, { generation: 1, itemCount: 3 })).status, 409);
+  assert.equal((await markThreadRead(pool, store, ids.running, { generation: 0, itemCount: 2 })).status, 400);
+  assert.deepEqual(await getStoreHead(pool, store), readHead, "reading never changes canonical history or store versions");
   const before = await getSnapshot(pool, store);
   assert.deepEqual(before.snapshot.histories[ids.idle], snapshot.histories[ids.idle]);
   before.snapshot.histories[ids.replacement] = [event("task_started", "replacement-next"), event("task_complete", "replacement-next")];
@@ -69,8 +85,27 @@ try {
   rows = await read();
   assert.equal(rows.replacement.activity.turnId, "replacement-next");
   assert.equal(rows.replacement.activity.state, "idle");
+  assert.equal(rows.replacement.readState.unread, true, "a replacement generation cannot inherit the old read position");
+  assert.equal((await markThreadRead(pool, store, ids.replacement, { generation: 1, itemCount: 1 })).status, 409);
+  assert.equal((await markThreadRead(pool, store, ids.replacement, { generation: rows.replacement.generation, itemCount: 2 })).status, 200);
   await rebuildSnapshot(pool, store);
   assert.equal((await read()).replacement.activity.state, "idle");
+  assert.equal((await read()).replacement.readState.unread, false, "read positions survive projection rebuilds");
+  const after = await getStoreHead(pool, store);
+  const append = (threadId, items) => ({ threadId, mode: "append", expectedGeneration: after.historyManifest[threadId].generation,
+    expectedItemCount: after.historyManifest[threadId].itemCount, items });
+  const quietUpdate = await commitDelta(pool, store, { expectedVersion: after.version,
+    stateChanges: [{ path: ["names", ids.running], mode: "set", conflictPolicy: "compareAndSwap", expected: { exists: false }, value: "Updated title" }],
+    historyChanges: [append(ids.running, [event("token_count", "running"), event("error", "running", { will_retry: true })]),
+      append(ids.child, [{ type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text: "Child result\u0000" }] } }])],
+  }, headers());
+  assert.equal(quietUpdate.status, 200, JSON.stringify(quietUpdate.body));
+  rows = await read();
+  assert.equal(rows.running.readState.unread, false, "title changes, token counts and retry notifications do not create unread messages");
+  assert.equal(rows.child.readState.unread, true, "subagent replies retain their own unread state");
+  assert.equal((await manageThread(pool, store, ids.child, "delete", { generation: rows.child.generation, itemCount: rows.child.itemCount, operationId: crypto.randomUUID() })).status, 200);
+  assert.equal((await markThreadRead(pool, store, ids.child, { generation: rows.child.generation, itemCount: rows.child.itemCount })).status, 404);
+  assert.equal((await pool.query("SELECT 1 FROM mira_thread_read_positions WHERE store_id=$1 AND thread_id=$2", [store,ids.child])).rowCount, 0);
   assert.deepEqual((await getSnapshot(pool, store)).snapshot.histories[ids.idle], snapshot.histories[ids.idle]);
   console.log("PASS: lifecycle migration/backfill, CLI/subagent activity, raw NUL preservation, old completion isolation, Node offline/restart, v1/v2 commits, idempotency, generations and rebuild");
 } finally {

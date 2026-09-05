@@ -149,6 +149,9 @@ const agent = {
   threadId: null,
   turnId: null,
   persistedActivity: new Map(),
+  readStates: new Map(),
+  readTimer: null,
+  readRequest: null,
   liveActivity: new Map(),
   activityTimer: null,
   activityRequest: null,
@@ -307,6 +310,7 @@ function recordLiveActivity(threadId, turnId, state) {
 }
 
 function acceptThreadActivity(thread, checkedAt = Date.now()) {
+  if (thread.readState) acceptThreadReadState(thread.threadId, thread.readState);
   const incoming = thread.activity;
   if (!incoming) return;
   const previous = agent.persistedActivity.get(thread.threadId);
@@ -322,14 +326,72 @@ function acceptThreadActivity(thread, checkedAt = Date.now()) {
   }
 }
 
-function renderThreadActivityIcons() {
-  for (const icon of $("#agentThreadList").querySelectorAll("[data-thread-activity]")) {
-    const activity = threadActivity(icon.dataset.threadActivity);
-    icon.hidden = !["running", "unknown", "failed", "interrupted"].includes(activity.state);
-    icon.dataset.state = activity.state;
-    icon.title = activityLabel(activity);
-    icon.setAttribute("aria-label", icon.title);
+function renderThreadStates() {
+  for (const label of $("#agentThreadList").querySelectorAll("[data-thread-activity]")) {
+    const id = label.dataset.threadActivity;
+    const activity = threadActivity(id);
+    const read = agent.readStates.get(id);
+    const unread = Boolean(read && read.latestItemSeq > read.readItemCount);
+    const row = label.closest(".agent-thread-row");
+    row.dataset.state = activity.state;
+    row.dataset.unread = String(unread);
+    const stateLabel = activity.state === "running" ? `进行中${unread ? " · 有新内容" : ""}`
+      : activity.state === "failed" ? `执行失败${unread ? " · 未读" : ""}`
+      : activity.state === "interrupted" ? `已中断${unread ? " · 未读" : ""}`
+      : activity.state === "unknown" ? `状态待确认${unread ? " · 未读" : ""}`
+      : unread ? `${activity.turnId ? "已完成" : "有更新"} · 未读` : "";
+    label.textContent = stateLabel || label.dataset.recency || "";
+    label.dataset.state = activity.state;
+    label.title = stateLabel ? activity.state === "idle" ? stateLabel : activityLabel(activity) : label.dataset.recency || "";
   }
+  scheduleThreadRead();
+}
+
+function acceptThreadReadState(threadId, state) {
+  if (!Number.isSafeInteger(state.generation)) return;
+  const previous = agent.readStates.get(threadId);
+  if (previous && previous.generation > state.generation) return;
+  const same = previous?.generation === state.generation;
+  agent.readStates.set(threadId, {
+    generation: state.generation,
+    latestItemSeq: Math.max(same ? previous.latestItemSeq : 0, state.latestItemSeq ?? 0),
+    readItemCount: Math.max(same ? previous.readItemCount : 0, state.readItemCount ?? 0),
+  });
+}
+
+function visibleReadPosition() {
+  if (document.hidden || !document.hasFocus() || document.body.dataset.view !== "agentView" ||
+      (!agentThreadDrawerWide.matches && agentThreadDrawerOpen) || document.querySelector("dialog[open]") ||
+      agent.transcriptGap || agent.transcriptLoadingOlder || agent.transcriptThreadId !== agent.threadId ||
+      !traceNearBottom(null, 24)) return null;
+  const generation = agent.transcriptGeneration, itemCount = agent.transcriptActivityCount;
+  const state = agent.readStates.get(agent.threadId);
+  if (!state || state.generation !== generation || !Number.isSafeInteger(itemCount) ||
+      itemCount <= state.readItemCount || state.latestItemSeq <= state.readItemCount) return null;
+  return { threadId: agent.threadId, generation, itemCount };
+}
+
+function scheduleThreadRead() {
+  const position = visibleReadPosition();
+  if (!position) { clearTimeout(agent.readTimer); agent.readTimer = null; return; }
+  if (agent.readTimer || agent.readRequest) return;
+  // A foreground paint and a short dwell prevent selection alone from reading
+  // unseen content. Only acknowledge the canonical snapshot actually displayed.
+  agent.readTimer = setTimeout(async () => {
+    agent.readTimer = null;
+    const current = visibleReadPosition();
+    if (!current || current.threadId !== position.threadId || current.generation !== position.generation) return;
+    const operation = api(`/v1/codex/threads/${encodeURIComponent(position.threadId)}/read?storeId=personal`, {
+      method: "POST", body: JSON.stringify({ generation: position.generation, itemCount: position.itemCount }), signal: AbortSignal.timeout(12_000),
+    });
+    agent.readRequest = operation;
+    try {
+      const saved = await operation;
+      acceptThreadReadState(position.threadId, saved);
+      renderThreadStates();
+    } catch { /* Keep unread until acknowledged; the next poll/focus retries. */ }
+    finally { if (agent.readRequest === operation) agent.readRequest = null; }
+  }, 800);
 }
 
 function scheduleThreadActivity(delay = threadActivity(agent.threadId).state === "running" ? 2_000 : 5_000) {
@@ -388,7 +450,7 @@ function observeTurnActivity(method, params) {
   if (phase) agent.turnActivity.set(turnId, phase);
   if (phase === "failed") {
     recordLiveActivity(notificationThreadId(params), turnId, "failed");
-    renderThreadActivityIcons();
+    renderThreadStates();
   }
 }
 
@@ -471,6 +533,7 @@ function show(view) {
   if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
   else if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
   syncAccountSidebar();
+  scheduleThreadRead();
 }
 
 function setAgentThreadDrawer(open, { focus = true } = {}) {
@@ -495,6 +558,7 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   else if (!open && document.body.dataset.view === "agentView" && document.activeElement && drawer.contains(document.activeElement)) {
     toggle.focus({ preventScroll: true });
   }
+  scheduleThreadRead();
 }
 
 function closeAgentThreadDrawerOnMobile() {
@@ -1839,7 +1903,7 @@ function syncActiveTurnUi() {
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
   syncConversationSendUi();
   renderReplyProgress();
-  renderThreadActivityIcons();
+  renderThreadStates();
 }
 
 function syncConversationSendUi() {
@@ -1887,6 +1951,9 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
   // visible (disabled offline) until a completion event or a fresh turn read.
   if (resetTurnState) {
     agent.persistedActivity.clear();
+    agent.readStates.clear();
+    clearTimeout(agent.readTimer);
+    agent.readTimer = null;
     agent.liveActivity.clear();
     agent.activityCheckedAt = 0;
     agent.activeTurns.clear();
@@ -2135,6 +2202,14 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
     } });
     node.innerHTML = DOMPurify.sanitize(html);
     decorateTraceFileReferences(node, fileReferences);
+    for (const table of node.querySelectorAll("table")) {
+      const scroll = element("div", "trace-table-scroll");
+      scroll.tabIndex = 0;
+      scroll.setAttribute("role", "region");
+      scroll.setAttribute("aria-label", "表格，可横向滚动");
+      table.replaceWith(scroll);
+      scroll.append(table);
+    }
   }
   else node.textContent = value;
 }
@@ -2559,6 +2634,8 @@ function renderThread(thread) {
 }
 
 function resetAgentTranscript(threadId = null) {
+  clearTimeout(agent.readTimer);
+  agent.readTimer = null;
   if ($("#conversationDetails").open) {
     if (threadId) void openConversationDetails(threadId);
     else $("#conversationDetails").close();
@@ -2853,6 +2930,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     agent.transcriptTailVersion = tailVersion;
     agent.transcriptActivityCount = transcript.itemCount ?? null;
   }
+  requestAnimationFrame(scheduleThreadRead);
   return transcript;
 }
 
@@ -3265,12 +3343,11 @@ function renderAgentThreads() {
       button.dataset.threadId = thread.threadId;
       if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
       button.title = thread.title || "未命名会话";
-      const activityIcon = element("i", "thread-activity-icon");
-      activityIcon.dataset.threadActivity = thread.threadId;
-      activityIcon.setAttribute("role", "img");
-      button.append(element("strong", "", button.title), element("span", "", agent.titleJobs.has(thread.threadId)
-        ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
-      button.append(activityIcon);
+      const status = element("span", "thread-state-label");
+      status.dataset.threadActivity = thread.threadId;
+      status.dataset.recency = agent.titleJobs.has(thread.threadId)
+        ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`;
+      button.append(element("strong", "", button.title), status);
       const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
       menu.type = "button";
       menu.dataset.threadMenu = thread.threadId;
@@ -3283,7 +3360,7 @@ function renderAgentThreads() {
     project.append(conversations);
     list.append(project);
   }
-  renderThreadActivityIcons();
+  renderThreadStates();
 }
 
 function openThreadWindow(event, link) {
@@ -4418,10 +4495,16 @@ conversationOverlayObserver.observe($(".conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
 const conversationWidthObserver = new ResizeObserver(() => {
   const scroll = traceScroller();
+  const style = getComputedStyle(scroll);
+  $(".conversation-card").style.setProperty("--conversation-table-width", `${Math.max(0, scroll.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))}px`);
   $(".conversation-card").style.setProperty("--conversation-scrollbar-width", `${scroll.offsetWidth - scroll.clientWidth}px`);
 });
 conversationWidthObserver.observe(traceScroller());
 traceScroller().addEventListener("scroll", scheduleOlderTranscriptLoad, { passive: true });
+traceScroller().addEventListener("scroll", scheduleThreadRead, { passive: true });
+window.addEventListener("focus", scheduleThreadRead);
+window.addEventListener("blur", scheduleThreadRead);
+document.addEventListener("visibilitychange", scheduleThreadRead);
 $("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
 $("#agentThreadList").addEventListener("click", (event) => {
   const project = event.target.closest("button[data-project-new]");

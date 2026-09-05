@@ -22,6 +22,8 @@
   --warning-soft: #fff5df;
   --danger: #a52a32;
   --danger-soft: #fff0f1;
+  --thread-running: #edf5fc;
+  --thread-unread: #edf7f4;
   --glass: rgb(250 252 255 / 64%);
   --glass-header: rgb(250 252 255 / 42%);
   --glass-header-filter: blur(2px) saturate(105%);
@@ -69,6 +71,8 @@
   --warning-soft: #3b3020;
   --danger: #f1a5ad;
   --danger-soft: #40252a;
+  --thread-running: #233444;
+  --thread-unread: #243a33;
   --glass: rgb(40 44 50 / 68%);
   --glass-header: rgb(40 44 50 / 46%);
   --glass-highlight: rgb(255 255 255 / 8%);
@@ -418,9 +422,15 @@ tbody tr:hover { background: var(--hover); }
 .agent-thread-list { flex: 1; align-content: start; }
 .agent-thread-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; }
 .agent-thread { min-width: 0; display: grid; gap: 3px; width: 100%; padding: 8px 8px 8px 20px; border: 0; border-left: 2px solid transparent; background: transparent; text-align: left; }
-.agent-thread:hover { background: var(--hover); }
-.agent-thread-row:has(.agent-thread.active) { background: var(--accent-soft); }
+.agent-thread-row:hover { background: var(--hover); }
+.agent-thread-row[data-unread="true"] { background: var(--thread-unread); }
+.agent-thread-row[data-state="running"] { background: var(--thread-running); }
+.agent-thread-row[data-state="failed"] { background: var(--danger-soft); }
+.agent-thread-row[data-state="unknown"], .agent-thread-row[data-state="interrupted"] { background: var(--surface-soft); }
+.agent-thread-row:has(.agent-thread.active) { box-shadow: inset 0 0 0 1px var(--line-strong); }
 .agent-thread.active { border-left-color: var(--accent); }
+.agent-thread-row[data-unread="true"] strong { font-weight: 650; }
+.thread-state-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-thread strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 500; }
 .local-session strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
 .agent-thread span, .local-session span { color: var(--muted); font-size: 9px; }
@@ -506,9 +516,11 @@ progress { width: 100%; accent-color: var(--accent); }
 .markdown-body blockquote { margin: 10px 0; padding: 7px 12px; border-left: 2px solid var(--accent); background: var(--surface); color: var(--muted); }
 .markdown-body a { color: var(--accent-hover); text-underline-offset: 2px; }
 .markdown-body hr { margin: 14px 0; border: 0; border-top: 1px solid var(--line); }
-.markdown-body table { display: block; max-width: 100%; margin: 10px 0; overflow: auto; border: 1px solid var(--line); border-collapse: collapse; font-size: 12px; }
-.markdown-body th, .markdown-body td { min-width: 100px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line); text-align: left; }
-.markdown-body th { background: var(--surface); font-weight: 600; }
+.trace-table-scroll { width: max-content; max-width: 100%; margin: 10px 0; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-control); }
+.trace-card.assistant > .markdown-body > .trace-table-scroll { max-width: var(--conversation-table-width, 100%); translate: min(0px, calc((min(808px, var(--conversation-table-width, 100%)) - 100%) / 2)) 0; }
+.markdown-body table { width: max-content; margin: 0; border: 0; border-collapse: collapse; font-size: inherit; line-height: inherit; }
+.markdown-body th, .markdown-body td { max-width: 34em; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line); text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.markdown-body th { position: static; background: var(--surface); color: var(--text); font-size: inherit; font-weight: 600; }
 .history-loader{flex:0 0 auto;display:flex;align-items:center;justify-content:center;min-height:40px;padding:0 0 10px}
 .history-load-status { color: var(--muted); font-size: 10px; }
 .history-load-button { min-height: 30px; padding: 5px 11px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--accent-hover); font-size: 10px; }
@@ -532,12 +544,6 @@ progress { width: 100%; accent-color: var(--accent); }
 #conversationProgressTime { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reply-spinner { width: 11px; height: 11px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: reply-spin 1s linear infinite; }
 .activity-unknown .reply-spinner { animation: none; border-color: var(--muted); border-style: dotted; }
-.agent-thread:has(.thread-activity-icon:not([hidden])) { position: relative; padding-right: 24px; }
-.thread-activity-icon { position: absolute; right: 6px; top: 12px; width: 10px; height: 10px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; }
-.thread-activity-icon[data-state="running"] { animation: reply-spin 1s linear infinite; }
-.thread-activity-icon[data-state="unknown"] { border-color: var(--muted); border-style: dotted; }
-.thread-activity-icon[data-state="failed"] { border-color: var(--danger); }
-.thread-activity-icon[data-state="interrupted"] { border-color: var(--muted); border-radius: 2px; }
 .conversation-drop-zone { border: 1px solid color-mix(in srgb, var(--input-border) 55%, var(--canvas)); border-radius: 8px; background: var(--canvas); box-shadow: 0 2px 8px rgb(22 34 52 / 4%); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }
 .conversation-drop-zone.dragging { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent), 0 3px 12px rgb(22 34 52 / 5%); }
 .conversation-drop-zone.dragging { background: var(--accent-soft); }
@@ -776,7 +782,6 @@ progress { width: 100%; accent-color: var(--accent); }
 .thread-project-threads { margin: 4px 8px 6px; }
 .thread-project-threads .agent-thread-row { position: relative; margin-block: 2px; border-radius: var(--radius-control); }
 .thread-project-threads .agent-thread { min-height: 48px; padding-left: 4px; border-radius: var(--radius-control); }
-.thread-project-threads .agent-thread.active strong { color: var(--accent-hover); font-weight: 600; }
 .thread-project-threads .agent-thread span { font-size: 10px; }
 .thread-project-empty { margin: 0; padding: 10px 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .thread-menu-toggle { margin-right: 5px; }

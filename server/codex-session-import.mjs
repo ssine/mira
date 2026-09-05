@@ -5,6 +5,7 @@ import { assertThreadsNotDeleted, commitDelta, commitImportedHistory, getStoreHe
 import { stageSessionTransfer } from "./session-transfer.mjs";
 import { stageSessionLineage } from "./session-lineage.mjs";
 import { addThreadActivities } from "./thread-activity.mjs";
+import { addThreadReadStates } from "./thread-read-state.mjs";
 
 const defaultStoreId = process.env.MIRA_CODEX_STORE_ID ?? "personal";
 
@@ -389,7 +390,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
      ORDER BY activity.updated_at DESC NULLS LAST, projections.thread_id DESC LIMIT $2`,
     [id, limit, threadId, archived],
   );
-  return addThreadActivities(pool, id, result.rows.map((row) => ({
+  return addThreadReadStates(pool, id, await addThreadActivities(pool, id, result.rows.map((row) => ({
     threadId: row.thread_id, parentThreadId: row.parent_thread_id,
     sourceKind: row.source_kind, title: row.title, name: row.name, archived: row.archived, cwd: row.cwd,
     itemCount: Number(row.item_count), generation: Number(row.active_generation),
@@ -398,7 +399,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,
     importedAt: row.imported_at?.toISOString() ?? null,
     runtimeNodeId: row.runtime_node_id, runtimeBoundAt: row.runtime_bound_at?.toISOString() ?? null,
-  })));
+  }))));
 }
 
 export { defaultStoreId };
