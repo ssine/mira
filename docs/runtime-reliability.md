@@ -155,6 +155,24 @@ Cache warmup is not a release promotion policy. Codex patch revisions remain
 immutable, and deployment must verify the runtime lock and the complete canonical
 package before switching an idle node. Never interrupt active user turns to update.
 
+### Publish an existing verified runtime without rebuilding
+
+After a trusted `main` Codex runtime run has passed **both platforms and packaging**,
+dispatch `promote-codex-release.yml` on `main` with its numeric `source_run` ID.
+This is separate from the Mira Node release promotion workflow. The current runtime
+lock and patch must still match that source commit, which must be an ancestor of
+the promotion checkout. Fork/PR/topic-branch, failed, partial and expired builds are
+rejected. The GitHub artifact digest, release checksums, canonical manifests and
+every archived file are checked without executing downloaded binaries.
+
+Publication uses the workflow's `GITHUB_TOKEN`, so creating the runtime tag does
+not trigger another full build. Assets first enter a draft and are downloaded back
+for byte-for-byte verification before publication. A partial upload may resume only
+the same source-run draft; no asset is overwritten, and an existing public release
+is refused. Codex is always published with `--latest=false`. Nodes must still pass
+platform-specific acceptance and an idle check before activation. This workflow
+does not deploy nodes, rebuild clients or change any production configuration.
+
 Compiler objects are not uploaded individually to GHA. The initial warmup observed
 hundreds of failed cache writes and repeated minutes with about 200 created entries,
 matching GitHub's [per-repository cache upload limit](https://docs.github.com/en/actions/reference/limits).

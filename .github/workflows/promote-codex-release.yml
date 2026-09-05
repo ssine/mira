@@ -1,0 +1,95 @@
+name: Publish verified Codex runtime
+on:
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: Successful main Codex runtime run containing mira-codex-release
+        required: true
+        type: string
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: mira-codex-promotion
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      SOURCE_RUN: ${{ inputs.source_run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Test promotion validator
+        run: python3 -m unittest discover -s tests -p codex_promotion_test.py
+      - name: Verify trusted successful source and unchanged runtime lock
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          metadata="$RUNNER_TEMP/codex-promotion"
+          mkdir "$metadata"
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN" > "$metadata/run.json"
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN/jobs?filter=latest&per_page=100" --paginate --slurp |
+            jq '[.[].jobs[]]' > "$metadata/jobs.json"
+          gh api "repos/$GH_REPO/actions/runs/$SOURCE_RUN/artifacts?per_page=100" --paginate --slurp |
+            jq -e '[.[].artifacts[] | select(.name == "mira-codex-release")] | if length == 1 then .[0] else error("Expected one release artifact") end' > "$metadata/artifact.json"
+          commit=$(jq -r .head_sha "$metadata/run.json")
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$commit" HEAD
+          git show "$commit:node/internal/codex-runtime.json" > "$metadata/lock.json"
+          cmp node/internal/codex-runtime.json "$metadata/lock.json"
+          node scripts/check-codex-runtime.mjs
+          git diff --exit-code "$commit" HEAD -- CODEX_VERSION patches/codex/ node/internal/codex-runtime.json
+          python3 scripts/verify-codex-promotion.py --metadata "$metadata" --repo "$GH_REPO"
+      - name: Download and verify artifact, archives and every canonical file
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/codex-promotion"
+          artifact=$(jq -r .id "$metadata/artifact.json")
+          [[ "$artifact" =~ ^[0-9]+$ ]]
+          gh api "repos/$GH_REPO/actions/artifacts/$artifact/zip" > "$metadata/release.zip"
+          python3 scripts/verify-codex-promotion.py --metadata "$metadata" --repo "$GH_REPO" \
+            --archive "$metadata/release.zip" --output "$metadata/release"
+      - name: Upload a verified draft without replacing any asset, then publish
+        run: |
+          set -euo pipefail
+          metadata="$RUNNER_TEMP/codex-promotion"
+          commit=$(jq -r .head_sha "$metadata/run.json")
+          version=$(jq -r .version "$metadata/lock.json")
+          tag="codex-v$version"
+          marker="Verified source run $SOURCE_RUN ($commit)."
+          if git rev-parse --verify "refs/tags/$tag" >/dev/null 2>&1; then
+            test "$(git rev-parse "refs/tags/$tag^{commit}")" = "$commit"
+          fi
+          gh api "repos/$GH_REPO/releases?per_page=100" --paginate --slurp |
+            jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' > "$metadata/existing.json"
+          count=$(jq length "$metadata/existing.json")
+          if [[ "$count" == 0 ]]; then
+            # The workflow GITHUB_TOKEN avoids a tag-triggered full rebuild.
+            gh release create "$tag" --target "$commit" --draft --latest=false \
+              --title "Mira-compatible Codex $version" \
+              --notes "$marker Independent optional Codex runtime, not a Mira Node/Server/APK update. Keep each complete canonical package together. Source baseline and patch are recorded in this tag; upstream LICENSE and NOTICE accompany the assets."
+          else
+            test "$count" = 1
+            jq -e --arg commit "$commit" --arg marker "$marker" \
+              '.[0] | .draft == true and .target_commitish == $commit and (.body | startswith($marker))' "$metadata/existing.json"
+          fi
+          gh release view "$tag" --json assets > "$metadata/assets.json"
+          for file in "$metadata/release/"*; do
+            name=$(basename "$file")
+            if ! jq -e --arg name "$name" '.assets[] | select(.name == $name)' "$metadata/assets.json" >/dev/null; then
+              gh release upload "$tag" "$file"
+            fi
+          done
+          # Read back uploaded bytes, including any assets from a prior partial attempt.
+          mkdir "$metadata/uploaded"
+          gh release download "$tag" --dir "$metadata/uploaded"
+          diff -qr "$metadata/release" "$metadata/uploaded"
+          gh release edit "$tag" --draft=false --latest=false
+          echo "Published $tag from verified run $SOURCE_RUN ($commit), without rebuilding." >> "$GITHUB_STEP_SUMMARY"
