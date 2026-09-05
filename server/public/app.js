@@ -2,7 +2,7 @@ import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/vendor/marked.js";
-import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
+import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
@@ -2042,16 +2042,6 @@ function createTraceCopyButton(card) {
   return button;
 }
 
-const traceClockFormatter = new Intl.DateTimeFormat("zh-CN", {
-  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
-});
-
-function traceClock(value) {
-  if (value === null || value === undefined || value === "") return "";
-  const date = value instanceof Date ? value : new Date(value);
-  return Number.isFinite(date.getTime()) ? traceClockFormatter.format(date) : "";
-}
-
 function setTraceMetadata(card, options = {}) {
   const footer = card.querySelector(".trace-footer");
   if (!footer) return;
@@ -2292,10 +2282,11 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   updateToolGroup(card.closest(".tool-group"));
   for (const [index, source] of (options.images ?? []).entries()) {
     const imageKey = `${key}:image:${index}`;
-    const existingImage = trace.querySelector(`[data-trace-key="${CSS.escape(imageKey)}"]`);
+    const existingImage = trace.querySelector(`[data-trace-key="${CSS.escape(imageKey)}"]`) ?? options.imageCards?.get(imageKey);
     const preview = existingImage ?? upsertTrace(imageKey, "image", "图片", source.path || "图片", "", {
       turnId: options.turnId, autoScroll: false,
     });
+    if (!trace.contains(preview)) trace.append(preview);
     traceImages.mount(preview.querySelector(".trace-body"), source, conversationNodeCandidates());
   }
   if (kind === "assistant" && !options.deferTurnFooter) refreshTurnFooters(options.turnId);
@@ -2690,6 +2681,10 @@ function scheduleOlderTranscriptLoad() {
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
   const previousCards = [...existingTrace.querySelectorAll(".trace-card")];
+  // Reattach decoded images synchronously so the image observer retains their
+  // DOM, pending reads and object URLs across canonical event reconciliation.
+  const imageCards = new Map(previousCards.filter((card) => card.dataset.traceKind === "image")
+    .map((card) => [card.dataset.traceKey, card]));
   const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
     ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction), .trace-card[data-pending-user="true"]')]
     : [];
@@ -2714,7 +2709,7 @@ function renderTranscript(fallbackThread, options = {}) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, images: item.images, turnId: item.turnId,
+      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, images: item.images, imageCards, turnId: item.turnId,
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
       ...(Number.isFinite(item.turnElapsedMs) ? {
@@ -4579,8 +4574,25 @@ $("#conversationDropZone").addEventListener("drop", (event) => {
   addComposerFiles(event.dataTransfer?.files ?? []);
 });
 $("#nodeFileClose").addEventListener("click", () => $("#nodeFileDialog").close());
+let nodeFileBackdropPointer = null;
+function isNodeFileBackdrop(event) {
+  const dialog = $("#nodeFileDialog");
+  const bounds = dialog.getBoundingClientRect();
+  return event.target === dialog && (event.clientX < bounds.left || event.clientX > bounds.right ||
+    event.clientY < bounds.top || event.clientY > bounds.bottom);
+}
+$("#nodeFileDialog").addEventListener("pointerdown", (event) => {
+  nodeFileBackdropPointer = event.isPrimary && event.button === 0 && isNodeFileBackdrop(event) ? event.pointerId : null;
+});
+$("#nodeFileDialog").addEventListener("pointercancel", () => { nodeFileBackdropPointer = null; });
+$("#nodeFileDialog").addEventListener("click", (event) => {
+  if (nodeFileBackdropPointer !== null && (event.pointerId === undefined || nodeFileBackdropPointer === event.pointerId) && isNodeFileBackdrop(event)) {
+    $("#nodeFileDialog").close();
+  }
+  nodeFileBackdropPointer = null;
+});
 $("#nodeFileTextMore").addEventListener("click", () => loadMoreFilePreview().catch((error) => toast(error.message)));
-$("#nodeFileDialog").addEventListener("close", resetNodeFileDialog);
+$("#nodeFileDialog").addEventListener("close", () => { nodeFileBackdropPointer = null; resetNodeFileDialog(); });
 $("#agentInterrupt").addEventListener("click", async () => {
   const threadId = agent.threadId;
   const turnId = agent.turnId;

@@ -50,6 +50,26 @@ export function formatActivityDuration(milliseconds) {
   return seconds < 60 ? `${Number(seconds.toFixed(1))} 秒` : `${Math.floor(seconds / 60)} 分 ${Math.floor(seconds % 60)} 秒`;
 }
 
+const traceClockFormatter = new Intl.DateTimeFormat("zh-CN", {
+  hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+});
+const traceWeekdayFormatter = new Intl.DateTimeFormat("zh-CN", { weekday: "long" });
+
+export function formatTraceTimestamp(value, now = new Date()) {
+  if (value === null || value === undefined || value === "") return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  // Compare local calendar dates, including across daylight-saving changes.
+  const day = (time) => Date.UTC(time.getFullYear(), time.getMonth(), time.getDate()) / 86400_000;
+  const daysAgo = day(now) - day(date);
+  const clock = traceClockFormatter.format(date);
+  if (daysAgo === 0) return clock;
+  if (daysAgo > 0 && daysAgo <= 7) return `${traceWeekdayFormatter.format(date)} ${clock}`;
+  const year = date.getFullYear() === now.getFullYear() ? "" : `${date.getFullYear()}/`;
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  return `${year}${month}/${String(date.getDate()).padStart(2, "0")} ${clock}`;
+}
+
 function durationMs(item) {
   const value = item.durationMs ?? item.duration_ms;
   if (Number.isFinite(value) && value >= 0) return value;

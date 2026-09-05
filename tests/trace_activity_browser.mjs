@@ -1297,7 +1297,7 @@ try {
     await historyPage.close();
   }
   {
-    const imagePage = await browser.newPage({ viewport: { width: 1100, height: 850 } });
+    const imagePage = await browser.newPage({ viewport: { width: 1100, height: 850 }, hasTouch: true });
     imagePage.on("pageerror", (error) => errors.push(error.message));
     await imagePage.route(`http://127.0.0.1:${server.address().port}/`, async (route) => {
       const response = await route.fetch();
@@ -1350,6 +1350,22 @@ try {
     assert.ok((await imagePage.locator("#nodeFileImage").boundingBox()).height > compactHeight, "click opens a larger in-page preview");
     assert.equal(await imagePage.evaluate(() => window.imageReads.length), 2, "preview reuses the decoded image without another Node request");
     assert.equal(await imagePage.context().pages().length, 1, "preview does not open another window");
+    await imagePage.locator("#nodeFileImage").click();
+    assert.equal(await imagePage.locator("#nodeFileDialog").evaluate((dialog) => dialog.open), true, "clicking the image keeps the preview open");
+    await imagePage.locator(".node-file-dialog-head").click({ position: { x: 5, y: 5 } });
+    const downloadEvent = imagePage.waitForEvent("download");
+    await imagePage.locator("#nodeFileDownload").click();
+    assert.equal((await downloadEvent).suggestedFilename(), "chart.png");
+    assert.equal(await imagePage.locator("#nodeFileDialog").evaluate((dialog) => dialog.open), true, "inside whitespace and download do not dismiss the preview");
+    const previewBounds = await imagePage.locator("#nodeFileImage").boundingBox();
+    await imagePage.mouse.move(previewBounds.x + previewBounds.width / 2, previewBounds.y + 10);
+    await imagePage.mouse.down();
+    await imagePage.mouse.move(2, 2, { steps: 5 });
+    await imagePage.mouse.up();
+    assert.equal(await imagePage.locator("#nodeFileDialog").evaluate((dialog) => dialog.open), true, "dragging from inside to outside is not a backdrop click");
+    await imagePage.mouse.click(2, 2);
+    await imagePage.waitForFunction(() => !document.querySelector("#nodeFileDialog").open && window.blobs.size === 1);
+    await image.click();
     await imagePage.keyboard.press("Escape");
     await imagePage.waitForFunction(() => window.blobs.size === 1);
     assert.equal(await imagePage.locator(".tool-group[open]").count(), 0, "image remains visible while tool group is collapsed");
@@ -1363,14 +1379,37 @@ try {
     ], { fragments: true });
     await imagePage.evaluate((trace) => {
       const h = window.traceHarness;
+      window.pathPreview = document.querySelector(".trace-card.image img");
       window.imageOffline = true;
       h.agent.transcriptItems = trace;
       h.renderTranscript(null, { preserveLive: true });
+      if (!window.pathPreview.isConnected || window.pathPreview.hidden) throw new Error("snapshot reconciliation hid the decoded path preview");
     }, durable);
+    await imagePage.waitForFunction(() => document.querySelector(".trace-card.image img") !== window.pathPreview);
     await image.waitFor({ state: "visible" });
     assert.equal(await image.count(), 1, "canonical snapshot supersedes the live path preview");
     assert.equal(await imagePage.evaluate(() => window.imageReads.length), 2, "saved image works when the original Node is offline");
     assert.equal(await imagePage.evaluate(() => window.blobs.size), 1, "reconciliation releases the old file blob");
+    const stableImages = await imagePage.evaluate(async () => {
+      const h = window.traceHarness;
+      const original = document.querySelector(".trace-card.image img");
+      const src = original.src;
+      const mutations = [];
+      const observer = new MutationObserver((entries) => mutations.push(...entries));
+      observer.observe(original, { attributes: true, attributeFilter: ["src", "hidden"] });
+      for (let i = 0; i < 6; i++) {
+        // Canonical refreshes and out-of-order live imageView events coexist.
+        h.renderTranscript(null, { preserveLive: true });
+        h.notify({ method: "item/completed", params: { threadId: "image-thread", turnId: "image-turn",
+          item: { type: "imageView", id: "view-1", path: "/tmp/chart.png" } } });
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        if (document.querySelector(".trace-card.image img") !== original || original.hidden || original.src !== src || !original.complete) return false;
+      }
+      observer.disconnect();
+      return mutations.length === 0;
+    });
+    assert.equal(stableImages, true, "event refreshes retain the decoded image without source or visibility churn");
+    assert.equal(await imagePage.evaluate(() => window.imageReads.length), 2, "late path notifications never reread the Node after a saved snapshot");
     await imagePage.evaluate(() => {
       const h = window.traceHarness;
       const later = h.agent.transcriptItems;
@@ -1385,8 +1424,10 @@ try {
     await image.click();
     await imagePage.locator("#nodeFileDialog[open] #nodeFileImage").waitFor({ state: "visible" });
     assert.equal(await imagePage.locator("#nodeFileImage").evaluate((img) => img.naturalHeight), 3200, "saved octet-stream image opens in the viewer");
-    await imagePage.locator("#nodeFileClose").click();
-    await imagePage.waitForFunction(() => window.blobs.size === 1);
+    await imagePage.locator("#nodeFileImage").tap();
+    assert.equal(await imagePage.locator("#nodeFileDialog").evaluate((dialog) => dialog.open), true);
+    await imagePage.touchscreen.tap(2, 2);
+    await imagePage.waitForFunction(() => !document.querySelector("#nodeFileDialog").open && window.blobs.size === 1);
     assert.equal(await imagePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await imagePage.evaluate(() => {
       const h = window.traceHarness;

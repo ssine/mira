@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activitySummary, activityStatus, formatActivityDuration, toolItemView, responseToolView,
+import { activitySummary, activityStatus, formatActivityDuration, formatTraceTimestamp, toolItemView, responseToolView,
   reasoningText, reasoningHeading, summarizeActivities } from "../server/public/trace-activity.js";
 import { projectCodexTranscript } from "../server/codex-transcript.mjs";
 
 const record = (type, payload) => ({ type, payload });
 const materialized = (item, turnId = "turn-1") => record("event_msg", { type: "item_completed", turn_id: turnId, item });
+
+test("message timestamps use local calendar days for today, weekdays and older dates", () => {
+  const now = new Date(2026, 8, 6, 0, 1);
+  assert.equal(formatTraceTimestamp(new Date(2026, 8, 6, 0, 0, 5), now), "00:00:05");
+  assert.equal(formatTraceTimestamp(new Date(2026, 8, 5, 23, 59, 5).toISOString(), now), "星期六 23:59:05");
+  assert.equal(formatTraceTimestamp(new Date(2026, 7, 30, 0, 0, 5), now), "星期日 00:00:05");
+  assert.equal(formatTraceTimestamp(new Date(2026, 7, 29, 12, 30, 5), now), "08/29 12:30:05");
+  assert.equal(formatTraceTimestamp(new Date(2025, 11, 31, 12, 30, 5), now), "2025/12/31 12:30:05");
+  assert.equal(formatTraceTimestamp(new Date(2026, 8, 7, 12, 30, 5), now), "09/07 12:30:05");
+  for (const value of [null, undefined, "", "invalid"]) assert.equal(formatTraceTimestamp(value, now), "");
+  // In America/New_York this crosses the 25-hour autumn clock change.
+  assert.equal(formatTraceTimestamp(new Date(2026, 9, 26, 0, 0), new Date(2026, 10, 2, 23, 59)), "星期一 00:00:00");
+});
 
 test("App Server and canonical command records share descriptions, details and durations", () => {
   const live = toolItemView({ type: "commandExecution", id: "read-1", command: "cat config.go", cwd: "/project",

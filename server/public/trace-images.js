@@ -101,8 +101,22 @@ export class TraceImages {
 
   mount(body, source, nodeIds) {
     const previous = this.entries.get(body);
-    if (previous && previous.source.url === source.url && previous.source.path === source.path) return;
-    if (previous) this.remove(body, previous);
+    if (previous) {
+      // A late path-only notification must not downgrade a saved snapshot.
+      const unchanged = source.url ? previous.source.url === source.url : previous.source.path === source.path;
+      source = { ...source, path: source.path || previous.source.path };
+      if (unchanged) {
+        previous.source = { ...previous.source, ...source, url: source.url || previous.source.url };
+        this.label(previous);
+        return;
+      }
+      previous.controller.abort();
+      const entry = { ...previous, source, nodeIds: [...nodeIds], controller: new AbortController(), pending: false };
+      this.entries.set(body, entry);
+      this.label(entry);
+      this.observer.observe(body);
+      return;
+    }
     const figure = document.createElement("figure");
     const link = document.createElement("button");
     link.type = "button";
@@ -111,15 +125,10 @@ export class TraceImages {
     link.title = "放大预览";
     link.setAttribute("aria-haspopup", "dialog");
     const img = document.createElement("img");
-    const label = source.path?.split(/[\\/]/).at(-1) || "工具返回的图片";
-    img.alt = label;
-    link.setAttribute("aria-label", `预览 ${label}`);
     img.decoding = "async";
     img.hidden = true;
     link.append(img);
     const caption = document.createElement("figcaption");
-    caption.textContent = source.path || label;
-    caption.title = source.path || label;
     const status = document.createElement("span");
     status.className = "trace-image-status";
     status.textContent = "正在加载图片…";
@@ -130,11 +139,23 @@ export class TraceImages {
     retry.hidden = true;
     figure.append(link, status, retry, caption);
     body.replaceChildren(figure);
-    const entry = { source, nodeIds: [...nodeIds], body, img, link, status, retry, controller: new AbortController() };
+    const entry = { source, nodeIds: [...nodeIds], body, img, link, caption, status, retry, controller: new AbortController() };
     this.entries.set(body, entry);
-    link.addEventListener("click", () => { if (entry.blob) this.preview(entry.blob, source.path); });
-    retry.addEventListener("click", () => this.enqueue(entry));
+    this.label(entry);
+    link.addEventListener("click", () => {
+      const current = this.entries.get(body);
+      if (current?.blob) this.preview(current.blob, current.source.path);
+    });
+    retry.addEventListener("click", () => this.enqueue(this.entries.get(body)));
     this.observer.observe(body);
+  }
+
+  label(entry) {
+    const label = entry.source.path?.split(/[\\/]/).at(-1) || "工具返回的图片";
+    entry.img.alt = label;
+    entry.link.setAttribute("aria-label", `预览 ${label}`);
+    entry.caption.textContent = entry.source.path || label;
+    entry.caption.title = entry.source.path || label;
   }
 
   enqueue(entry) {
@@ -156,22 +177,31 @@ export class TraceImages {
   async load(entry) {
     const { source, controller, img, status, retry, link } = entry;
     retry.hidden = true;
-    status.hidden = false;
+    status.hidden = Boolean(entry.blob);
     status.textContent = "正在加载图片…";
+    let objectUrl;
     try {
       const url = imageDataUrl(source.url);
       const blob = url ? await imageBlob(url, controller.signal)
         : await this.readFile(source.path, entry.nodeIds, controller, (text) => { status.textContent = text; });
       controller.signal.throwIfAborted();
-      if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
-      entry.objectUrl = URL.createObjectURL(blob);
-      img.src = entry.objectUrl;
-      await img.decode();
+      objectUrl = URL.createObjectURL(blob);
+      const nextImage = img.cloneNode(false);
+      nextImage.src = objectUrl;
+      await nextImage.decode();
       controller.signal.throwIfAborted();
       const follow = this.followImage();
+      // Decode off-DOM and commit in one step: keep the visible image while a
+      // path preview is upgraded to its immutable snapshot.
+      nextImage.alt = entry.img.alt;
+      nextImage.hidden = false;
+      entry.img.replaceWith(nextImage);
+      entry.img = nextImage;
+      if (entry.objectUrl) URL.revokeObjectURL(entry.objectUrl);
+      entry.objectUrl = objectUrl;
+      objectUrl = null;
       entry.blob = blob;
       link.disabled = false;
-      img.hidden = false;
       status.hidden = true;
       follow();
     } catch (error) {
@@ -181,7 +211,10 @@ export class TraceImages {
       entry.blob = null;
       if (entry.objectUrl) { URL.revokeObjectURL(entry.objectUrl); entry.objectUrl = null; }
       status.textContent = `图片暂时无法显示：${error.message}`;
+      status.hidden = false;
       retry.hidden = false;
+    } finally {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     }
   }
 }
