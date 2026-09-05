@@ -144,6 +144,7 @@ const agent = {
   activeTurns: new Map(),
   turnThreads: new Map(),
   turnTimings: new Map(),
+  turnActivity: new Map(),
   sessions: [],
   sessionNodeId: null,
   sessionScanEpoch: 0,
@@ -155,6 +156,7 @@ const agent = {
   transcriptCursor: null,
   transcriptTotal: 0,
   transcriptLoadingOlder: false,
+  transcriptOlderError: null,
   threadRuntimeNodeId: null,
   previousRuntimeNodeId: null,
   attachments: [],
@@ -196,6 +198,37 @@ function renderReplyProgress() {
   }
   if (entry && !replyProgressTimer) replyProgressTimer = setInterval(renderReplyProgress, 1000);
   if (!entry && replyProgressTimer) { clearInterval(replyProgressTimer); replyProgressTimer = null; }
+  renderTurnActivity(Boolean(entry));
+}
+
+function renderTurnActivity(submitting) {
+  const turnId = agent.activeTurns.get(agent.threadId);
+  const phase = agent.turnActivity.get(turnId) ?? "working";
+  const visible = Boolean(turnId && !submitting && phase !== "failed" && agent.socket?.readyState === WebSocket.OPEN);
+  const status = $("#conversationActivity");
+  if (status.classList.contains("hidden") === visible) {
+    const follow = traceNearBottom();
+    status.classList.toggle("hidden", !visible);
+    if (follow) scrollTraceToBottom();
+  }
+  const text = phase === "replying" ? "Codex 正在回复…" : phase === "tool" ? "Codex 正在调用工具…" : "Codex 仍在处理中…";
+  const label = $("#conversationActivityText");
+  if (visible && label.textContent !== text) label.textContent = text;
+}
+
+function observeTurnActivity(method, params) {
+  const turnId = params.turn?.id ?? params.turnId;
+  if (!turnId) return;
+  if (method === "turn/completed") { agent.turnActivity.delete(turnId); return; }
+  if (agent.turnTimings.get(turnId)?.completedAt) return;
+  let phase;
+  if (method === "turn/started" || method === "item/completed") phase = "working";
+  else if (method === "item/agentMessage/delta" && params.delta) phase = "replying";
+  else if (method === "item/started") {
+    const type = String(params.item?.type ?? "").replaceAll("_", "").toLowerCase();
+    phase = ["commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "websearch", "collabagenttoolcall"].includes(type) ? "tool" : "working";
+  } else if (method === "error" && !params.willRetry) phase = "failed";
+  if (phase) agent.turnActivity.set(turnId, phase);
 }
 
 function updateReplyProgress(entry, values) {
@@ -1506,6 +1539,7 @@ function closeAgentSocket({ preserveSubmission = false } = {}) {
   agent.activeTurns.clear();
   agent.turnThreads.clear();
   agent.turnTimings.clear();
+  agent.turnActivity.clear();
   syncActiveTurnUi();
   if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
   syncConversationSendUi();
@@ -2133,6 +2167,7 @@ function resetAgentTranscript(threadId = null) {
   agent.transcriptCursor = null;
   agent.transcriptTotal = 0;
   agent.transcriptLoadingOlder = false;
+  agent.transcriptOlderError = null;
 }
 
 function mergeTranscriptItems(current, updates) {
@@ -2174,19 +2209,46 @@ function mergeTranscriptItems(current, updates) {
 function renderHistoryLoader(trace) {
   if (agent.transcriptCursor === null) return;
   const loader = element("div", "history-loader");
-  const button = element("button", "history-load-button",
-    agent.transcriptLoadingOlder
-      ? "正在加载更早历史…"
-      : `加载更早历史 · 已显示 ${agent.transcriptItems.length} 条`);
+  const status = element("span", "history-load-status");
+  status.setAttribute("role", "status");
+  const button = element("button", "history-load-button", "加载失败，点击重试");
   button.type = "button";
   button.dataset.loadOlder = "true";
-  button.disabled = agent.transcriptLoadingOlder;
-  loader.append(button);
+  loader.append(status, button);
   trace.append(loader);
+  updateHistoryLoader();
+}
+
+function updateHistoryLoader() {
+  const loader = $("#conversationTrace .history-loader");
+  if (!loader) return;
+  const failed = Boolean(agent.transcriptOlderError);
+  const status = loader.querySelector(".history-load-status");
+  status.hidden = failed;
+  status.textContent = agent.transcriptLoadingOlder ? "正在加载更早消息…" : "向上滚动加载更早消息";
+  const button = loader.querySelector("[data-load-older]");
+  button.hidden = !failed;
+  button.disabled = agent.transcriptLoadingOlder;
+  button.title = agent.transcriptOlderError ?? "";
+}
+
+let olderTranscriptFrame = null;
+function scheduleOlderTranscriptLoad() {
+  if (olderTranscriptFrame !== null) return;
+  olderTranscriptFrame = requestAnimationFrame(() => {
+    olderTranscriptFrame = null;
+    if ($("#agentView").classList.contains("hidden") || !traceScroller().clientHeight ||
+        traceScroller().scrollTop > 64 || agent.transcriptOlderError ||
+        agent.transcriptThreadId !== agent.threadId) return;
+    void loadOlderAgentTranscript();
+  });
 }
 
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
+  const liveCards = options.preserveViewport?.mode === "prepend"
+    ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction)')]
+    : [];
   const liveCompactions = [...existingTrace.querySelectorAll('.trace-card.compaction')]
     .filter((card) => card.dataset.traceKey?.startsWith("item-"));
   const preciseClocks = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
@@ -2218,6 +2280,18 @@ function renderTranscript(fallbackThread, options = {}) {
     if (expandedItems.has(key) && card.querySelector(".trace-detail")) card.querySelector(".trace-detail").open = true;
     if (expandedGroups.has(key) && card.closest(".tool-group")) card.closest(".tool-group").open = true;
   }
+  // Older pages must not replace prose or tool output still arriving at the tail.
+  const renderedCards = liveCards.length ? [...trace.querySelectorAll(".trace-card")] : [];
+  const narrativeKey = (card) => JSON.stringify([card.dataset.turnId, card.dataset.traceKind, card.querySelector(".trace-body")._miraSource]);
+  const renderedByKey = new Map(renderedCards.map((card) => [card.dataset.traceKey, card]));
+  const renderedByBody = new Map(renderedCards.map((card) => [narrativeKey(card), card]));
+  for (const card of liveCards) {
+    const replacement = renderedByKey.get(card.dataset.traceKey) ?? renderedByBody.get(narrativeKey(card));
+    if (replacement) replacement.replaceWith(card);
+    else if (card.dataset.traceKind === "tool") ensureToolGroup(trace, card.dataset.turnId ?? "").querySelector(".tool-group-items").append(card);
+    else trace.append(card);
+    updateToolGroup(card.closest(".tool-group"));
+  }
   const storedCompactions = new Map();
   for (const item of agent.transcriptItems.filter((item) => item.kind === "compaction")) {
     const turn = item.turnId ?? "";
@@ -2229,9 +2303,10 @@ function renderTranscript(fallbackThread, options = {}) {
     if (remaining) storedCompactions.set(turn, remaining - 1);
     else trace.append(card); // Keep the notice while its durable write catches up.
   }
-  if (!agent.transcriptItems.length && !liveCompactions.length) {
+  if (!agent.transcriptItems.length && !liveCompactions.length && !liveCards.length) {
     if (agent.transcriptCursor !== null) {
       trace.append(element("div", "conversation-empty", "此页没有可显示的消息，可继续加载更早历史。"));
+      scheduleOlderTranscriptLoad();
       return;
     }
     renderThread(fallbackThread);
@@ -2247,15 +2322,19 @@ function renderTranscript(fallbackThread, options = {}) {
   requestAnimationFrame(() => {
     if (trace.lastElementChild !== last || scroll.scrollTop !== scrollTop) return;
     if (options.preserveViewport) {
-      scroll.scrollTop = options.preserveViewport.mode === "prepend"
-        ? options.preserveViewport.top + scroll.scrollHeight - options.preserveViewport.height
-        : options.preserveViewport.top;
+      const viewport = options.preserveViewport;
+      const anchor = viewport.anchorKey && trace.querySelector(`[data-trace-key="${CSS.escape(viewport.anchorKey)}"]`);
+      scroll.scrollTop = viewport.mode === "prepend"
+        ? anchor ? scroll.scrollTop + anchor.getBoundingClientRect().top - viewport.anchorTop
+          : viewport.top + scroll.scrollHeight - viewport.height
+        : viewport.top;
     } else if (options.anchorBottom !== false) {
       scrollTraceToBottom(trace);
       requestAnimationFrame(() => {
         if (trace.lastElementChild === last && traceNearBottom(trace)) scrollTraceToBottom(trace);
       });
     }
+    scheduleOlderTranscriptLoad();
   });
 }
 
@@ -2278,6 +2357,11 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     : options.preserveLoaded && options.anchorBottom === false
       ? { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight }
       : null;
+  if (options.prepend) {
+    const top = scroll.getBoundingClientRect().top + $(".conversation-head").getBoundingClientRect().height;
+    const anchor = [...trace.querySelectorAll(".trace-card[data-trace-key]")].find((card) => card.getBoundingClientRect().bottom > top);
+    if (anchor) Object.assign(preserveViewport, { anchorKey: anchor.dataset.traceKey, anchorTop: anchor.getBoundingClientRect().top });
+  }
   if (options.prepend && sameThread) {
     agent.transcriptItems = mergeTranscriptItems(incoming, agent.transcriptItems);
     agent.transcriptCursor = transcript.nextCursor ?? null;
@@ -2303,24 +2387,25 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
 
 async function loadOlderAgentTranscript() {
   if (!agent.threadId || agent.transcriptCursor === null || agent.transcriptLoadingOlder) return;
+  const threadId = agent.threadId;
+  const epoch = agent.selectionEpoch;
   agent.transcriptLoadingOlder = true;
-  const button = $("#conversationTrace").querySelector("[data-load-older]");
-  if (button) {
-    button.disabled = true;
-    button.textContent = "正在加载更早历史…";
-  }
+  agent.transcriptOlderError = null;
+  updateHistoryLoader();
   try {
-    await loadAgentTranscript(agent.threadId, null, {
+    await loadAgentTranscript(threadId, null, {
       cursor: agent.transcriptCursor,
       prepend: true,
       anchorBottom: false,
     });
+  } catch (error) {
+    if (threadId === agent.threadId && epoch === agent.selectionEpoch) agent.transcriptOlderError = error.message;
   } finally {
-    agent.transcriptLoadingOlder = false;
-    const current = $("#conversationTrace").querySelector("[data-load-older]");
-    if (current) {
-      current.disabled = false;
-      current.textContent = `加载更早历史 · 已显示 ${agent.transcriptItems.length} 条`;
+    if (threadId === agent.threadId && epoch === agent.selectionEpoch) {
+      agent.transcriptLoadingOlder = false;
+      updateHistoryLoader();
+      // Continue past empty pages or fill a short viewport, after its anchor is restored.
+      scheduleOlderTranscriptLoad();
     }
   }
 }
@@ -2355,6 +2440,7 @@ function handleAgentNotification(message) {
     return;
   }
   replyProgress.observe(method, { ...params, threadId: notificationThreadId(params) });
+  observeTurnActivity(method, params);
   renderReplyProgress();
   if (method === "turn/started") {
     const turnId = params.turn?.id ?? null;
@@ -3226,6 +3312,7 @@ const conversationWidthObserver = new ResizeObserver(() => {
   $(".conversation-card").style.setProperty("--conversation-scrollbar-width", `${scroll.offsetWidth - scroll.clientWidth}px`);
 });
 conversationWidthObserver.observe(traceScroller());
+traceScroller().addEventListener("scroll", scheduleOlderTranscriptLoad, { passive: true });
 $("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
 $("#agentThreadList").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-thread-id]");
@@ -3247,7 +3334,7 @@ $("#conversationTrace").addEventListener("click", (event) => {
     return;
   }
   if (event.target.closest("button[data-load-older]")) {
-    loadOlderAgentTranscript().catch((error) => toast(error.message));
+    void loadOlderAgentTranscript();
   }
 });
 $("#sessionScan").addEventListener("click", () => scanLocalSessions().catch((error) => {

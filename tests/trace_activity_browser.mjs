@@ -30,6 +30,7 @@ const server = http.createServer(async (request, response) => {
     if (request.url === "/app.js") body = body.replace("void bootstrap();", `
       show("agentView");
       window.traceHarness = { agent, notify: handleAgentNotification, renderTranscript, renderThread,
+        loadAgentTranscript, resetAgentTranscript, closeAgentSocket, syncActiveTurnUi,
         upsertTrace, replyProgress, renderReplyProgress, prepareTurnInput, renderLocalSessions,
         show, renderNodes, renderEnrollments, renderAudit,
         message: onAgentSocketMessage, nodes: dashboardNodes, connectAgentSocket, resumeAgentThread, recoverAgentSession, stopAgentRecovery, mergeTranscriptItems,
@@ -221,6 +222,8 @@ try {
   assert.equal(await page.locator(".trace-card.user .trace-footer").count(), 0, "user messages need no elapsed time or copy action");
   assert.match(await page.locator(".trace-card.assistant .trace-completed").textContent(), /^\d{2}:\d{2}:\d{2}$/);
   assert.equal(await page.locator(".trace-card.assistant .trace-elapsed").isVisible(), false);
+  assert.equal(await page.locator("#conversationActivity").isVisible(), true, "the turn stays visibly active after prose completes");
+  assert.equal(await page.locator("#conversationActivityText").textContent(), "Codex 仍在处理中…");
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy svg").count(), 1);
   assert.equal(await page.locator(".trace-card.assistant .trace-footer .trace-copy").getAttribute("aria-label"), "复制这条消息的原文");
 
@@ -769,6 +772,149 @@ try {
   assert.deepEqual(errors, [], "browser must have no uncaught errors");
   const screenshot = process.env.MIRA_TRACE_SCREENSHOT ?? process.argv[4];
   if (screenshot) await page.locator(".conversation-card").screenshot({ path: screenshot });
+  for (const width of [1440, 390]) {
+    const historyPage = await browser.newPage({ viewport: { width, height: 844 } });
+    historyPage.on("pageerror", (error) => errors.push(error.message));
+    const requests = [];
+    const pending = [];
+    const awaitPending = async () => {
+      for (let attempt = 0; !pending.length && attempt < 500; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.ok(pending.length, `expected another history request; received ${JSON.stringify(requests)}`);
+    };
+    const messages = (start, count) => Array.from({ length: count }, (_, i) => ({
+      key: `history-${start + i}`, kind: "assistant", turnId: `turn-${start + i}`,
+      sourceItemSeq: start + i, body: `Message ${start + i}\n\nA paragraph of conversation history.`,
+    }));
+    await historyPage.route("**/v1/codex/threads/*/transcript?*", async (route) => {
+      const url = new URL(route.request().url());
+      const cursor = url.searchParams.get("cursor");
+      requests.push(cursor);
+      if (!cursor) return route.fulfill({ json: { generation: 1, trace: messages(201, 30), nextCursor: "older-200" } });
+      const response = await new Promise((resolve) => pending.push(resolve));
+      await route.fulfill(response);
+    });
+    await historyPage.goto(`http://127.0.0.1:${server.address().port}/`);
+    await historyPage.waitForFunction(() => !!window.traceHarness);
+    await historyPage.evaluate(async () => {
+      const h = window.traceHarness;
+      h.agent.threadId = "history-thread";
+      h.resetAgentTranscript("history-thread");
+      await h.loadAgentTranscript("history-thread");
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    assert.deepEqual(requests, [null], "opening a long conversation stays at its latest page");
+    await historyPage.locator("#conversationScroll").evaluate((scroll) => { scroll.scrollTop = 0; });
+    await historyPage.waitForFunction(() => window.traceHarness.agent.transcriptLoadingOlder);
+    await historyPage.waitForFunction(() => document.querySelector(".history-load-status").textContent.includes("正在加载"));
+    await awaitPending();
+    await historyPage.locator("#conversationScroll").evaluate(async (scroll) => {
+      for (let i = 0; i < 20; i++) scroll.dispatchEvent(new Event("scroll"));
+      await new Promise(requestAnimationFrame);
+      scroll.scrollTop = 140; // Keep the reader's latest position while the request is in flight.
+      window.traceHarness.agent.turnId = "live-turn";
+      window.traceHarness.notify({ method: "item/agentMessage/delta", params: {
+        threadId: "history-thread", turnId: "live-turn", itemId: "live", delta: "Still streaming while reading history",
+      } });
+    });
+    assert.deepEqual(requests, [null, "older-200"], "top scroll events coalesce into one page request");
+    const anchor = historyPage.locator('[data-trace-key="history-202"]');
+    const before = await anchor.boundingBox();
+    pending.shift()({ json: { generation: 1, trace: messages(171, 30), nextCursor: "older-170" } });
+    await historyPage.locator('[data-trace-key="history-171"]').waitFor();
+    await historyPage.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    assert.ok(Math.abs((await anchor.boundingBox()).y - before.y) <= 1, "prepending preserves the visible message position");
+    assert.equal(await historyPage.getByText("Still streaming while reading history", { exact: true }).count(), 1);
+    assert.deepEqual(requests, [null, "older-200"], "a restored anchor must not drain the next page");
+
+    // Empty canonical pages advance automatically; errors pause until explicitly retried.
+    await historyPage.locator("#conversationScroll").evaluate((scroll) => { scroll.scrollTop = 0; });
+    await awaitPending();
+    pending.shift()({ json: { generation: 1, trace: [], nextCursor: "older-160" } });
+    await awaitPending();
+    assert.deepEqual(requests.slice(-2), ["older-170", "older-160"]);
+    pending.shift()({ status: 503, json: { error: "Temporary history outage" } });
+    await historyPage.locator('[data-load-older]:not([hidden])').waitFor();
+    const failedCount = requests.length;
+    await historyPage.locator("#conversationScroll").evaluate(async (scroll) => {
+      scroll.dispatchEvent(new Event("scroll"));
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    assert.equal(requests.length, failedCount, "failed history must not spin automatic retries");
+    await historyPage.locator("[data-load-older]").click();
+    await awaitPending();
+    pending.shift()({ json: { generation: 1, trace: messages(1, 30), nextCursor: null } });
+    await historyPage.locator('[data-trace-key="history-1"]').waitFor();
+    assert.equal(await historyPage.locator(".history-loader").count(), 0, "oldest page removes the loader");
+    const completeCount = requests.length;
+    await historyPage.locator("#conversationScroll").evaluate(async (scroll) => {
+      scroll.scrollTop = 0;
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    });
+    assert.equal(requests.length, completeCount);
+
+    // An old request's finally block must not clear the next conversation's loading state.
+    await historyPage.evaluate(() => {
+      const h = window.traceHarness;
+      h.agent.transcriptCursor = "stale-page";
+      h.renderTranscript(null, { anchorBottom: false });
+      document.querySelector("#conversationScroll").scrollTop = 0;
+    });
+    await awaitPending();
+    await historyPage.evaluate(() => {
+      const h = window.traceHarness;
+      h.agent.selectionEpoch++;
+      h.agent.threadId = "next-thread";
+      h.resetAgentTranscript("next-thread");
+      h.agent.transcriptLoadingOlder = true;
+      h.clear();
+      h.upsertTrace("next-thread-message", "assistant", "Codex", "Next conversation");
+    });
+    pending.shift()({ json: { generation: 1, trace: messages(999, 1), nextCursor: null } });
+    await historyPage.waitForLoadState("networkidle");
+    assert.equal(await historyPage.getByText("Next conversation", { exact: true }).count(), 1);
+    assert.equal(await historyPage.locator('[data-trace-key="history-999"]').count(), 0);
+    assert.equal(await historyPage.evaluate(() => window.traceHarness.agent.transcriptLoadingOlder), true);
+    const activity = await historyPage.evaluate(() => {
+      const h = window.traceHarness;
+      h.agent.socket = { readyState: WebSocket.OPEN, close() {} };
+      h.agent.threadId = "activity-thread";
+      const send = (method, params = {}) => h.notify({ method, params: { threadId: "activity-thread", turnId: "activity-turn", ...params } });
+      const status = () => ({ visible: !document.querySelector("#conversationActivity").classList.contains("hidden"), text: document.querySelector("#conversationActivityText").textContent });
+      send("turn/started", { turn: { id: "activity-turn" } });
+      send("item/completed", { item: { id: "prose", type: "agentMessage", text: "I will continue." } });
+      const gap = status();
+      send("item/started", { item: { id: "tool", type: "commandExecution", command: "pwd" } });
+      const tool = status();
+      send("item/completed", { item: { id: "tool", type: "commandExecution", command: "pwd", status: "completed" } });
+      const nextGap = status();
+      send("turn/completed", { threadId: "other-thread", turn: { id: "other-turn" } });
+      const unrelated = status();
+      send("item/agentMessage/delta", { itemId: "next-prose", delta: "Next words" });
+      const prose = status();
+      h.agent.threadId = "idle-thread"; h.syncActiveTurnUi();
+      const switched = status();
+      h.agent.threadId = "activity-thread"; h.syncActiveTurnUi();
+      const returned = status();
+      send("turn/completed", { turn: { id: "activity-turn", status: "completed" } });
+      const completed = status();
+      send("turn/started", { turn: { id: "failed-turn" } });
+      send("error", { turnId: "failed-turn", error: { message: "Execution failed" }, willRetry: false });
+      const failed = status();
+      send("turn/started", { turn: { id: "disconnect-turn" } });
+      h.closeAgentSocket();
+      return { gap, tool, nextGap, unrelated, prose, switched, returned, completed, failed, disconnected: status() };
+    });
+    assert.deepEqual(activity.gap, { visible: true, text: "Codex 仍在处理中…" });
+    assert.deepEqual(activity.nextGap, activity.gap);
+    assert.deepEqual(activity.unrelated, activity.gap);
+    assert.deepEqual(activity.tool, { visible: true, text: "Codex 正在调用工具…" });
+    assert.deepEqual(activity.prose, { visible: true, text: "Codex 正在回复…" });
+    assert.deepEqual(activity.returned, activity.prose);
+    for (const state of ["switched", "completed", "failed", "disconnected"]) assert.equal(activity[state].visible, false, state);
+    await historyPage.close();
+  }
+  assert.deepEqual(errors, []);
+  console.log("PASS: automatic top pagination on desktop/mobile, stable reading anchor, live stream preservation, empty pages, retry, exhaustion, stale-thread isolation and ongoing turn activity");
   console.log("PASS: real-browser mobile recovery, half-open probe, tail-first paint, stale resume isolation, thin glass, submission hint, cross-thread isolation, 17 MiB chunked attachments, cancellation cleanup, live/history activity and responsive layout");
 } finally {
   await browser?.close();

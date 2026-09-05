@@ -481,7 +481,8 @@ progress { width: 100%; accent-color: var(--accent); }
 .markdown-body table { display: block; max-width: 100%; margin: 10px 0; overflow: auto; border: 1px solid var(--line); border-collapse: collapse; font-size: 12px; }
 .markdown-body th, .markdown-body td { min-width: 100px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--line); text-align: left; }
 .markdown-body th { background: var(--surface); font-weight: 600; }
-.history-loader{flex:0 0 auto;display:flex;justify-content:center;padding:0 0 10px}
+.history-loader{flex:0 0 auto;display:flex;align-items:center;justify-content:center;min-height:40px;padding:0 0 10px}
+.history-load-status { color: var(--muted); font-size: 10px; }
 .history-load-button { min-height: 30px; padding: 5px 11px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--accent-hover); font-size: 10px; }
 .history-load-button:hover { background: var(--hover); }
 .tool-group { flex: 0 0 auto; width: 100%; min-width: 0; margin: -3px 0; border: 0; background: transparent; }
