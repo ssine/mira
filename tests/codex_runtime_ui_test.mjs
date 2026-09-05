@@ -4,12 +4,12 @@ import test from "node:test";
 import vm from "node:vm";
 
 const source = await fs.readFile(new URL("../server/public/app.js", import.meta.url), "utf8");
-const start = source.indexOf("async function startAgentRuntime()");
+const start = source.indexOf("async function startAgentRuntime(");
 const end = source.indexOf("async function stopAgentRuntime()", start);
 assert(start > 0 && end > start);
 
 function fixture(states, { managed = true, stopAt = Infinity } = {}) {
-  let now = 0, requests = 0, connected = false;
+  let now = 0, requests = 0, starts = 0, connected = false;
   const messages = [];
   const agent = { runtimeStartEpoch: 0 };
   const node = { nodeId: "fixture", capabilities: { codexRuntimeDownload: managed } };
@@ -21,14 +21,14 @@ function fixture(states, { managed = true, stopAt = Infinity } = {}) {
     closeAgentSocket() { agent.runtimeStartEpoch++; },
     setAgentRuntimeState: (message) => messages.push(message),
     async api(url) {
-      if (url.endsWith("/start")) return {};
+      if (url.endsWith("/start")) { starts++; return {}; }
       requests++;
       return { ...node, reportedAppServer: states(now) };
     },
     async connectAgentSocket() { connected = true; },
   });
   vm.runInContext(source.slice(start, end), context);
-  return { run: () => context.startAgentRuntime(), messages, connected: () => connected, requests: () => requests };
+  return { run: (options) => context.startAgentRuntime(options), messages, connected: () => connected, requests: () => requests, starts: () => starts };
 }
 
 test("first Codex download can exceed 30 seconds and preparation is not an error", async () => {
@@ -56,5 +56,18 @@ test("stopping while preparing prevents a late connection", async () => {
 test("older nodes retain bounded normal startup timeout", async () => {
   const subject = fixture(() => ({ status: "starting" }), { managed: false });
   await assert.rejects(subject.run(), /启动超时/);
-  assert.equal(subject.requests(), 60);
+  assert.equal(subject.requests(), 61, "one initial status check, then 60 half-second polls");
+});
+
+test("a connection probe cannot start a stopped runtime", async () => {
+  const subject = fixture(() => ({ status: "stopped" }));
+  await assert.rejects(subject.run({ allowStart: false }), /尚未就绪/);
+  assert.equal(subject.starts(), 0);
+});
+
+test("concurrent connection requests share one startup operation", async () => {
+  const subject = fixture((now) => ({ status: now < 1000 ? "starting" : "running" }));
+  await Promise.all([subject.run(), subject.run()]);
+  assert.equal(subject.starts(), 1);
+  assert(subject.connected());
 });
