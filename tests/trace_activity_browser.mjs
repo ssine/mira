@@ -1,4 +1,4 @@
-import { sidebarAction } from "./sidebar_browser_helpers.mjs";
+import { sidebarAction, closeSidebar } from "./sidebar_browser_helpers.mjs";
 // Real-browser rendering test, isolated from a running Mira Server/Node or DB.
 // Usage: node tests/trace_activity_browser.mjs [playwright-module] [browser-channel] [screenshot]
 // Optional MIRA_TRACE_SCREENSHOT saves the final narrow-screen view.
@@ -131,7 +131,7 @@ try {
   await page.setViewportSize({ width: 1099, height: 1100 });
   await page.locator("#agentThreadDrawerToggle").click();
   assert.equal(await page.locator("#agentThreadDrawerBackdrop").getAttribute("tabindex"), "0");
-  await page.locator("#agentThreadDrawerClose").click();
+  await closeSidebar(page);
   await page.locator("#conversationInput").focus();
   await page.setViewportSize({ width: 1440, height: 1100 });
   await page.waitForFunction(() => document.querySelector("#agentThreadDrawer").getAttribute("aria-hidden") === "false");

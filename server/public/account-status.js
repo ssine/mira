@@ -205,15 +205,21 @@ export class AccountSidebar {
     find("[data-account-summary-email]").textContent = email;
     find("[data-account-summary-email]").title = email;
     find("[data-account-summary-plan]").textContent = this.account?.planType?.toUpperCase() ?? "";
-    const summary = remaining === null ? "查看账户与额度" : `本周剩余 ${Number(remaining.toFixed(1))}%`;
+    const remainingText = remaining === null ? "未提供" : `${Number(remaining.toFixed(1))}%`;
+    const deadline = resetTime(resetsAt);
+    const summary = remaining === null ? "查看账户与额度" : resetsAt === null ? `剩余 ${remainingText} · 时间未提供`
+      : deadline === "等待更新" ? "已到重置时间，等待更新" : `${deadline} 前剩余 ${remainingText}`;
     const summaryNode = find("[data-account-summary-remaining]");
     summaryNode.textContent = this.node && !this.available ? (this.node.status !== "online" ? "运行节点离线" : "Codex 尚未启动") : summary;
     summaryNode.title = this.message || summary;
-    find("[data-account-remaining]").textContent = remaining === null ? "未提供" : `${Number(remaining.toFixed(1))}%`;
+    const summaryCredits = find("[data-account-summary-credits]");
+    summaryCredits.textContent = this.account?.type !== "chatgpt" ? "" : resetCount === null ? "重置未提供" : `重置 ${resetCount} 次`;
+    summaryCredits.title = resetCount === null ? "剩余重置次数未提供" : `剩余重置次数：${resetCount} 次`;
+    find("[data-account-remaining]").textContent = remainingText;
     const meter = find("meter");
     meter.classList.toggle("hidden", remaining === null);
     meter.value = remaining ?? 0;
-    find("[data-account-reset]").textContent = resetTime(resetsAt);
+    find("[data-account-reset]").textContent = deadline;
     find("[data-account-reset]").title = resetsAt ? `${new Date(resetsAt).toLocaleString()}（本地时间）` : "按本地时区显示";
     find("[data-account-credits]").textContent = resetCount === null ? "未提供" : `${resetCount} 次`;
     find("dl").classList.toggle("hidden", this.account?.type !== "chatgpt");

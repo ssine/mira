@@ -491,7 +491,7 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   backdrop.tabIndex = overlay ? 0 : -1;
   toggle.setAttribute("aria-expanded", String(open));
   toggle.setAttribute("aria-label", open ? "关闭会话侧边栏" : "打开会话侧边栏");
-  if (open && focus) $("#agentThreadDrawerClose").focus({ preventScroll: true });
+  if (open && focus) $("#agentNavMenuToggle").focus({ preventScroll: true });
   else if (!open && document.body.dataset.view === "agentView" && document.activeElement && drawer.contains(document.activeElement)) {
     toggle.focus({ preventScroll: true });
   }
@@ -4359,7 +4359,6 @@ conversationDetailsWide.addEventListener("change", () => {
   showConversationDetailsPanel();
 });
 $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
-$("#agentThreadDrawerClose").addEventListener("click", () => setAgentThreadDrawer(false));
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
 installAgentDrawerSwipe();
 window.addEventListener("popstate", () => {

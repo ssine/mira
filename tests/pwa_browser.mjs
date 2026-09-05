@@ -1,4 +1,4 @@
-import { sidebarAction } from "./sidebar_browser_helpers.mjs";
+import { sidebarAction, closeSidebar } from "./sidebar_browser_helpers.mjs";
 // Real browser + disposable Server: install metadata, cold launch, mobile viewport,
 // HTTP validation, offline recovery and exclusion of private data from SW caches.
 // MIRA_SERVER_URL=http://127.0.0.1:8789 node tests/pwa_browser.mjs [playwright-module]
@@ -93,7 +93,7 @@ try {
   await page.locator("#conversationInput").fill("侧边栏切换时保留的草稿");
   await page.locator("#conversationScroll").evaluate((scroll) => { scroll.scrollTop = 400; });
   await page.locator("#agentThreadDrawerToggle").click();
-  await page.locator("#agentThreadDrawerClose").click();
+  await closeSidebar(page);
   assert.equal(await page.locator("#conversationInput").inputValue(), "侧边栏切换时保留的草稿");
   assert.ok(page.url().endsWith(`/?thread=${thread}`));
   assert.ok(Math.abs(await page.locator("#conversationScroll").evaluate((scroll) => scroll.scrollTop) - 400) <= 1);
@@ -162,7 +162,7 @@ try {
   await page.setViewportSize({ width: 393, height: 851 });
   await page.locator("#agentThreadDrawerToggle").click();
   await sidebarAction(page, "agentThemeToggle");
-  await page.locator("#agentThreadDrawerClose").click();
+  await closeSidebar(page);
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   measure = await layout();
   assert.ok(measure.bottom <= measure.height + 1 && measure.top >= 0, `portrait keyboard recovery: ${JSON.stringify(measure)}`);

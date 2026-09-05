@@ -1,3 +1,4 @@
+import { closeSidebar } from "./sidebar_browser_helpers.mjs";
 // Trusted touch input in mobile Chromium; no simulated DOM gesture handlers.
 // Run against the disposable Server with MIRA_SERVER_URL and its test administrator.
 import assert from 'node:assert/strict';
@@ -68,7 +69,7 @@ try {
   assert.equal(await drawer.evaluate(element => element.inert), false);
   assert.equal(await scroll.evaluate(element => element.scrollTop), before, 'opening does not move the reading position');
   assert.equal(new URL(page.url()).searchParams.get('thread'), threadId, 'right swipe does not navigate browser history');
-  await page.locator('#agentThreadDrawerClose').tap(); await closed();
+  await closeSidebar(page, { touch: true }); await closed();
   await readingPosition();
   // Inspect intermediate frames with the finger still down, including reversal
   // and a pause longer than the old 1.5 second gesture timeout.
@@ -90,7 +91,7 @@ try {
   await readingPosition();
   await swipe(100, 300, 80, 0, { steps: 4, delay: 0 });
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'short flick opens the drawer');
-  await page.locator('#agentThreadDrawerClose').tap();
+  await closeSidebar(page, { touch: true });
   await readingPosition(); await beginDrag(100, 300); await dragTo(170, 300);
   await page.waitForTimeout(200); await endDrag(); await closed();
   await readingPosition(); await beginDrag(90, 300); await dragTo(270, 300); await follows(180);
@@ -101,12 +102,12 @@ try {
   for (const x of [20, 245]) {
     await readingPosition(); await swipe(x, 300, 100, 0, { steps: 4, delay: 0 });
     assert.equal(await drawer.getAttribute('aria-hidden'), 'false', `flick from x=${x}`);
-    await page.locator('#agentThreadDrawerClose').tap();
+    await closeSidebar(page, { touch: true });
   }
   await readingPosition(); await swipe(100, 300, 160, 110);
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'mostly horizontal diagonal drag remains usable');
   assert.equal(await scroll.evaluate(element => element.scrollTop), 300, 'horizontal axis lock preserves reading position');
-  await page.locator('#agentThreadDrawerClose').tap();
+  await closeSidebar(page, { touch: true });
   await readingPosition();
 
   await swipe(170, 430, 5, -190);
@@ -139,7 +140,7 @@ try {
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'swipes starting on a link also open the drawer');
   assert.equal(await page.evaluate(() => window.linkTaps), 0, 'drag does not activate its starting link');
   assert.equal(new URL(page.url()).searchParams.get('thread'), threadId);
-  await page.locator('#agentThreadDrawerClose').tap(); await page.waitForTimeout(250);
+  await closeSidebar(page, { touch: true }); await page.waitForTimeout(250);
   await link.tap(); assert.equal(await page.evaluate(() => window.linkTaps), 1, 'ordinary link taps still work');
   // Tool summaries have the same drag/tap distinction as links.
   await page.locator('.trace-body').evaluate(element => { const details = document.createElement('details'); details.innerHTML = '<summary>Tool details</summary><p>Tool evidence</p>'; element.append(details); });
@@ -148,7 +149,7 @@ try {
   await swipe(summaryBounds.x + 30, summaryBounds.y + summaryBounds.height / 2, 150);
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'tool rows accept dragging');
   assert.equal(await summary.evaluate(element => element.parentElement.open), false, 'drag does not toggle tool evidence');
-  await page.locator('#agentThreadDrawerClose').tap(); await page.waitForTimeout(250);
+  await closeSidebar(page, { touch: true }); await page.waitForTimeout(250);
   await summary.tap(); assert.equal(await summary.evaluate(element => element.parentElement.open), true, 'tool evidence still expands on tap');
   const input = page.locator('#conversationInput');
   await input.fill('Unchanged draft');
@@ -160,13 +161,13 @@ try {
   await readingPosition();
   await swipe(90, 300, 180, 0);
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false', 'gesture also works with reduced motion');
-  await page.locator('#agentThreadDrawerClose').tap();
+  await closeSidebar(page, { touch: true });
   await readingPosition(); await beginDrag(90, 300); await dragTo(170, 300); await follows(80);
   await page.setViewportSize({ width: 1200, height: 900 });
   await session.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
   await page.waitForFunction(() => !document.querySelector('#agentThreadDrawer').hasAttribute('inert'));
   assert.equal(await drawer.evaluate(element => element.style.transform), '', 'resize clears unfinished drag styles');
-  await page.locator('#agentThreadDrawerClose').tap();
+  await closeSidebar(page, { touch: true });
   await readingPosition(); await swipe(400, 300, 160, 0); await closed();
   threadList = [thread, ...Array.from({ length: 24 }, (_, i) => ({ ...thread, threadId: `00000000-0000-4000-8000-${String(i + 1).padStart(12, '0')}`, title: `Another conversation ${i + 1}` }))];
   await page.emulateMedia({ reducedMotion: 'no-preference' });
@@ -206,7 +207,7 @@ try {
   await swipe(180, 500, 2, -180);
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false');
   assert.ok(await list.evaluate(element => element.scrollTop) > 50, 'the expanded conversation list keeps vertical scrolling');
-  await page.locator('#agentThreadDrawerClose').tap(); await page.waitForTimeout(250);
+  await closeSidebar(page, { touch: true }); await page.waitForTimeout(250);
   await page.reload(); await page.locator('.trace-card.assistant').waitFor();
   await page.evaluate(() => { window.maxTouches = 0; document.addEventListener('touchstart', event => { window.maxTouches = Math.max(window.maxTouches, event.touches.length); }, { passive:true, capture:true }); });
   await session.send('Input.synthesizePinchGesture', { x:190, y:300, scaleFactor:1.5, gestureSourceType:'touch' });

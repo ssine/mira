@@ -713,6 +713,7 @@ progress { width: 100%; accent-color: var(--accent); }
 [data-account-summary-email] { font-size: 12px; font-weight: 600; }
 [data-account-summary-remaining] { font-size: 11px; color: var(--muted); }
 [data-account-summary-plan] { font-size: 10px; color: var(--accent); }
+[data-account-summary-credits] { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sidebar-popover { position: fixed; inset: auto; width: min(320px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); margin: 0; padding: 14px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); color: var(--text); box-shadow: var(--shadow-float); }
 .sidebar-popover-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; min-width: 0; font-size: 14px; }
 .sidebar-popover-head > strong { min-width: 0; overflow-wrap: anywhere; }

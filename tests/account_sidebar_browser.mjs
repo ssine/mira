@@ -54,6 +54,7 @@ try {
  await expectText('[data-account-remaining]','48%');
  await expectText('[data-account-email]','first@example.test');
  await expectText('[data-account-credits]','1 次');
+ await expectText('[data-account-summary-credits]','重置 1 次');
  assert.equal(await panel.locator('[data-account-plan]').textContent(),'PRO');
  assert.match(await panel.locator('[data-account-node]').textContent(),/WSL/);
  assert.match(await panel.locator('[data-account-reset]').textContent(),/^\d\d\/\d\d \d\d:\d\d$/);
@@ -69,17 +70,19 @@ try {
  await page.getByRole('button',{name:'关闭账户详情',exact:true}).click();
  for(let i=0;i<3;i++) {
   await page.locator('#agentThreadDrawerToggle').click();await page.locator('#agentThreadDrawerToggle').click();
-  assert.equal(await panel.locator('[data-account-summary-remaining]').textContent(),'本周剩余 48%');
+  assert.match(await panel.locator('[data-account-summary-remaining]').textContent(),/^\d\d\/\d\d \d\d:\d\d 前剩余 48%$/);
  }
  await page.clock.fastForward(4*60_000);
  assert.equal(calls.length,initialCalls,'reopening the sidebar does not reconnect or request account data');
  await page.clock.fastForward(60_100);
  await expectText('[data-account-remaining]','0%');await expectText('[data-account-credits]','0 次');
+ await expectText('[data-account-summary-credits]','重置 0 次');
  assert.equal(calls.filter(call=>call.method==='account/rateLimits/read').length,2,'one automatic refresh after five minutes');
  await accountDetails(page);
  // Missing fields stay unknown, rather than borrowing Spark's separate weekly quota.
  delete limits[0].rateLimitsByLimitId.codex.secondary;limits[0].rateLimitResetCredits=null;
  await idle();await panel.locator('[data-account-refresh]').click();await expectText('[data-account-remaining]','未提供');await expectText('[data-account-credits]','未提供');
+ await expectText('[data-account-summary-credits]','重置未提供');
  assert.equal(await panel.locator('meter').isVisible(),false);
  limits[0].rateLimitsByLimitId.codex.secondary={usedPercent:52,windowDurationMins:10080,resetsAt:reset};limits[0].rateLimitResetCredits={availableCount:1};
  await idle();await panel.locator('[data-account-refresh]').click();await expectText('[data-account-remaining]','48%');
@@ -117,6 +120,9 @@ try {
  await page.setViewportSize({width:390,height:844});await page.locator('#agentThreadDrawerToggle').click();
  await expectText('[data-account-remaining]','48%');
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ for (const selector of ['[data-account-summary-remaining]', '[data-account-summary-credits]']) {
+  assert.equal(await panel.locator(selector).evaluate(element => element.scrollWidth > element.clientWidth), false, 'compact quota summary fits without truncation');
+ }
  await accountDetails(page);
  await panel.locator('[data-account-refresh]').scrollIntoViewIfNeeded();
  assert.equal(await panel.locator('[data-account-refresh]').isVisible(),true);

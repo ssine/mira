@@ -1,4 +1,4 @@
-import { sidebarAction } from "./sidebar_browser_helpers.mjs";
+import { sidebarAction, closeSidebar } from "./sidebar_browser_helpers.mjs";
 // Real-browser shell regression against a disposable Mira Server.
 // Usage: MIRA_SERVER_URL=http://127.0.0.1:8787 MIRA_TEST_ADMIN_PASSWORD=... node tests/web_shell_browser.mjs [playwright-module]
 import assert from "node:assert/strict";
@@ -54,7 +54,7 @@ try {
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
   assert.equal(await page.locator("#agentNavMenuToggle").isVisible(), true);
-  await page.locator("#agentThreadDrawerClose").click();
+  await closeSidebar(page);
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
   await page.locator("#agentThreadDrawerToggle").click();
   if (screenshotDirectory) await page.screenshot({ path: `${screenshotDirectory}/agent-light.png`, fullPage: true });
