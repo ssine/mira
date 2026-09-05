@@ -37,7 +37,7 @@ const fixture = http.createServer(async (request, response) => {
     assert.equal(parts[2], store);
     if (request.method === "GET") {
       if (parts[3] === "threads") { const result = await getThreadHistory(pool, store, parts[4], Number(url.searchParams.get("generation")) || null, Number(url.searchParams.get("throughVersion")) || null); json(result.status, result.body); }
-      else json(200, await getStoreHead(pool, store));
+      else json(200, await getStoreHead(pool, store, url.searchParams.has('threadId') ? [url.searchParams.get('threadId')] : null));
     } else {
       const result = await commitDelta(pool, store, JSON.parse(Buffer.concat(chunks)), request.headers);
       json(result.status, result.body);

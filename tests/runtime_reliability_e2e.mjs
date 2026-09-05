@@ -103,7 +103,7 @@ const fixture = http.createServer(async (req, res) => {
         const result = await getThreadHistory(pool, store, parts[4], Number(url.searchParams.get("generation")) || null, Number(url.searchParams.get("throughVersion")) || null);
         return sendJSON(res, result.status, result.body);
       }
-      return sendJSON(res, 200, await getStoreHead(pool, store));
+      return sendJSON(res, 200, await getStoreHead(pool, store, url.searchParams.has('threadId') ? [url.searchParams.get('threadId')] : null));
     }
     const body = JSON.parse(encoded);
     if (current.conflictNext) {

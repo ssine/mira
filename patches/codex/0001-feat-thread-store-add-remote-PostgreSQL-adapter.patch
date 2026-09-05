@@ -1,4 +1,4 @@
-From 94c17b12a3a24fc83fb7e782fee378bfe5faf8f8 Mon Sep 17 00:00:00 2001
+From 5f8b36268f983c19013e62bcc4fffb201be4de16 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 5 Sep 2026 14:20:34 +0800
 Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
@@ -22,11 +22,11 @@ Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
  codex-rs/thread-store/Cargo.toml              |   1 +
  codex-rs/thread-store/src/in_memory.rs        |  86 +-
  codex-rs/thread-store/src/lib.rs              |   2 +
- codex-rs/thread-store/src/remote_http.rs      | 880 ++++++++++++++++++
+ codex-rs/thread-store/src/remote_http.rs      | 907 ++++++++++++++++++
  .../thread-store/src/remote_http/retry.rs     |  84 ++
- .../src/remote_http/retry_tests.rs            | 317 +++++++
- .../thread-store/src/remote_http/writer.rs    | 215 +++++
- 22 files changed, 1970 insertions(+), 181 deletions(-)
+ .../src/remote_http/retry_tests.rs            | 362 +++++++
+ .../thread-store/src/remote_http/writer.rs    | 302 ++++++
+ 22 files changed, 2129 insertions(+), 181 deletions(-)
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/retry.rs
@@ -2046,10 +2046,10 @@ index a8b6a36..3fbd587 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..46232a1
+index 0000000..2101f7f
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,907 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
@@ -2158,6 +2158,7 @@ index 0000000..46232a1
 +}
 +
 +struct CachedStore {
++    scope: Option<ThreadId>,
 +    version: u64,
 +    // CAS expectations must describe canonical JSON, not serde's defaults/projection.
 +    canonical_state: serde_json::Value,
@@ -2217,14 +2218,16 @@ index 0000000..46232a1
 +            .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
 +    }
 +
-+    async fn head(&self) -> ThreadStoreResult<HeadResponse> {
-+        request_json(
-+            self.client
-+                .get(&self.store_url)
-+                .bearer_auth(&self.bearer_token)
-+                .timeout(Duration::from_secs(10)),
-+        )
-+        .await
++    async fn head_for_thread(&self, scope: Option<ThreadId>) -> ThreadStoreResult<HeadResponse> {
++        let mut request = self
++            .client
++            .get(&self.store_url)
++            .bearer_auth(&self.bearer_token)
++            .timeout(Duration::from_secs(10));
++        if let Some(thread_id) = scope {
++            request = request.query(&[("threadId", thread_id.to_string())]);
++        }
++        request_json(request).await
 +    }
 +
 +    async fn load(&self, head: HeadResponse) -> ThreadStoreResult<CachedStore> {
@@ -2247,6 +2250,7 @@ index 0000000..46232a1
 +        }
 +        snapshot.insert("histories".to_string(), serde_json::json!({}));
 +        Ok(CachedStore {
++            scope: None,
 +            version,
 +            canonical_state: state,
 +            history_manifest,
@@ -2289,21 +2293,28 @@ index 0000000..46232a1
 +        Ok(())
 +    }
 +
-+    async fn refresh(&self, cache: &mut Option<CachedStore>) -> ThreadStoreResult<()> {
-+        let head = self.head().await?;
++    async fn refresh_scoped(
++        &self,
++        cache: &mut Option<CachedStore>,
++        scope: Option<ThreadId>,
++    ) -> ThreadStoreResult<()> {
++        let head = self.head_for_thread(scope).await?;
 +        if cache
 +            .as_ref()
-+            .is_some_and(|cached| cached.version == head.version)
++            .is_some_and(|cached| cached.version == head.version && cached.scope == scope)
 +        {
 +            return Ok(());
 +        }
-+        *cache = Some(self.load(head).await?);
++        let mut loaded = self.load(head).await?;
++        loaded.scope = scope;
++        *cache = Some(loaded);
 +        Ok(())
 +    }
 +
 +    async fn save(
 +        &self,
 +        version: u64,
++        scope: Option<ThreadId>,
 +        manifest: &HashMap<String, HistoryManifestEntry>,
 +        canonical_state: &mut serde_json::Value,
 +        before: serde_json::Value,
@@ -2352,9 +2363,31 @@ index 0000000..46232a1
 +            state_changes,
 +            history_changes,
 +        };
++        let mut builder = self.client.post(format!("{}/commits", self.store_url));
++        if let Some(thread_id) = scope {
++            if request
++                .history_changes
++                .iter()
++                .all(|change| change.thread_id == thread_id.to_string())
++                && request.state_changes.iter().all(|change| {
++                    change.path.len() > 1
++                        && change.path[1] == thread_id.to_string()
++                        && matches!(
++                            change.path[0].as_str(),
++                            "created_threads"
++                                | "metadata_updates"
++                                | "names"
++                                | "sections"
++                                | "section_positions"
++                                | "section_entered_at"
++                        )
++                })
++            {
++                builder = builder.header("x-mira-thread-scope", thread_id.to_string());
++            }
++        }
 +        let committed = request_json(
-+            self.client
-+                .post(format!("{}/commits", self.store_url))
++            builder
 +                .bearer_auth(&self.bearer_token)
 +                .header("x-codex-operation-id", operation_id)
 +                .header("x-codex-version", env!("CARGO_PKG_VERSION"))
@@ -2379,7 +2412,8 @@ index 0000000..46232a1
 +        self.check_write_error()?;
 +        let mut cache = self.take_cache();
 +        let result = async {
-+            self.refresh(&mut cache).await?;
++            self.refresh_scoped(&mut cache, (thread_ids.len() == 1).then(|| thread_ids[0]))
++                .await?;
 +            let cached = cache.as_mut().ok_or_else(cache_missing)?;
 +            for thread_id in thread_ids {
 +                self.ensure_history(cached, thread_id).await?;
@@ -2632,20 +2666,15 @@ index 0000000..46232a1
 +        }) {
 +            return Box::pin(async move { self.check_thread_write_errors(&[params.thread_id]) });
 +        }
-+        let thread_id = params.thread_id;
-+        Box::pin(self.mutate(vec![thread_id], move |store| {
-+            ThreadStore::append_items(store, params)
-+        }))
++        Box::pin(self.append_records(params))
 +    }
 +
 +    fn persist_thread(
 +        &self,
 +        thread_id: ThreadId,
-+        context: PersistContext,
++        _context: PersistContext,
 +    ) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.read(Vec::new(), move |store| {
-+            ThreadStore::persist_thread(store, thread_id, context)
-+        }))
++        self.flush_thread(thread_id)
 +    }
 +
 +    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
@@ -2675,9 +2704,7 @@ index 0000000..46232a1
 +    }
 +
 +    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.read(Vec::new(), move |store| {
-+            ThreadStore::shutdown_thread(store, thread_id)
-+        }))
++        self.flush_thread(thread_id)
 +    }
 +
 +    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
@@ -3022,10 +3049,10 @@ index 0000000..8221135
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 0000000..f5d007c
+index 0000000..2b4de1f
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
-@@ -0,0 +1,317 @@
+@@ -0,0 +1,362 @@
 +use std::sync::Arc;
 +use std::time::Duration;
 +
@@ -3343,12 +3370,57 @@ index 0000000..f5d007c
 +        "conflicts must never be retried or replay the failed operation"
 +    );
 +}
++
++#[tokio::test]
++async fn durable_append_sends_only_new_records_without_reading_history() {
++    let thread = ThreadId::new();
++    let item: RolloutItem = serde_json::from_value(json!({
++        "type": "response_item", "payload": {"type": "message", "role": "assistant",
++            "content": [{"type": "output_text", "text": "new durable text"}]}
++    }))
++    .unwrap();
++    let head = json!({"version": 400, "state": {"created_threads": {
++        thread.to_string(): {"history_mode": "legacy", "unknown": "preserved on server"}
++    }}, "historyManifest": {thread.to_string(): {"generation": 3, "itemCount": 10000}}});
++    let committed = json!({"version": 401, "historyManifest": {
++        thread.to_string(): {"generation": 3, "itemCount": 10001}
++    }});
++    let (url, mut requests, handle) = server(vec![
++        Some((200, head.to_string())),
++        Some((200, committed.to_string())),
++    ])
++    .await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    store
++        .append_items(AppendThreadItemsParams {
++            thread_id: thread,
++            items: vec![item],
++        })
++        .await
++        .unwrap();
++    store.flush_thread(thread).await.unwrap();
++    store.shutdown_thread(thread).await.unwrap();
++    handle.await.unwrap();
++    let head_request = requests.recv().await.unwrap();
++    assert!(head_request.starts_with(&format!("GET /v2/stores/test?threadId={thread} ")));
++    let append = requests.recv().await.unwrap();
++    let body: serde_json::Value =
++        serde_json::from_str(append.split("\r\n\r\n").nth(1).unwrap()).unwrap();
++    assert_eq!(body["stateChanges"], json!([]));
++    assert_eq!(body["historyChanges"][0]["expectedItemCount"], 10000);
++    assert_eq!(
++        body["historyChanges"][0]["items"].as_array().unwrap().len(),
++        1
++    );
++    assert!(!append.contains("preserved on server"));
++    assert!(requests.recv().await.is_none());
++}
 diff --git a/codex-rs/thread-store/src/remote_http/writer.rs b/codex-rs/thread-store/src/remote_http/writer.rs
 new file mode 100644
-index 0000000..2345b87
+index 0000000..f70d767
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/writer.rs
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,302 @@
 +use std::collections::HashSet;
 +use std::panic::AssertUnwindSafe;
 +
@@ -3358,10 +3430,15 @@ index 0000000..2345b87
 +use super::RemoteHttpThreadStore;
 +use super::cache_missing;
 +use super::operation_gate_closed;
++use super::{CommitRequest, CommitResponse, HistoryChange, request_json};
++use crate::AppendThreadItemsParams;
 +use crate::InMemoryThreadStore;
 +use crate::ThreadStoreError;
 +use crate::ThreadStoreFuture;
 +use crate::ThreadStoreResult;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_rollout::persisted_rollout_items;
++use std::time::Duration;
 +
 +// The serialized writer outlives cancelled callers, but has no local durable outbox.
 +impl RemoteHttpThreadStore {
@@ -3393,6 +3470,21 @@ index 0000000..2345b87
 +        + Send
 +        + 'static,
 +    ) -> ThreadStoreResult<T> {
++        self.enqueue_write(thread_ids.clone(), move |store| {
++            Box::pin(async move {
++                store
++                    .mutate_inner(thread_ids, load_histories, operation)
++                    .await
++            })
++        })
++        .await
++    }
++
++    async fn enqueue_write<T: Send + 'static>(
++        &self,
++        thread_ids: Vec<ThreadId>,
++        operation: impl FnOnce(Self) -> ThreadStoreFuture<'static, T> + Send + 'static,
++    ) -> ThreadStoreResult<T> {
 +        let store = self.clone();
 +        let (done, receiver) = tokio::sync::watch::channel(false);
 +        let previous = store
@@ -3413,9 +3505,7 @@ index 0000000..2345b87
 +                .map_err(|_| operation_gate_closed())?;
 +            let result = match AssertUnwindSafe(async {
 +                store.check_thread_write_errors(&thread_ids)?;
-+                store
-+                    .mutate_inner(thread_ids, load_histories, operation)
-+                    .await
++                operation(store.clone()).await
 +            })
 +            .catch_unwind()
 +            .await
@@ -3436,6 +3526,74 @@ index 0000000..2345b87
 +        .map_err(|_| ThreadStoreError::Internal {
 +            message: "remote thread-store write worker failed".to_string(),
 +        })?
++    }
++
++    pub(super) async fn append_records(
++        &self,
++        params: AppendThreadItemsParams,
++    ) -> ThreadStoreResult<()> {
++        let thread_id = params.thread_id;
++        self.enqueue_write(vec![thread_id], move |store| {
++            Box::pin(async move {
++                let result = async {
++                    let head = store.head_for_thread(Some(thread_id)).await?;
++                    let key = thread_id.to_string();
++                    let entry = head
++                        .history_manifest
++                        .get(&key)
++                        .ok_or_else(|| ThreadStoreError::ThreadNotFound { thread_id })?;
++                    let mode = head
++                        .state
++                        .pointer(&format!("/created_threads/{key}/history_mode"))
++                        .cloned()
++                        .and_then(|value| serde_json::from_value::<ThreadHistoryMode>(value).ok())
++                        .unwrap_or(ThreadHistoryMode::Legacy);
++                    let items = persisted_rollout_items(&params.items, mode);
++                    if items.is_empty() {
++                        return Ok(());
++                    }
++                    let values = items
++                        .iter()
++                        .map(serde_json::to_value)
++                        .collect::<Result<Vec<_>, _>>()
++                        .map_err(|error| ThreadStoreError::Internal {
++                            message: error.to_string(),
++                        })?;
++                    let request = CommitRequest {
++                        expected_version: head.version,
++                        state_changes: Vec::new(),
++                        history_changes: vec![HistoryChange {
++                            thread_id: key.clone(),
++                            mode: "append",
++                            expected_generation: entry.generation,
++                            expected_item_count: entry.item_count,
++                            items: Some(values),
++                        }],
++                    };
++                    let _: CommitResponse = request_json(
++                        store
++                            .client
++                            .post(format!("{}/commits", store.store_url))
++                            .bearer_auth(&store.bearer_token)
++                            .header("x-codex-operation-id", ThreadId::new().to_string())
++                            .header("x-codex-version", env!("CARGO_PKG_VERSION"))
++                            .header("x-mira-thread-scope", key)
++                            .timeout(Duration::from_secs(10))
++                            .json(&request),
++                    )
++                    .await?;
++                    Ok(())
++                }
++                .await;
++                // Metadata/history caches may describe the prefix before this commit.
++                store.replace_cache(None);
++                if let Err(error) = &result {
++                    store.record_write_error(error, &[thread_id]);
++                }
++                result
++            })
++        })
++        .await
 +    }
 +
 +    fn record_write_error(&self, error: &ThreadStoreError, thread_ids: &[ThreadId]) {
@@ -3506,7 +3664,7 @@ index 0000000..2345b87
 +        let mut cache = self.take_cache();
 +        let mut invalidate_cache = false;
 +        let result = async {
-+            self.refresh(&mut cache)
++            self.refresh_scoped(&mut cache, (thread_ids.len() == 1).then(|| thread_ids[0]))
 +                .await
 +                .inspect_err(|error| self.record_write_error(error, &thread_ids))?;
 +            let cached = cache.as_mut().ok_or_else(cache_missing)?;
@@ -3532,6 +3690,7 @@ index 0000000..2345b87
 +            match self
 +                .save(
 +                    cached.version,
++                    cached.scope,
 +                    &cached.history_manifest,
 +                    &mut cached.canonical_state,
 +                    before,

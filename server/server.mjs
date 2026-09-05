@@ -18,6 +18,7 @@ import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
 import { NodeChannel } from "./node-channel.mjs";
 import { SSHRelay } from "./ssh-relay.mjs";
 import { manageThread, renameThread } from "./thread-management.mjs";
+import { startThreadErasureWorker, threadErasureStatus } from "./thread-erasure.mjs";
 import {
   approveEnrollment, createEnrollment, getEnrollment, listEnrollments, rejectEnrollment,
 } from "./node-enrollment.mjs";
@@ -373,7 +374,11 @@ async function route(request, response) {
     if (!principal) return;
     const storeId = url.searchParams.get("storeId") ?? defaultStoreId;
     const limit = boundedInteger(url.searchParams.get("limit"), 200, 1, 500);
-    sendJson(response, 200, { storeId, data: await listImportedThreads(pool, storeId, limit, null, url.searchParams.get("archived") === "1") });
+    const [data, cleanup] = await Promise.all([
+      listImportedThreads(pool, storeId, limit, null, url.searchParams.get("archived") === "1"),
+      threadErasureStatus(pool, storeId),
+    ]);
+    sendJson(response, 200, { storeId, data, cleanup });
     return;
   }
   match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})(?:\/(archive|restore))?$/i);
@@ -575,7 +580,9 @@ async function route(request, response) {
     if (!principal) return;
     const storeId = safeStoreId(match[1]);
     if (!storeId) { errorJson(response, 400, "invalid store id", "invalid_request"); return; }
-    sendJson(response, 200, await getStoreHead(pool, storeId)); return;
+    const threadId = url.searchParams.get('threadId');
+    if (threadId !== null && (!threadId || threadId.length > 256)) { errorJson(response,400,'invalid thread id','invalid_request'); return; }
+    sendJson(response, 200, await getStoreHead(pool, storeId, threadId === null ? null : [threadId])); return;
   }
   match = url.pathname.match(/^\/v2\/stores\/([^/]+)\/threads\/([^/]+)\/history$/);
   if (request.method === "GET" && match) {
@@ -673,6 +680,7 @@ const sshRelay = new SSHRelay({ pool, authService, nodeChannel });
 nodeChannel.sshRelay = sshRelay;
 const capabilityService = new CapabilityService({ pool, nodeChannel });
 nodeChannel.setCapabilityService(capabilityService);
+const stopThreadErasureWorker = startThreadErasureWorker(pool);
 
 server.listen(listenPort, listenHost, () => {
   console.log(`Mira Server listening on http://${listenHost}:${listenPort}; imported ${importedLegacyStoreCount} legacy store(s); normalized ${normalizedImportedThreadCount} imported thread(s)`);
@@ -686,8 +694,10 @@ async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
   console.log(`received ${signal}; shutting down`);
+  const erasureStopped = stopThreadErasureWorker();
   nodeChannel.close();
   server.close(async () => {
+    await erasureStopped;
     await pool.end();
     process.exit(0);
   });

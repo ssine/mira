@@ -3,12 +3,25 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { initializeDatabase } from "../server/db.mjs";
-import { putSnapshot, getSnapshot, getStoreHead, getThreadHistory, commitDelta, commitImportedHistory, rebuildSnapshot } from "../server/thread-store.mjs";
+import { putSnapshot, getSnapshot, getStoreHead, getThreadHistory, commitDelta, commitImportedHistory, rebuildSnapshot, listStoreEvents, listThreadEvents } from "../server/thread-store.mjs";
 import { listImportedThreads } from "../server/codex-session-import.mjs";
 import { manageThread, renameThread } from "../server/thread-management.mjs";
+import { processThreadErasureBatch, threadErasureStatus } from "../server/thread-erasure.mjs";
 
 if (!process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL) throw new Error("a disposable test database is required");
-const pool = new pg.Pool({ connectionString: process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL });
+const owner = new pg.Pool({ connectionString: process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL });
+const database = `erasure_test_${crypto.randomUUID().replaceAll("-", "")}`;
+await owner.query(`CREATE DATABASE ${database}`);
+// Isolate fault-injection jobs from a live disposable Server's background worker.
+const databaseUrl = new URL(process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL);
+databaseUrl.pathname = `/${database}`;
+const pool = new pg.Pool({ connectionString: databaseUrl.toString() });
+async function drain(storeId) {
+  for (let batches = 0; (await threadErasureStatus(pool, storeId)).pending; batches++) {
+    assert(batches < 500, "erasure did not finish");
+    assert(await processThreadErasureBatch(pool, { storeId, eventBatchSize: 2, itemBatchSize: 1 }));
+  }
+}
 const storeId = `thread-management-${crypto.randomUUID()}`;
 const parent = crypto.randomUUID(), child = crypto.randomUUID();
 const headers = () => ({ "x-codex-operation-id": crypto.randomUUID() });
@@ -79,10 +92,19 @@ try {
   assert.equal(afterDelete.version, beforeDelete.version + 1);
   assert.equal((await manageThread(pool, storeId, parent, "delete", deleted)).body.duplicate, true);
   assert.equal((await manageThread(pool, storeId, parent, "delete", { ...deleted, itemCount: 99 })).status, 409);
-  await assert.rejects(pool.query(`INSERT INTO codex_store_events(store_id,event_seq,previous_event_seq,operation_id,event_format_version,state,history_manifest)
-    VALUES($1,$2,$3,$4,1,'{}',$5::jsonb)`, [storeId, afterDelete.version+1, afterDelete.version, crypto.randomUUID(), JSON.stringify({ [parent]: { generation: 1, itemCount: 0 } })]), { code: "23514" }, "an old Server cannot bypass permanent deletion");
+  await assert.rejects(pool.query(`INSERT INTO codex_thread_events(store_id,thread_id,generation,item_seq,operation_id,event_format_version,payload,payload_sha256)
+    VALUES($1,$2,1,99,$3,1,'{}','fixture')`, [storeId,parent,deleted.operationId]), { code: "23514" }, "direct SQL cannot bypass permanent deletion");
+  assert.equal((await threadErasureStatus(pool, storeId)).pending, 1);
+  assert((await pool.query("SELECT 1 FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2", [storeId,parent])).rowCount > 0, "physical cleanup is deferred");
+  assert.equal((await getThreadHistory(pool, storeId, parent, 1, beforeDelete.version)).status, 404, "old-version history is inaccessible before cleanup");
+  assert.deepEqual(await listThreadEvents(pool, storeId, parent, null, 0, 100), []);
+  for (const event of await listStoreEvents(pool, storeId, 0, 100)) assert.equal(event.historyManifest[parent], undefined);
+  assert.equal((await getSnapshot(pool, storeId)).snapshot.histories[parent], undefined);
+  assert.equal((await listImportedThreads(pool, storeId, 1, parent)).length, 0);
+  await drain(storeId);
+  assert.equal((await manageThread(pool, storeId, parent, "delete", deleted)).body.cleanupPending, false);
   assert.equal((await pool.query("SELECT 1 FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2", [storeId,parent])).rowCount, 0);
-  assert.equal((await pool.query("SELECT 1 FROM codex_store_events WHERE store_id=$1 AND (history_manifest ? $2 OR state->'names' ? $2 OR state->'created_threads' ? $2)", [storeId,parent])).rowCount, 0, "older store versions cannot recover deleted metadata");
+  assert.equal((await pool.query("SELECT 1 FROM codex_store_state_changes WHERE store_id=$1 AND thread_id=$2", [storeId,parent])).rowCount, 0, "older store versions cannot recover deleted metadata");
   assert.equal((await pool.query("SELECT 1 FROM mira_codex_session_import_records WHERE import_id=$1", [ownImport])).rowCount, 0);
   assert.equal((await pool.query("SELECT 1 FROM mira_codex_session_import_records WHERE import_id=$1", [sharedImport])).rowCount, 1, "a surviving fork retains its shared source provenance");
   assert.equal((await getThreadHistory(pool, storeId, parent, 1, beforeDelete.version)).status, 404);
@@ -105,6 +127,70 @@ try {
   ]);
   assert.equal(race.filter(result => result.status === 200).length, 1, "delete and an overlapping append cannot both commit");
   assert(race.some(result => [409,410].includes(result.status)));
+
+  // Production stores contain thousands of large versions preceding a new
+  // thread. Deleting it must not physically rewrite those unrelated rows.
+  const scopeStore = `delete-scope-${crypto.randomUUID()}`, scopeThread = crypto.randomUUID();
+  const unrelated = { histories: { [child]: [] }, future_metadata: { [child]: { reference: scopeThread } } };
+  let scopeVersion = 0;
+  for (const state of [unrelated, { ...unrelated, scalar: true }, { ...unrelated, rollout_paths: null },
+    { ...unrelated, future_metadata: { ...unrelated.future_metadata, [scopeThread]: { secret: "erase" } } },
+    { ...unrelated, rollout_paths: { "/deleted/rollout": scopeThread, "/surviving/rollout": child } },
+    { ...unrelated, histories: { ...unrelated.histories, [scopeThread]: [] } }]) {
+    assert.equal((await putSnapshot(pool, scopeStore, { expectedVersion: scopeVersion++, snapshot: state }, headers())).status, 200);
+  }
+  const physicalRows = () => pool.query("SELECT event_seq::text,ctid::text FROM codex_store_events WHERE store_id=$1 AND event_seq<=3 ORDER BY event_seq", [scopeStore]);
+  const untouched = (await physicalRows()).rows;
+  assert.equal((await manageThread(pool, scopeStore, scopeThread, "delete", { ...actionBody(), itemCount: 0 })).status, 200);
+  scopeVersion++;
+  // Fail after a batch's physical update but before its durable checkpoint.
+  // Retrying from the persisted cursor must neither skip data nor lose history.
+  const faultPool = { async connect() {
+    const client = await pool.connect();
+    return { release: () => client.release(), async query(sql, values) {
+      const result = await client.query(sql, values);
+      if (sql.startsWith("DELETE FROM codex_store_state_changes")) throw Object.assign(new Error("injected batch failure"), { code: "injected" });
+      return result;
+    } };
+  } };
+  await assert.rejects(processThreadErasureBatch(faultPool, { storeId: scopeStore, eventBatchSize: 4 }), { code: "injected" });
+  const failedJob = (await pool.query("SELECT after_event_seq,last_error_code FROM mira_thread_erasures WHERE store_id=$1", [scopeStore])).rows[0];
+  assert.equal(Number(failedJob.after_event_seq), 0);
+  assert.equal(failedJob.last_error_code, "injected");
+  assert((await pool.query("SELECT 1 FROM codex_store_state_changes WHERE store_id=$1 AND thread_id=$2", [scopeStore,scopeThread])).rowCount>0);
+  await pool.query("UPDATE mira_thread_erasures SET retry_at=NOW() WHERE store_id=$1", [scopeStore]);
+  let scanStarted, finishScan;
+  const scanning = new Promise(resolve => { scanStarted = resolve; });
+  const scanDelay = new Promise(resolve => { finishScan = resolve; });
+  const slowPool = { async connect() {
+    const client = await pool.connect();
+    return { release: () => client.release(), async query(sql, values) {
+      if (sql.startsWith("DELETE FROM codex_store_state_changes")) { scanStarted(); await scanDelay; }
+      return client.query(sql, values);
+    } };
+  } };
+  const deletion = processThreadErasureBatch(slowPool, { storeId: scopeStore, eventBatchSize: 4 });
+  await scanning;
+  let writeTimer;
+  try {
+    const writing = commitDelta(pool, scopeStore, { expectedVersion: scopeVersion, stateChanges: [], historyChanges: [
+      { threadId: child, mode: "append", expectedGeneration: 1, expectedItemCount: 0, items: [{ type: "during_deletion_scan" }] },
+    ] }, headers());
+    const write = await Promise.race([writing, new Promise((_, reject) => {
+      writeTimer = setTimeout(() => reject(new Error("deletion scan blocked an unrelated writer")), 3000);
+    })]);
+    assert.equal(write.status, 200, "other conversations can commit while deletion scans old versions");
+  } finally { clearTimeout(writeTimer); finishScan(); }
+  assert(Number((await deletion).afterEventSeq)>0);
+  await drain(scopeStore);
+  assert.deepEqual((await physicalRows()).rows, untouched, "deletion must not rewrite versions without the target thread");
+  assert.equal((await pool.query("SELECT 1 FROM codex_store_state_changes WHERE store_id=$1 AND thread_id=$2",[scopeStore,scopeThread])).rowCount,0);
+  const state=(await getStoreHead(pool,scopeStore)).state;
+  assert.equal(state.future_metadata?.[scopeThread],undefined);
+  assert.equal(state.rollout_paths?.["/deleted/rollout"],undefined);
+  assert.equal(state.future_metadata[child].reference,scopeThread,"unrelated nested references remain unchanged");
+  assert.deepEqual((await getSnapshot(pool, scopeStore)).snapshot.histories[child], [{ type: "during_deletion_scan" }]);
   console.log("PASS: durable names, idempotent retries, concurrent CAS, v1/v2 compatibility, projection rebuilds, raw history and subagent preservation");
   console.log("PASS: archive/restore, permanent content deletion, old-version erasure, shared fork provenance, stale-writer fencing, retry and concurrent deletion");
-} finally { await pool.end(); }
+  console.log("PASS: immediate read/write fencing, bounded erasure, rollback/retry checkpoints, concurrent writes, physical row preservation and shared fork provenance");
+} finally { await pool.end(); await owner.query(`DROP DATABASE ${database}`); await owner.end(); }

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "version": "0.153.1-mira.5",
+  "version": "0.153.1-mira.6",
   "upstreamVersion": "0.153.1",
-  "patchSHA256": "c2a004b2c9ff52e2e3916552f05200d126e438bb3abb6cc2ba3c987b379ccb43"
+  "patchSHA256": "c6ffbdf3d2701f9360e04f46851ebfd47e2dd088310256f0ab9a2aed4f3acf10"
 }

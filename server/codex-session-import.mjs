@@ -308,7 +308,7 @@ export async function normalizeImportedThreadHistoryModes(pool) {
       if (!manifest) continue;
       // Raw JSON can contain escaped NUL. PostgreSQL JSON extraction functions
       // also reject it, so inspect the first envelope in the application.
-      const first = await pool.query(`SELECT payload FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2
+      const first = await pool.query(`SELECT payload FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2
         AND generation=$3 AND store_event_seq<=$4 AND item_seq=1`,
       [storeId, threadId, manifest.generation, head.version]);
       if (first.rows[0]?.payload?.type === "session_meta" && first.rows[0].payload.payload?.history_mode === "legacy") continue;

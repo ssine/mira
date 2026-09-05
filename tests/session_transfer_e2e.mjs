@@ -69,15 +69,8 @@ try {
     expectedItemCount: manifest.itemCount, items: [{ type: "event_msg", payload: { type: "agent_message", message: "continued\u0000output" } }],
   }] }, {});
   assert.equal(appended.status, 200, "V2 must continue a lossless imported history");
-  const compatibilityCache = await pool.query(
-    "SELECT COUNT(*)::int AS count FROM codex_thread_store_snapshots WHERE store_id=$1",
-    [storeId],
-  );
-  assert.equal(
-    compatibilityCache.rows[0].count,
-    0,
-    "routine V2 commits must invalidate rather than rewrite the whole compatibility snapshot",
-  );
+  assert.equal((await pool.query("SELECT to_regclass('codex_thread_store_snapshots') AS legacy")).rows[0].legacy,null,
+    "normalized storage has no persistent compatibility snapshot table");
   const shorter = await run(service, storeId);
   assert.equal(shorter.body.version, appended.body.version, "reimporting source must not erase newer turns");
   for (const phase of ["reading", "publishing"]) {

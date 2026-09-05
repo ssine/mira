@@ -127,6 +127,7 @@ const agent = {
   resumePromises: new Map(),
   runtimePromise: null,
   recoveryPromise: null,
+  recoveryNotice: null,
   connectionWanted: false,
   socketInitialized: false,
   reconnectTimer: null,
@@ -150,6 +151,8 @@ const agent = {
   forkRequests: new Map(),
   showArchived: false,
   threadActionPromise: null,
+  cleanupPending: false,
+  cleanupTimer: null,
   deleteTarget: null,
   activeTurns: new Map(),
   turnStateRequests: new Map(),
@@ -1502,6 +1505,8 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
       const failure = results.find((result) => result.status === "rejected");
       if (failure) throw failure.reason;
       agent.reconnectAttempt = 0;
+      if (agent.recoveryNotice === $("#conversationNotice").textContent) setConversationNotice();
+      agent.recoveryNotice = null;
       scheduleAgentHeartbeat();
     } catch (error) {
       if (epoch !== agent.selectionEpoch || !agent.connectionWanted) return;
@@ -1510,7 +1515,20 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
         setConversationNotice("登录已过期，请重新登录。输入内容仍保留。", "warning");
         return;
       }
-      setAgentRuntimeState("连接暂时中断，正在自动重连…", "offline");
+      if (error.status === 404 || error.status === 410 || error.code === -32004) {
+        stopAgentRecovery();
+        setConversationNotice(`会话已删除或不可访问：${error.message}`, "error");
+        return;
+      }
+      const connected = agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN;
+      if (connected) {
+        const node = dashboardNodes.get(agent.socketNodeId);
+        setAgentRuntimeState(`已连接 ${node?.hostname ?? agent.socketNodeId}`, "online");
+        agent.recoveryNotice = `恢复会话失败：${error.message}`;
+        setConversationNotice(agent.recoveryNotice, "error");
+      } else {
+        setAgentRuntimeState(`连接暂时中断，正在自动重连… ${error.message}`, "offline");
+      }
       scheduleAgentRecovery();
     }
   })();
@@ -2677,7 +2695,10 @@ function onAgentSocketMessage(event) {
     const pending = agent.pending.get(message.id);
     if (!pending) return;
     agent.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(readableErrorMessage(message.error) || JSON.stringify(message.error)));
+    if (message.error) pending.reject(Object.assign(
+      new Error(readableErrorMessage(message.error) || JSON.stringify(message.error)),
+      { code: message.error.code },
+    ));
     else pending.resolve(message.result);
     return;
   }
@@ -2972,6 +2993,7 @@ async function showProjectDialog() {
 async function loadAgentThreads() {
   const archived = agent.showArchived;
   const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
+  updateThreadCleanup(response.cleanup?.pending ?? 0);
   if (archived !== agent.showArchived) return;
   const selected = currentAgentThread();
   agent.threads = response.data ?? [];
@@ -2980,6 +3002,24 @@ async function loadAgentThreads() {
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
   renderAgentThreads();
+}
+
+function updateThreadCleanup(pending) {
+  clearTimeout(agent.cleanupTimer);
+  const status = $("#threadCleanupStatus");
+  if (pending) {
+    status.textContent = "对话已删除，正在完成历史数据清理…";
+    status.classList.remove("hidden");
+    agent.cleanupTimer = setTimeout(() => {
+      if (!["agentView", "runtimeView"].includes(document.body.dataset.view)) return;
+      void loadAgentThreads().catch(error => {
+        if (error.status !== 401 && error.status !== 403) updateThreadCleanup(pending);
+      });
+    }, 3000);
+  } else if (agent.cleanupPending) {
+    status.textContent = "已删除对话的历史数据清理完成";
+  }
+  agent.cleanupPending = Boolean(pending);
 }
 
 function removeThreadFromWindow(threadId, deleted) {
@@ -3942,14 +3982,15 @@ $("#threadDeleteForm").addEventListener("submit", async event => {
   if (!thread || agent.threadActionPromise || agent.sendPromise || agent.forkPromise) return;
   if (agent.activeTurns.has(thread.threadId)) { $("#threadDeleteError").textContent = "请先停止此对话的运行，再删除。"; return; }
   const operation = (async () => {
-    await api(`/v1/codex/threads/${encodeURIComponent(thread.threadId)}?storeId=personal`, {
+    const result = await api(`/v1/codex/threads/${encodeURIComponent(thread.threadId)}?storeId=personal`, {
       method: "DELETE", body: JSON.stringify({ generation: thread.generation, itemCount: thread.itemCount, operationId: thread.operationId }),
     });
     removeThreadFromWindow(thread.threadId, true);
     threadMetadataChannel?.postMessage({ threadId: thread.threadId, action: "delete" });
     $("#threadDeleteDialog").close();
+    if (result.cleanupPending) updateThreadCleanup(1);
     await loadAgentThreads();
-    toast("对话已永久删除");
+    toast(result.cleanupPending ? "对话已删除，历史数据将在后台完成清理" : "对话已永久删除");
   })();
   agent.threadActionPromise = operation; syncConversationSendUi();
   $("#threadDeleteConfirm").disabled = true;

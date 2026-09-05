@@ -55,6 +55,7 @@ try {
   let nodeRequests = 0;
   let expireLogin = false;
   let transcriptRequests = 0;
+  let missingTranscript = false;
   await page.route("**/v1/nodes/test-node", (route) => {
     nodeRequests++;
     return route.fulfill({ status: expireLogin ? 401 : 200, json: expireLogin
@@ -66,6 +67,7 @@ try {
     const url = new URL(route.request().url());
     assert.equal(url.searchParams.get("tail"), "1");
     const threadId = url.pathname.split("/").at(-2);
+    if (missingTranscript) return route.fulfill({ status: 404, json: { error: "thread was deleted" } });
     return route.fulfill({ json: { generation: 1, nextCursor: null, trace: [{
       key: `recovered-${threadId}`, kind: "assistant", body: `Recent messages for ${threadId}`,
       sourceItemSeq: 99, turnId: `recovered-turn-${threadId}`,
@@ -317,6 +319,57 @@ try {
   assert.equal(await page.locator("#conversationMeta .conversation-directory").textContent(), "/other");
   assert.equal(await page.locator("#conversationMeta .conversation-model").textContent(), "gpt-6-astra");
   assert.equal((await page.locator("#conversationMeta").textContent()).includes("other-thread"), false);
+
+  // A healthy socket plus a failed resume is a conversation error, not an
+  // offline runtime. Keep its actual error visible and preserve the draft.
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.agent.loadedThreadIds.delete("other-thread");
+    window.failedRecovery = h.recoverAgentSession({ refresh: false });
+  });
+  await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
+  const failedResume = reconnectMessages.findLast(message => message.method === "thread/resume");
+  reconnectedSocket.send(JSON.stringify({ id: failedResume.id, error: { code: -32600, message: "resume unavailable" } }));
+  await page.evaluate(() => window.failedRecovery);
+  assert.equal(await page.locator("#agentRuntimeBadge").textContent(), "online");
+  assert.equal(await page.locator("#conversationConnection").isVisible(), false);
+  assert.equal(await page.locator("#conversationNotice").textContent(), "恢复会话失败：resume unavailable");
+  assert.equal(await page.locator("#conversationInput").inputValue(), "Draft stays through mobile suspension");
+  automaticResume = true;
+  await page.evaluate(() => window.traceHarness.recoverAgentSession({ refresh: false }));
+  assert.equal(await page.locator("#conversationNotice").textContent(), "", "a recovered conversation clears its recovery error");
+
+  automaticResume = false;
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.agent.loadedThreadIds.delete("other-thread");
+    window.deletedRecovery = h.recoverAgentSession({ refresh: false });
+  });
+  await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
+  const deletedResume = reconnectMessages.findLast(message => message.method === "thread/resume");
+  reconnectedSocket.send(JSON.stringify({ id: deletedResume.id, error: { code: -32004, message: "此会话已永久删除，不能继续写入或恢复。" } }));
+  await page.evaluate(() => window.deletedRecovery);
+  assert.equal(await page.evaluate(() => window.traceHarness.agent.connectionWanted), false, "broker deletion errors stop automatic retries too");
+  assert.match(await page.locator("#conversationNotice").textContent(), /此会话已永久删除/);
+  automaticResume = true;
+  await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.agent.connectionWanted = true;
+    await h.connectAgentSocket("test-node");
+  });
+
+  // A deleted thread's transcript cannot recover; don't reconnect forever or
+  // mislabel the healthy service as offline after deletion committed.
+  missingTranscript = true;
+  await page.evaluate(() => window.traceHarness.recoverAgentSession());
+  assert.equal(await page.evaluate(() => window.traceHarness.agent.connectionWanted), false);
+  assert.match(await page.locator("#conversationNotice").textContent(), /会话已删除或不可访问.*thread was deleted/);
+  missingTranscript = false;
+  await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.agent.connectionWanted = true;
+    await h.connectAgentSocket("test-node");
+  });
 
   expireLogin = true;
   reconnectedSocket.close({ code: 1001 });

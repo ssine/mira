@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { storageRowsMigration } from "./storage-rows-migration.mjs";
 
 const migrations = [
   {
@@ -515,9 +516,31 @@ const migrations = [
       $$;
     `,
   },
+  {
+    version: 16,
+    name: "bounded-background-thread-erasure",
+    sql: `
+      CREATE TABLE mira_thread_erasures (
+        store_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        action_seq BIGINT NOT NULL REFERENCES mira_thread_actions(action_seq),
+        through_event_seq BIGINT NOT NULL CHECK (through_event_seq >= 0),
+        after_event_seq BIGINT NOT NULL DEFAULT 0 CHECK (after_event_seq >= 0),
+        phase TEXT NOT NULL DEFAULT 'events' CHECK (phase IN ('events','history','provenance','complete')),
+        retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        last_error_code TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        completed_at TIMESTAMPTZ,
+        PRIMARY KEY (store_id,thread_id)
+      );
+      CREATE INDEX mira_thread_erasures_pending_idx ON mira_thread_erasures(updated_at) WHERE phase<>'complete';
+    `,
+  },
+  { version: 17, name: "normalized-thread-records-cutover", sql: storageRowsMigration },
 ];
 
-export async function initializeDatabase(pool) {
+export async function initializeDatabase(pool, { throughVersion = Infinity } = {}) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS codex_schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -528,6 +551,7 @@ export async function initializeDatabase(pool) {
   `);
 
   for (const migration of migrations) {
+    if (migration.version > throughVersion) break;
     const checksum = crypto.createHash("sha256").update(migration.sql).digest("hex");
     const existing = await pool.query(
       "SELECT name, checksum FROM codex_schema_migrations WHERE version = $1",

@@ -1,16 +1,16 @@
 # Codex Remote Thread Store Adapter Protocol v2
 
-状态：PoC 已实现。HTTP JSON；ThreadStore 请求使用带 `store:read` / `store:write` scope 的
-客户端 Bearer token。管理员和 Node 认证不复用这个凭证，见 [auth-v1.md](./auth-v1.md)。
+状态：已实现，数据库 schema 17。HTTP JSON；ThreadStore 请求使用获批 Node 的 Bearer 凭据。
+管理员使用数据库 Cookie 会话，见 [auth-v1.md](./auth-v1.md)。
 
 ## 1. 目标与不变量
 
-- PostgreSQL 中的 `codex_store_events` 与 `codex_thread_events` 是唯一持久化事实来源。
+- PostgreSQL 的原始 rollout、元数据变化日志、历史边界和操作回执共同构成持久化事实来源。
 - Codex 仍读写官方 `ThreadStore` 数据结构；adapter 只把一次本地状态变化编码成细粒度提交。
 - store head 是单调递增的 `uint64`。一次有效提交恰好产生一个新版本。
 - rollout item 原始 JSON 不做业务格式转换。新 Codex 字段可以原样持久化、回放。
 - thread 历史在一个 generation 内不可变、只追加；重写历史必须创建新 generation。
-- snapshot 和 thread projection 都是缓存，可从权威事件重建。
+- snapshot 按需构造，当前状态和 thread projection 可从权威记录重建；不存完整历史快照。
 - 所有写入带 operation ID，从而支持超时后的安全重试。
 
 协议版本与 Codex rollout/event 格式版本分开演进：adapter v2 不要求 Server 理解每一种
@@ -46,6 +46,9 @@ Authorization: Bearer <token>
 `state` 不包含 rollout 历史。客户端必须使用同一响应里的 `version` 和
 `historyManifest` 加载历史，从而得到一致的物化视图。
 
+传入 `?threadId=<id>` 可只读取一个会话的状态和 manifest，常规追加和元数据操作使用此路径。
+响应还包含 `historyFloor`：一次性迁移清理旧快照后最早可读取的版本。
+
 ## 3. 按版本读取 thread 历史
 
 ```http
@@ -71,6 +74,7 @@ Authorization: Bearer <token>
 - generation 与该版本 manifest 不匹配时返回 404。
 - 实际数量与 manifest 不一致时返回 409，客户端不得使用部分历史。
 - 省略 generation 时使用目标版本的 active generation。
+- `throughVersion < historyFloor` 返回 410；客户端需重新读取 head。
 
 ## 4. 细粒度提交
 
@@ -131,6 +135,9 @@ X-Codex-Version: 0.151.0
 同一 operation ID 再次提交不会重放变化；响应包含 `duplicate: true` 和原提交版本。
 没有产生变化时不推进 head，并返回 `noChange: true`。
 
+单会话提交可带 `X-Mira-Thread-Scope: <threadId>`，让响应只包含该会话的 manifest。
+Server 验证所有变化确实属于这个会话；不带该头仍兼容旧客户端。
+
 `rebased: true` 表示 Server 在高于 `expectedVersion` 的 head 上合并了提交。adapter 必须使本地
 物化 cache 失效，下次操作从 PostgreSQL 重载，不能只把本地 cache 的 version 改成新 head。
 
@@ -189,8 +196,8 @@ X-Codex-Version: 0.151.0
 
 ## 6. 写入和执行节点切换
 
-一个 Codex 进程内部对同一 store 的 mutation 串行化；Server 通过
-`codex_store_heads` 的行锁串行提交。`turn/completed` 是模型生命周期事件，不等于最后一批
+一个 Codex 进程内部的 mutation 有序执行。Server 通过会话级锁保护冲突，独立会话可并发准备写入；
+只有事务末尾发布版本时短暂锁住 `codex_store_heads`，不在此锁下读取或处理完整历史。`turn/completed` 是模型生命周期事件，不等于最后一批
 持久化 callback 已完成。跨节点接管必须按以下顺序：
 
 1. 停止给旧 App Server 分配新 turn；
@@ -210,6 +217,9 @@ PoC 的 E2E 已验证这个 quiescent handoff。生产版仍应把它升级为�
 - 数据库 migration 有递增版本、名称与 SQL checksum；已应用 migration 被修改时拒绝启动。
 - 新投影以新表或新列添加，回填后再切换读取；不要原地重写旧 rollout payload。
 - generation 保留合法历史重写前的旧数据，便于审计、回滚和离线升级。
+- schema 17 按管理员授权进行一次性切换：保留原始历史、导入溯源和当前状态，清除旧完整快照，
+  在原 head 建立一个 baseline。低于 `historyFloor` 的旧版本不能继续读取或写入。
+- 具体表职责、事务顺序和回滚限制见 [存储设计](../docs/thread-storage-redesign.md)。
 
 ## 8. 当前资源上限
 
