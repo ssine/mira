@@ -43,9 +43,11 @@ try {
     return route.fallback();
   });
   await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket => {
-    let titleConnection = false, tempId;
+    let titleConnection = false, accountConnection = false, tempId;
     socket.onMessage(async data => {
       const request = JSON.parse(data);
+      if (request.method === 'initialize') accountConnection = request.params.clientInfo.name === 'mira_web_account';
+      if (accountConnection) { if (request.id !== undefined) socket.send(JSON.stringify({ id: request.id, result: request.method === 'account/read' ? { account: null } : {} })); return; }
       if (request.method === 'initialize') titleConnection = request.params.clientInfo.name === 'mira_web_title';
       if (request.id === undefined) return;
       const send = result => socket.send(JSON.stringify({ id: request.id, result }));

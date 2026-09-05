@@ -110,16 +110,20 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
+              <section id="agentAccount" class="sidebar-account" aria-label="当前运行节点的 Codex 账户">
+                <div class="sidebar-account-heading"><strong data-account-email>Codex 账户</strong><span data-account-plan class="sidebar-account-plan"></span><button data-account-refresh class="chat-icon-button" type="button" aria-label="刷新账户与额度" title="刷新账户与额度" disabled>↻</button></div>
+                <p data-account-node class="sidebar-account-node">当前运行节点</p>
+                <dl class="hidden">
+                  <div><dt>周额度剩余</dt><dd data-account-remaining>未提供</dd></div>
+                  <div><dt>下次重置</dt><dd data-account-reset title="按本地时区显示">未提供</dd></div>
+                  <div><dt>重置机会</dt><dd data-account-credits>未提供</dd></div>
+                </dl>
+                <meter class="hidden" min="0" max="100" value="0" aria-label="周额度剩余百分比"></meter>
+                <p data-account-status class="sidebar-account-status hidden" role="status"></p>
+              </section>
               <button id="agentArchiveToggle" class="chat-nav-link chat-manage-link" type="button" aria-pressed="false"><span aria-hidden="true">▤</span><span><strong id="agentArchiveLabel">归档对话</strong></span></button>
               <button id="agentThemeToggle" class="chat-nav-link chat-manage-link" type="button" aria-label="切换外观"><span aria-hidden="true">◐</span><span><strong>切换外观</strong></span></button>
-              <button id="agentFullscreenToggle" class="chat-nav-link chat-manage-link" type="button" aria-pressed="false" disabled>
-                <span aria-hidden="true">⛶</span><span><strong id="agentFullscreenLabel">全屏模式</strong><small id="agentFullscreenHint">隐藏系统栏，扩大阅读空间</small></span>
-              </button>
-              <p id="agentFullscreenStatus" class="fullscreen-status hidden" role="status"></p>
               <button class="chat-nav-link chat-manage-link hidden" type="button" data-install-app><span aria-hidden="true">↓</span><span><strong>安装 Mira</strong><small>添加到桌面，以独立应用打开</small></span></button>
-              <button id="agentManage" class="chat-nav-link chat-manage-link" type="button">
-                <span aria-hidden="true">⚙</span><span><strong>运行节点与导入</strong><small>选择运行位置、扫描本地会话</small></span>
-              </button>
             </footer>
           </aside>
           <section class="conversation-card">

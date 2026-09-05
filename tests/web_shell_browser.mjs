@@ -53,7 +53,6 @@ try {
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
   assert.equal(await page.locator("#agentHome").isVisible(), true);
-  assert.equal(await page.locator("#agentManage").isVisible(), true);
   await page.locator("#agentThreadDrawerClose").click();
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
   await page.locator("#agentThreadDrawerToggle").click();

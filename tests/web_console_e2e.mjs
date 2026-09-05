@@ -165,7 +165,7 @@ for (const wiring of [
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
 }
-for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentManage", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationScroll", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
+for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationScroll", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {

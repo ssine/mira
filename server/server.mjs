@@ -41,6 +41,7 @@ const staticAssets = new Map([
   ["/", [path.join(publicDirectory, "index.html"), "text/html; charset=utf-8"]],
   ["/app.js", [path.join(publicDirectory, "app.js"), "text/javascript; charset=utf-8"]],
   ["/thread-title.js", [path.join(publicDirectory, "thread-title.js"), "text/javascript; charset=utf-8"]],
+  ["/account-status.js", [path.join(publicDirectory, "account-status.js"), "text/javascript; charset=utf-8"]],
   ["/trace-activity.js", [path.join(publicDirectory, "trace-activity.js"), "text/javascript; charset=utf-8"]],
   ["/conversation-progress.js", [path.join(publicDirectory, "conversation-progress.js"), "text/javascript; charset=utf-8"]],
   ["/theme.js", [path.join(publicDirectory, "theme.js"), "text/javascript; charset=utf-8"]],

@@ -6,6 +6,7 @@ import { toolItemView, activitySummary, summarizeActivities, activityStatus, for
 import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
+import { AccountSidebar } from "/account-status.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -199,6 +200,14 @@ const agent = {
 };
 
 const transcriptPageSize = 60;
+const accountSidebar = new AccountSidebar($("#agentAccount"));
+
+function syncAccountSidebar() {
+  const active = document.body.dataset.view === "agentView" && agentThreadDrawerOpen && !document.hidden;
+  const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  accountSidebar.select(navigator.onLine === false && node ? { ...node, status: "offline" } : node, active);
+}
+
 const replyProgress = new ReplyProgress();
 let replyProgressTimer = null;
 const traceStreamRenders = new WeakMap();
@@ -332,6 +341,7 @@ function show(view) {
   document.title = view === "agentView" ? `${$("#conversationTitle").textContent} · Mira` : "Mira";
   if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
   else if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
+  syncAccountSidebar();
 }
 
 function setAgentThreadDrawer(open, { focus = true } = {}) {
@@ -340,6 +350,7 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   const toggle = $("#agentThreadDrawerToggle");
   if (!drawer || !backdrop || !toggle) return;
   agentThreadDrawerOpen = open;
+  syncAccountSidebar();
   drawer.closest(".chat-shell").classList.toggle("sidebar-open", open);
   drawer.classList.toggle("open", open);
   drawer.toggleAttribute("inert", !open);
@@ -1617,6 +1628,7 @@ function syncActiveTurnUi() {
 }
 
 function syncConversationSendUi() {
+  syncAccountSidebar();
   const selectedNode = $("#agentRuntimeNode")?.value;
   const busy = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
   $("#threadFork").disabled = busy;
@@ -3897,7 +3909,6 @@ $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").ca
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
 $("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#agentHome").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
-$("#agentManage").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
 $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
 $("#agentThreadDrawerClose").addEventListener("click", () => setAgentThreadDrawer(false));
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
@@ -3919,6 +3930,7 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
+  syncAccountSidebar();
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
@@ -3931,15 +3943,18 @@ $("#agentRuntimeNode").addEventListener("change", () => {
 });
 
 document.addEventListener("visibilitychange", () => {
+  syncAccountSidebar();
   if (document.hidden) {
     clearTimeout(agent.reconnectTimer);
     clearTimeout(agent.heartbeatTimer);
   } else void recoverAgentSession({ probe: true });
 });
-window.addEventListener("pageshow", (event) => { if (event.persisted) void recoverAgentSession({ probe: true }); });
+window.addEventListener("pageshow", (event) => { syncAccountSidebar(); if (event.persisted) void recoverAgentSession({ probe: true }); });
+window.addEventListener("pagehide", () => accountSidebar.select(null, false));
 document.addEventListener("resume", () => { void recoverAgentSession({ probe: true }); });
-window.addEventListener("online", () => { void recoverAgentSession({ probe: true }); });
+window.addEventListener("online", () => { syncAccountSidebar(); void recoverAgentSession({ probe: true }); });
 window.addEventListener("offline", () => {
+  syncAccountSidebar();
   clearTimeout(agent.reconnectTimer);
   clearTimeout(agent.heartbeatTimer);
   if (agent.connectionWanted) setAgentRuntimeState("网络已断开，恢复后将自动连接", "offline");

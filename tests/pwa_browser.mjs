@@ -89,16 +89,11 @@ try {
   assert.equal(await page.title(), "手机会话 · Mira");
   await page.setViewportSize({ width: 393, height: 851 });
 
-  await page.locator("#conversationInput").fill("全屏切换时保留的草稿");
+  await page.locator("#conversationInput").fill("侧边栏切换时保留的草稿");
   await page.locator("#conversationScroll").evaluate((scroll) => { scroll.scrollTop = 400; });
   await page.locator("#agentThreadDrawerToggle").click();
-  const fullscreen = page.locator("#agentFullscreenToggle");
-  await fullscreen.click();
-  await page.waitForFunction(() => document.fullscreenElement === document.documentElement);
-  assert.equal(await fullscreen.getAttribute("aria-pressed"), "true");
-  assert.equal(await page.locator("#agentFullscreenLabel").textContent(), "退出全屏");
   await page.locator("#agentThreadDrawerClose").click();
-  assert.equal(await page.locator("#conversationInput").inputValue(), "全屏切换时保留的草稿");
+  assert.equal(await page.locator("#conversationInput").inputValue(), "侧边栏切换时保留的草稿");
   assert.ok(page.url().endsWith(`/?thread=${thread}`));
   assert.ok(Math.abs(await page.locator("#conversationScroll").evaluate((scroll) => scroll.scrollTop) - 400) <= 1);
   for (const viewport of [{ width: 393, height: 430 }, { width: 851, height: 393 }, { width: 393, height: 851 }]) {
@@ -106,34 +101,9 @@ try {
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const bounds = await page.evaluate(() => ({ bottom: document.querySelector("#conversationForm").getBoundingClientRect().bottom,
       viewport: visualViewport.height + visualViewport.offsetTop, overflow: document.documentElement.scrollWidth > innerWidth + 1 }));
-    assert.ok(Math.abs(bounds.bottom - bounds.viewport) <= 1, `fullscreen composer follows viewport: ${JSON.stringify(bounds)}`);
+    assert.ok(Math.abs(bounds.bottom - bounds.viewport) <= 1, `mobile composer follows viewport: ${JSON.stringify(bounds)}`);
     assert.equal(bounds.overflow, false);
   }
-  await page.locator("#agentThreadDrawerToggle").click();
-  await fullscreen.click();
-  await page.waitForFunction(() => !document.fullscreenElement);
-  assert.equal(await fullscreen.getAttribute("aria-pressed"), "false");
-  assert.equal(await page.locator("#agentFullscreenLabel").textContent(), "全屏模式");
-  await fullscreen.click();
-  await page.waitForFunction(() => Boolean(document.fullscreenElement));
-  await page.evaluate(() => document.exitFullscreen()); // The browser/system can exit independently.
-  await page.waitForFunction(() => document.querySelector("#agentFullscreenToggle").getAttribute("aria-pressed") === "false");
-  await page.evaluate(() => {
-    window.originalRequestFullscreen = document.documentElement.requestFullscreen;
-    document.documentElement.requestFullscreen = () => Promise.reject(new TypeError("Fullscreen denied"));
-  });
-  await fullscreen.click();
-  await page.locator("#agentFullscreenStatus:not(.hidden)").waitFor();
-  assert.equal(await fullscreen.isEnabled(), true, "a rejected fullscreen request allows retry");
-  assert.equal(await fullscreen.getAttribute("aria-pressed"), "false");
-  await page.evaluate(() => { document.documentElement.requestFullscreen = window.originalRequestFullscreen; });
-  await fullscreen.click();
-  await page.waitForFunction(() => Boolean(document.fullscreenElement));
-  assert.equal(await page.locator("#agentFullscreenStatus").isVisible(), false);
-  await fullscreen.click();
-  await page.waitForFunction(() => !document.fullscreenElement);
-  await page.locator("#agentThreadDrawerClose").click();
-
   // A real cold document load uses the install start URL and restores the route.
   await page.goto(`${origin}/?launch=pwa`, { waitUntil: "networkidle" });
   await page.waitForURL(`**/?thread=${thread}`);
@@ -236,5 +206,5 @@ try {
   await page.locator("#loginView:not(.hidden)").waitFor();
   assert.ok(page.url().endsWith("/?view=agent"));
   assert.deepEqual(errors, []);
-  console.log("PASS: Chrome installability, icons, ETag/HEAD, launch/deep links, fullscreen entry/exit/retry, mobile/landscape/zoom, theme, offline recovery, private-cache exclusion, logout");
+  console.log("PASS: Chrome installability, icons, ETag/HEAD, launch/deep links, mobile/landscape/zoom, theme, offline recovery, private-cache exclusion, logout");
 } finally { await context?.close(); await fs.rm(profile, { recursive: true, force: true }); }

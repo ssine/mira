@@ -35,8 +35,10 @@ try {
     if (loseTitleReply) { loseTitleReply = false; return route.abort('failed'); }
     return route.fulfill({ response });
   });
-  await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket=>socket.onMessage(async data=>{
+  await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket=>{ let accountConnection=false; socket.onMessage(async data=>{
     const request=JSON.parse(data); if (request.id === undefined) return;
+    if(request.method==='initialize') accountConnection=request.params.clientInfo.name==='mira_web_account';
+    if(accountConnection) { socket.send(JSON.stringify({id:request.id,result:request.method==='account/read'?{account:null}:{}})); return; }
     messages.push(request);
     const send=result=>socket.send(JSON.stringify({id:request.id,result}));
     if(request.method==='initialize')send({});
@@ -62,7 +64,7 @@ try {
       if(rejectStop) { rejectStop=false; socket.send(JSON.stringify({id:request.id,error:{message:'Try stopping again'}})); }
       else { send({}); socket.send(JSON.stringify({method:'turn/completed',params:{threadId:request.params.threadId,turn:{id:request.params.turnId,status:'interrupted'}}})); }
     } else throw Error('unexpected RPC '+request.method);
-  }));
+  }); });
   const page=await context.newPage();
   await page.goto(origin);
   await page.locator('#password').fill(process.env.MIRA_TEST_ADMIN_PASSWORD??'mira-local-admin-password');
