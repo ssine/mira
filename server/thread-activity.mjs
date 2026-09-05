@@ -3,6 +3,11 @@
 const cache = new WeakMap();
 const starts = new Set(["task_started", "turn_started"]);
 const ends = new Set(["task_complete", "turn_complete", "turn_aborted"]);
+function eventTime(value) {
+  if (value == null) return null;
+  const milliseconds = value instanceof Date ? value.getTime() : typeof value === "number" ? value * 1000 : Date.parse(value);
+  return Number.isFinite(milliseconds) && Math.abs(milliseconds) <= 8.64e15 ? new Date(milliseconds).toISOString() : null;
+}
 function terminalError(payload) {
   if (payload?.type !== "error" || payload.will_retry === true || payload.willRetry === true) return false;
   const info = payload.codex_error_info;
@@ -28,8 +33,8 @@ export function projectThreadActivity(rows, exhausted = true) {
   return {
     state: end ? (payload.type === "turn_aborted" ? "interrupted" : payload.error || error ? "failed" : "idle") : error ? "failed" : "running",
     turnId: turnId ?? payload.turn_id ?? null,
-    startedAt: start?.payload.timestamp ?? null,
-    updatedAt: marker.payload.timestamp ?? marker.created_at?.toISOString() ?? null,
+    startedAt: eventTime(start?.payload.payload.started_at) ?? eventTime(start?.payload.timestamp) ?? eventTime(start?.created_at),
+    updatedAt: eventTime(payload.completed_at ?? payload.started_at) ?? eventTime(marker.payload.timestamp) ?? eventTime(marker.created_at),
   };
 }
 
@@ -79,7 +84,7 @@ export async function addThreadActivities(pool, storeId, threads) {
           (thread.createdAt && Date.parse(activity.startedAt) < Date.parse(thread.createdAt))) reason = "history";
       else if (!node) reason = "unbound";
       else if (node.approval_status !== "approved" || node.channel_status?.connected !== true || Date.now() - Date.parse(node.last_seen_at) >= 15_000) reason = "offline";
-      else if (thread.runtimeNodeId && Date.parse(thread.runtimeBoundAt) <= Date.parse(activity.startedAt) &&
+      else if (thread.runtimeNodeId &&
         (node.reported_app_server?.status !== "running" || Date.parse(node.reported_app_server?.startedAt) > Date.parse(activity.startedAt))) reason = "runtime";
       if (reason) { activity.state = "unknown"; activity.reason = reason; }
     }

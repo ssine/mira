@@ -16,7 +16,8 @@ const pool = new pg.Pool({ connectionString: url.toString() });
 const store = "activity-test", node = crypto.randomUUID();
 const ids = Object.fromEntries(["running", "idle", "failed", "child", "late", "unbound", "replacement", "copied"].map(name => [name, crypto.randomUUID()]));
 const timestamp = new Date().toISOString();
-const event = (type, turn_id, extra = {}) => ({ type: "event_msg", timestamp, payload: { type, turn_id, ...extra } });
+const event = (type, turn_id, extra = {}) => ({ type: "event_msg", payload: { type, turn_id,
+  ...(type === "task_started" ? { started_at: Math.floor(Date.parse(timestamp) / 1000) } : { completed_at: Math.floor(Date.parse(timestamp) / 1000) }), ...extra } });
 const headers = () => ({ "x-codex-operation-id": crypto.randomUUID() });
 try {
   await initializeDatabase(pool, { throughVersion: 17 });
@@ -52,6 +53,7 @@ try {
   assert.equal(rows.running.activity.reason, "offline", "Node status is not cached with immutable history");
   assert.equal(rows.idle.activity.state, "idle", "offline does not change completed history");
   await pool.query("UPDATE codex_nodes SET channel_status='{\"connected\":true}',last_seen_at=NOW(),reported_app_server=$2::jsonb WHERE node_id=$1", [node, JSON.stringify({status:"running",startedAt:new Date(Date.now()+60_000).toISOString()})]);
+  await pool.query("UPDATE mira_codex_thread_runtimes SET bound_at=NOW() WHERE store_id=$1", [store]);
   assert.equal((await read()).running.activity.reason, "runtime");
   await pool.query("UPDATE codex_nodes SET reported_app_server=$2::jsonb WHERE node_id=$1", [node, JSON.stringify({status:"running",startedAt:new Date(Date.now()-60_000).toISOString()})]);
   const head = await getStoreHead(pool, store);

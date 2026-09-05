@@ -15,3 +15,11 @@ test("canonical lifecycle projection handles late older completions, failure and
   assert.equal(projectThreadActivity([{ payload: { type: "future_tool", payload: { type: "task_complete" } } }, event("task_started")]).state, "running");
   assert.equal(projectThreadActivity([], false).state, "unknown");
 });
+test("native store events carry Unix seconds without a rollout timestamp envelope", () => {
+  const started = { payload: { type: "event_msg", payload: { type: "task_started", turn_id: "native", started_at: 1788622585 } } };
+  const ended = { payload: { type: "event_msg", payload: { type: "task_complete", turn_id: "native", completed_at: 1788622587 } } };
+  assert.equal(projectThreadActivity([started]).startedAt, "2026-09-05T15:36:25.000Z");
+  assert.equal(projectThreadActivity([ended, started]).updatedAt, "2026-09-05T15:36:27.000Z");
+  const legacy = { payload: { type: "event_msg", payload: { type: "task_started", turn_id: "legacy" } }, created_at: new Date("2026-09-05T15:00:00Z") };
+  assert.equal(projectThreadActivity([legacy]).startedAt, "2026-09-05T15:00:00.000Z");
+});
