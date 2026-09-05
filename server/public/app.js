@@ -151,8 +151,6 @@ const agent = {
   forkRequests: new Map(),
   showArchived: false,
   threadActionPromise: null,
-  cleanupPending: false,
-  cleanupTimer: null,
   deleteTarget: null,
   activeTurns: new Map(),
   turnStateRequests: new Map(),
@@ -2993,7 +2991,6 @@ async function showProjectDialog() {
 async function loadAgentThreads() {
   const archived = agent.showArchived;
   const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
-  updateThreadCleanup(response.cleanup?.pending ?? 0);
   if (archived !== agent.showArchived) return;
   const selected = currentAgentThread();
   agent.threads = response.data ?? [];
@@ -3002,24 +2999,6 @@ async function loadAgentThreads() {
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
   renderAgentThreads();
-}
-
-function updateThreadCleanup(pending) {
-  clearTimeout(agent.cleanupTimer);
-  const status = $("#threadCleanupStatus");
-  if (pending) {
-    status.textContent = "对话已删除，正在完成历史数据清理…";
-    status.classList.remove("hidden");
-    agent.cleanupTimer = setTimeout(() => {
-      if (!["agentView", "runtimeView"].includes(document.body.dataset.view)) return;
-      void loadAgentThreads().catch(error => {
-        if (error.status !== 401 && error.status !== 403) updateThreadCleanup(pending);
-      });
-    }, 3000);
-  } else if (agent.cleanupPending) {
-    status.textContent = "已删除对话的历史数据清理完成";
-  }
-  agent.cleanupPending = Boolean(pending);
 }
 
 function removeThreadFromWindow(threadId, deleted) {
@@ -3982,15 +3961,13 @@ $("#threadDeleteForm").addEventListener("submit", async event => {
   if (!thread || agent.threadActionPromise || agent.sendPromise || agent.forkPromise) return;
   if (agent.activeTurns.has(thread.threadId)) { $("#threadDeleteError").textContent = "请先停止此对话的运行，再删除。"; return; }
   const operation = (async () => {
-    const result = await api(`/v1/codex/threads/${encodeURIComponent(thread.threadId)}?storeId=personal`, {
+    await api(`/v1/codex/threads/${encodeURIComponent(thread.threadId)}?storeId=personal`, {
       method: "DELETE", body: JSON.stringify({ generation: thread.generation, itemCount: thread.itemCount, operationId: thread.operationId }),
     });
     removeThreadFromWindow(thread.threadId, true);
     threadMetadataChannel?.postMessage({ threadId: thread.threadId, action: "delete" });
     $("#threadDeleteDialog").close();
-    if (result.cleanupPending) updateThreadCleanup(1);
-    await loadAgentThreads();
-    toast(result.cleanupPending ? "对话已删除，历史数据将在后台完成清理" : "对话已永久删除");
+    toast("对话已删除");
   })();
   agent.threadActionPromise = operation; syncConversationSendUi();
   $("#threadDeleteConfirm").disabled = true;

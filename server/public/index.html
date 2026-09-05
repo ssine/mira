@@ -107,7 +107,6 @@
             </div>
             <section class="thread-browser">
               <div class="agent-side-head"><h2>项目</h2><div class="project-create-actions"><button id="agentNewProject" class="ghost" type="button">＋ 项目</button><button id="agentNewThread" class="ghost" type="button">＋ 对话</button></div></div>
-              <p id="threadCleanupStatus" class="muted hidden" role="status"></p>
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
@@ -312,7 +311,7 @@
       <form id="threadDeleteForm">
         <h2 id="threadDeleteTitle">永久删除对话？</h2>
         <p id="threadDeleteName"></p>
-        <p class="muted">删除后无法恢复，已有分支会保留。对话会立即移除，历史数据将在后台完成清理。</p>
+        <p class="muted">删除后无法恢复，已有分支会保留。</p>
         <p id="threadDeleteError" class="chat-edit-error" role="status"></p>
         <div class="chat-edit-actions"><button id="threadDeleteCancel" class="ghost" type="button">取消</button><button id="threadDeleteConfirm" class="danger" type="submit">永久删除</button></div>
       </form>

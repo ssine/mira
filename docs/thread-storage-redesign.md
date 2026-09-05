@@ -92,6 +92,9 @@ bindings, and queues erasure. It does not traverse the global event history.
 A worker deletes only the target thread's metadata changes and raw history in
 bounded transactions, with durable progress and crash retry. Content-free commit
 receipts and boundary records can remain for ordering/idempotency.
+The Web UI removes the conversation and confirms deletion as soon as the foreground
+transaction succeeds. Erasure progress is an internal maintenance concern; it does
+not keep the UI busy or trigger cleanup polling.
 
 Import provenance is removed only when no surviving imported fork or other store
 still depends on it. Import discovery and transfer never delete the original
