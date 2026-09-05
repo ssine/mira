@@ -389,6 +389,13 @@ try {
   );
 } finally {
   await pool.end();
-  await owner.query(`DROP DATABASE ${name} WITH (FORCE)`);
+  // pg-pool can resolve end() before PostgreSQL observes socket closure.
+  // Let those sessions drain instead of terminating an idle client's socket.
+  const deadline = Date.now() + 30_000;
+  while ((await owner.query("SELECT pid FROM pg_stat_activity WHERE datname=$1", [name])).rowCount) {
+    if (Date.now() > deadline) throw new Error("storage fixture connections did not drain");
+    await new Promise(resolve => setTimeout(resolve,25));
+  }
+  await owner.query(`DROP DATABASE ${name}`);
   await owner.end();
 }
