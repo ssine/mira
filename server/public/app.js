@@ -129,6 +129,8 @@ const agent = {
   recoveryPromise: null,
   recoveryNotice: null,
   connectionWanted: false,
+  resumeRequestedThreadId: null,
+  composerValue: "",
   socketInitialized: false,
   reconnectTimer: null,
   heartbeatTimer: null,
@@ -1441,11 +1443,13 @@ function setAgentRuntimeState(message, status = "offline") {
   $("#agentRuntimeBadge").className = `badge ${status}`;
   const indicator = $("#conversationConnection");
   indicator.textContent = status === "online" ? "" : message;
-  indicator.classList.toggle("hidden", status === "online" || !agent.connectionWanted);
+  indicator.classList.toggle("hidden", status === "online" || !agent.connectionWanted ||
+    (agent.threadId && agent.resumeRequestedThreadId !== agent.threadId));
 }
 
 function agentRecoveryAllowed() {
   return agent.connectionWanted && !document.hidden && navigator.onLine !== false &&
+    (!agent.threadId || agent.resumeRequestedThreadId === agent.threadId || document.body.dataset.view === "runtimeView") &&
     ["agentView", "runtimeView"].includes(document.body.dataset.view);
 }
 
@@ -1496,7 +1500,7 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
       const connection = (async () => {
         await startAgentRuntime({ allowStart: false });
         if (epoch !== agent.selectionEpoch || !agentRecoveryAllowed()) return;
-        if (threadId && !agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
+        if (threadId && agent.resumeRequestedThreadId === threadId && !agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
         else if (threadId && agent.activeTurns.has(threadId)) await refreshActiveTurn(threadId, agent.socket);
       })();
       const results = await Promise.allSettled([history, connection]);
@@ -3309,7 +3313,11 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (agent.sendPromise) return;
   if (updateRoute) writeBrowserRoute("agent", threadId);
   const epoch = ++agent.selectionEpoch;
-  agent.connectionWanted = true;
+  agent.resumeRequestedThreadId = null;
+  agent.composerValue = $("#conversationInput").value;
+  clearTimeout(agent.reconnectTimer);
+  clearTimeout(agent.heartbeatTimer);
+  $("#conversationConnection").classList.add("hidden");
   agent.threadId = threadId;
   resetAgentTranscript(threadId);
   agent.threadRuntimeNodeId = null;
@@ -3343,19 +3351,22 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   syncActiveTurnUi();
   renderAgentThreads();
   setConversationNotice();
-  // Reading a conversation must not wait for a Node, model runtime or a full
-  // resume response. The authoritative tail and live subscription are separate.
-  const history = loadAgentTranscript(threadId);
-  void (async () => {
-    try {
-      await startAgentRuntime();
-      if (epoch !== agent.selectionEpoch) return;
-      await resumeAgentThreadOnSocket(threadId);
-    } catch {
-      if (epoch === agent.selectionEpoch) scheduleAgentRecovery();
-    }
-  })();
-  await history;
+  // Browsing only reads the authoritative transcript. If editing began while
+  // its metadata was loading, prepare the runtime now that its Node is known.
+  if (agent.resumeRequestedThreadId === threadId) void prepareEditedThread(threadId, epoch);
+  await loadAgentTranscript(threadId);
+}
+
+async function prepareEditedThread(threadId, epoch) {
+  if (!currentAgentThread() || agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
+  try {
+    await startAgentRuntime();
+    if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
+    if (!agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
+    if (agent.selectionEpoch === epoch) scheduleAgentHeartbeat();
+  } catch {
+    if (agent.selectionEpoch === epoch && !agent.sendPromise) scheduleAgentRecovery();
+  }
 }
 
 function newAgentThread({ updateRoute = true, project = null, force = false } = {}) {
@@ -3373,6 +3384,8 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   if (updateRoute) writeBrowserRoute("agent");
   agent.selectionEpoch++;
   agent.threadId = null;
+  agent.resumeRequestedThreadId = null;
+  agent.composerValue = $("#conversationInput").value;
   agent.newThreadRequestId = null;
   agent.newThreadRequestSignature = null;
   agent.threadRuntimeNodeId = null;
@@ -3533,7 +3546,9 @@ function addComposerFiles(files) {
 async function sendAgentMessage(text, attachments = [], progress = null) {
   updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
   agent.connectionWanted = true;
-  if (!agent.socketInitialized || !agent.socket || agent.socket.readyState !== WebSocket.OPEN) await startAgentRuntime();
+  agent.resumeRequestedThreadId = agent.threadId;
+  await startAgentRuntime();
+  scheduleAgentHeartbeat();
   // A thread ID survives reconnects, but the new App Server may have no live
   // thread handle. Restore it before uploading attachments or starting a turn.
   if (agent.threadId && !agent.loadedThreadIds.has(agent.threadId)) {
@@ -3556,6 +3571,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    agent.resumeRequestedThreadId = agent.threadId;
     writeBrowserRoute("agent", agent.threadId, { replace: true });
     agent.loadedThreadIds.add(agent.threadId);
     agent.newThreadRequestId = null;
@@ -3611,7 +3627,7 @@ async function openAgentConsole() {
   writeBrowserRoute("agent", agent.threadId);
   show("agentView");
   await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
-  if (agent.threadId) {
+  if (agent.threadId && agent.resumeRequestedThreadId === agent.threadId) {
     agent.connectionWanted = true;
     void recoverAgentSession({ probe: true });
   }
@@ -3832,6 +3848,7 @@ $("#conversationForm").addEventListener("submit", async (event) => {
     await operation;
     if ($("#conversationInput").value.trim() === text) {
       $("#conversationInput").value = "";
+      agent.composerValue = "";
       resizeConversationInput();
     }
     agent.attachments = agent.attachments.filter((file) => !attachments.includes(file));
@@ -3863,7 +3880,16 @@ $("#conversationInput").addEventListener("beforeinput", (event) => {
   event.preventDefault();
   if (!agent.sendPromise && !agent.forkPromise && !agent.threadActionPromise && $("#agentRuntimeNode").value) $("#conversationForm").requestSubmit();
 });
-$("#conversationInput").addEventListener("input", resizeConversationInput);
+$("#conversationInput").addEventListener("input", (event) => {
+  resizeConversationInput();
+  const value = event.currentTarget.value;
+  if (value === agent.composerValue) return;
+  agent.composerValue = value;
+  const threadId = agent.threadId;
+  if (!threadId || agent.resumeRequestedThreadId === threadId) return;
+  agent.resumeRequestedThreadId = threadId;
+  void prepareEditedThread(threadId, agent.selectionEpoch);
+});
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
 $("#conversationUploadCancel").addEventListener("click", () => {
   agent.uploadController?.abort();

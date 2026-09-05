@@ -59,6 +59,9 @@ try {
   await page.locator('#dashboardView:not(.hidden)').waitFor();
   await page.goto(`${origin}/?thread=${ids[0]}`);
   await page.locator('.thread-project').first().waitFor();
+  await page.locator('#conversationInput').focus();
+  assert.equal(messages.filter(message=>message.method==='thread/resume').length,0,'opening or focusing a conversation only reads history');
+  await page.locator('#conversationInput').fill('Draft begins runtime preparation');
   await page.locator('#agentInterrupt:not(.hidden)').waitFor();
   assert.equal(await page.locator('.thread-project').count(),3,'same path on different machines is a different project');
   assert.deepEqual(await page.locator('.thread-project').first().locator('button[data-thread-id]').evaluateAll(es=>es.map(e=>e.dataset.threadId)),ids.slice(0,2),'newest conversations first within each project');

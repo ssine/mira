@@ -237,9 +237,12 @@ try {
     const h = window.traceHarness;
     h.agent.socket.readyState = 3;
     h.agent.threads = [{ threadId: "progress-thread", cwd: "/project", runtimeNodeId: "test-node" }];
+    h.agent.resumeRequestedThreadId = null;
     await h.connectAgentSocket("test-node");
   });
   await page.locator("#conversationInput").fill("Continue after restart");
+  await page.waitForFunction(() => window.traceHarness.agent.resumePromises.has('progress-thread'));
+  assert.equal(await page.evaluate(()=>window.traceHarness.agent.sendPromise),null,'editing prepares the conversation before sending');
   await page.locator("#conversationInput").press("Enter");
   await page.waitForFunction(() => window.traceHarness.agent.pending.size === 1);
   // A second submit while resume is pending must remain single-flight.
@@ -298,8 +301,10 @@ try {
   assert.equal(reconnectMessages.filter((message) => message.method === "turn/start").length, sendsBeforeRecovery,
     "reconnect must never replay an uncertain user submission");
 
-  // First paint and fast thread switches do not wait for Codex restoration.
+  // Browsing and focusing only read the transcript. Actual edits start one
+  // shared resume; a late result cannot replace a subsequently selected thread.
   automaticResume = false;
+  const resumesBeforeBrowsing = reconnectMessages.filter(message=>message.method==='thread/resume').length;
   await page.evaluate(() => {
     const h = window.traceHarness;
     h.agent.threads.push({ threadId: "fast-thread", title: "Fast thread", cwd: "/fast" });
@@ -307,9 +312,27 @@ try {
   });
   await page.waitForFunction(() => document.querySelector("#conversationTrace").textContent.includes("Recent messages for fast-thread"));
   assert.equal(await page.evaluate(() => window.traceHarness.agent.loadedThreadIds.has("fast-thread")), false);
+  await page.locator('#conversationInput').focus();
+  await page.locator('#conversationInput').press('ArrowLeft');
+  await page.locator('#conversationInput').evaluate(node=>node.dispatchEvent(new InputEvent('input',{bubbles:true})));
+  await page.evaluate(()=>window.traceHarness.recoverAgentSession({refresh:false}));
+  assert.equal(reconnectMessages.filter(message=>message.method==='thread/resume').length,resumesBeforeBrowsing);
+  await page.locator('#conversationInput').press('x');
+  await page.waitForFunction(()=>window.traceHarness.agent.resumePromises.has('fast-thread'));
   const slowResume = reconnectMessages.findLast((message) => message.method === "thread/resume");
+  assert.equal(slowResume.params.threadId,'fast-thread');
+  await page.locator('#conversationInput').press('y');
+  assert.equal(reconnectMessages.filter(message=>message.method==='thread/resume').length,resumesBeforeBrowsing+1,'typing more characters shares the pending resume');
   await page.evaluate(() => { window.openOther = window.traceHarness.resumeAgentThread("other-thread"); });
   await page.waitForFunction(() => document.querySelector("#conversationTrace").textContent.includes("Recent messages for other-thread"));
+  await page.locator('#conversationInput').focus();
+  await page.evaluate(()=>window.traceHarness.recoverAgentSession({refresh:false}));
+  assert.equal(reconnectMessages.filter(message=>message.method==='thread/resume').length,resumesBeforeBrowsing+1,'an existing draft does not resume a newly opened conversation');
+  await page.locator('#conversationInput').evaluate(node=>{
+    node.value='Draft stays through mobile suspension中';
+    node.dispatchEvent(new InputEvent('input',{inputType:'insertCompositionText',data:'中',isComposing:true,bubbles:true}));
+  });
+  await page.waitForFunction(()=>window.traceHarness.agent.resumePromises.has('other-thread'));
   const otherResume = reconnectMessages.findLast((message) => message.method === "thread/resume");
   assert.notEqual(slowResume.id, otherResume.id);
   reconnectedSocket.send(JSON.stringify({ id: slowResume.id, result: { thread: { id: "fast-thread", name: "STALE TITLE" }, cwd: "/fast" } }));
@@ -334,7 +357,7 @@ try {
   assert.equal(await page.locator("#agentRuntimeBadge").textContent(), "online");
   assert.equal(await page.locator("#conversationConnection").isVisible(), false);
   assert.equal(await page.locator("#conversationNotice").textContent(), "恢复会话失败：resume unavailable");
-  assert.equal(await page.locator("#conversationInput").inputValue(), "Draft stays through mobile suspension");
+  assert.equal(await page.locator("#conversationInput").inputValue(), "Draft stays through mobile suspension中");
   automaticResume = true;
   await page.evaluate(() => window.traceHarness.recoverAgentSession({ refresh: false }));
   assert.equal(await page.locator("#conversationNotice").textContent(), "", "a recovered conversation clears its recovery error");
