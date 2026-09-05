@@ -1,0 +1,20 @@
+{
+  "id": "/",
+  "name": "Mira",
+  "short_name": "Mira",
+  "description": "随时连接你的设备，继续 Codex 对话。",
+  "lang": "zh-CN",
+  "start_url": "/?launch=pwa",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    { "src": "/icons/mira-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/mira-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ],
+  "shortcuts": [
+    { "name": "新建对话", "url": "/?view=agent" },
+    { "name": "设备", "url": "/?view=nodes" }
+  ]
+}

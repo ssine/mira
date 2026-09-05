@@ -1,0 +1,157 @@
+// Real browser + disposable Server: install metadata, cold launch, mobile viewport,
+// HTTP validation, offline recovery and exclusion of private data from SW caches.
+// MIRA_SERVER_URL=http://127.0.0.1:8789 node tests/pwa_browser.mjs [playwright-module]
+import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+const { chromium, devices } = await import(process.argv[2] ?? "playwright");
+const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8789";
+const thread = "00000000-0000-4000-8000-0000000000a1";
+const other = "00000000-0000-4000-8000-0000000000b2";
+const profile = await fs.mkdtemp(path.join(os.tmpdir(), "mira-pwa-browser-"));
+let context;
+try {
+  context = await chromium.launchPersistentContext(profile, { ...devices["Pixel 7"], headless: true,
+    ...(process.env.MIRA_BROWSER_EXECUTABLE ? { executablePath: process.env.MIRA_BROWSER_EXECUTABLE } : {}) });
+  const page = await context.newPage();
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("console", (message) => {
+    if (message.type() === "error" && /content security policy/i.test(message.text())) errors.push(message.text());
+  });
+  await context.route("**/v1/codex/threads?*", (route) => route.fulfill({ json: { data: [{ threadId: thread, title: "手机会话", updatedAt: new Date().toISOString() }] } }));
+  await context.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: { threadId: other, title: "另一个会话" } }));
+  await context.route("**/v1/codex/threads/*/transcript?*", (route) => route.fulfill({ json: {
+    generation: 1, trace: [{ key: "message", kind: "assistant", turnId: "turn", body: "手机上的对话正文。\n\n".repeat(100) }],
+  } }));
+
+  await page.goto(origin, { waitUntil: "networkidle" });
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+  const session = await context.newCDPSession(page);
+  const manifest = await session.send("Page.getAppManifest");
+  assert.deepEqual(manifest.errors, []);
+  const metadata = JSON.parse(manifest.data);
+  assert.equal(metadata.display, "standalone");
+  assert.equal(metadata.start_url, "/?launch=pwa");
+  assert.equal(metadata.id, "/");
+  for (const icon of metadata.icons) {
+    const dimensions = await page.evaluate(async (src) => {
+      const image = new Image(); image.src = src; await image.decode(); return `${image.width}x${image.height}`;
+    }, icon.src);
+    assert.equal(dimensions, icon.sizes);
+  }
+  const eligibility = await session.send("Page.getInstallabilityErrors");
+  assert.deepEqual(eligibility.installabilityErrors, [], "Chrome must consider the page installable");
+  const asset = await context.request.get(`${origin}/app.js`);
+  const validated = await context.request.get(`${origin}/app.js`, { headers: { "if-none-match": asset.headers().etag } });
+  assert.equal(validated.status(), 304);
+  assert.equal((await validated.body()).length, 0);
+  const head = await context.request.head(`${origin}/manifest.webmanifest`);
+  assert.equal(head.status(), 200);
+  assert.match(head.headers()["content-type"], /application\/manifest\+json/);
+
+  await page.locator("#password").fill(process.env.MIRA_TEST_ADMIN_PASSWORD ?? "mira-local-admin-password");
+  await page.locator("#loginForm button[type=submit]").click();
+  await page.locator("#dashboardView:not(.hidden)").waitFor();
+  // Suppress a native dialog for the fallback-help test, then exercise the
+  // user-gesture prompt path independently below.
+  await page.evaluate(() => window.dispatchEvent(new Event("appinstalled")));
+  await page.evaluate(() => {
+    document.querySelector("#dashboardView [data-install-app]").classList.remove("hidden");
+  });
+  await page.locator("#dashboardView [data-install-app]").click();
+  await page.locator(".pwa-install-dialog[open]").waitFor();
+  await page.locator(".pwa-install-dialog button").click();
+  await page.evaluate(() => {
+    const event = new Event("beforeinstallprompt", { cancelable: true });
+    event.prompt = async () => { document.body.dataset.installPromptShown = "true"; };
+    event.userChoice = Promise.resolve({ outcome: "accepted" });
+    window.dispatchEvent(event);
+  });
+  await page.locator("#dashboardView [data-install-app]").click();
+  assert.equal(await page.locator("body").getAttribute("data-install-prompt-shown"), "true");
+  await page.evaluate(() => window.dispatchEvent(new Event("appinstalled")));
+  assert.equal(await page.locator("#dashboardView [data-install-app]").isVisible(), false);
+  await page.goto(`${origin}/?thread=${thread}`, { waitUntil: "networkidle" });
+  await page.locator(".trace-card.assistant").waitFor();
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.app.route")), `/?thread=${thread}`);
+
+  // A real cold document load uses the install start URL and restores the route.
+  await page.goto(`${origin}/?launch=pwa`, { waitUntil: "networkidle" });
+  await page.waitForURL(`**/?thread=${thread}`);
+  await page.locator(".trace-card.assistant").waitFor();
+  await page.goto(`${origin}/?launch=pwa&thread=${other}`, { waitUntil: "networkidle" });
+  await page.waitForURL(`**/?thread=${other}`);
+  await page.locator(".trace-card.assistant").waitFor();
+
+  const layout = () => page.evaluate(() => {
+    const input = document.querySelector("#conversationInput");
+    const box = input.getBoundingClientRect();
+    return { bottom: box.bottom, top: box.top, height: visualViewport.height, width: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth, font: getComputedStyle(input).fontSize,
+      touchTarget: document.querySelector("#conversationSend").getBoundingClientRect().height };
+  });
+  await page.locator("#conversationInput").fill("未发送的草稿");
+  await page.setViewportSize({ width: 393, height: 430 });
+  await page.waitForFunction(() => document.querySelector("#conversationInput").getBoundingClientRect().bottom <= visualViewport.height + 1);
+  let measure = await layout();
+  assert.ok(measure.bottom <= measure.height + 1 && measure.top >= 0);
+  assert.ok(measure.scrollWidth <= measure.width + 1);
+  assert.equal(measure.font, "16px");
+  assert.ok(measure.touchTarget >= 44);
+  assert.equal(await page.locator("#conversationInput").inputValue(), "未发送的草稿");
+  await page.setViewportSize({ width: 851, height: 393 });
+  await page.waitForFunction(() => document.querySelector("#conversationInput").getBoundingClientRect().bottom <= visualViewport.height + 1);
+  measure = await layout();
+  assert.ok(measure.scrollWidth <= measure.width + 1, "landscape must not scroll horizontally");
+  await page.setViewportSize({ width: 393, height: 851 });
+  await page.locator("#agentThemeToggle").click();
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  measure = await layout();
+  assert.ok(measure.bottom <= measure.height + 1 && measure.top >= 0, `portrait keyboard recovery: ${JSON.stringify(measure)}`);
+  assert.equal(await page.locator('meta[name="theme-color"]').getAttribute("content"), "#1f2226");
+  if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
+    await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
+    await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/pwa-mobile.png` });
+  }
+
+  // Pinch zoom must remain available without shrinking/repositioning the shell.
+  const beforeZoom = await page.evaluate(() => document.documentElement.style.getPropertyValue("--app-viewport-height"));
+  await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 2 });
+  await page.evaluate(() => new Promise(requestAnimationFrame));
+  assert.equal(await page.evaluate(() => document.documentElement.style.getPropertyValue("--app-viewport-height")), beforeZoom);
+  await session.send("Emulation.setPageScaleFactor", { pageScaleFactor: 1 });
+
+  const cached = await page.evaluate(async () => {
+    const entries = [];
+    for (const key of await caches.keys()) {
+      if (!key.startsWith("mira-pwa-")) continue;
+      for (const request of await (await caches.open(key)).keys()) entries.push(new URL(request.url).pathname);
+    }
+    return entries.sort();
+  });
+  assert.deepEqual(cached, ["/icons/mira.svg", "/offline.css", "/offline.html", "/offline.js"]);
+  await context.setOffline(true);
+  const offline = await page.reload({ waitUntil: "domcontentloaded" });
+  assert.equal(offline.status(), 200);
+  await page.getByRole("heading", { name: "暂时无法连接 Mira" }).waitFor();
+  assert.ok(page.url().endsWith(`/?thread=${other}`), "offline fallback keeps the original deep link");
+  assert.equal(await page.locator(".trace-card").count(), 0, "offline page never exposes cached messages");
+  await context.setOffline(false);
+  await page.locator(".trace-card.assistant").waitFor({ timeout: 20000 });
+  assert.ok(page.url().endsWith(`/?thread=${other}`));
+
+  await page.locator("#agentThreadDrawerToggle").click();
+  await page.locator("#agentHome").click();
+  await page.locator("#logoutButton").click();
+  await page.locator("#loginView:not(.hidden)").waitFor();
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.app.route")), null);
+  await page.goto(`${origin}/?launch=pwa`);
+  await page.locator("#loginView:not(.hidden)").waitFor();
+  assert.ok(page.url().endsWith("/?view=agent"));
+  assert.deepEqual(errors, []);
+  console.log("PASS: Chrome installability, icons, ETag/HEAD, launch/deep links, mobile/landscape/zoom, theme, offline recovery, private-cache exclusion, logout");
+} finally { await context?.close(); await fs.rm(profile, { recursive: true, force: true }); }

@@ -55,7 +55,31 @@ Windows 与 WSL 是两个独立 Node，各安装一次即可；二者不会共�
 安装器通过一个临时、非提权的计划任务写入真实用户 PATH，完成后移除该辅助任务。
 旧版 `%LOCALAPPDATA%\Mira\identity.json` 仍能识别；不应复制成第二个同时运行的 Node。
 
-## Android
+## 手机网页应用（PWA）
+
+Android 上用 Chrome 或 Edge 打开 Mira 的 HTTPS 地址，登录后点击首页或对话侧边栏中的
+**安装 Mira**，按浏览器提示安装。也可以从浏览器菜单选择「安装应用」或「添加到主屏幕」。
+安装后从桌面图标以独立窗口启动，自动回到上次访问的会话或页面；直接打开会话链接仍以链接为准。
+iPhone 可以从浏览器分享菜单选择「添加到主屏幕」。退出账户会清除记住的启动页面。
+
+PWA 适合在手机上对话和管理设备；下面的 Android Node APK 用于把手机本身加入设备网络。
+PWA 不需要安装 Node APK，也不需要设备操作权限。PWA 仍使用管理员会话与 CSRF 校验。
+
+手机切到后台后，系统仍可能暂停网页或断开网络。恢复前台会自动探测连接、重新连接并从
+Server 补齐消息；关闭手机页面不会主动中止其他设备上的 Codex 任务。当前没有后台完成通知。
+断网启动时显示离线提示，并在连接恢复后回到原 URL；离线时无法发送或读取会话。
+Service Worker 仅缓存公共离线提示页及其样式、脚本和图标，不缓存认证响应、会话、文件或附件。
+静态资源使用 ETag 校验，后续打开可复用未变化的文件；更新不会强制刷新正在使用的对话。
+
+移动布局使用 Android 的 `interactive-widget=resizes-content` 和 Visual Viewport 适配软键盘，
+保留页面缩放，并为状态栏、屏幕切口和底部手势区留出空间。
+本地回归：在一次性 Server/数据库上运行
+`MIRA_SERVER_URL=http://127.0.0.1:8789 node tests/pwa_browser.mjs [playwright-module]`。
+可通过 `MIRA_BROWSER_EXECUTABLE` 指定 Chromium，通过 `MIRA_WEB_SCREENSHOT_DIR` 保存截图。
+移动模拟覆盖安装条件、图标、深链接、键盘尺寸变化、横屏、离线恢复和缓存边界；
+它不替代真机的系统安装、软键盘与省电策略验收。
+
+## Android Node
 
 从 [最新 Release](https://github.com/ssine/mira/releases/latest) 下载 `mira_<version>_android_arm64.apk`，
 在 Android 8+ 的 arm64 手机上安装。只有一个 APK：

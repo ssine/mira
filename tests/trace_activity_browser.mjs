@@ -14,6 +14,7 @@ const assets = new Map([
   ["/trace-activity.js", ["public/trace-activity.js", "text/javascript"]],
   ["/conversation-progress.js", ["public/conversation-progress.js", "text/javascript"]],
   ["/theme.js", ["public/theme.js", "text/javascript"]],
+  ["/pwa.js", ["public/pwa.js", "text/javascript"]],
   ["/styles.css", ["public/styles.css", "text/css"]],
   ["/vendor/xterm.js", ["node_modules/@xterm/xterm/lib/xterm.mjs", "text/javascript"]],
   ["/vendor/xterm-addon-fit.js", ["node_modules/@xterm/addon-fit/lib/addon-fit.mjs", "text/javascript"]],

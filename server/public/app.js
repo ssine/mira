@@ -4,6 +4,7 @@ import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/vendor/marked.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ReplyProgress } from "/conversation-progress.js";
+import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -26,6 +27,7 @@ function writeBrowserRoute(view, threadId = null, { replace = false } = {}) {
   if (url.href === window.location.href) return;
   browserRouteEpoch++;
   window.history[replace ? "replaceState" : "pushState"](null, "", url);
+  rememberAppRoute();
 }
 
 async function restoreBrowserRoute() {
@@ -33,6 +35,7 @@ async function restoreBrowserRoute() {
   const url = new URL(window.location.href);
   const threadId = url.searchParams.get("thread");
   const view = threadId ? "agent" : url.searchParams.get("view");
+  rememberAppRoute();
   if (agent.sendPromise) {
     writeBrowserRoute("agent", agent.threadId, { replace: true });
     return;
@@ -75,6 +78,7 @@ function terminalTheme() {
 
 function syncThemeControl() {
   const dark = document.documentElement.dataset.theme === "dark";
+  document.querySelector('meta[name="theme-color"]').content = dark ? "#1f2226" : "#ffffff";
   const button = $("#themeToggle");
   button.setAttribute("aria-label", `切换到${dark ? "浅色" : "深色"}主题`);
   button.querySelector(".topbar-action-label").textContent = dark ? "浅色" : "深色";
@@ -3097,6 +3101,7 @@ $("#logoutButton").addEventListener("click", async () => {
     await api("/v1/admin/logout", { method: "POST", body: "{}" });
   } finally {
     csrfToken = null;
+    clearAppRoute();
     stopAgentRecovery();
     disposeTerminal();
     workspace.node = null;
@@ -3149,6 +3154,7 @@ document.addEventListener("visibilitychange", () => {
   } else void recoverAgentSession({ probe: true });
 });
 window.addEventListener("pageshow", (event) => { if (event.persisted) void recoverAgentSession({ probe: true }); });
+document.addEventListener("resume", () => { void recoverAgentSession({ probe: true }); });
 window.addEventListener("online", () => { void recoverAgentSession({ probe: true }); });
 window.addEventListener("offline", () => {
   clearTimeout(agent.reconnectTimer);
@@ -3432,4 +3438,5 @@ for (const button of document.querySelectorAll("[data-copy-install]")) {
 }
 
 syncThemeControl();
+initializePwa();
 void bootstrap();

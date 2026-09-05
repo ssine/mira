@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import process from "node:process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 
@@ -41,6 +42,15 @@ const staticAssets = new Map([
   ["/conversation-progress.js", [path.join(publicDirectory, "conversation-progress.js"), "text/javascript; charset=utf-8"]],
   ["/theme.js", [path.join(publicDirectory, "theme.js"), "text/javascript; charset=utf-8"]],
   ["/styles.css", [path.join(publicDirectory, "styles.css"), "text/css; charset=utf-8"]],
+  ["/pwa.js", [path.join(publicDirectory, "pwa.js"), "text/javascript; charset=utf-8"]],
+  ["/service-worker.js", [path.join(publicDirectory, "service-worker.js"), "text/javascript; charset=utf-8"]],
+  ["/manifest.webmanifest", [path.join(publicDirectory, "manifest.webmanifest"), "application/manifest+json; charset=utf-8"]],
+  ["/offline.html", [path.join(publicDirectory, "offline.html"), "text/html; charset=utf-8"]],
+  ["/offline.css", [path.join(publicDirectory, "offline.css"), "text/css; charset=utf-8"]],
+  ["/offline.js", [path.join(publicDirectory, "offline.js"), "text/javascript; charset=utf-8"]],
+  ["/icons/mira.svg", [path.join(publicDirectory, "icons/mira.svg"), "image/svg+xml"]],
+  ["/icons/mira-192.png", [path.join(publicDirectory, "icons/mira-192.png"), "image/png"]],
+  ["/icons/mira-512.png", [path.join(publicDirectory, "icons/mira-512.png"), "image/png"]],
   ["/vendor/xterm.js", [path.join(serverDirectory, "node_modules/@xterm/xterm/lib/xterm.mjs"), "text/javascript; charset=utf-8"]],
   ["/vendor/xterm-addon-fit.js", [path.join(serverDirectory, "node_modules/@xterm/addon-fit/lib/addon-fit.mjs"), "text/javascript; charset=utf-8"]],
   ["/vendor/xterm.css", [path.join(serverDirectory, "node_modules/@xterm/xterm/css/xterm.css"), "text/css; charset=utf-8"]],
@@ -134,18 +144,29 @@ function boundedInteger(value, fallback, minimum, maximum) {
   return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
 }
 
-async function servePublic(response, relativePath) {
+async function servePublic(request, response, relativePath) {
   const asset = staticAssets.get(relativePath);
   if (!asset) return false;
   try {
-    const payload = await fs.readFile(asset[0]);
-    response.writeHead(200, {
-      "content-type": asset[1], "content-length": payload.length,
+    let payload = await fs.readFile(asset[0]);
+    if (relativePath === "/service-worker.js") {
+      const files = await Promise.all(["offline.html", "offline.css", "offline.js", "icons/mira.svg"].map((file) => fs.readFile(path.join(publicDirectory, file))));
+      const hash = createHash("sha256").update(payload);
+      for (const file of files) hash.update(file);
+      payload = Buffer.from(payload.toString().replace("__MIRA_OFFLINE_VERSION__", hash.digest("hex").slice(0, 20)));
+    }
+    const etag = `"${createHash("sha256").update(payload).digest("hex")}"`;
+    const headers = {
+      "content-type": asset[1],
       "cache-control": "no-cache",
-      "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "etag": etag,
+      "content-security-policy": "default-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; connect-src 'self' ws: wss:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
       "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
-    });
-    response.end(payload);
+    };
+    if (relativePath === "/service-worker.js") headers["service-worker-allowed"] = "/";
+    const unchanged = request.headers["if-none-match"]?.split(",").some((value) => value.trim().replace(/^W\//, "") === etag || value.trim() === "*");
+    response.writeHead(unchanged ? 304 : 200, { ...headers, ...(!unchanged ? { "content-length": payload.length } : {}) });
+    response.end(unchanged || request.method === "HEAD" ? undefined : payload);
     return true;
   } catch (error) {
     if (error.code === "ENOENT") return false;
@@ -155,7 +176,7 @@ async function servePublic(response, relativePath) {
 
 async function route(request, response) {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  if (request.method === "GET" && await servePublic(response, url.pathname)) return;
+  if (["GET", "HEAD"].includes(request.method) && await servePublic(request, response, url.pathname)) return;
 
   if (request.method === "GET" && url.pathname === "/healthz") {
     await pool.query("SELECT 1");

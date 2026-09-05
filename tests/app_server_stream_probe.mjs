@@ -26,7 +26,7 @@ const output=process.env.MIRA_STREAM_OUTPUT ?? path.join(os.tmpdir(), `mira-stre
 const stamp=()=>performance.timeOrigin+performance.now();
 const capture=[]; const children=[]; const progress=setInterval(()=>{console.log(JSON.stringify({stage:'progress',direct:capture.filter(e=>e.stage==='direct'&&e.message.method==='item/agentMessage/delta').length,proxy:capture.filter(e=>e.stage==='proxy'&&e.message.method==='item/agentMessage/delta').length,last:capture.slice(-2).map(e=>({stage:e.stage,method:e.message.method}))}));},10000);
 const vendors={'/vendor/xterm-addon-fit.js':'@xterm/addon-fit/lib/addon-fit.mjs','/vendor/xterm.js':'@xterm/xterm/lib/xterm.mjs','/vendor/xterm.css':'@xterm/xterm/css/xterm.css','/vendor/dompurify.js':'dompurify/dist/purify.es.mjs','/vendor/marked.js':'marked/lib/marked.esm.js'};
-const publicAssets = new Set(['/', '/app.js', '/styles.css', '/trace-activity.js', '/conversation-progress.js', '/theme.js']);
+const publicAssets = new Set(['/', '/app.js', '/styles.css', '/trace-activity.js', '/conversation-progress.js', '/theme.js', '/pwa.js']);
 const server=http.createServer(async(req,res)=>{
  try{
   if(req.url.startsWith('/v1/')){res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url.includes('transcript')?{trace:[],generation:1,nextCursor:null}:{data:[]}));return;}

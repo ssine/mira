@@ -2,8 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="application-name" content="Mira">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Mira">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icons/mira.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icons/mira-192.png">
     <title>Mira · 私有设备网络</title>
     <script src="/theme.js"></script>
     <link rel="stylesheet" href="/vendor/xterm.css">
@@ -50,7 +58,7 @@
       <section id="dashboardView" class="dashboard hidden">
         <div class="hero-row">
           <div><p class="eyebrow">CONTROL PLANE</p><h1>设备网络</h1><p class="muted">批准接入、查看健康状态、选择 Codex 的运行位置。</p></div>
-          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开对话</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
+          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开对话</button><button class="secondary hidden" type="button" data-install-app>安装 Mira</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
         </div>
         <div class="metrics" aria-label="设备摘要">
           <article><span>在线 Node</span><strong id="onlineCount">—</strong><small>Reverse channel</small></article>
@@ -102,6 +110,7 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
+              <button class="chat-nav-link chat-manage-link hidden" type="button" data-install-app><span aria-hidden="true">↓</span><span><strong>安装 Mira</strong><small>添加到桌面，以独立应用打开</small></span></button>
               <button id="agentManage" class="chat-nav-link chat-manage-link" type="button">
                 <span aria-hidden="true">⚙</span><span><strong>运行节点与导入</strong><small>选择运行位置、扫描本地会话</small></span>
               </button>
@@ -125,7 +134,7 @@
                 <div id="conversationAttachments" class="conversation-attachments hidden" aria-live="polite"></div>
                 <div class="composer-input-row">
                   <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
-                  <textarea id="conversationInput" rows="1" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
+                  <textarea id="conversationInput" rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
                   <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>
                 </div>
               </div>
