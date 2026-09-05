@@ -63,3 +63,11 @@ test("Mira and Codex have separate jobs, tags and latest policy", async () => {
   assert.match(codex, /Runtime already exists/);
   assert.match(codex, /CODEX_VERSION patches\/codex\//);
 });
+
+test("Codex fault tests wait for PostgreSQL's final TCP SQL listener", async () => {
+  const workflow = await fs.readFile(path.join(root, ".github/workflows/codex-release.yml"), "utf8");
+  assert.match(workflow, /psql -h 127\.0\.0\.1 -U mira -d mira -XAtqc 'SELECT 1'/);
+  assert.doesNotMatch(workflow, /pg_isready -U mira/,
+    "socket readiness can match the temporary initdb server that is about to stop");
+  assert.match(workflow, /docker logs mira-codex-test-postgres/);
+});

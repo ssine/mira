@@ -316,8 +316,14 @@ jobs:
             -p 127.0.0.1:55432:5432 postgres:17-alpine
           trap 'docker rm -f mira-codex-test-postgres >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 40); do
-            if docker exec mira-codex-test-postgres pg_isready -U mira; then break; fi
-            if [[ "$attempt" == 40 ]]; then exit 1; fi
+            # The image's initialization server accepts Unix sockets, then exits.
+            # Wait for the final TCP listener and an authenticated SQL round trip.
+            if docker exec -e PGPASSWORD=mira-local mira-codex-test-postgres \
+              psql -h 127.0.0.1 -U mira -d mira -XAtqc 'SELECT 1' >/dev/null 2>&1; then break; fi
+            if [[ "$attempt" == 40 ]]; then
+              docker logs mira-codex-test-postgres >&2
+              exit 1
+            fi
             sleep 0.5
           done
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex" \
