@@ -1,3 +1,4 @@
+import { sidebarAction } from "./sidebar_browser_helpers.mjs";
 // Real Server/PostgreSQL + browser; only Node execution is simulated.
 // MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL and MIRA_SERVER_URL must point to a disposable test server.
 import assert from "node:assert/strict";
@@ -86,21 +87,33 @@ try {
   assert.equal(await firstProject.locator('.thread-project-count').textContent(), '2 对话');
   assert.equal(await firstProject.locator('.thread-project-platform').textContent(), 'WSL');
   assert.equal(await page.locator('.thread-project').nth(1).locator('.thread-project-platform').count(), 0, 'Linux machines are not mislabeled as WSL');
-  const projectPath = firstProject.locator('.thread-project-path');
-  assert.equal(await projectPath.evaluate(e => getComputedStyle(e).direction), 'rtl', 'path ellipsis starts on the left');
-  assert.equal(await projectPath.locator('bdi').getAttribute('dir'), 'ltr', 'native path order is preserved');
-  assert.match(await firstProject.locator('.thread-project-location').getAttribute('title'), /Machine A · WSL · \/work\/project/);
-  const longPath = page.locator('.thread-project').nth(2).locator('.thread-project-path');
-  const suffixVisible = await longPath.evaluate(path => {
-    const text = path.querySelector('bdi').firstChild;
-    const suffix = document.createRange();
-    suffix.setStart(text, text.length - 'elsewhere'.length);
-    suffix.setEnd(text, text.length);
-    const visible = path.getBoundingClientRect();
-    const tail = suffix.getBoundingClientRect();
-    return path.scrollWidth > path.clientWidth && tail.left >= visible.left && tail.right <= visible.right + 1;
-  });
-  assert.equal(suffixVisible, true, 'overflow keeps the final project directory visible');
+  await projectSummary.hover();
+  await firstProject.locator('.project-details-toggle').click();
+  assert.match(await page.locator('#projectDetailsFacts').textContent(), /Machine A · WSL/);
+  assert.match(await page.locator('#projectDetailsFacts').textContent(), /\/work\/project/);
+  await page.getByRole('button', {name:'关闭项目详情',exact:true}).click();
+  const lastProject = page.locator('.thread-project').nth(2);
+  await lastProject.locator('summary').hover();
+  await lastProject.locator('.project-details-toggle').click();
+  assert.ok((await page.locator('#projectDetailsFacts').textContent()).includes(paths[3]), 'project details retain the complete directory');
+  await page.getByRole('button', {name:'复制项目目录',exact:true}).click();
+  assert.equal(await page.evaluate(()=>navigator.clipboard.readText()), paths[3]);
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#agentThreadDrawer').getAttribute('aria-hidden'), 'false', 'Escape closes the popover without closing navigation');
+  assert.ok((await projectSummary.boundingBox()).height <= 36, 'project headers use a compact single line');
+  assert.ok((await page.locator('.chat-drawer-nav').boundingBox()).height <= 44);
+  assert.ok((await page.locator('.chat-drawer-footer').boundingBox()).height <= 60);
+  await row.hover();await row.locator('[data-thread-menu]').click();await page.locator('#threadShowDetails').click();
+  await page.locator('#conversationDetails[open]').waitFor();
+  assert.match(await page.locator('#conversationDetailsFacts').textContent(), /Machine A · WSL/);
+  const detailsBounds=await page.locator('#conversationDetails').boundingBox();
+  const chatBounds=await page.locator('.conversation-card').boundingBox();
+  assert.ok(chatBounds.x+chatBounds.width<=detailsBounds.x+1,'desktop details sit beside the reading surface');
+  await page.locator('#conversationInput').fill('Keep reading and writing');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('#conversationDetails').isVisible(),false);
+  assert.equal(await page.locator('#conversationInput').inputValue(),'Keep reading and writing');
+  await page.locator('#conversationInput').fill('');
   assert.equal(await row.locator('[aria-current="page"]').count(), 1, 'selected conversation is announced');
   const hierarchy = await firstProject.evaluate(project => {
     const summary = project.querySelector('summary');
@@ -123,11 +136,11 @@ try {
   await projectSummary.press('Enter');
   await page.waitForFunction(() => !document.querySelector('.thread-project').open);
   assert.equal(await row.isVisible(), false, 'keyboard collapse hides conversations');
-  assert.equal(await firstProject.locator('.thread-project-count').isVisible(), true, 'collapsed projects retain their conversation count');
+  assert.equal(await firstProject.locator('.thread-project-count').textContent(), '2 对话', 'conversation count remains available to assistive technology');
   await projectSummary.press('Enter');
   await row.waitFor({ state: 'visible' });
   for (const theme of ['light', 'dark']) {
-    if (await page.locator('html').getAttribute('data-theme') !== theme) await page.locator('#agentThemeToggle').click();
+    if (await page.locator('html').getAttribute('data-theme') !== theme) await sidebarAction(page, "agentThemeToggle");
     assert.equal(await row.locator('[aria-current="page"]').isVisible(), true);
     if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
       await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
@@ -137,7 +150,7 @@ try {
   await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
   assert.equal(await row.locator('.agent-thread.active').evaluate(e => getComputedStyle(e).borderLeftStyle), 'solid', 'selection remains marked in forced colors');
   await page.emulateMedia({ forcedColors: 'none', reducedMotion: 'no-preference' });
-  await page.locator('#agentThemeToggle').click();
+  await sidebarAction(page, "agentThemeToggle");
   const rowMenu = row.locator('[data-thread-menu]');
   await page.mouse.move(1400, 850);
   assert.equal(await rowMenu.evaluate(e => getComputedStyle(e).opacity), '0', 'mouse users see no menu until hover or focus');
@@ -187,6 +200,11 @@ try {
   await page.waitForFunction(()=>document.title==='项目的新标题 · Mira');
   // Mobile top-right menu and dialog remain usable without reopening the sidebar.
   await page.setViewportSize({width:390,height:844});
+  await page.locator('#conversationMenuToggle').click();await page.locator('#threadShowDetails').click();
+  await page.locator('#conversationDetails[open]').waitFor();
+  assert.equal(await page.locator('#conversationDetails').evaluate(dialog=>dialog.matches(':modal')),true,'mobile details use a modal sheet');
+  assert.ok((await page.locator('#conversationDetails').boundingBox()).width<=390);
+  await page.keyboard.press('Escape');
   await page.locator('#conversationMenuToggle').click();
   await page.locator('#threadRename').click();
   await page.locator('#threadRenameInput').fill('手机编辑标题');
@@ -230,7 +248,7 @@ try {
   assert.equal(await page.locator('#conversationInput').inputValue(),'Draft survives stop');
   // New project chooses its machine and directory, not that machine's default cwd.
   await page.locator('#agentThreadDrawerToggle').click();
-  await page.locator('#agentNewProject').click();
+  await sidebarAction(page, "agentNewProject");
   await page.locator('#projectNode').selectOption(nodes[1].nodeId);
   await page.locator('#projectPath').fill('/work/new-project');
   await page.locator('#projectForm button[type=submit]').click();
@@ -258,7 +276,7 @@ try {
   await page.locator('.thread-project').first().waitFor();
   assert.equal(await page.locator(`[data-thread-row="${ids[1]}"]`).count(),0,'archive survives reload');
   await page.locator('#agentThreadDrawerToggle').click();
-  await page.locator('#agentArchiveToggle').click();
+  await sidebarAction(page, "agentArchiveToggle");
   await page.locator(`[data-thread-row="${ids[1]}"]`).waitFor();
   assert.equal(await page.locator('[data-thread-row]').count(),1,'archive view excludes normal conversations');
   assert.equal(await page.locator('.thread-project-count').textContent(), '1 对话', 'archive count reflects only visible conversations');
@@ -267,7 +285,7 @@ try {
   assert.equal(await page.locator('#threadArchive').textContent(),'恢复对话');
   await page.locator('#threadArchive').click();
   await page.waitForFunction(()=>document.querySelectorAll('[data-thread-row]').length===0);
-  await page.locator('#agentArchiveToggle').click();
+  await sidebarAction(page, "agentArchiveToggle");
   await page.locator(`button[data-thread-id="${ids[1]}"]`).click();
   await page.waitForURL(`**/?thread=${ids[1]}`);
   await page.locator('#conversationMenuToggle').click();

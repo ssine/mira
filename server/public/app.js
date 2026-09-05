@@ -209,10 +209,11 @@ const agent = {
 
 const transcriptPageSize = 60;
 const accountSidebar = new AccountSidebar($("#agentAccount"));
+const conversationDetailsWide = window.matchMedia("(min-width: 1280px)");
 const traceImages = new TraceImages($("#conversationTrace"), readTraceImage, () => {
   const follow = traceNearBottom($("#conversationTrace"));
   return () => { if (follow) scrollTraceToBottom($("#conversationTrace")); };
-});
+}, openTraceImagePreview);
 
 function syncAccountSidebar() {
   const active = document.body.dataset.view === "agentView" && agentThreadDrawerOpen && !document.hidden;
@@ -448,10 +449,13 @@ function clear(value) {
 }
 
 function show(view) {
+  closeSidebarPopovers();
+  if (view !== "agentView") $("#conversationDetails").close();
   for (const id of ["loginView", "setupView", "dashboardView", "workspaceView", "agentView", "runtimeView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
   const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView"].includes(view);
+  if (!authenticated) accountSidebar.clear();
   $("#logoutButton").classList.toggle("hidden", !authenticated);
   $("#globalNav").classList.toggle("hidden", !authenticated);
   $("#globalNodes").classList.toggle("active", ["dashboardView", "workspaceView"].includes(view));
@@ -473,6 +477,7 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   const backdrop = $("#agentThreadDrawerBackdrop");
   const toggle = $("#agentThreadDrawerToggle");
   if (!drawer || !backdrop || !toggle) return;
+  if (!open) closeSidebarPopovers();
   agentThreadDrawerOpen = open;
   syncAccountSidebar();
   drawer.closest(".chat-shell").classList.toggle("sidebar-open", open);
@@ -2284,6 +2289,23 @@ async function readTraceImage(path, candidates, controller, progress) {
   throw failure;
 }
 
+function openTraceImagePreview(blob, path) {
+  resetNodeFileDialog();
+  const label = path ? baseName(path) : "图片预览";
+  $("#nodeFileTitle").textContent = label;
+  $("#nodeFileMeta").textContent = formatBytes(blob.size);
+  $("#nodeFilePath").textContent = path || "";
+  $("#nodeFileLoading").classList.add("hidden");
+  agent.fileObjectUrl = URL.createObjectURL(blob);
+  $("#nodeFileImage").src = agent.fileObjectUrl;
+  $("#nodeFileImage").classList.remove("hidden");
+  const download = $("#nodeFileDownload");
+  download.href = agent.fileObjectUrl;
+  download.download = path ? baseName(path) : "image";
+  download.classList.remove("hidden");
+  if (!$("#nodeFileDialog").open) $("#nodeFileDialog").showModal();
+}
+
 function resetNodeFileDialog() {
   agent.fileReadController?.abort();
   agent.fileReadController = null;
@@ -2462,6 +2484,10 @@ function renderThread(thread) {
 }
 
 function resetAgentTranscript(threadId = null) {
+  if ($("#conversationDetails").open) {
+    if (threadId) void openConversationDetails(threadId);
+    else $("#conversationDetails").close();
+  }
   agent.transcriptThreadId = threadId;
   agent.transcriptGeneration = null;
   agent.transcriptItems = [];
@@ -3106,6 +3132,9 @@ function renderAgentThreads() {
   }
   if (agent.draftProject && !groups.has(agent.draftProject.key)) groups.set(agent.draftProject.key, { ...agent.draftProject, threads: [] });
   if (!groups.size) list.append(element("div", "agent-list-empty", agent.showArchived ? "没有已归档的对话" : "添加项目目录，开始新的对话"));
+  const projectName = group => group.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || group.cwd || "未分配目录";
+  const nameCounts = new Map();
+  for (const group of groups.values()) nameCounts.set(projectName(group), (nameCounts.get(projectName(group)) ?? 0) + 1);
   for (const group of groups.values()) {
     const project = element("details", "thread-project");
     project.dataset.projectKey = group.key;
@@ -3113,25 +3142,18 @@ function renderAgentThreads() {
     project.addEventListener("toggle", () => agent.projectOpen.set(group.key, project.open));
     const summary = element("summary", "thread-project-summary");
     const copy = element("span", "thread-project-identity");
-    const name = group.cwd.replace(/[\\/]+$/, "").split(/[\\/]/).at(-1) || group.cwd || "未分配目录";
+    const name = projectName(group);
     const node = dashboardNodes.get(group.nodeId);
     const machine = node?.hostname || (group.nodeId ? "未连接的机器" : "未关联运行机器");
     const isWsl = node?.nodeMode === "wsl";
     const location = `${machine}${isWsl ? " · WSL" : ""} · ${group.cwd || "目录未知"}`;
     copy.append(element("strong", "", name));
     copy.title = location;
-    const details = element("small", "thread-project-location");
-    details.title = location;
-    details.append(element("span", "thread-project-machine", machine));
-    if (isWsl) details.append(element("span", "thread-project-platform", "WSL"));
-    const separator = element("span", "", "·");
-    separator.setAttribute("aria-hidden", "true");
-    const path = element("span", "thread-project-path");
-    const pathText = element("bdi", "", group.cwd || "目录未知");
-    pathText.dir = "ltr";
-    path.append(pathText);
-    details.append(separator, path);
-    const count = element("span", "thread-project-count", `${group.threads.length} 对话`);
+    summary.title = location;
+    const machineLabel = element("span", "thread-project-machine", nameCounts.get(name) > 1 ? machine : "");
+    machineLabel.title = machine;
+    const platform = element("span", isWsl ? "thread-project-platform" : "", isWsl ? "WSL" : "");
+    const count = element("span", "thread-project-count visually-hidden", `${group.threads.length} 对话`);
     count.setAttribute("aria-label", `${group.threads.length} 个${agent.showArchived ? "已归档" : ""}对话`);
     const add = element("button", "chat-icon-button project-new-thread", "+");
     add.type = "button";
@@ -3141,7 +3163,15 @@ function renderAgentThreads() {
     add.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise) || !add.dataset.projectNode;
     add.title = add.dataset.projectNode ? `在 ${group.cwd || "默认目录"} 新建对话` : "该项目未关联可运行 Codex 的机器";
     add.setAttribute("aria-label", add.title);
-    summary.append(copy, count, add, details);
+    const more = element("button", "chat-icon-button project-details-toggle", "⋯");
+    more.type = "button";
+    more.title = `项目详情：${name}`;
+    more.setAttribute("aria-label", more.title);
+    more.setAttribute("aria-haspopup", "dialog");
+    more.addEventListener("click", event => { event.preventDefault(); openProjectDetails(group, name, more); });
+    const actions = element("span", "project-heading-actions");
+    actions.append(add, more);
+    summary.append(copy, machineLabel, platform, actions, count);
     project.append(summary);
     const conversations = element("div", "thread-project-threads");
     conversations.setAttribute("role", "group");
@@ -3181,6 +3211,90 @@ function openThreadWindow(event, link) {
   if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
   event.preventDefault();
   window.open(link.href, "_blank", `width=${Math.min(1100, screen.availWidth)},height=${Math.min(900, screen.availHeight)},noopener`);
+}
+
+function closeSidebarPopovers() {
+  for (const panel of document.querySelectorAll(".sidebar-popover:popover-open")) panel.hidePopover();
+}
+
+function openSidebarPopover(panel, anchor, above = false) {
+  if (panel.matches(":popover-open")) { panel.hidePopover(); return; }
+  panel.showPopover();
+  const bounds = anchor.getBoundingClientRect();
+  panel.style.left = `${Math.max(8, Math.min(bounds.left, innerWidth - panel.offsetWidth - 8))}px`;
+  panel.style.top = `${Math.max(8, Math.min(above ? bounds.top - panel.offsetHeight - 8 : bounds.bottom + 4, innerHeight - panel.offsetHeight - 8))}px`;
+  panel.querySelector("button:not([disabled])")?.focus();
+}
+
+function navigationFacts(target, rows) {
+  clear(target);
+  for (const [label, value, copy] of rows) {
+    const row = element("div");
+    const term = element("dt", "", label);
+    const description = element("dd");
+    const text = element("bdi", "", value || "未提供");
+    text.dir = "ltr";
+    description.append(text);
+    if (copy && value) {
+      const button = element("button", "ghost navigation-copy", "复制");
+      button.type = "button";
+      button.setAttribute("aria-label", `复制${label}`);
+      button.addEventListener("click", () => navigator.clipboard.writeText(value).then(() => toast("已复制")).catch(error => toast(error.message)));
+      term.append(button);
+    }
+    row.append(term, description);
+    target.append(row);
+  }
+}
+
+function nodeDisplayName(nodeId) {
+  const node = dashboardNodes.get(nodeId);
+  return node ? `${node.hostname}${node.nodeMode === "wsl" ? " · WSL" : node.platform === "windows" ? " · Windows" : ""}` : "未关联运行机器";
+}
+
+function openProjectDetails(group, name, anchor) {
+  $("#projectDetailsTitle").textContent = name;
+  navigationFacts($("#projectDetailsFacts"), [
+    ["运行机器", nodeDisplayName(group.nodeId)], ["项目目录", group.cwd, true], ["对话数量", String(group.threads.length)],
+  ]);
+  openSidebarPopover($("#projectDetails"), anchor);
+}
+
+function renderConversationDetails(thread) {
+  $("#conversationDetailsName").textContent = thread?.title || "未命名会话";
+  navigationFacts($("#conversationDetailsFacts"), [
+    ["运行机器", nodeDisplayName(thread?.runtimeNodeId || thread?.sourceNodeId)],
+    ["工作目录", thread?.cwd, true], ["模型", thread?.model || "默认模型"],
+    ["最近更新", thread?.updatedAt ? new Date(thread.updatedAt).toLocaleString() : null],
+  ]);
+}
+
+function showConversationDetailsPanel() {
+  const panel = $("#conversationDetails");
+  if (!panel.open) {
+    if (conversationDetailsWide.matches) panel.show();
+    else panel.showModal();
+  }
+  $(".chat-shell").classList.add("details-open");
+}
+
+async function openConversationDetails(threadId) {
+  if (!threadId) return;
+  const panel = $("#conversationDetails");
+  const revision = (panel._miraRevision ?? 0) + 1;
+  panel._miraRevision = revision;
+  panel.dataset.threadId = threadId;
+  renderConversationDetails(agent.threads.find(thread => thread.threadId === threadId));
+  $("#conversationDetailsStatus").textContent = "正在更新…";
+  showConversationDetailsPanel();
+  try {
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+    if (!panel.open || panel._miraRevision !== revision) return;
+    renderConversationDetails(thread);
+    $("#conversationDetailsStatus").textContent = "";
+  } catch (error) {
+    if (panel.open && panel._miraRevision === revision) $("#conversationDetailsStatus").textContent = error.message;
+  }
 }
 
 function openThreadMenu(threadId, anchor, point = null) {
@@ -3996,6 +4110,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     agent.projectOpen.set(projectForThread(summary).key, true);
     agent.showArchived = false;
     $("#agentArchiveToggle").setAttribute("aria-pressed", "false");
+    $("#agentArchiveToggle").setAttribute("aria-checked", "false");
     $("#agentArchiveLabel").textContent = "归档对话";
     setConversationTitle(summary.title);
     renderAgentThreads();
@@ -4127,6 +4242,38 @@ $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").ca
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
 $("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#agentHome").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
+$("#agentLogout").addEventListener("click", () => $("#logoutButton").click());
+$("#agentNavMenuToggle").addEventListener("click", event => openSidebarPopover($("#agentNavMenu"), event.currentTarget));
+$("#agentAccountToggle").addEventListener("click", event => {
+  accountSidebar.render();
+  openSidebarPopover($("#agentAccountDetails"), event.currentTarget, true);
+});
+for (const [panelId, triggerId] of [["agentNavMenu", "agentNavMenuToggle"], ["agentAccountDetails", "agentAccountToggle"]]) {
+  $("#" + panelId).addEventListener("toggle", event => $("#" + triggerId).setAttribute("aria-expanded", String(event.newState === "open")));
+}
+$("#agentNavMenu").addEventListener("click", event => { if (event.target.closest("button")) $("#agentNavMenu").hidePopover(); }, { capture: true });
+$("#agentNavMenu").addEventListener("keydown", event => {
+  if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+  const buttons = [...event.currentTarget.querySelectorAll("button:not([disabled])")].filter(button => button.getClientRects().length);
+  const index = buttons.indexOf(document.activeElement);
+  const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowUp" ? -1 : 1) + buttons.length) % buttons.length;
+  buttons[next]?.focus(); event.preventDefault();
+});
+document.addEventListener("click", event => event.target.closest("[data-close-popover]")?.closest("[popover]")?.hidePopover());
+window.addEventListener("resize", closeSidebarPopovers);
+$("#threadShowDetails").addEventListener("click", () => {
+  $("#threadOptionsMenu").hidePopover();
+  void openConversationDetails(agent.menuThreadId);
+});
+$("#conversationDetailsClose").addEventListener("click", () => $("#conversationDetails").close());
+$("#conversationDetails").addEventListener("close", () => {
+  if (!$("#conversationDetails").open) $(".chat-shell").classList.remove("details-open");
+});
+conversationDetailsWide.addEventListener("change", () => {
+  if (!$("#conversationDetails").open) return;
+  $("#conversationDetails").close();
+  showConversationDetailsPanel();
+});
 $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
 $("#agentThreadDrawerClose").addEventListener("click", () => setAgentThreadDrawer(false));
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
@@ -4138,6 +4285,9 @@ window.addEventListener("popstate", () => {
 });
 agentThreadDrawerWide.addEventListener("change", () => setAgentThreadDrawer(agentThreadDrawerWide.matches, { focus: false }));
 document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || document.querySelector("[popover]:popover-open")) return;
+  if ($("#conversationDetails").open && conversationDetailsWide.matches) { $("#conversationDetails").close(); return; }
+  if (document.querySelector("dialog[open]")) return;
   if (event.key === "Escape" && $("#agentThreadDrawer").classList.contains("open")) setAgentThreadDrawer(false);
 });
 $("#agentRefresh").addEventListener("click", () => Promise.all([refreshAgentNodes(), loadAgentThreads()]).then(() => toast("Agent 状态已刷新")).catch((error) => toast(error.message)));
@@ -4410,6 +4560,7 @@ $("#threadDelete").addEventListener("click", () => showDeleteThreadDialog().catc
 $("#agentArchiveToggle").addEventListener("click", () => {
   agent.showArchived = !agent.showArchived;
   $("#agentArchiveToggle").setAttribute("aria-pressed", String(agent.showArchived));
+  $("#agentArchiveToggle").setAttribute("aria-checked", String(agent.showArchived));
   $("#agentArchiveLabel").textContent = agent.showArchived ? "返回对话列表" : "归档对话";
   void loadAgentThreads().catch(error => toast(error.message));
 });

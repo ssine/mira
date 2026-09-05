@@ -19,27 +19,43 @@ export function resetTime(timestamp, now = Date.now()) {
 
 // A read-only subscription: it never starts/resumes a thread or changes the Node's runtime.
 export class AccountSidebar {
-  constructor(root, { intervalMs = 60_000, timeoutMs = 15_000 } = {}) {
+  constructor(root, { intervalMs = 5 * 60_000, timeoutMs = 15_000 } = {}) {
     this.root = root;
     this.intervalMs = intervalMs;
     this.timeoutMs = timeoutMs;
+    this.cache = new Map();
     root.querySelector("[data-account-refresh]").addEventListener("click", () => void this.refresh());
     this.render();
   }
 
   select(node, active) {
-    const key = active ? JSON.stringify([node?.nodeId, node?.status, node?.reportedAppServer?.status]) : "";
+    const cacheKey = node?.nodeId ? JSON.stringify([node.nodeId, node.reportedAppServer?.codexHome, node.reportedAppServer?.codexPath]) : null;
+    const key = active ? JSON.stringify([cacheKey, node?.status, node?.reportedAppServer?.status]) : "";
     if (key === this.key) return;
     this.key = key;
     this.stop();
+    this.cacheKey = active ? cacheKey : null;
     this.node = active ? node : null;
-    this.account = null;
-    this.limits = null;
+    const cached = active && this.cache.get(cacheKey);
+    this.account = cached?.account ?? null;
+    this.limits = cached?.limits ?? null;
     this.message = !active ? "" : !node ? "请选择运行节点" : node.status !== "online" ? "运行节点离线"
-      : node.reportedAppServer?.status !== "running" ? "Codex 尚未启动" : "正在读取账户…";
+      : node.reportedAppServer?.status !== "running" ? "Codex 尚未启动" : cached ? cached.message : "正在读取账户…";
     this.available = Boolean(active && node?.status === "online" && node?.reportedAppServer?.status === "running");
     this.render();
-    if (this.available) void this.refresh();
+    if (this.available) {
+      if (cached && Date.now() - cached.updatedAt < this.intervalMs) this.schedule();
+      else void this.refresh();
+    }
+  }
+
+  clear() {
+    this.stop();
+    this.cache.clear();
+    this.key = this.cacheKey = this.node = this.account = this.limits = null;
+    this.available = false;
+    this.message = "";
+    this.render();
   }
 
   stop() {
@@ -89,16 +105,20 @@ export class AccountSidebar {
       if (request) { message.error ? request.reject(new Error(message.error.message)) : request.resolve(message.result); return; }
       if (message.id !== undefined) return;
       if (["account/updated", "account/rateLimits/updated"].includes(message.method)) {
-        // Re-read the complete snapshot, including reset credits omitted by sparse notifications.
+        // Identity changes invalidate the cached account immediately. Frequent
+        // quota notifications share the normal TTL instead of causing more RPCs.
         if (message.method === "account/updated") {
           this.revision++;
+          this.cache.delete(this.cacheKey);
           this.account = null;
           this.limits = null;
           this.message = "账户信息已变更，正在更新…";
           this.render();
+          clearTimeout(this.notificationTimer);
+          this.notificationTimer = setTimeout(() => void this.refresh(), 300);
+        } else {
+          this.schedule();
         }
-        clearTimeout(this.notificationTimer);
-        this.notificationTimer = setTimeout(() => void this.refresh(), 300);
       }
     });
     const disconnected = () => {
@@ -108,7 +128,7 @@ export class AccountSidebar {
       this.revision++;
       this.message = this.account ? "连接已断开，显示上次结果" : "账户暂不可用，请稍后刷新";
       this.render();
-      this.schedule();
+      this.schedule(this.intervalMs);
     };
     socket.addEventListener("close", disconnected, { once: true });
     socket.addEventListener("error", disconnected, { once: true });
@@ -116,9 +136,12 @@ export class AccountSidebar {
     return session;
   }
 
-  schedule() {
+  schedule(retryDelay) {
     clearTimeout(this.timer);
-    if (this.available) this.timer = setTimeout(() => void this.refresh(), this.intervalMs);
+    if (!this.available || this.operation) return;
+    const cached = this.cache.get(this.cacheKey);
+    const delay = retryDelay ?? (cached ? Math.max(0, cached.updatedAt + this.intervalMs - Date.now()) : this.intervalMs);
+    if (this.available) this.timer = setTimeout(() => void this.refresh(), delay);
   }
 
   async refresh() {
@@ -132,7 +155,9 @@ export class AccountSidebar {
       const account = await session.call("account/read", { refreshToken: false });
       if (this.session !== session || this.revision !== revision) return;
       const previousEmail = this.account?.email;
+      const previousType = this.account?.type;
       this.account = account.account ?? null;
+      if (previousEmail !== this.account?.email || previousType !== this.account?.type) this.cache.delete(this.cacheKey);
       if (previousEmail !== this.account?.email || this.account?.type !== "chatgpt") this.limits = null;
       this.message = !this.account ? "此节点的 Codex 尚未登录" : this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" : "";
       this.render();
@@ -152,8 +177,11 @@ export class AccountSidebar {
     } finally {
       if (this.operation === operation) {
         this.operation = null;
+        if (this.session === session && this.revision === revision) {
+          this.cache.set(this.cacheKey, { account: this.account, limits: this.limits, message: this.message, updatedAt: Date.now() });
+        }
         this.render();
-        this.schedule();
+        this.schedule(this.session === session && this.revision === revision ? undefined : this.intervalMs);
         if (this.refreshAgain || this.revision !== revision && this.session === session) {
           this.refreshAgain = false;
           clearTimeout(this.notificationTimer);
@@ -174,6 +202,13 @@ export class AccountSidebar {
     find("[data-account-node]").textContent = nodeLabel;
     find("[data-account-node]").title = nodeLabel;
     find("[data-account-plan]").textContent = this.account?.planType?.toUpperCase() ?? "";
+    find("[data-account-summary-email]").textContent = email;
+    find("[data-account-summary-email]").title = email;
+    find("[data-account-summary-plan]").textContent = this.account?.planType?.toUpperCase() ?? "";
+    const summary = remaining === null ? "查看账户与额度" : `本周剩余 ${Number(remaining.toFixed(1))}%`;
+    const summaryNode = find("[data-account-summary-remaining]");
+    summaryNode.textContent = this.node && !this.available ? (this.node.status !== "online" ? "运行节点离线" : "Codex 尚未启动") : summary;
+    summaryNode.title = this.message || summary;
     find("[data-account-remaining]").textContent = remaining === null ? "未提供" : `${Number(remaining.toFixed(1))}%`;
     const meter = find("meter");
     meter.classList.toggle("hidden", remaining === null);
@@ -185,6 +220,9 @@ export class AccountSidebar {
     find("[data-account-status]").textContent = this.message ?? "";
     find("[data-account-status]").classList.toggle("hidden", !this.message);
     find("[data-account-refresh]").disabled = !this.available || Boolean(this.operation);
+    const cached = this.cache.get(this.cacheKey);
+    const minutes = cached ? Math.max(0, Math.floor((Date.now() - cached.updatedAt) / 60_000)) : null;
+    find("[data-account-updated]").textContent = `${minutes === null ? "" : minutes === 0 ? "刚刚更新 · " : `${minutes} 分钟前更新 · `}每 5 分钟刷新`;
     this.root.setAttribute("aria-busy", String(Boolean(this.operation)));
   }
 }

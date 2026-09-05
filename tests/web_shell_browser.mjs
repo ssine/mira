@@ -1,3 +1,4 @@
+import { sidebarAction } from "./sidebar_browser_helpers.mjs";
 // Real-browser shell regression against a disposable Mira Server.
 // Usage: MIRA_SERVER_URL=http://127.0.0.1:8787 MIRA_TEST_ADMIN_PASSWORD=... node tests/web_shell_browser.mjs [playwright-module]
 import assert from "node:assert/strict";
@@ -52,7 +53,7 @@ try {
   assert.equal(await page.locator(".topbar").isVisible(), false, "chat has its own dedicated shell");
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= window.innerHeight + 1));
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
-  assert.equal(await page.locator("#agentHome").isVisible(), true);
+  assert.equal(await page.locator("#agentNavMenuToggle").isVisible(), true);
   await page.locator("#agentThreadDrawerClose").click();
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
   await page.locator("#agentThreadDrawerToggle").click();
@@ -72,7 +73,7 @@ try {
   await page.waitForURL("**/?view=agent");
   await page.goBack();
   await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
-  await page.locator("#agentHome").click();
+  await sidebarAction(page, "agentHome");
   await page.locator("#logoutButton").click();
   await page.goto(`${serverUrl}/?thread=${threadA}`);
   await page.locator("#loginView:not(.hidden)").waitFor();
@@ -80,14 +81,14 @@ try {
   await page.locator("#loginForm button[type=submit]").click();
   await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
 
-  await page.locator("#agentThemeToggle").click();
+  await sidebarAction(page, "agentThemeToggle");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
   await page.reload({ waitUntil: "networkidle" });
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   await page.locator("#agentView:not(.hidden)").waitFor();
   assert.equal(await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--accent").trim()), "#6cb8f6");
-  await page.locator("#agentHome").click();
+  await sidebarAction(page, "agentHome");
 
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await page.locator("#globalNodes").isVisible(), true);

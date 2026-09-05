@@ -1,3 +1,4 @@
+import { sidebarAction } from "./sidebar_browser_helpers.mjs";
 import assert from "node:assert/strict";
 const { chromium } = await import(process.argv[2] ?? "playwright");
 const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8789";
@@ -82,7 +83,7 @@ try {
   assert.equal(sockets, 0);
   await page.emulateMedia({ reducedMotion: "reduce" });
   assert.equal(await idleIcon.evaluate(element => getComputedStyle(element).animationName), "none");
-  await page.locator("#agentThemeToggle").click();
+  await sidebarAction(page, "agentThemeToggle");
   assert.equal(await idleIcon.isVisible(), true);
   await page.setViewportSize({ width: 412, height: 820 });
   await page.locator("#agentThreadDrawerToggle").click();

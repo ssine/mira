@@ -72,10 +72,11 @@ export function imageJsonReplacer(key, value) {
 // Images outside collapsed tool groups load as they approach the viewport.
 // Bound simultaneous Node reads and release blobs when a conversation is removed.
 export class TraceImages {
-  constructor(root, readFile, followImage) {
+  constructor(root, readFile, followImage, preview) {
     this.root = root;
     this.readFile = readFile;
     this.followImage = followImage;
+    this.preview = preview;
     this.entries = new Map();
     this.queue = [];
     this.running = 0;
@@ -103,13 +104,16 @@ export class TraceImages {
     if (previous && previous.source.url === source.url && previous.source.path === source.path) return;
     if (previous) this.remove(body, previous);
     const figure = document.createElement("figure");
-    const link = document.createElement("a");
-    link.target = "_blank";
-    link.rel = "noopener";
-    link.title = "查看原图";
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "trace-image-preview";
+    link.disabled = true;
+    link.title = "放大预览";
+    link.setAttribute("aria-haspopup", "dialog");
     const img = document.createElement("img");
     const label = source.path?.split(/[\\/]/).at(-1) || "工具返回的图片";
     img.alt = label;
+    link.setAttribute("aria-label", `预览 ${label}`);
     img.decoding = "async";
     img.hidden = true;
     link.append(img);
@@ -121,12 +125,14 @@ export class TraceImages {
     status.textContent = "正在加载图片…";
     const retry = document.createElement("button");
     retry.type = "button";
+    retry.className = "trace-image-retry";
     retry.textContent = "重新加载";
     retry.hidden = true;
     figure.append(link, status, retry, caption);
     body.replaceChildren(figure);
     const entry = { source, nodeIds: [...nodeIds], body, img, link, status, retry, controller: new AbortController() };
     this.entries.set(body, entry);
+    link.addEventListener("click", () => { if (entry.blob) this.preview(entry.blob, source.path); });
     retry.addEventListener("click", () => this.enqueue(entry));
     this.observer.observe(body);
   }
@@ -163,14 +169,16 @@ export class TraceImages {
       await img.decode();
       controller.signal.throwIfAborted();
       const follow = this.followImage();
-      link.href = entry.objectUrl;
+      entry.blob = blob;
+      link.disabled = false;
       img.hidden = false;
       status.hidden = true;
       follow();
     } catch (error) {
       if (controller.signal.aborted) return;
       img.hidden = true;
-      link.removeAttribute("href");
+      link.disabled = true;
+      entry.blob = null;
       if (entry.objectUrl) { URL.revokeObjectURL(entry.objectUrl); entry.objectUrl = null; }
       status.textContent = `图片暂时无法显示：${error.message}`;
       retry.hidden = false;

@@ -1,3 +1,4 @@
+import { sidebarAction, accountDetails } from "./sidebar_browser_helpers.mjs";
 // Real Server/login + browser; read-only account RPCs are simulated independently of chat.
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
@@ -42,12 +43,14 @@ try {
   await context.route(`**/v1/codex/threads/${thread.threadId}/transcript?*`,r=>r.fulfill({json:{generation:1,trace:[],nextCursor:null}}));
  }
  const page=await context.newPage();page.setDefaultTimeout(10000);page.on('pageerror',e=>errors.push(e.message));
+ await page.clock.install();
  await page.goto(origin);await page.locator('#password').fill(process.env.MIRA_TEST_ADMIN_PASSWORD??'mira-local-admin-password');
  await page.locator('#loginForm button[type=submit]').click();await page.locator('#dashboardView:not(.hidden)').waitFor();
  await page.goto(`${origin}/?thread=${threadIds[0]}`);
  const panel=page.locator('#agentAccount');
  const expectText=async(selector,text)=>{try{await page.waitForFunction(([selector,text])=>document.querySelector(selector)?.textContent===text,[`#agentAccount ${selector}`,text]);}catch(error){console.log({expected:[selector,text],panel:await panel.textContent(),calls,errors});throw error;}};
  const idle=()=>page.waitForFunction(()=>document.querySelector('#agentAccount').getAttribute('aria-busy')==='false');
+ await accountDetails(page);
  await expectText('[data-account-remaining]','48%');
  await expectText('[data-account-email]','first@example.test');
  await expectText('[data-account-credits]','1 次');
@@ -57,10 +60,23 @@ try {
  assert.equal(await panel.locator('meter').getAttribute('aria-label'),'周额度剩余百分比');
  assert.equal(await panel.locator('meter').evaluate(e=>e.value),48);
  assert.ok(calls.every(r=>['initialize','account/read','account/rateLimits/read'].includes(r.method)));
- // Quota notifications re-read reset counts as well as the usage window.
+ // Frequent quota notifications and drawer toggles share a five-minute cache.
+ await idle(); const initialCalls=calls.length;
  limits[0].rateLimitsByLimitId.codex.secondary.usedPercent=100;limits[0].rateLimitResetCredits.availableCount=0;
  sockets.get(0).send(JSON.stringify({method:'account/rateLimits/updated',params:{rateLimits:{limitId:'codex'}}}));
+ await page.waitForTimeout(400);
+ assert.equal(calls.length,initialCalls,'quota notifications do not bypass the cache');
+ await page.getByRole('button',{name:'关闭账户详情',exact:true}).click();
+ for(let i=0;i<3;i++) {
+  await page.locator('#agentThreadDrawerToggle').click();await page.locator('#agentThreadDrawerToggle').click();
+  assert.equal(await panel.locator('[data-account-summary-remaining]').textContent(),'本周剩余 48%');
+ }
+ await page.clock.fastForward(4*60_000);
+ assert.equal(calls.length,initialCalls,'reopening the sidebar does not reconnect or request account data');
+ await page.clock.fastForward(60_100);
  await expectText('[data-account-remaining]','0%');await expectText('[data-account-credits]','0 次');
+ assert.equal(calls.filter(call=>call.method==='account/rateLimits/read').length,2,'one automatic refresh after five minutes');
+ await accountDetails(page);
  // Missing fields stay unknown, rather than borrowing Spark's separate weekly quota.
  delete limits[0].rateLimitsByLimitId.codex.secondary;limits[0].rateLimitResetCredits=null;
  await idle();await panel.locator('[data-account-refresh]').click();await expectText('[data-account-remaining]','未提供');await expectText('[data-account-credits]','未提供');
@@ -79,38 +95,51 @@ try {
  try{heldReply();}catch{}holdFirst=false;
  await page.waitForTimeout(100);await expectText('[data-account-email]','second@example.test');
  assert.match(await panel.locator('[data-account-node]').textContent(),/Windows/);
+ await accountDetails(page);
  // Account replacement clears previous values immediately, then loads the new identity.
  accounts[1]={type:'apiKey'};
  sockets.get(1).send(JSON.stringify({method:'account/updated',params:{authMode:'apikey'}}));
  await expectText('[data-account-email]','API Key 登录');
  assert.equal(await panel.locator('dl').isVisible(),false);
  assert.equal(await panel.locator('meter').isVisible(),false);
- const chooseNode=async index=>{await page.locator('#agentHome').click();await page.locator('#globalRuntime').click();await page.locator('#agentRuntimeNode').selectOption(nodeIds[index]);await page.locator('#runtimeOpenChat').click();};
+ const chooseNode=async index=>{await sidebarAction(page, "agentHome");await page.locator('#globalRuntime').click();await page.locator('#agentRuntimeNode').selectOption(nodeIds[index]);await page.locator('#runtimeOpenChat').click();};
  // Pick an unlogged Node on a new conversation, so its stored runtime does not override the selection.
  await page.locator('#agentNewThread').click();await chooseNode(2);
  await expectText('[data-account-status]','此节点的 Codex 尚未登录');
  assert.equal(await panel.locator('dl').isVisible(),false);
- nodes[2].status='offline';await page.locator('#agentHome').click();await page.locator('#globalRuntime').click();await page.locator('#agentRefresh').click();await page.locator('#runtimeOpenChat').click();
+ nodes[2].status='offline';await sidebarAction(page, "agentHome");await page.locator('#globalRuntime').click();await page.locator('#agentRefresh').click();await page.locator('#runtimeOpenChat').click();
  await expectText('[data-account-status]','运行节点离线');
  assert.equal(await panel.locator('[data-account-refresh]').isDisabled(),true);
+ const firstNodeReads=calls.filter(call=>call.node===0&&call.method==='account/read').length;
  nodes[2].status='online';await chooseNode(0);await expectText('[data-account-email]','first@example.test');await expectText('[data-account-remaining]','48%');
+ assert.equal(calls.filter(call=>call.node===0&&call.method==='account/read').length,firstNodeReads,'switching back reuses the correct Node cache');
  // The compact block and all existing footer navigation remain usable on mobile.
  await page.setViewportSize({width:390,height:844});await page.locator('#agentThreadDrawerToggle').click();
  await expectText('[data-account-remaining]','48%');
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ await accountDetails(page);
  await panel.locator('[data-account-refresh]').scrollIntoViewIfNeeded();
  assert.equal(await panel.locator('[data-account-refresh]').isVisible(),true);
- await page.locator('#agentThemeToggle').click();
+ await sidebarAction(page, "agentThemeToggle");
  assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
  if(process.env.MIRA_WEB_SCREENSHOT_DIR) {
   await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR,{recursive:true});
   await panel.scrollIntoViewIfNeeded();await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-sidebar-mobile.png`});
-  await page.setViewportSize({width:1440,height:1000});await page.locator('#agentThemeToggle').click();
+  await accountDetails(page);await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-details-mobile.png`});
+  await page.setViewportSize({width:1440,height:1000});await sidebarAction(page, "agentThemeToggle");
   await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-sidebar-desktop.png`});
+  await accountDetails(page);await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-details-desktop.png`});
  }
- await page.locator('#agentHome').click();await page.locator('#logoutButton').click();await page.locator('#loginView:not(.hidden)').waitFor();
+ await sidebarAction(page, "agentLogout");await page.locator('#loginView:not(.hidden)').waitFor();
  assert.equal((await panel.textContent()).includes('first@example.test'),false,'logout clears account data');
  assert.equal(await panel.locator('[data-account-refresh]').isDisabled(),true);
+ const beforeLogin=calls.filter(call=>call.node===0&&call.method==='account/read').length;
+ await page.locator('#password').fill(process.env.MIRA_TEST_ADMIN_PASSWORD??'mira-local-admin-password');
+ await page.locator('#loginForm button[type=submit]').click();await page.locator('#agentView:not(.hidden)').waitFor();
+ await expectText('[data-account-email]','API Key 登录');
+ await page.locator('#agentNewThread').click();await chooseNode(0);
+ await expectText('[data-account-email]','first@example.test');
+ assert.ok(calls.filter(call=>call.node===0&&call.method==='account/read').length>beforeLogin,'logout clears the cache before another login');
  assert.deepEqual(errors,[]);
  console.log('PASS: account email/plan, weekly window selection, reset time/credits, notifications, unknown/zero, stale replies, API key, logout/offline, mobile/dark layout and read-only RPC isolation');
 }finally{await browser.close();}

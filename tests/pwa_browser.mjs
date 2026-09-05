@@ -1,3 +1,4 @@
+import { sidebarAction } from "./sidebar_browser_helpers.mjs";
 // Real browser + disposable Server: install metadata, cold launch, mobile viewport,
 // HTTP validation, offline recovery and exclusion of private data from SW caches.
 // MIRA_SERVER_URL=http://127.0.0.1:8789 node tests/pwa_browser.mjs [playwright-module]
@@ -160,7 +161,7 @@ try {
   assert.ok(measure.scrollWidth <= measure.width + 1, "landscape must not scroll horizontally");
   await page.setViewportSize({ width: 393, height: 851 });
   await page.locator("#agentThreadDrawerToggle").click();
-  await page.locator("#agentThemeToggle").click();
+  await sidebarAction(page, "agentThemeToggle");
   await page.locator("#agentThreadDrawerClose").click();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   measure = await layout();
@@ -198,7 +199,7 @@ try {
   assert.ok(page.url().endsWith(`/?thread=${other}`));
 
   await page.locator("#agentThreadDrawerToggle").click();
-  await page.locator("#agentHome").click();
+  await sidebarAction(page, "agentHome");
   await page.locator("#logoutButton").click();
   await page.locator("#loginView:not(.hidden)").waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.app.route")), null);

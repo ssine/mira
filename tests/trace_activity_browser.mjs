@@ -1,3 +1,4 @@
+import { sidebarAction } from "./sidebar_browser_helpers.mjs";
 // Real-browser rendering test, isolated from a running Mira Server/Node or DB.
 // Usage: node tests/trace_activity_browser.mjs [playwright-module] [browser-channel] [screenshot]
 // Optional MIRA_TRACE_SCREENSHOT saves the final narrow-screen view.
@@ -137,10 +138,10 @@ try {
   assert.equal(await page.locator("#conversationInput").evaluate((node) => node === document.activeElement), true, "resizing must not steal input focus");
   await page.locator("#agentNewThread").click();
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false", "wide sidebar stays open after choosing a new conversation");
-  await page.locator("#agentThemeToggle").click();
+  await sidebarAction(page, "agentThemeToggle");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "dark");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.theme")), "dark");
-  await page.locator("#agentThemeToggle").click();
+  await sidebarAction(page, "agentThemeToggle");
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   assert.equal(await page.locator("#conversationCwd").getAttribute("type"), "hidden", "thread cwd must not look editable per message");
   assert.equal(await page.locator("#conversationInput").getAttribute("rows"), "1");
@@ -1308,7 +1309,15 @@ try {
     });
     await imagePage.goto(`http://127.0.0.1:${server.address().port}/`);
     await imagePage.waitForFunction(() => !!window.traceHarness);
-    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1UAAAAASUVORK5CYII=";
+    const png = await imagePage.evaluate(() => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 800; canvas.height = 3200;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#e4ecf6"; ctx.fillRect(0, 0, 800, 3200);
+      ctx.fillStyle = "#315a92";
+      for (let y = 80; y < 3200; y += 160) ctx.fillRect(60, y, 680, 40);
+      return canvas.toDataURL("image/png").split(",")[1];
+    });
     await imagePage.evaluate((png) => {
       const h = window.traceHarness;
       h.agent.threadId = "image-thread";
@@ -1333,7 +1342,16 @@ try {
     const image = imagePage.locator("#conversationTrace > .trace-card.image img");
     await image.waitFor({ state: "visible" });
     assert.equal(await image.count(), 1, "started/completed share a single standalone preview");
-    assert.equal(await image.evaluate((img) => img.naturalWidth), 1);
+    assert.equal(await image.evaluate((img) => img.naturalHeight), 3200);
+    const compactHeight = (await image.boundingBox()).height;
+    assert.ok(compactHeight <= 180, `long image stays compact: ${compactHeight}`);
+    await image.click();
+    await imagePage.locator("#nodeFileDialog[open] #nodeFileImage").waitFor({ state: "visible" });
+    assert.ok((await imagePage.locator("#nodeFileImage").boundingBox()).height > compactHeight, "click opens a larger in-page preview");
+    assert.equal(await imagePage.evaluate(() => window.imageReads.length), 2, "preview reuses the decoded image without another Node request");
+    assert.equal(await imagePage.context().pages().length, 1, "preview does not open another window");
+    await imagePage.keyboard.press("Escape");
+    await imagePage.waitForFunction(() => window.blobs.size === 1);
     assert.equal(await imagePage.locator(".tool-group[open]").count(), 0, "image remains visible while tool group is collapsed");
     assert.equal(await imagePage.locator(".tool-group .trace-card.tool").count(), 1);
     assert.deepEqual(await imagePage.evaluate(() => window.imageReads.map((read) => read.action)), ["stat", "read"]);
@@ -1363,16 +1381,22 @@ try {
     await image.waitFor({ state: "visible" });
     assert.equal(await image.count(), 1, "older path-only fragments cannot replace a saved snapshot");
     await imagePage.setViewportSize({ width: 390, height: 844 });
+    assert.ok((await image.boundingBox()).height <= 180, "mobile long images also stay compact");
+    await image.click();
+    await imagePage.locator("#nodeFileDialog[open] #nodeFileImage").waitFor({ state: "visible" });
+    assert.equal(await imagePage.locator("#nodeFileImage").evaluate((img) => img.naturalHeight), 3200, "saved octet-stream image opens in the viewer");
+    await imagePage.locator("#nodeFileClose").click();
+    await imagePage.waitForFunction(() => window.blobs.size === 1);
     assert.equal(await imagePage.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await imagePage.evaluate(() => {
       const h = window.traceHarness;
       h.clear();
       h.upsertTrace("image-retry", "tool", "查看图片", "/tmp/missing.png", "完成", { images: [{ path: "/tmp/missing.png" }], turnId: "image-turn" });
     });
-    await imagePage.locator(".trace-card.image button").waitFor({ state: "visible" });
+    await imagePage.locator(".trace-image-retry").waitFor({ state: "visible" });
     assert.match(await imagePage.locator(".trace-image-status").textContent(), /运行节点离线/);
     await imagePage.evaluate(() => { window.imageOffline = false; });
-    await imagePage.locator(".trace-card.image button").click();
+    await imagePage.locator(".trace-image-retry").click();
     await image.waitFor({ state: "visible" });
     await imagePage.evaluate(() => {
       const h = window.traceHarness;
