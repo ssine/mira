@@ -157,6 +157,11 @@ const agent = {
   transcriptTotal: 0,
   transcriptLoadingOlder: false,
   transcriptOlderError: null,
+  transcriptTailVersion: null,
+  transcriptReconciliations: new Map(),
+  // Ephemeral diagnostics, not a second transcript store. Keep failures across
+  // history refresh/reconnect/selection until explicitly dismissed (or page close).
+  diagnostics: new Map(),
   threadRuntimeNodeId: null,
   previousRuntimeNodeId: null,
   attachments: [],
@@ -2174,6 +2179,35 @@ function resetAgentTranscript(threadId = null) {
   agent.transcriptTotal = 0;
   agent.transcriptLoadingOlder = false;
   agent.transcriptOlderError = null;
+  agent.transcriptTailVersion = null;
+}
+
+function retainTurnError(threadId, turnId, message) {
+  if (!threadId || !message) return;
+  const key = JSON.stringify([threadId, turnId ?? "unscoped"]);
+  let diagnostic = agent.diagnostics.get(key);
+  if (!diagnostic) {
+    diagnostic = { threadId, turnId, messages: new Set(), dismissed: false };
+    agent.diagnostics.set(key, diagnostic);
+  }
+  diagnostic.messages.add(message);
+  if (threadId === agent.threadId) renderTurnDiagnostics();
+}
+
+function renderTurnDiagnostics() {
+  for (const [key, diagnostic] of agent.diagnostics) {
+    if (diagnostic.threadId !== agent.threadId || diagnostic.dismissed) continue;
+    const card = upsertTrace(`diagnostic-${key}`, "error", "执行失败",
+      [...diagnostic.messages].join("\n\n"), "", { autoScroll: false, turnId: diagnostic.turnId });
+    card.dataset.diagnosticKey = key;
+    if (!card.querySelector("[data-dismiss-diagnostic]")) {
+      const dismiss = element("button", "trace-dismiss", "关闭此错误");
+      dismiss.type = "button";
+      dismiss.dataset.dismissDiagnostic = key;
+      dismiss.title = "仅关闭提示，不会重新执行或删除数据库历史";
+      card.append(dismiss);
+    }
+  }
 }
 
 function mergeTranscriptItems(current, updates) {
@@ -2252,8 +2286,8 @@ function scheduleOlderTranscriptLoad() {
 
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
-  const liveCards = options.preserveViewport?.mode === "prepend"
-    ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction)')]
+  const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
+    ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction), .trace-card[data-pending-user="true"]')]
     : [];
   const liveCompactions = [...existingTrace.querySelectorAll('.trace-card.compaction')]
     .filter((card) => card.dataset.traceKey?.startsWith("item-"));
@@ -2272,6 +2306,7 @@ function renderTranscript(fallbackThread, options = {}) {
   const trace = clear($("#conversationTrace"));
   renderHistoryLoader(trace);
   for (const item of agent.transcriptItems) {
+    if (item.kind === "error" && agent.diagnostics.has(JSON.stringify([agent.threadId, item.turnId ?? "unscoped"]))) continue;
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
@@ -2293,7 +2328,11 @@ function renderTranscript(fallbackThread, options = {}) {
   const renderedByBody = new Map(renderedCards.map((card) => [narrativeKey(card), card]));
   for (const card of liveCards) {
     const replacement = renderedByKey.get(card.dataset.traceKey) ?? renderedByBody.get(narrativeKey(card));
-    if (replacement) replacement.replaceWith(card);
+    if (replacement) {
+      // Canonical completion supersedes an older partial live item. Prepending
+      // older pages must instead keep the still-running tail untouched.
+      if (options.preserveViewport?.mode === "prepend") replacement.replaceWith(card);
+    }
     else if (card.dataset.traceKind === "tool") ensureToolGroup(trace, card.dataset.turnId ?? "").querySelector(".tool-group-items").append(card);
     else trace.append(card);
     updateToolGroup(card.closest(".tool-group"));
@@ -2309,7 +2348,8 @@ function renderTranscript(fallbackThread, options = {}) {
     if (remaining) storedCompactions.set(turn, remaining - 1);
     else trace.append(card); // Keep the notice while its durable write catches up.
   }
-  if (!agent.transcriptItems.length && !liveCompactions.length && !liveCards.length) {
+  renderTurnDiagnostics();
+  if (!agent.transcriptItems.length && !liveCompactions.length && !liveCards.length && !trace.querySelector("[data-diagnostic-key]")) {
     if (agent.transcriptCursor !== null) {
       trace.append(element("div", "conversation-empty", "此页没有可显示的消息，可继续加载更早历史。"));
       scheduleOlderTranscriptLoad();
@@ -2356,6 +2396,13 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const incoming = Array.isArray(transcript.trace) ? transcript.trace : [];
   const sameThread = agent.transcriptThreadId === threadId &&
     agent.transcriptGeneration === transcript.generation;
+  const tailVersion = transcript.storeVersion == null ? null
+    : JSON.stringify([transcript.generation, transcript.storeVersion, transcript.itemCount]);
+  if (sameThread && options.preserveLoaded && !options.prepend && tailVersion !== null &&
+      agent.transcriptTailVersion === tailVersion) {
+    renderTurnDiagnostics();
+    return transcript; // No changed canonical items: avoid rebuilding Markdown/DOM.
+  }
   const trace = $("#conversationTrace");
   const scroll = traceScroller();
   const preserveViewport = options.prepend
@@ -2386,8 +2433,10 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   if (agent.liveRevision !== liveRevision && agent.transcriptThreadId === threadId && options.preserveLoaded) return transcript;
   renderTranscript(fallbackThread, {
     preserveViewport,
+    preserveLive: options.preserveLoaded && sameThread,
     anchorBottom: options.anchorBottom !== false,
   });
+  if (!options.prepend) agent.transcriptTailVersion = tailVersion;
   return transcript;
 }
 
@@ -2417,19 +2466,28 @@ async function loadOlderAgentTranscript() {
 }
 
 async function refreshCompletedTranscript(threadId) {
-  // ThreadStore persistence can finish shortly after turn/completed. Refresh a
-  // few times so missed live notifications are replaced by the authoritative
-  // database projection without requiring a manual reopen.
-  for (const delay of [250, 750, 1_500]) {
-    await new Promise((resolve) => setTimeout(resolve, delay));
-    if (agent.threadId !== threadId) return;
+  const epoch = agent.selectionEpoch;
+  const key = JSON.stringify([threadId, epoch]);
+  if (agent.transcriptReconciliations.has(key)) return agent.transcriptReconciliations.get(key);
+  // One coalesced read per completion burst, not a fixed three-read polling loop.
+  // Unpersisted live items/diagnostics remain visible; reconnect also reconciles.
+  const operation = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
     try {
       await loadAgentTranscript(threadId, null, {
         preserveLoaded: true,
         anchorBottom: traceNearBottom(),
       });
-    } catch { /* next refresh may succeed */ }
-  }
+    } catch (error) {
+      if (agent.threadId === threadId && agent.selectionEpoch === epoch) {
+        setConversationNotice(`历史对账暂未完成，实时内容仍保留：${error.message}`, "warning");
+      }
+    }
+  })();
+  agent.transcriptReconciliations.set(key, operation);
+  try { await operation; }
+  finally { agent.transcriptReconciliations.delete(key); }
 }
 
 function handleAgentNotification(message) {
@@ -2479,17 +2537,28 @@ function handleAgentNotification(message) {
     }
     syncActiveTurnUi();
     void loadAgentThreads().catch((error) => console.warn("Unable to refresh thread list after turn completion", error));
-    if (threadId && threadId !== agent.threadId) return;
     const status = String(turn.status ?? "").toLowerCase();
     const turnError = readableErrorMessage(turn.error);
     if (turnError || ["failed", "error"].includes(status)) {
-      upsertTrace(`turn-${completedTurnId ?? Date.now()}`, "error", "Turn 失败",
-        turnError || "Codex Turn 执行失败", turn.status ?? "失败");
-    } else if (["interrupted", "cancelled", "canceled", "aborted"].includes(status)) {
+      retainTurnError(threadId, completedTurnId, turnError || "Codex Turn 执行失败");
+    }
+    if (threadId && threadId !== agent.threadId) return;
+    if (["interrupted", "cancelled", "canceled", "aborted"].includes(status)) {
       upsertTrace(`turn-${completedTurnId ?? Date.now()}`, "system", "Turn 已中断",
         "本次执行没有继续完成。", turn.status);
     }
     if (threadId) void refreshCompletedTranscript(threadId);
+    return;
+  }
+  if (method === "error") {
+    const threadId = notificationThreadId(params) ?? agent.threadId;
+    if (params.willRetry === true) {
+      if (threadId === agent.threadId) upsertTrace(`retry-${params.turnId ?? "current"}`, "system", "正在重试",
+        readableErrorMessage(params.error ?? params.message) || "连接暂时中断，Codex 正在重试。", "");
+      return; // A recoverable transport warning is not a failed turn.
+    }
+    retainTurnError(threadId, params.turnId ?? agent.activeTurns.get(threadId),
+      readableErrorMessage(params.error ?? params.message ?? params) || JSON.stringify(params));
     return;
   }
   if (!notificationIsForOpenThread(params)) return;
@@ -2912,6 +2981,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   setConversationTitle("正在打开会话…");
   $("#conversationMeta").textContent = "";
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "正在加载最近消息…"));
+  renderTurnDiagnostics();
   let projected = currentAgentThread();
   if (!projected) {
     try {
@@ -3172,6 +3242,9 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     if (optimistic.dataset.pendingUser === "true") optimistic.remove();
     throw error;
   }
+  // If the live user-item notification was missed, the canonical user message
+  // can still replace this optimistic card by turn + body during reconciliation.
+  if (result.turn?.id) optimistic.dataset.turnId = result.turn.id;
   // turn/start can accept input into an already-running turn, without emitting
   // another turn/started. The RPC acknowledgement ends submission in both cases.
   replyProgress.finish(progress);
@@ -3252,6 +3325,7 @@ $("#logoutButton").addEventListener("click", async () => {
     await api("/v1/admin/logout", { method: "POST", body: "{}" });
   } finally {
     csrfToken = null;
+    agent.diagnostics.clear();
     clearAppRoute();
     stopAgentRecovery();
     disposeTerminal();
@@ -3351,6 +3425,13 @@ $("#agentThreadList").addEventListener("click", (event) => {
   }
 });
 $("#conversationTrace").addEventListener("click", (event) => {
+  const dismiss = event.target.closest("[data-dismiss-diagnostic]");
+  if (dismiss) {
+    const diagnostic = agent.diagnostics.get(dismiss.dataset.dismissDiagnostic);
+    if (diagnostic) diagnostic.dismissed = true;
+    dismiss.closest("[data-diagnostic-key]").remove();
+    return;
+  }
   const file = event.target.closest("[data-node-file-path]");
   if (file) {
     event.preventDefault();

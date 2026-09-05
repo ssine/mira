@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `a84054b`
+- Patch source commit: `94c17b1`
 
 Apply it to a clean checkout:
 
@@ -20,8 +20,8 @@ Build Codex using the upstream instructions. The resulting CLI and App Server un
 
 Mira's release workflow performs this application and uses Codex's canonical package builder for
 Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the entrypoint,
-`codex-code-mode-host`, platform sandbox resources, `rg` and `codex-package.json`; it is packaged
-beside `mira-node`. The Node probes the remote ThreadStore configuration before advertising a build
+`codex-code-mode-host`, platform sandbox resources, `rg` and `codex-package.json`; it is published
+as an independent Codex runtime, downloaded by the Node on demand. The Node probes the remote ThreadStore configuration before advertising a build
 as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
 release matrix builds, not just changing the version file.
 

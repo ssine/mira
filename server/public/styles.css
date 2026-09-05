@@ -431,6 +431,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-card.tool, .trace-card.reasoning, .trace-card.system, .trace-card.error { width: min(100%, 808px); }
 .trace-card.system { padding: 8px 11px; border-left: 2px solid var(--line); background: var(--surface); }
 .trace-card.error { padding: 8px 11px; border-left: 2px solid var(--danger); background: var(--danger-soft); }
+.trace-dismiss { margin-top: 6px; padding: 3px 7px; font-size: 12px; }
 .trace-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; margin-bottom: 4px; }
 .trace-kind { color: var(--muted); font-size: 11px; font-weight: 500; }
 .trace-status { color: var(--quiet); font-size: 12px; line-height: 16px; }

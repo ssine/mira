@@ -769,6 +769,65 @@ try {
   } } });
   assert.equal(await page.locator(".trace-card.error .trace-body").last().textContent(),
     "The requested model requires a newer version of Codex.", "live nested Codex errors must be readable");
+  // A failed write cannot store its own error. Neither completion reconciliation,
+  // later canonical refreshes nor switching conversations may erase that diagnostic.
+  const errorRequests = transcriptRequests;
+  await notify("error", { threadId: "thread-a", turnId: "turn-1", error: {
+    message: "The requested model requires a newer version of Codex.",
+  } });
+  await notify("turn/completed", { threadId: "thread-a", turn: { id: "turn-1", status: "failed", error: {
+    message: "The requested model requires a newer version of Codex.",
+  } } });
+  await page.waitForTimeout(2800);
+  assert.equal(transcriptRequests - errorRequests, 1, "completion burst reconciles once, not three polls");
+  assert.equal(await page.locator("[data-diagnostic-key]").count(), 1, "repeated reports share one per-turn error card");
+  await page.evaluate(async () => {
+    const h = window.traceHarness;
+    await h.loadAgentTranscript("thread-a", null, { preserveLoaded: true });
+    h.agent.threadId = "thread-b"; h.resetAgentTranscript("thread-b"); h.renderTranscript();
+  });
+  assert.equal(await page.locator("[data-diagnostic-key]").count(), 0, "errors must not leak into another thread");
+  await notify("error", { threadId: "thread-a", turnId: "turn-1", error: { message: "Final save also failed" } });
+  await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.agent.threadId = "thread-a"; h.resetAgentTranscript("thread-a");
+    await h.loadAgentTranscript("thread-a");
+  });
+  assert.equal(await page.locator("[data-diagnostic-key]").count(), 1);
+  assert.match(await page.locator("[data-diagnostic-key] .trace-body").textContent(), /Final save also failed/);
+  await page.locator("[data-dismiss-diagnostic]").click();
+  await page.evaluate(() => window.traceHarness.loadAgentTranscript("thread-a", null, { preserveLoaded: true }));
+  assert.equal(await page.locator("[data-diagnostic-key]").count(), 0, "explicit dismissal survives refresh");
+  let stableVersion = 8;
+  await page.route("**/v1/codex/threads/stable-thread/transcript?*", (route) => route.fulfill({ json: {
+    generation: 1, storeVersion: stableVersion, itemCount: 20, nextCursor: null,
+    trace: [{ key: "stable-item", kind: "assistant", body: "Already durable", sourceItemSeq: 20, turnId: "stable-turn" },
+      ...(stableVersion === 9 ? [{ key: "persisted-pending", kind: "user", body: "Pending without event", sourceItemSeq: 21, turnId: "pending-turn" }] : [])],
+  } }));
+  const unchanged = await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.agent.threadId = "stable-thread"; h.resetAgentTranscript("stable-thread");
+    await h.loadAgentTranscript("stable-thread");
+    const original = document.querySelector('[data-trace-key="stable-item"]');
+    h.notify({ method: "item/started", params: { threadId: "stable-thread", turnId: "new-turn",
+      item: { id: "unpersisted-user", type: "userMessage", content: [{ type: "text", text: "Unsaved input" }] } } });
+    await h.loadAgentTranscript("stable-thread", null, { preserveLoaded: true });
+    return { sameNode: original === document.querySelector('[data-trace-key="stable-item"]'),
+      retainedInput: document.querySelector("#conversationTrace").textContent.includes("Unsaved input") };
+  });
+  assert.deepEqual(unchanged, { sameNode: true, retainedInput: true }, "unchanged tails avoid DOM rebuilding and retain live-only input");
+  stableVersion = 9;
+  const pendingCount = await page.evaluate(async () => {
+    const h = window.traceHarness;
+    const pending = h.upsertTrace("pending-user", "user", "你", "Pending without event", "", { turnId: "pending-turn" });
+    pending.dataset.pendingUser = "true";
+    await h.loadAgentTranscript("stable-thread", null, { preserveLoaded: true });
+    return [...document.querySelectorAll(".trace-card.user .trace-body")].filter((body) => body._miraSource === "Pending without event").length;
+  });
+  assert.equal(pendingCount, 1, "a persisted user message replaces its optimistic copy even if the live item event was missed");
+  await notify("error", { threadId: "stable-thread", turnId: "pending-turn", willRetry: true,
+    error: { message: "Temporary network issue; retrying" } });
+  assert.equal(await page.locator("[data-diagnostic-key]").count(), 0, "a runtime retry warning must not be mislabeled as permanent failure");
   assert.deepEqual(errors, [], "browser must have no uncaught errors");
   const screenshot = process.env.MIRA_TRACE_SCREENSHOT ?? process.argv[4];
   if (screenshot) await page.locator(".conversation-card").screenshot({ path: screenshot });

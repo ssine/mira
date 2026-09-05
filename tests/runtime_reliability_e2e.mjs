@@ -9,7 +9,7 @@ import readline from "node:readline";
 import { spawn } from "node:child_process";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { initializeDatabase } from "../server/db.mjs";
-import { commitDelta, getStoreHead, getThreadHistory, getSnapshot } from "../server/thread-store.mjs";
+import { commitDelta, getStoreHead, getThreadHistory, getSnapshot, putSnapshot } from "../server/thread-store.mjs";
 
 const binary = process.env.CODEX_TEST_BINARY;
 assert(binary && path.isAbsolute(binary), "CODEX_TEST_BINARY must name the candidate Codex binary");
@@ -39,6 +39,16 @@ const fixture = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname.endsWith("/responses")) {
       current.modelRequests++;
+      if (["imported", "conflict"].includes(current.mode)) {
+        const events = [
+          { type: "response.created", response: { id: "resp-import" } },
+          { type: "response.output_item.done", item: { type: "message", role: "assistant", id: "msg-import",
+            content: [{ type: "output_text", text: "IMPORT_OK" }] } },
+          { type: "response.completed", response: { id: "resp-import", usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } },
+        ];
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        return res.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+      }
       if (current.mode === "stream") {
         const text = "实时文字".repeat(125);
         const item = { type: "message", role: "assistant", id: "msg-stream", content: [] };
@@ -95,6 +105,11 @@ const fixture = http.createServer(async (req, res) => {
       return sendJSON(res, 200, await getStoreHead(pool, store));
     }
     const body = JSON.parse(encoded);
+    if (current.conflictNext) {
+      current.conflictNext = false;
+      current.conflicts = (current.conflicts ?? 0) + 1;
+      return sendJSON(res, 409, { error: "fixture concurrent writer conflict" });
+    }
     const toolOutput = body.historyChanges.some((change) => change.items?.some((item) => item.payload?.type === "function_call_output" && item.payload?.call_id === "retry-probe-call"));
     if (toolOutput) {
       current.attempts.push({ id: req.headers["x-codex-operation-id"], encoded });
@@ -211,6 +226,42 @@ try {
   assert(JSON.stringify(streamRestored).includes(streamText), "a fresh process restores the completed stream");
   await streamResume.close();
   console.log(`PASS stream: ${deltas.length} real App Server deltas in ${(deltas.at(-1).at - deltas[0].at).toFixed(1)} ms, no per-delta store requests, durable completion and fresh resume`);
+  const importedSnapshot = (await getSnapshot(pool, streaming.context.store)).snapshot;
+  const importedId = streamThread.thread.id;
+  // Imports omit optional fields; serde fills them in. Unknown newer fields and
+  // alternate RFC3339 formatting must survive a typed read-modify-write too.
+  const metadata = importedSnapshot.metadata_updates[importedId];
+  delete metadata.model;
+  delete metadata.title;
+  metadata.future_fixture_field = { keep: ["opaque", 7] };
+  if (typeof metadata.updated_at === "string") metadata.updated_at = metadata.updated_at.replace(/Z$/, "+00:00");
+  importedSnapshot.future_fixture_root = { keep: true };
+  for (const mode of ["imported", "conflict"]) {
+    assert.equal((await putSnapshot(pool, `retry-${mode}`, { expectedVersion: 0, snapshot: importedSnapshot }, {})).status, 200);
+    const app = await client(mode);
+    await app.call("thread/resume", { threadId: importedId, cwd: directory, model: "gpt-5.4" });
+    if (mode === "conflict") app.context.conflictNext = true;
+    const started = await app.call("turn/start", { threadId: importedId, input: [{ type: "text", text: "Only reply IMPORT_OK; no tools." }] });
+    assert.equal((await app.wait(started.turn.id)).status, mode === "conflict" ? "failed" : "completed");
+    if (mode === "conflict") {
+      assert.equal(app.context.modelRequests, 0, "a rejected pre-model write must stop sampling");
+      assert.equal(app.context.conflicts, 1, "a real conflict must not be blindly retried");
+      await app.call("thread/read", { threadId: importedId, includeTurns: true });
+      const other = await app.call("thread/start", { cwd: directory, approvalPolicy: "never", sandbox: "read-only" });
+      const healthy = await app.call("turn/start", { threadId: other.thread.id, input: [{ type: "text", text: "Only reply IMPORT_OK." }] });
+      assert.equal((await app.wait(healthy.turn.id)).status, "completed", "one conflicted thread must not poison unrelated conversations");
+    }
+    const stored = await getSnapshot(pool, app.context.store);
+    assert.deepEqual(stored.snapshot.metadata_updates[importedId].future_fixture_field, metadata.future_fixture_field);
+    assert.deepEqual(stored.snapshot.future_fixture_root, { keep: true });
+    const rawHistory = await getThreadHistory(pool, app.context.store, importedId, null, null);
+    assert.deepEqual(stored.snapshot.histories[importedId], rawHistory.body.items);
+    await app.close();
+    const resumed = await client(`${mode}-resume`, false, app.context.store);
+    await resumed.call("thread/resume", { threadId: importedId, cwd: directory });
+    await resumed.close();
+    console.log(`PASS ${mode}: omitted metadata, canonical unknown fields, V1/V2 and fresh resume; conflicts isolated without replay`);
+  }
   for (const mode of ["retry", "denied"]) {
     const app = await client(mode);
     const started = await app.call("thread/start", { cwd: directory, approvalPolicy: "never", sandbox: "read-only",

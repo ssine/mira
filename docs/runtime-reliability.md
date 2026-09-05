@@ -19,10 +19,19 @@ local JSONL mirror, disk outbox, or alternate source of truth.
   A flush waits for earlier queued writes, including cancelled callers, and only
   succeeds after acknowledgement. It does not download the whole store again.
 - Authorization/validation failures, incompatible responses and actual optimistic
-  conflicts are not blindly retried. A permanent persistence failure latches a
-  runtime storage error. Later writes and durability barriers fail rather than
-  pretending the transcript was saved. Restore access, then restart the affected
-  runtime; unknown-outcome commits must be inspected before resubmitting work.
+  conflicts are not blindly retried. Authorization/protocol failures latch a
+  runtime storage error; an optimistic conflict fences writes and durability
+  barriers for the affected thread only. Unrelated threads (including subagents)
+  can continue, and canonical history remains readable after a thread conflict.
+  Resolve the conflict, then restart the affected runtime; unknown-outcome commits
+  must be inspected before resubmitting work. There is no automatic tool replay.
+- Keep the raw canonical state alongside the typed in-memory projection. Determine
+  intended leaf changes from the typed before/after snapshots, but build CAS
+  expectations from the original raw JSON. Missing optional fields are different
+  from synthesized `null`; timestamps may deserialize into a different spelling.
+  Update only changed canonical leaves after acknowledgement, retaining unknown
+  fields and platform-filtered threads. This applies to native and imported history
+  equally; imports do not need destructive normalization to the current runtime.
 - A durability barrier precedes model sampling, so a rejected tool result cannot
   silently become the next model request. Task panics are caught at the existing
   task lifecycle boundary and become a scoped `error` followed by a failed
@@ -38,6 +47,23 @@ tool output or automatically repeat its side effects to repair old history.
 All Session tasks use the same terminal path, including subagents. Thread-store
 tests also cover queued parent/child creation and preservation of parent identity.
 They do not claim end-to-end recovery of every subagent orchestration pattern.
+
+### Web reconciliation and error lifetime
+
+Messages arrive over the App Server WebSocket. The 25-second connection probe
+does not download history. Initial selection, reconnection/foreground recovery,
+older-page scrolling and completion reconciliation can fetch canonical history.
+Completion bursts now coalesce into one tail read after 250 ms, instead of three
+fixed reads. Unchanged canonical tail versions skip Markdown/DOM reconstruction.
+Any live items not yet represented by that snapshot remain visible; future
+reconnection/selection reconciles again without a perpetual history polling loop.
+
+Errors are deduplicated per thread/turn and kept in page memory independently of
+the canonical transcript until explicitly dismissed, logout or page close. They
+survive canonical refresh, reconnection and switching away/back in the same page,
+including failures received for a background thread. This is an operational
+diagnostic, not a persistent history mirror: if saving failed, reloading the whole
+page cannot recover that unsaved error. Closing a diagnostic never retries work.
 
 ## Verification
 
