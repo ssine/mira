@@ -80,23 +80,13 @@ try {
   await page.locator(".trace-card.assistant").waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.app.route")), `/?thread=${thread}`);
   await page.setViewportSize({ width: 320, height: 640 });
-  const header = await page.locator(".conversation-head").evaluate((node) => {
-    const directory = node.querySelector(".conversation-directory");
-    const model = node.querySelector(".conversation-model");
-    return { height: node.getBoundingClientRect().height, directory: directory.textContent, model: model.textContent,
-      directoryTop: directory.getBoundingClientRect().top, modelTop: model.getBoundingClientRect().top,
-      directoryClipped: directory.scrollWidth > directory.clientWidth, modelClipped: model.scrollWidth > model.clientWidth,
-      meta: node.querySelector("#conversationMeta").textContent };
-  });
-  assert.equal(header.directory, cwd);
-  assert.equal(header.model, "gpt-6-astra");
-  assert.ok(header.height <= 48, `compact header: ${JSON.stringify(header)}`);
-  assert.equal(header.directoryTop, header.modelTop, "directory and model stay on one line");
-  assert.equal(header.directoryClipped, true);
-  assert.equal(header.modelClipped, false, "a long directory must leave the model readable");
-  assert.equal(header.meta.includes(thread), false);
-  assert.equal(await page.locator("#conversationTitle").isVisible(), true);
-  assert.ok(await page.locator("#conversationTitle").evaluate((node) => getComputedStyle(node).clipPath === "none" && node.getBoundingClientRect().width > 1));
+  const header = await page.locator(".conversation-head").boundingBox();
+  const toggle = await page.locator("#agentThreadDrawerToggle").boundingBox();
+  assert.equal(header.width, toggle.width, "navigation must only occupy the sidebar button width");
+  assert.ok(toggle.width >= 44 && toggle.height >= 44, "mobile navigation retains a touch target");
+  assert.equal(await page.locator("#conversationTitle").isVisible(), false);
+  assert.equal(await page.locator("#conversationMeta").isVisible(), false);
+  assert.equal(await page.title(), "手机会话 · Mira");
   await page.setViewportSize({ width: 393, height: 851 });
 
   await page.locator("#conversationInput").fill("全屏切换时保留的草稿");
@@ -199,7 +189,9 @@ try {
   measure = await layout();
   assert.ok(measure.scrollWidth <= measure.width + 1, "landscape must not scroll horizontally");
   await page.setViewportSize({ width: 393, height: 851 });
+  await page.locator("#agentThreadDrawerToggle").click();
   await page.locator("#agentThemeToggle").click();
+  await page.locator("#agentThreadDrawerClose").click();
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
   measure = await layout();
   assert.ok(measure.bottom <= measure.height + 1 && measure.top >= 0, `portrait keyboard recovery: ${JSON.stringify(measure)}`);

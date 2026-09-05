@@ -110,6 +110,8 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
+              <button id="agentThemeToggle" class="chat-nav-link chat-manage-link" type="button" aria-label="切换外观"><span aria-hidden="true">◐</span><span><strong>切换外观</strong></span></button>
+              <button id="agentInterrupt" class="chat-nav-link chat-manage-link danger hidden" type="button"><span aria-hidden="true">■</span><span><strong>中断当前回复</strong></span></button>
               <button id="agentFullscreenToggle" class="chat-nav-link chat-manage-link" type="button" aria-pressed="false" disabled>
                 <span aria-hidden="true">⛶</span><span><strong id="agentFullscreenLabel">全屏模式</strong><small id="agentFullscreenHint">隐藏系统栏，扩大阅读空间</small></span>
               </button>
@@ -125,8 +127,7 @@
               <button id="agentThreadDrawerToggle" class="chat-icon-button drawer-toggle" type="button" aria-label="打开会话侧边栏" aria-expanded="false" title="会话">
                 <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3.5 5h13M3.5 10h13M3.5 15h13"></path></svg>
               </button>
-              <div class="conversation-identity"><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted"><span class="conversation-directory">默认目录</span><span class="conversation-meta-separator">·</span><span class="conversation-model">默认模型</span></p><p id="conversationConnection" class="hidden" role="status"></p></div>
-              <div class="conversation-actions"><button id="agentThemeToggle" class="chat-icon-button" type="button" aria-label="切换外观" title="切换外观">◐</button><button id="agentInterrupt" class="danger hidden" type="button">中断</button></div>
+              <div class="conversation-identity hidden"><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted"><span class="conversation-directory">默认目录</span><span class="conversation-meta-separator">·</span><span class="conversation-model">默认模型</span></p></div>
             </header>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationScroll" class="conversation-scroll">
@@ -134,6 +135,7 @@
             </div>
             <div id="conversationComposer" class="conversation-compose-area">
             <form id="conversationForm" class="conversation-composer">
+              <p id="conversationConnection" class="hidden" role="status"></p>
               <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span></div>
               <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span><button id="conversationUploadCancel" class="composer-cancel hidden" type="button" aria-label="取消上传" title="取消上传">×</button></div>
               <input id="conversationCwd" type="hidden">

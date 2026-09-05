@@ -302,6 +302,7 @@ function show(view) {
   $("#globalRuntime").classList.toggle("active", view === "runtimeView");
   $("#globalRuntime").setAttribute("aria-current", view === "runtimeView" ? "page" : "false");
   document.body.dataset.view = view;
+  document.title = view === "agentView" ? `${$("#conversationTitle").textContent} · Mira` : "Mira";
   if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
   else if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
 }
@@ -1404,6 +1405,11 @@ function setConversationNotice(message = "", kind = "") {
   notice.className = `workspace-notice${message ? "" : " hidden"}${kind ? ` ${kind}` : ""}`;
 }
 
+function setConversationTitle(title) {
+  $("#conversationTitle").textContent = title;
+  if (document.body.dataset.view === "agentView") document.title = `${title} · Mira`;
+}
+
 function setConversationMeta(cwd, model) {
   const directory = element("span", "conversation-directory", cwd || "默认目录");
   const runtimeModel = element("span", "conversation-model", model || "默认模型");
@@ -2358,7 +2364,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
       ? { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight }
       : null;
   if (options.prepend) {
-    const top = scroll.getBoundingClientRect().top + $(".conversation-head").getBoundingClientRect().height;
+    const top = $(".conversation-head").getBoundingClientRect().bottom;
     const anchor = [...trace.querySelectorAll(".trace-card[data-trace-key]")].find((card) => card.getBoundingClientRect().bottom > top);
     if (anchor) Object.assign(preserveViewport, { anchorKey: anchor.dataset.traceKey, anchorTop: anchor.getBoundingClientRect().top });
   }
@@ -2643,6 +2649,7 @@ function renderAgentThreads() {
     return;
   }
   for (const thread of agent.threads) {
+    const row = element("div", "agent-thread-row");
     const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
     button.type = "button";
     button.disabled = Boolean(agent.sendPromise);
@@ -2652,13 +2659,23 @@ function renderAgentThreads() {
       element("span", "", `${thread.itemCount} items · ${when(thread.updatedAt)}`),
       element("small", "", thread.parentThreadId ? `subagent · ${thread.threadId}` : thread.threadId),
     );
-    list.append(button);
+    const openWindow = element("a", "chat-icon-button thread-open-window", "↗");
+    openWindow.href = `/?thread=${encodeURIComponent(thread.threadId)}`;
+    openWindow.target = "_blank";
+    openWindow.rel = "noopener";
+    openWindow.dataset.openThreadWindow = thread.threadId;
+    openWindow.title = `在新窗口打开：${thread.title || "未命名会话"}`;
+    openWindow.setAttribute("aria-label", openWindow.title);
+    row.append(button, openWindow);
+    list.append(row);
   }
 }
 
 async function loadAgentThreads() {
   const response = await api("/v1/codex/threads?storeId=personal&limit=300");
   agent.threads = response.data ?? [];
+  const title = currentAgentThread()?.title;
+  if (title) setConversationTitle(title);
   renderAgentThreads();
 }
 
@@ -2877,7 +2894,7 @@ async function restoreAgentThread(threadId, socket) {
   if (agent.threadId !== threadId) return result.thread;
   agent.previousRuntimeNodeId = projectedThread?.runtimeNodeId ?? projectedThread?.sourceNodeId ?? null;
   agent.threadRuntimeNodeId = agent.socketNodeId;
-  $("#conversationTitle").textContent = result.thread.name || result.thread.preview || "Codex 会话";
+  setConversationTitle(result.thread.name || result.thread.preview || projectedThread?.title || "Codex 会话");
   const resumedCwd = result.cwd ?? projectedCwd;
   setConversationMeta(resumedCwd, result.model);
   $("#conversationCwd").value = resumedCwd ?? "";
@@ -2892,7 +2909,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   agent.threadId = threadId;
   resetAgentTranscript(threadId);
   agent.threadRuntimeNodeId = null;
-  $("#conversationTitle").textContent = "正在打开会话…";
+  setConversationTitle("正在打开会话…");
   $("#conversationMeta").textContent = "";
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "正在加载最近消息…"));
   let projected = currentAgentThread();
@@ -2904,7 +2921,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
     } catch (error) {
       if (epoch !== agent.selectionEpoch) return;
       stopAgentRecovery();
-      $("#conversationTitle").textContent = "会话不可用";
+      setConversationTitle("会话不可用");
       setConversationNotice(error.message, "error");
       return;
     }
@@ -2914,7 +2931,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (preferredNode && [...$("#agentRuntimeNode").options].some((option) => option.value === preferredNode)) {
     $("#agentRuntimeNode").value = preferredNode;
   }
-  $("#conversationTitle").textContent = projected?.title || "Codex 会话";
+  setConversationTitle(projected?.title || "Codex 会话");
   setConversationMeta(projected?.cwd, projected?.model);
   $("#conversationCwd").value = projected?.cwd || "";
   syncActiveTurnUi();
@@ -2946,7 +2963,7 @@ function newAgentThread({ updateRoute = true } = {}) {
   agent.previousRuntimeNodeId = null;
   syncActiveTurnUi();
   resetAgentTranscript();
-  $("#conversationTitle").textContent = "新会话";
+  setConversationTitle("新会话");
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   setConversationMeta($("#conversationCwd").value);
@@ -3129,7 +3146,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     agent.newThreadRequestSignature = null;
     agent.threadRuntimeNodeId = agent.socketNodeId;
     agent.previousRuntimeNodeId = null;
-    $("#conversationTitle").textContent = "新会话";
+    setConversationTitle("新会话");
     const startedCwd = started.cwd ?? cwd;
     setConversationMeta(startedCwd, started.model);
     $("#conversationCwd").value = startedCwd ?? "";
@@ -3300,7 +3317,7 @@ window.addEventListener("offline", () => {
 });
 
 const conversationOverlayObserver = new ResizeObserver(() => {
-  const head = $(".conversation-head").getBoundingClientRect().height;
+  const head = $(".conversation-head").getBoundingClientRect().bottom - $(".conversation-card").getBoundingClientRect().top;
   const notice = $("#conversationNotice");
   const noticeHeight = notice.classList.contains("hidden") ? 0 : notice.getBoundingClientRect().height + 8;
   $(".conversation-card").style.setProperty("--conversation-overlay-height", `${head + noticeHeight}px`);
@@ -3315,6 +3332,18 @@ conversationWidthObserver.observe(traceScroller());
 traceScroller().addEventListener("scroll", scheduleOlderTranscriptLoad, { passive: true });
 $("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
 $("#agentThreadList").addEventListener("click", (event) => {
+  const openWindow = event.target.closest("a[data-open-thread-window]");
+  if (openWindow) {
+    // Keep modifier/middle-click link behavior. A direct user gesture with window
+    // dimensions requests a separate desktop/PWA window; no shared UI state is changed.
+    if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) {
+      event.preventDefault();
+      const width = Math.min(1100, screen.availWidth);
+      const height = Math.min(900, screen.availHeight);
+      window.open(openWindow.href, "_blank", `width=${width},height=${height},noopener`);
+    }
+    return;
+  }
   const button = event.target.closest("button[data-thread-id]");
   if (button) {
     closeAgentThreadDrawerOnMobile();

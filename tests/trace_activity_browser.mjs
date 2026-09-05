@@ -335,7 +335,7 @@ try {
   assert.equal(fragmentMerge[0].body, "输入\ncommand\n\n输出\nresult");
   assert.equal(fragmentMerge[0].title, "functions.exec");
 
-  const glass = await page.locator(".conversation-head").evaluate((head) => {
+  const glass = await page.locator("#agentThreadDrawerToggle").evaluate((head) => {
     const style = getComputedStyle(head);
     const trace = document.querySelector("#conversationScroll");
     return { blur: style.backdropFilter, background: style.backgroundColor,
@@ -344,8 +344,8 @@ try {
   });
   assert.match(glass.blur, /blur\(2px\)/);
   assert.match(glass.background, /rgba/);
-  assert.equal(glass.headTop, glass.traceTop, "messages must scroll behind the glass header");
-  assert.ok(glass.padding > glass.height, "initial messages must clear the header");
+  assert.ok(glass.headTop >= glass.traceTop, "navigation floats over the reading surface");
+  assert.ok(glass.padding > glass.height + glass.headTop - glass.traceTop, "initial messages must clear the navigation button");
 
   const streamBenchmark = await page.evaluate(async () => {
     const h = window.traceHarness;
