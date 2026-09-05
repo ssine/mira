@@ -71,3 +71,20 @@ test("Codex fault tests wait for PostgreSQL's final TCP SQL listener", async () 
     "socket readiness can match the temporary initdb server that is about to stop");
   assert.match(workflow, /docker logs mira-codex-test-postgres/);
 });
+
+test("compiler objects use bounded batched snapshots, not per-object GHA uploads", async () => {
+  const workflow = await fs.readFile(path.join(root, ".github/workflows/codex-release.yml"), "utf8");
+  assert.match(workflow, /SCCACHE_GHA_ENABLED: "false"/);
+  assert.match(workflow, /SCCACHE_DIRECT: "false"/);
+  assert.match(workflow, /SCCACHE_CACHE_SIZE: "2G"/);
+  assert.match(workflow, /actions\/cache\/restore@v4/);
+  assert.match(workflow, /actions\/cache\/save@v4/);
+  assert.match(workflow, /github\.run_id.*github\.run_attempt/);
+  assert.match(workflow, /if: always\(\).*steps\.enable_sccache\.outcome == 'success'/);
+  assert.match(workflow, /disable_annotations: true/);
+  assert(workflow.indexOf('sccache --show-stats --stats-format=json') < workflow.indexOf('sccache --stop-server'));
+  assert(workflow.indexOf('sccache --stop-server') < workflow.indexOf('actions/cache/save@v4'));
+  const jobTimeout = Number(workflow.match(/timeout-minutes: (\d+)/)[1]);
+  const buildTimeout = Number(workflow.match(/name: Build Mira-compatible Codex\n\s+timeout-minutes: (\d+)/)[1]);
+  assert(jobTimeout - buildTimeout >= 10, 'a timed-out build must leave time for cache/diagnostics');
+});

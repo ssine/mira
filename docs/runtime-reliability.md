@@ -134,7 +134,7 @@ build Codex or Nodes. A main build creates artifacts but does not publish a rele
 
 | Layer | Cache identity / behavior |
 | --- | --- |
-| Rust compilation | sccache's compiler/command/source keys; GHA backend enabled before daemon startup; no idle shutdown during long links |
+| Rust compilation | sccache's compiler/command/source keys in a bounded local cache; one GHA archive per target/attempt, with main snapshots reusable by release tags |
 | Cargo downloads | OS + Cargo.lock; compatible download-only fallback, Cargo still verifies/resolves inputs |
 | rusty_v8 | target + profile + pinned V8 version; upstream checksums re-fetched and verified on every restore |
 | Linux builder | per-architecture Docker build-layer cache |
@@ -154,3 +154,19 @@ elapsed time. Cold cache, linker work and hosted-runner variation still cost tim
 Cache warmup is not a release promotion policy. Codex patch revisions remain
 immutable, and deployment must verify the runtime lock and the complete canonical
 package before switching an idle node. Never interrupt active user turns to update.
+
+Compiler objects are not uploaded individually to GHA. The initial warmup observed
+hundreds of failed cache writes and repeated minutes with about 200 created entries,
+matching GitHub's [per-repository cache upload limit](https://docs.github.com/en/actions/reference/limits).
+Instead, sccache stores up to 2 GiB locally per target and CI restores/saves that directory
+as one immutable archive per run/attempt. Compatible fallback snapshots are safe because
+sccache still validates compiler/source/command inputs; direct preprocessor shortcuts are
+disabled. A new snapshot can preserve partial compiler work after failure without making
+that build publishable. Statistics are captured before stopping the daemon and archiving.
+The build step has an earlier deadline than the job so ordinary build timeouts leave room
+for cache saving; abrupt runner loss can still lose unsaved work. Cache save/restore failures
+do not bypass compilation or release checks. No account storage/billing limit is increased.
+The first batched run uses a new cache namespace and must warm it; old per-object GHA
+entries are not copied into the local cache. Existing entries are left to normal eviction.
+`tests/compiler_cache_snapshot_e2e.mjs` verifies a cold native compile, an archived-cache
+restore hit and invalidation after a header change (GCC on Linux, MSVC on Windows).

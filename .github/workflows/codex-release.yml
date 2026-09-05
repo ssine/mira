@@ -12,6 +12,7 @@ on:
       - patches/codex/**
       - node/internal/codex-runtime.json
       - tests/runtime_reliability_e2e.mjs
+      - tests/compiler_cache_snapshot_e2e.mjs
       - .github/workflows/codex-release.yml
   workflow_dispatch:
     inputs:
@@ -29,10 +30,15 @@ permissions:
 
 jobs:
   codex:
-    timeout-minutes: 90
+    # Leave time to save compiler work even if the long build step times out.
+    timeout-minutes: 120
     env:
-      SCCACHE_GHA_ENABLED: "true"
-      # The action starts the daemon: these must exist before that step.
+      # Thousands of per-object GHA uploads hit its 200 uploads/minute limit.
+      # Keep content-addressed compilation local; restore/save it as one archive.
+      SCCACHE_GHA_ENABLED: "false"
+      SCCACHE_CACHE_SIZE: "2G"
+      # Preserve the remote backend's full-preprocessor input validation.
+      SCCACHE_DIRECT: "false"
       SCCACHE_IDLE_TIMEOUT: "0"
       STABLE_GIT_COMMIT: ${{ github.sha }}
     strategy:
@@ -126,13 +132,36 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Configure local compiler cache path
+        if: inputs.codex_release == ''
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=$RUNNER_TEMP/mira-sccache" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/mira-sccache"
+
+      - name: Restore batched compiler cache
+        id: compiler_cache
+        if: inputs.codex_release == ''
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/mira-sccache
+          # New snapshots can retain useful work from a failed attempt without
+          # trying to overwrite an immutable cache entry on the next attempt.
+          key: codex-sccache-v1-${{ matrix.target }}-rust1.95-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            codex-sccache-v1-${{ matrix.target }}-rust1.95-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}-
+            codex-sccache-v1-${{ matrix.target }}-rust1.95-
+
       # Cache compiler outputs rather than the whole multi-gigabyte target tree.
-      # The pinned action uses GitHub Actions cache as sccache's remote backend.
-      - name: Enable shared Rust compilation cache
+      - name: Enable local Rust compilation cache
+        id: enable_sccache
         if: inputs.codex_release == ''
         uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         with:
           version: "v0.15.0"
+          # We capture statistics before stopping the daemon for the archive.
+          disable_annotations: true
 
       - name: Configure Rust compilation cache
         if: inputs.codex_release == ''
@@ -141,6 +170,11 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           rustc --version --verbose
           sccache --version
+
+      - name: Verify compiler cache snapshot restores and invalidates
+        if: runner.os == 'Linux' && inputs.codex_release == ''
+        shell: bash
+        run: MIRA_SCCACHE_TEST_BINARY="$SCCACHE_PATH" node tests/compiler_cache_snapshot_e2e.mjs
 
       - if: runner.os == 'Linux' && inputs.codex_release == ''
         uses: mlugg/setup-zig@v2
@@ -222,6 +256,7 @@ jobs:
           echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
 
       - name: Build Mira-compatible Codex
+        timeout-minutes: 105
         if: inputs.codex_release == ''
         shell: bash
         env:
@@ -242,14 +277,28 @@ jobs:
             --target "$TARGET" --release --locked "${build_args[@]}")
 
       - name: Report compiler cache effectiveness
-        if: always() && inputs.codex_release == ''
+        if: always() && steps.enable_sccache.outcome == 'success'
         shell: bash
         run: |
           sccache --show-stats | tee "$RUNNER_TEMP/sccache-stats.txt"
+          sccache --show-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats.json"
           if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
             echo '### Rust compilation cache' >> "$GITHUB_STEP_SUMMARY"
             cat "$RUNNER_TEMP/sccache-stats.txt" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Stop compiler cache before snapshot
+        if: always() && steps.enable_sccache.outcome == 'success'
+        shell: bash
+        run: sccache --stop-server >/dev/null || true
+
+      - name: Save one batched compiler cache snapshot
+        if: always() && steps.enable_sccache.outcome == 'success' && steps.compiler_cache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/mira-sccache
+          key: ${{ steps.compiler_cache.outputs.cache-primary-key }}
 
       - name: Preserve build timings and cache statistics
         if: always() && inputs.codex_release == ''
@@ -259,6 +308,7 @@ jobs:
           path: |
             upstream-codex/codex-rs/target/cargo-timings/
             ${{ runner.temp }}/sccache-stats.txt
+            ${{ runner.temp }}/sccache-stats.json
           retention-days: 14
 
       - name: Strip Linux release binaries
