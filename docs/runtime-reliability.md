@@ -41,6 +41,72 @@ They do not claim end-to-end recovery of every subagent orchestration pattern.
 
 ## Verification
 
+### Streaming and browser latency
+
+Transient rollout items must be filtered before entering the remote writer. The
+adapter checks upstream's persistence policy in both Legacy and Paginated modes;
+only an append that is nonpersistent in both modes takes the fast path. A mixed
+batch or any potentially durable item still uses the ordered, acknowledged
+writer. The fast path also checks the latched storage error.
+
+Previously, even a single text delta entered `mutate`, fetched the store head,
+loaded history when necessary, and compared before/after snapshots before
+discovering that nothing needed writing. This serialized visible text behind a
+remote database round trip per delta. Browser rendering alone could not fix it.
+
+The runtime regression below now streams 500 ready text deltas with 30 ms store
+latency. It asserts zero store requests between the first and last delta, exact
+text, durable completion and a fresh-process resume. The old runtime makes 499
+requests between those deltas and fails this test.
+
+For an opt-in measurement with the real configured model on a local approved
+execution Node, use the installed CLI for authentication:
+
+```sh
+MIRA_CLI_PATH=/absolute/path/to/mira \
+MIRA_STREAM_NODE_ID=<approved-node-id> \
+MIRA_STREAM_DIRECT_URL=ws://127.0.0.1:<app-server-port> \
+MIRA_STREAM_OUTPUT=/tmp/mira-stream-capture.json \
+  node tests/app_server_stream_probe.mjs /absolute/path/to/playwright/index.mjs
+```
+
+This creates and archives a diagnostic conversation. It records direct App
+Server notifications, the same notifications after Mira's real proxy, browser
+receive times, frame observations and long tasks. Frame timestamps are a
+conservative next-frame observation, not a physical-display scanout timestamp.
+Captures include the diagnostic conversation payloads: do not commit them or use
+production credential files as test fixtures. Set `MIRA_BROWSER_EXECUTABLE` if
+Playwright's default browser is unavailable.
+
+The real payloads can then exercise the renderer without contacting a model:
+
+```sh
+MIRA_STREAM_CAPTURE=/tmp/mira-stream-capture.json \
+  node tests/trace_activity_browser.mjs /absolute/path/to/playwright/index.mjs
+```
+
+Replay uses 20 times the captured rate, a mobile viewport, 6 times CPU throttling
+and long conversation history. It checks lossless output and receive-to-frame
+latency, independently of model generation speed. Live text enters the DOM in
+the message task; scroll updates and secondary metadata updates share a frame.
+
+A 2026-09-05 sample with the same `gpt-6-astra`, `xhigh`, `priority` configuration
+and a 30-line Chinese prompt measured the following. These are sample results,
+not a guaranteed model rate:
+
+| Runtime | Characters | First-to-last delta | Characters/sec | Browser receive-to-frame p95 |
+| --- | ---: | ---: | ---: | ---: |
+| Before | 1,379 | 141.54 s | 9.74 | 32.6 ms |
+| Fixed | 1,362 | 33.45 s | 40.72 | 15.4 ms |
+
+All 1,254 / 1,231 deltas were observed in browser frames. The fixed runtime made
+zero store HTTP requests between the first and last text delta. Its isolated
+candidate used a loopback browser bridge while still writing to the same real
+PostgreSQL store; the baseline separately measured Mira's actual relay overhead
+at 3.6 ms p95. The later idle-deployment probe repeats the complete managed
+runtime/relay/browser path. At 20 times the captured rate with a throttled mobile
+CPU and long history, browser replay measured 47.5 ms p95 and preserved all text.
+
 The upstream patch includes ThreadStore tests for 502/429, lost acknowledgements,
 exact request reuse, cancellation and ordering, permanent failures and worker
 panics, plus a core lifecycle test for panic/error/completion/idle state.

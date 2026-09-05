@@ -39,6 +39,26 @@ const fixture = http.createServer(async (req, res) => {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname.endsWith("/responses")) {
       current.modelRequests++;
+      if (current.mode === "stream") {
+        const text = "实时文字".repeat(125);
+        const item = { type: "message", role: "assistant", id: "msg-stream", content: [] };
+        const events = [
+          { type: "response.created", response: { id: "resp-stream" } },
+          { type: "response.output_item.added", output_index: 0, item },
+          ...Array.from(text, (delta) => ({ type: "response.output_text.delta", item_id: item.id, output_index: 0, content_index: 0, delta })),
+          { type: "response.output_item.done", output_index: 0, item: { ...item, content: [{ type: "output_text", text }] } },
+          { type: "response.completed", response: { id: "resp-stream", usage: { input_tokens: 1, output_tokens: 500, total_tokens: 501 } } },
+        ];
+        current.streamText = text;
+        const delivered = new Promise((resolve) => { current.streamDelivered = resolve; });
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        const encode = (events) => events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+        res.write(encode(events.slice(0, -2)));
+        // Keep the model response open until all deltas reach App Server's
+        // public transport. Completion writes then cannot race the measurement.
+        await bound(delivered, "stream delivery");
+        return res.end(encode(events.slice(-2)));
+      }
       if (current.mode === "malformed") {
         return sendJSON(res, 400, { error: { message: "MIRA_MOCK_MODEL_REACHED", type: "invalid_request_error" } });
       }
@@ -62,6 +82,8 @@ const fixture = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       return res.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
     }
+    current.storeRequests.push({ at: performance.now(), method: req.method, path: url.pathname });
+    if (current.mode === "stream") await delay(30);
     const parts = url.pathname.split("/").filter(Boolean);
     assert.equal(parts[1], "stores");
     const store = parts[2];
@@ -94,7 +116,7 @@ const fixture = http.createServer(async (req, res) => {
 });
 
 async function client(mode, inMemory = false, store = `retry-${mode}`) {
-  current = { mode, store, modelRequests: 0, attempts: [], toolCalls: 0, events: [] };
+  current = { mode, store, modelRequests: 0, attempts: [], toolCalls: 0, events: [], storeRequests: [], deltas: [] };
   const context = current;
   const home = path.join(directory, mode);
   await fs.mkdir(home);
@@ -130,6 +152,10 @@ async function client(mode, inMemory = false, store = `retry-${mode}`) {
   readline.createInterface({ input: proc.stdout }).on("line", (line) => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
+    if (message.method === "item/agentMessage/delta") {
+      context.deltas.push({ at: performance.now(), text: message.params.delta });
+      if (context.deltas.length === 500) context.streamDelivered?.();
+    }
     if (message.method === "item/tool/call") {
       context.toolCalls++;
       notify({ id: message.id, result: { contentItems: [{ type: "inputText", text: "TOOL_RESULT_ONCE" }], success: true } });
@@ -168,6 +194,23 @@ try {
   pool = new pg.Pool({ connectionString: connection.toString() });
   await initializeDatabase(pool);
   await new Promise((resolve) => fixture.listen(0, "127.0.0.1", resolve));
+  const streaming = await client("stream");
+  const streamThread = await streaming.call("thread/start", { cwd: directory, approvalPolicy: "never", sandbox: "read-only" });
+  const streamTurn = await streaming.call("turn/start", { threadId: streamThread.thread.id, input: [{ type: "text", text: "Stream the fixture text." }] });
+  assert.equal((await streaming.wait(streamTurn.turn.id)).status, "completed");
+  const { deltas, storeRequests, streamText } = streaming.context;
+  assert.equal(deltas.map((delta) => delta.text).join(""), streamText);
+  assert.equal(storeRequests.filter((request) => request.at > deltas[0].at && request.at < deltas.at(-1).at).length, 0,
+    "streamed text must not perform per-delta remote reads, history loads or commits");
+  assert(deltas.at(-1).at - deltas[0].at < 2_000, "500 ready deltas must not wait on 30 ms database round trips");
+  const streamHistory = await getThreadHistory(pool, streaming.context.store, streamThread.thread.id, null, null);
+  assert(JSON.stringify(streamHistory.body.items).includes(streamText), "the complete assistant text must still be durable");
+  await streaming.close();
+  const streamResume = await client("stream-resume", false, streaming.context.store);
+  const streamRestored = await streamResume.call("thread/resume", { threadId: streamThread.thread.id, cwd: directory });
+  assert(JSON.stringify(streamRestored).includes(streamText), "a fresh process restores the completed stream");
+  await streamResume.close();
+  console.log(`PASS stream: ${deltas.length} real App Server deltas in ${(deltas.at(-1).at - deltas[0].at).toFixed(1)} ms, no per-delta store requests, durable completion and fresh resume`);
   for (const mode of ["retry", "denied"]) {
     const app = await client(mode);
     const started = await app.call("thread/start", { cwd: directory, approvalPolicy: "never", sandbox: "read-only",

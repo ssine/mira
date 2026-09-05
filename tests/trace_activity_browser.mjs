@@ -330,7 +330,7 @@ try {
 
   const glass = await page.locator(".conversation-head").evaluate((head) => {
     const style = getComputedStyle(head);
-    const trace = document.querySelector("#conversationTrace");
+    const trace = document.querySelector("#conversationScroll");
     return { blur: style.backdropFilter, background: style.backgroundColor,
       headTop: head.getBoundingClientRect().top, traceTop: trace.getBoundingClientRect().top,
       padding: parseFloat(getComputedStyle(trace).paddingTop), height: head.getBoundingClientRect().height };
@@ -374,13 +374,71 @@ try {
     const started = performance.now();
     h.notify({ method: "item/agentMessage/delta", params: {
       threadId: "stream-benchmark", turnId: "stream-turn", itemId: "stream-item", delta: "New words immediately" } });
-    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    return { sameTextNode: textNode === body.firstChild, tail: body.textContent.endsWith("New words immediately"), latencyMs: performance.now() - started };
+    const immediate = body.textContent.endsWith("New words immediately");
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    return { immediate, sameTextNode: textNode === body.firstChild, tail: body.textContent.endsWith("New words immediately"), latencyMs: performance.now() - started };
   });
+  assert.equal(incremental.immediate, true, "received text enters the DOM in the same message task");
   assert.equal(incremental.sameTextNode, true, "new words append without replacing already-rendered text");
   assert.equal(incremental.tail, true);
   assert.ok(incremental.latencyMs < 250, "visible output must not wait for a typing timer");
   console.log(`TRACE_PAINT_BENCHMARK append latency=${incremental.latencyMs.toFixed(1)}ms`);
+  if (process.env.MIRA_STREAM_CAPTURE) {
+    // Replay real App Server payloads at 20x recorded speed with a long reading
+    // surface and a throttled mobile CPU. No model, credentials or production
+    // mutations are involved in this rendering regression.
+    const capture = JSON.parse(await fs.readFile(process.env.MIRA_STREAM_CAPTURE, "utf8"));
+    const deltas = capture.capture.filter((entry) => entry.stage === "proxy" && entry.message.method === "item/agentMessage/delta");
+    assert(deltas.length > 100, "supply a real stream capture with at least 100 deltas");
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 6 });
+    await page.setViewportSize({ width: 390, height: 844 });
+    const replay = await page.evaluate(async (events) => {
+      const h = window.traceHarness;
+      h.clear();
+      for (let i = 0; i < 60; i++) h.upsertTrace(`replay-history-${i}`, "assistant", "Codex", "Earlier conversation paragraph.\n\n".repeat(20), "", { autoScroll: false });
+      const first = events[0];
+      h.agent.threadId = first.message.params.threadId;
+      h.agent.turnId = first.message.params.turnId;
+      const scroll = document.querySelector("#conversationScroll");
+      scroll.scrollTop = scroll.scrollHeight;
+      const received = [], frames = [];
+      let running = true, characters = 0, source = "";
+      const frame = () => {
+        const body = document.querySelector(".trace-card.assistant:last-child .trace-body");
+        frames.push({ at: performance.now(), characters: body?.textContent.length ?? 0 });
+        if (running) requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+      const started = performance.now();
+      for (const event of events) {
+        const wait = (event.at - first.at) / 20 - (performance.now() - started);
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        const at = performance.now();
+        h.message({ data: JSON.stringify(event.message) });
+        source += event.message.params.delta;
+        characters += event.message.params.delta.length;
+        received.push({ at, characters });
+      }
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      running = false;
+      const body = document.querySelector(".trace-card.assistant:last-child .trace-body");
+      const lags = received.map((event) => frames.find((frame) => frame.at >= event.at && frame.characters >= event.characters)?.at - event.at).sort((a, b) => a - b);
+      return { deltas: received.length, characters, lossless: body?._miraSource === source && body?.textContent === source,
+        p95Ms: lags[Math.floor(lags.length * .95)], maxMs: lags.at(-1) };
+    }, deltas);
+    await cdp.send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    await page.setViewportSize({ width: 1440, height: 1100 });
+    assert.equal(replay.lossless, true);
+    assert(replay.p95Ms < 100 && replay.maxMs < 250, "real stream replay must keep up under mobile CPU load");
+    console.log(`REAL_STREAM_REPLAY ${JSON.stringify(replay)}`);
+    // Restore the deterministic stream used by the remaining Markdown checks.
+    await page.evaluate(() => {
+      const h = window.traceHarness; h.clear(); h.agent.threadId = "stream-benchmark";
+      h.notify({ method: "item/agentMessage/delta", params: { threadId: "stream-benchmark", turnId: "stream-turn", itemId: "stream-item",
+        delta: "A short **streamed** sentence with `code`.\n".repeat(1200) } });
+    });
+  }
   await page.evaluate(() => {
     const h = window.traceHarness;
     const body = document.querySelector(".trace-card.assistant .trace-body");
@@ -484,6 +542,11 @@ try {
   assert.equal(await page.locator(".reasoning .trace-kind").textContent(), "Inspecting configuration");
 
   await notify("item/started", { item: { ...read, status: "inProgress" } });
+  const toolRow = await page.locator(".tool-group-summary").evaluate((node) => ({
+    height: node.getBoundingClientRect().height,
+    latestHeight: node.querySelector(".tool-group-latest").getBoundingClientRect().height,
+  }));
+  assert.ok(toolRow.height <= 36 && toolRow.latestHeight < 20, "collapsed tool activity occupies one line");
   assert.equal(await page.locator(".tool-group").getAttribute("open"), null);
   assert.match(await page.locator(".tool-group-latest").textContent(), /正在读取 \/project\/config.go/);
   await notify("item/commandExecution/outputDelta", { itemId: "cmd-1", delta: "package main\n" });
@@ -541,12 +604,12 @@ try {
     h.clear();
     for (let i = 0; i < 50; i += 1) h.upsertTrace(`message-${i}`, "assistant", "Codex", `Message ${i}\n\nA short update.`, "");
   });
-  await page.locator("#conversationTrace").evaluate((trace) => { trace.scrollTop = 0; });
+  await page.locator("#conversationScroll").evaluate((trace) => { trace.scrollTop = 0; });
   await page.evaluate(() => window.traceHarness.upsertTrace("next-message", "assistant", "Codex", "Streaming update", ""));
-  assert.equal(await page.locator("#conversationTrace").evaluate((node) => node.scrollTop), 0, "new activity must respect scrolling into history");
+  assert.equal(await page.locator("#conversationScroll").evaluate((node) => node.scrollTop), 0, "new activity must respect scrolling into history");
   await page.evaluate(() => {
     const h = window.traceHarness;
-    const trace = document.querySelector("#conversationTrace");
+    const trace = document.querySelector("#conversationScroll");
     trace.scrollTop = trace.scrollHeight;
     const now = Date.now();
     h.upsertTrace("bottom-message", "assistant", "Codex", "Follow newest update", "", {
@@ -559,7 +622,18 @@ try {
       completedAt: new Date(now).toISOString(), elapsedMs: 4100,
     });
   });
-  assert.ok(await page.locator("#conversationTrace").evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 2));
+  assert.ok(await page.locator("#conversationScroll").evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop < 2));
+  const flow = await page.evaluate(() => {
+    const bounds = (selector) => { const r = document.querySelector(selector).getBoundingClientRect(); return { left: r.left, right: r.right, width: r.width, bottom: r.bottom }; };
+    return { trace: bounds("#conversationTrace"), form: bounds("#conversationForm"), user: bounds('[data-trace-key="preview-user"]'), assistant: bounds('[data-trace-key="preview-assistant"]'),
+      parent: document.querySelector("#conversationForm").parentElement.id,
+      barBorder: getComputedStyle(document.querySelector("#conversationForm")).borderTopWidth };
+  });
+  assert.equal(flow.parent, "conversationScroll", "composer belongs to the conversation scroll flow");
+  assert.equal(flow.barBorder, "0px", "composer does not draw a full-width bottom bar");
+  assert.ok(flow.trace.width <= 808 && Math.abs(flow.form.width - flow.trace.width) < 1);
+  assert.ok(Math.abs(flow.user.right - flow.assistant.right) < 1, "user messages align right inside the same reading column");
+  assert.ok(Math.abs(flow.form.left - flow.assistant.left) < 1, "composer and assistant share a column");
   const agentViewport = await page.locator(".chat-shell").evaluate((node) => ({
     bottom: node.getBoundingClientRect().bottom,
     viewportBottom: window.innerHeight,
@@ -615,7 +689,7 @@ try {
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false");
   await page.keyboard.press("Escape");
   if (process.env.MIRA_TRACE_MOBILE_MESSAGES_SCREENSHOT) {
-    await page.locator("#conversationTrace").evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    await page.locator("#conversationScroll").evaluate((node) => { node.scrollTop = node.scrollHeight; });
     await page.locator(".conversation-card").screenshot({ path: process.env.MIRA_TRACE_MOBILE_MESSAGES_SCREENSHOT });
   }
   await page.evaluate((history) => {

@@ -1701,43 +1701,56 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   else node.textContent = value;
 }
 
-function queueTraceStreamRender(card, value, kind, follow) {
-  card.querySelector(".trace-body")._miraSource = value;
+function queueTraceStreamRender(card, value, kind, follow, delta = null) {
+  const node = card.querySelector(".trace-body");
   const queued = traceStreamRenders.get(card);
+  // Capture the scroll intent before the first mutation in a frame. Subsequent
+  // deltas append text without forcing a layout or waiting for another frame.
+  const shouldFollow = queued ? queued.follow : follow && traceNearBottom();
+  const scrollTop = queued ? queued.scrollTop : traceScroller().scrollTop;
+  const previous = node._miraSource ?? "";
+  node._miraSource = value;
+  if (node._miraStreamText?.parentNode === node && delta !== null &&
+      node._miraStreamText.length === previous.length) {
+    node._miraStreamText.appendData(delta);
+  } else if (node._miraStreamText?.parentNode === node && value.startsWith(node._miraStreamText.data)) {
+    node._miraStreamText.appendData(value.slice(node._miraStreamText.length));
+  } else {
+    node._miraStreamText = document.createTextNode(value);
+    node.replaceChildren(node._miraStreamText);
+  }
+  if (node.hidden || node.classList.contains("markdown-body")) {
+    updateTraceBodyState(card, value, kind);
+    node.classList.remove("markdown-body");
+  }
   if (queued) {
-    queued.follow ||= follow;
     return;
   }
-  const pending = { follow, frame: null };
+  const pending = { follow: shouldFollow, scrollTop, frame: null };
   pending.frame = requestAnimationFrame(() => {
     traceStreamRenders.delete(card);
     if (!card.isConnected) return;
     const trace = $("#conversationTrace");
-    const shouldFollow = pending.follow && traceNearBottom(trace);
-    const node = card.querySelector(".trace-body");
     const source = node._miraSource ?? "";
     updateTraceBodyState(card, source, kind);
     // Parsing and sanitizing the entire accumulated Markdown for every token is
     // quadratic. Keep live output cheap and lossless, then fully typeset the
     // authoritative item once item/completed arrives.
-    node.classList.remove("markdown-body");
-    if (node._miraStreamText?.parentNode === node && source.startsWith(node._miraStreamText.data)) {
-      node._miraStreamText.appendData(source.slice(node._miraStreamText.length));
-    } else {
-      node._miraStreamText = document.createTextNode(source);
-      node.replaceChildren(node._miraStreamText);
-    }
-    if (shouldFollow) scrollTraceToBottom(trace);
+    if (pending.follow && traceScroller().scrollTop === pending.scrollTop) scrollTraceToBottom(trace);
   });
   traceStreamRenders.set(card, pending);
 }
 
-function traceNearBottom(trace = $("#conversationTrace"), threshold = 96) {
-  return trace.scrollHeight - trace.clientHeight - trace.scrollTop <= threshold;
+function traceScroller() { return $("#conversationScroll"); }
+
+function traceNearBottom(_trace, threshold = 96) {
+  const scroll = traceScroller();
+  return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= threshold;
 }
 
-function scrollTraceToBottom(trace = $("#conversationTrace")) {
-  trace.scrollTop = trace.scrollHeight;
+function scrollTraceToBottom() {
+  const scroll = traceScroller();
+  scroll.scrollTop = scroll.scrollHeight;
 }
 
 function updateToolGroup(group) {
@@ -1762,7 +1775,7 @@ function ensureToolGroup(trace, turnId = "") {
   group = element("details", "tool-group");
   group.dataset.turnId = turnId;
   const summary = element("summary", "tool-group-summary");
-  summary.append(element("span", "tool-group-total"), element("span", "tool-group-counts"), element("span", "tool-group-latest"));
+  summary.append(element("span", "tool-group-total"), element("span", "tool-group-latest"), element("span", "tool-group-counts"));
   group.append(summary, element("div", "tool-group-items"));
   trace.append(group);
   return group;
@@ -1992,7 +2005,7 @@ function appendTraceText(key, kind, title, delta, status = "运行中") {
   const effectiveTitle = existing?.dataset.traceTitle || title;
   const card = existing ?? upsertTrace(key, kind, effectiveTitle, undefined, status, { autoScroll: false, turnId: agent.turnId });
   const body = card.querySelector(".trace-body");
-  queueTraceStreamRender(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind, true);
+  queueTraceStreamRender(card, `${body._miraSource ?? body.textContent ?? ""}${delta}`, kind, true, delta);
 }
 
 function reconcilePendingUserTrace(key, body) {
@@ -2169,12 +2182,13 @@ function renderTranscript(fallbackThread, options = {}) {
     return;
   }
   const last = trace.lastElementChild;
-  const scrollTop = trace.scrollTop;
+  const scroll = traceScroller();
+  const scrollTop = scroll.scrollTop;
   requestAnimationFrame(() => {
-    if (trace.lastElementChild !== last || trace.scrollTop !== scrollTop) return;
+    if (trace.lastElementChild !== last || scroll.scrollTop !== scrollTop) return;
     if (options.preserveViewport) {
-      trace.scrollTop = options.preserveViewport.mode === "prepend"
-        ? options.preserveViewport.top + trace.scrollHeight - options.preserveViewport.height
+      scroll.scrollTop = options.preserveViewport.mode === "prepend"
+        ? options.preserveViewport.top + scroll.scrollHeight - options.preserveViewport.height
         : options.preserveViewport.top;
     } else if (options.anchorBottom !== false) {
       scrollTraceToBottom(trace);
@@ -2198,10 +2212,11 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const sameThread = agent.transcriptThreadId === threadId &&
     agent.transcriptGeneration === transcript.generation;
   const trace = $("#conversationTrace");
+  const scroll = traceScroller();
   const preserveViewport = options.prepend
-    ? { mode: "prepend", top: trace.scrollTop, height: trace.scrollHeight }
+    ? { mode: "prepend", top: scroll.scrollTop, height: scroll.scrollHeight }
     : options.preserveLoaded && options.anchorBottom === false
-      ? { mode: "stable", top: trace.scrollTop, height: trace.scrollHeight }
+      ? { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight }
       : null;
   if (options.prepend && sameThread) {
     agent.transcriptItems = mergeTranscriptItems(incoming, agent.transcriptItems);

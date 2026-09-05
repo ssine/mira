@@ -116,6 +116,7 @@
               <div class="conversation-actions"><button id="agentThemeToggle" class="chat-icon-button" type="button" aria-label="切换外观" title="切换外观">◐</button><button id="agentInterrupt" class="danger hidden" type="button">中断</button></div>
             </header>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
+            <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             <form id="conversationForm" class="conversation-composer">
               <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span><button id="conversationUploadCancel" class="composer-cancel hidden" type="button" aria-label="取消上传" title="取消上传">×</button></div>
@@ -131,6 +132,7 @@
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
               <span id="conversationHint" class="visually-hidden" role="status" aria-live="polite">可粘贴或拖入图片与文件，上传支持取消</span>
             </form>
+            </div>
           </section>
         </div>
       </section>

@@ -1,7 +1,7 @@
-From 59d43f3a0b5020c7b7861147f59e74b80b785668 Mon Sep 17 00:00:00 2001
+From a84054bd7b870505731b7eaedfa7117164e896a5 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
-Date: Sat, 5 Sep 2026 14:02:49 +0800
-Subject: [PATCH] feat(thread-store): add reliable remote PostgreSQL adapter
+Date: Sat, 5 Sep 2026 14:20:34 +0800
+Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
 
 ---
  codex-rs/Cargo.lock                           | 299 +++----
@@ -22,11 +22,11 @@ Subject: [PATCH] feat(thread-store): add reliable remote PostgreSQL adapter
  codex-rs/thread-store/Cargo.toml              |   1 +
  codex-rs/thread-store/src/in_memory.rs        |  86 +-
  codex-rs/thread-store/src/lib.rs              |   2 +
- codex-rs/thread-store/src/remote_http.rs      | 776 ++++++++++++++++++
+ codex-rs/thread-store/src/remote_http.rs      | 789 ++++++++++++++++++
  .../thread-store/src/remote_http/retry.rs     |  84 ++
- .../src/remote_http/retry_tests.rs            | 226 +++++
+ .../src/remote_http/retry_tests.rs            | 265 ++++++
  .../thread-store/src/remote_http/writer.rs    | 148 ++++
- 22 files changed, 1708 insertions(+), 181 deletions(-)
+ 22 files changed, 1760 insertions(+), 181 deletions(-)
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/retry.rs
@@ -2046,16 +2046,18 @@ index a8b6a36..3fbd587 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..22f0ecd
+index 0000000..b56b215
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,776 @@
+@@ -0,0 +1,789 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
 +use std::time::Duration;
 +
 +use codex_protocol::ThreadId;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_rollout::is_persisted_rollout_item;
 +use serde::Deserialize;
 +use serde::Serialize;
 +
@@ -2567,6 +2569,17 @@ index 0000000..22f0ecd
 +    }
 +
 +    fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
++        // Streaming deltas are transient in both history modes. Filtering only
++        // inside InMemoryThreadStore is too late: mutate has already downloaded
++        // the head/history and cloned snapshots, once for every displayed token.
++        // Check both modes without reading metadata; any potentially durable
++        // item still follows the ordered, acknowledged writer unchanged.
++        if params.items.iter().all(|item| {
++            !is_persisted_rollout_item(item, ThreadHistoryMode::Legacy)
++                && !is_persisted_rollout_item(item, ThreadHistoryMode::Paginated)
++        }) {
++            return Box::pin(async move { self.check_write_error() });
++        }
 +        let thread_id = params.thread_id;
 +        Box::pin(self.mutate(vec![thread_id], move |store| {
 +            ThreadStore::append_items(store, params)
@@ -2918,10 +2931,10 @@ index 0000000..8221135
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 0000000..34370aa
+index 0000000..945d2ff
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
-@@ -0,0 +1,226 @@
+@@ -0,0 +1,265 @@
 +use std::sync::Arc;
 +use std::time::Duration;
 +
@@ -2931,11 +2944,50 @@ index 0000000..34370aa
 +use tokio::io::AsyncWriteExt;
 +
 +use super::request_json;
++use crate::AppendThreadItemsParams;
 +use crate::CreateThreadParams;
 +use crate::RemoteHttpThreadStore;
 +use crate::ThreadStore;
 +use crate::ThreadStoreError;
 +use codex_protocol::ThreadId;
++use codex_protocol::protocol::AgentMessageContentDeltaEvent;
++use codex_protocol::protocol::EventMsg;
++use codex_rollout::RolloutItem;
++
++#[tokio::test]
++async fn streamed_text_bypasses_remote_reads_and_pending_storage() {
++    let (url, mut requests, handle) = server(vec![Some((403, String::new()))]).await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    let thread = ThreadId::new();
++    let append = || AppendThreadItemsParams {
++        thread_id: thread,
++        items: vec![RolloutItem::EventMsg(EventMsg::AgentMessageContentDelta(
++            AgentMessageContentDeltaEvent {
++                thread_id: thread.to_string(),
++                turn_id: "stream-turn".to_string(),
++                item_id: "stream-item".to_string(),
++                delta: "字".to_string(),
++            },
++        ))],
++    };
++    let permit = store.operation_gate.acquire().await.unwrap();
++    tokio::time::timeout(Duration::from_secs(1), async {
++        for _ in 0..2_000 {
++            store.append_items(append()).await.unwrap();
++        }
++    })
++    .await
++    .expect("transient output must not wait for the storage gate or HTTP");
++    assert!(requests.try_recv().is_err());
++    drop(permit);
++    // Durable work still reaches the server, and its failure also stops the
++    // transient fast path instead of falsely reporting a healthy runtime.
++    assert!(store.create_thread(create(thread, None)).await.is_err());
++    assert!(store.append_items(append()).await.is_err());
++    handle.await.unwrap();
++    assert!(requests.recv().await.unwrap().starts_with("GET "));
++    assert!(requests.recv().await.is_none());
++}
 +
 +// None means the server accepted a complete request but lost its response.
 +async fn server(
@@ -3304,3 +3356,4 @@ index 0000000..d4657a3
 +}
 -- 
 2.51.2
+
