@@ -1,4 +1,4 @@
-From 5f8b36268f983c19013e62bcc4fffb201be4de16 Mon Sep 17 00:00:00 2001
+From 502ee904c7ca942c96bda687b8d4cdacbefe0c56 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 5 Sep 2026 14:20:34 +0800
 Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
@@ -22,11 +22,11 @@ Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
  codex-rs/thread-store/Cargo.toml              |   1 +
  codex-rs/thread-store/src/in_memory.rs        |  86 +-
  codex-rs/thread-store/src/lib.rs              |   2 +
- codex-rs/thread-store/src/remote_http.rs      | 907 ++++++++++++++++++
- .../thread-store/src/remote_http/retry.rs     |  84 ++
- .../src/remote_http/retry_tests.rs            | 362 +++++++
- .../thread-store/src/remote_http/writer.rs    | 302 ++++++
- 22 files changed, 2129 insertions(+), 181 deletions(-)
+ codex-rs/thread-store/src/remote_http.rs      | 921 ++++++++++++++++++
+ .../thread-store/src/remote_http/retry.rs     |  89 ++
+ .../src/remote_http/retry_tests.rs            | 428 ++++++++
+ .../thread-store/src/remote_http/writer.rs    | 309 ++++++
+ 22 files changed, 2221 insertions(+), 181 deletions(-)
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/retry.rs
@@ -2046,10 +2046,10 @@ index a8b6a36..3fbd587 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..2101f7f
+index 0000000..52925d4
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,907 @@
+@@ -0,0 +1,921 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
@@ -2647,10 +2647,24 @@ index 0000000..2101f7f
 +        }))
 +    }
 +
-+    fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
++    fn resume_thread(&self, mut params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
 +        let thread_id = params.thread_id;
-+        Box::pin(self.mutate(vec![thread_id], move |store| {
-+            ThreadStore::resume_thread(store, params)
++        // Reopening persistence only prepares future appends. A replay copy is
++        // never authority to replace or recreate a concurrently deleted thread.
++        params.history = None;
++        Box::pin(self.mutate_metadata(thread_id, move |store| {
++            Box::pin(async move {
++                ThreadStore::read_thread(
++                    store,
++                    ReadThreadParams {
++                        thread_id,
++                        include_archived: params.include_archived,
++                        include_history: false,
++                    },
++                )
++                .await?;
++                ThreadStore::resume_thread(store, params).await
++            })
 +        }))
 +    }
 +
@@ -2959,10 +2973,10 @@ index 0000000..2101f7f
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/retry.rs b/codex-rs/thread-store/src/remote_http/retry.rs
 new file mode 100644
-index 0000000..8221135
+index 0000000..0054010
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry.rs
-@@ -0,0 +1,84 @@
+@@ -0,0 +1,89 @@
 +use std::time::Duration;
 +
 +use reqwest::RequestBuilder;
@@ -3019,6 +3033,11 @@ index 0000000..8221135
 +                    let message = format!("remote thread-store returned HTTP {status}");
 +                    return Err(if status == StatusCode::CONFLICT {
 +                        ThreadStoreError::Conflict { message }
++                    } else if matches!(
++                        status,
++                        StatusCode::PAYLOAD_TOO_LARGE | StatusCode::NOT_FOUND | StatusCode::GONE
++                    ) {
++                        ThreadStoreError::InvalidRequest { message }
 +                    } else {
 +                        ThreadStoreError::Internal { message }
 +                    });
@@ -3049,10 +3068,10 @@ index 0000000..8221135
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 0000000..2b4de1f
+index 0000000..57b2eca
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
-@@ -0,0 +1,362 @@
+@@ -0,0 +1,428 @@
 +use std::sync::Arc;
 +use std::time::Duration;
 +
@@ -3320,55 +3339,57 @@ index 0000000..2b4de1f
 +}
 +
 +#[tokio::test]
-+async fn conflict_stops_only_affected_thread_and_keeps_canonical_reads_available() {
-+    let head = Some((
-+        200,
-+        json!({"version": 0, "state": {}, "historyManifest": {}}).to_string(),
-+    ));
-+    let (url, mut requests, handle) = server(vec![
-+        head.clone(),
-+        Some((409, String::new())),
-+        head.clone(),
-+        head,
-+        Some((
++async fn rejected_write_stops_only_affected_thread_and_keeps_canonical_reads_available() {
++    for status in [404, 409, 410, 413] {
++        let head = Some((
 +            200,
-+            json!({"version": 1, "historyManifest": {}}).to_string(),
-+        )),
-+    ])
-+    .await;
-+    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
-+    let parent = ThreadId::new();
-+    let child = ThreadId::new();
-+    assert!(store.create_thread(create(parent, None)).await.is_err());
-+    assert!(
++            json!({"version": 0, "state": {}, "historyManifest": {}}).to_string(),
++        ));
++        let (url, mut requests, handle) = server(vec![
++            head.clone(),
++            Some((status, String::new())),
++            head.clone(),
++            head,
++            Some((
++                200,
++                json!({"version": 1, "historyManifest": {}}).to_string(),
++            )),
++        ])
++        .await;
++        let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++        let parent = ThreadId::new();
++        let child = ThreadId::new();
++        assert!(store.create_thread(create(parent, None)).await.is_err());
++        assert!(
++            store
++                .flush_thread(parent)
++                .await
++                .unwrap_err()
++                .to_string()
++                .contains("paused")
++        );
++        assert!(store.create_thread(create(parent, None)).await.is_err());
++        // Even the failed thread's canonical state can be inspected without clearing its write fence.
 +        store
-+            .flush_thread(parent)
++            .read(vec![parent], |_| Box::pin(async { Ok(()) }))
 +            .await
-+            .unwrap_err()
-+            .to_string()
-+            .contains("conflict")
-+    );
-+    assert!(store.create_thread(create(parent, None)).await.is_err());
-+    // Even the failed thread's canonical state can be inspected without clearing its write fence.
-+    store
-+        .read(vec![parent], |_| Box::pin(async { Ok(()) }))
-+        .await
-+        .unwrap();
-+    store
-+        .create_thread(create(child, Some(parent)))
-+        .await
-+        .unwrap();
-+    store.flush_thread(child).await.unwrap();
-+    assert!(store.flush_thread(parent).await.is_err());
-+    handle.await.unwrap();
-+    let mut count = 0;
-+    while requests.recv().await.is_some() {
-+        count += 1;
++            .unwrap();
++        store
++            .create_thread(create(child, Some(parent)))
++            .await
++            .unwrap();
++        store.flush_thread(child).await.unwrap();
++        assert!(store.flush_thread(parent).await.is_err());
++        handle.await.unwrap();
++        let mut count = 0;
++        while requests.recv().await.is_some() {
++            count += 1;
++        }
++        assert_eq!(
++            count, 5,
++            "rejected writes must never be retried or replay the failed operation"
++        );
 +    }
-+    assert_eq!(
-+        count, 5,
-+        "conflicts must never be retried or replay the failed operation"
-+    );
 +}
 +
 +#[tokio::test]
@@ -3415,22 +3436,89 @@ index 0000000..2b4de1f
 +    assert!(!append.contains("preserved on server"));
 +    assert!(requests.recv().await.is_none());
 +}
++
++#[tokio::test]
++async fn resume_reopens_existing_history_without_republishing_replay_context() {
++    let thread = ThreadId::new();
++    let created = create(thread, None);
++    let head = json!({"version": 400, "state": {"created_threads": {
++        thread.to_string(): created
++    }}, "historyManifest": {thread.to_string(): {"generation": 3, "itemCount": 10000}}});
++    let (url, mut requests, handle) = server(vec![Some((200, head.to_string()))]).await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    store
++        .resume_thread(crate::ResumeThreadParams {
++            thread_id: thread,
++            rollout_path: None,
++            history: Some(Arc::new(Vec::new())),
++            include_archived: true,
++            metadata: created.metadata,
++        })
++        .await
++        .unwrap();
++    store.flush_thread(thread).await.unwrap();
++    handle.await.unwrap();
++    for _ in 0..1 {
++        assert!(
++            requests
++                .recv()
++                .await
++                .unwrap()
++                .starts_with(&format!("GET /v2/stores/test?threadId={thread} "))
++        );
++    }
++    assert!(requests.recv().await.is_none());
++}
++
++#[tokio::test]
++async fn resume_cannot_recreate_a_thread_deleted_after_history_was_read() {
++    let thread = ThreadId::new();
++    let head = json!({"version": 401, "state": {}, "historyManifest": {}});
++    let (url, mut requests, handle) = server(vec![
++        Some((200, head.to_string())),
++        Some((200, head.to_string())),
++    ])
++    .await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    let error = store
++        .resume_thread(crate::ResumeThreadParams {
++            thread_id: thread,
++            rollout_path: None,
++            history: Some(Arc::new(Vec::new())),
++            include_archived: true,
++            metadata: create(thread, None).metadata,
++        })
++        .await
++        .unwrap_err();
++    assert!(matches!(error, ThreadStoreError::ThreadNotFound { thread_id } if thread_id == thread));
++    store
++        .read(Vec::new(), |_| Box::pin(async { Ok(()) }))
++        .await
++        .unwrap();
++    handle.await.unwrap();
++    assert!(requests.recv().await.unwrap().starts_with("GET "));
++    assert!(requests.recv().await.unwrap().starts_with("GET "));
++    assert!(requests.recv().await.is_none());
++}
 diff --git a/codex-rs/thread-store/src/remote_http/writer.rs b/codex-rs/thread-store/src/remote_http/writer.rs
 new file mode 100644
-index 0000000..f70d767
+index 0000000..bfd08b7
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/writer.rs
-@@ -0,0 +1,302 @@
+@@ -0,0 +1,309 @@
 +use std::collections::HashSet;
 +use std::panic::AssertUnwindSafe;
 +
 +use codex_protocol::ThreadId;
 +use futures::FutureExt;
 +
++use super::CommitRequest;
++use super::CommitResponse;
++use super::HistoryChange;
 +use super::RemoteHttpThreadStore;
 +use super::cache_missing;
 +use super::operation_gate_closed;
-+use super::{CommitRequest, CommitResponse, HistoryChange, request_json};
++use super::request_json;
 +use crate::AppendThreadItemsParams;
 +use crate::InMemoryThreadStore;
 +use crate::ThreadStoreError;
@@ -3597,7 +3685,11 @@ index 0000000..f70d767
 +    }
 +
 +    fn record_write_error(&self, error: &ThreadStoreError, thread_ids: &[ThreadId]) {
-+        if matches!(error, ThreadStoreError::Conflict { .. }) && !thread_ids.is_empty() {
++        if matches!(
++            error,
++            ThreadStoreError::Conflict { .. } | ThreadStoreError::InvalidRequest { .. }
++        ) && !thread_ids.is_empty()
++        {
 +            let mut failures = self
 +                .thread_write_errors
 +                .lock()
@@ -3647,7 +3739,7 @@ index 0000000..f70d767
 +            if let Some(message) = failures.get(thread_id) {
 +                return Err(ThreadStoreError::Conflict {
 +                    message: format!(
-+                        "conversation {thread_id} storage conflict; this conversation is paused to avoid overwriting history; resolve the conflict and restart the runtime: {message}"
++                        "conversation {thread_id} storage write failed; this conversation is paused to protect history; resolve the error and restart the runtime: {message}"
 +                    ),
 +                });
 +            }

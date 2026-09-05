@@ -11,6 +11,7 @@ import pg from "../server/node_modules/pg/lib/index.js";
 import { initializeDatabase } from "../server/db.mjs";
 import { commitDelta, getStoreHead, getThreadHistory, getSnapshot, putSnapshot } from "../server/thread-store.mjs";
 import { closeRuntimeFixtureDatabase } from "./runtime_fixture_cleanup.mjs";
+import { manageThread } from "../server/thread-management.mjs";
 
 const binary = process.env.CODEX_TEST_BINARY;
 assert(binary && path.isAbsolute(binary), "CODEX_TEST_BINARY must name the candidate Codex binary");
@@ -93,7 +94,7 @@ const fixture = http.createServer(async (req, res) => {
       res.writeHead(200, { "content-type": "text/event-stream" });
       return res.end(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
     }
-    current.storeRequests.push({ at: performance.now(), method: req.method, path: url.pathname });
+    current.storeRequests.push({ at: performance.now(), method: req.method, path: url.pathname, bytes: Buffer.byteLength(encoded) });
     if (current.mode === "stream") await delay(30);
     const parts = url.pathname.split("/").filter(Boolean);
     assert.equal(parts[1], "stores");
@@ -101,11 +102,17 @@ const fixture = http.createServer(async (req, res) => {
     if (req.method === "GET") {
       if (parts[3] === "threads") {
         const result = await getThreadHistory(pool, store, parts[4], Number(url.searchParams.get("generation")) || null, Number(url.searchParams.get("throughVersion")) || null);
+        if (current.mode==='resume-delete-race' && !current.deletedDuringResume && result.status===200) {
+          current.deletedDuringResume=true;
+          const deleted=await manageThread(pool,store,parts[4],'delete',{generation:result.body.generation,itemCount:result.body.itemCount,operationId:crypto.randomUUID()});
+          assert.equal(deleted.status,200);
+        }
         return sendJSON(res, result.status, result.body);
       }
       return sendJSON(res, 200, await getStoreHead(pool, store, url.searchParams.has('threadId') ? [url.searchParams.get('threadId')] : null));
     }
     const body = JSON.parse(encoded);
+    current.historyWrites.push(...body.historyChanges.map(change=>({ threadId: change.threadId, mode: change.mode, count: change.items?.length ?? 0 })));
     if (current.conflictNext) {
       current.conflictNext = false;
       current.conflicts = (current.conflicts ?? 0) + 1;
@@ -127,12 +134,12 @@ const fixture = http.createServer(async (req, res) => {
     sendJSON(res, result.status, result.body);
   } catch (error) {
     current.fixtureError = error;
-    sendJSON(res, 500, { error: "fixture failure" });
+    sendJSON(res, error.statusCode ?? 500, { error: "fixture failure" });
   }
 });
 
 async function client(mode, inMemory = false, store = `retry-${mode}`) {
-  current = { mode, store, modelRequests: 0, attempts: [], toolCalls: 0, events: [], storeRequests: [], deltas: [] };
+  current = { mode, store, modelRequests: 0, attempts: [], toolCalls: 0, events: [], storeRequests: [], historyWrites: [], deltas: [] };
   const context = current;
   const home = path.join(directory, mode);
   await fs.mkdir(home);
@@ -210,6 +217,24 @@ try {
   pool = new pg.Pool({ connectionString: connection.toString() });
   await initializeDatabase(pool);
   await new Promise((resolve) => fixture.listen(0, "127.0.0.1", resolve));
+  // Optional private reproduction fixture; never commit real conversation data.
+  if (process.env.MIRA_RESUME_REPRO_SNAPSHOT) {
+    const snapshot = JSON.parse(await fs.readFile(process.env.MIRA_RESUME_REPRO_SNAPSHOT, 'utf8'));
+    const threadId = Object.keys(snapshot.histories)[0], store = 'retry-long-resume';
+    const prefixCount = snapshot.histories[threadId].length;
+    assert.equal((await putSnapshot(pool, store, { expectedVersion: 0, snapshot }, {})).status, 200);
+    const digest = async () => (await pool.query(`SELECT md5(string_agg(payload_sha256,'' ORDER BY item_seq)) AS digest
+      FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2 AND generation=1 AND item_seq<=$3`, [store,threadId,prefixCount])).rows[0].digest;
+    const before = await digest();
+    const app = await client('long-resume', false, store);
+    await app.call('thread/resume', {threadId,cwd:directory,excludeTurns:true});
+    assert(app.context.historyWrites.every(write=>write.mode==='append'), 'long resume must not replace historical records');
+    assert(app.context.storeRequests.filter(request=>request.method==='POST').every(request=>request.bytes<256*1024), 'reopening a long conversation must only submit small metadata/appends');
+    assert.equal((await getStoreHead(pool,store)).historyManifest[threadId].generation,1);
+    assert.equal(await digest(),before,'long resume preserves the canonical prefix');
+    await app.close();
+    console.log(`PASS long resume: ${prefixCount} records, small requests, unchanged generation and canonical prefix digest`);
+  }
   const streaming = await client("stream");
   const streamThread = await streaming.call("thread/start", { cwd: directory, approvalPolicy: "never", sandbox: "read-only" });
   const streamTurn = await streaming.call("turn/start", { threadId: streamThread.thread.id, input: [{ type: "text", text: "Stream the fixture text." }] });
@@ -237,10 +262,22 @@ try {
   metadata.future_fixture_field = { keep: ["opaque", 7] };
   if (typeof metadata.updated_at === "string") metadata.updated_at = metadata.updated_at.replace(/Z$/, "+00:00");
   importedSnapshot.future_fixture_root = { keep: true };
+  assert.equal((await putSnapshot(pool,'retry-resume-delete-race',{expectedVersion:0,snapshot:importedSnapshot},{})).status,200);
+  const deletedResume=await client('resume-delete-race');
+  await assert.rejects(deletedResume.call('thread/resume',{threadId:importedId,cwd:directory}));
+  assert.equal(deletedResume.context.deletedDuringResume,true);
+  assert.equal(deletedResume.context.historyWrites.some(write=>write.threadId===importedId),false,'an in-flight resume cannot republish the deleted history');
+  await deletedResume.call('thread/list',{limit:10});
+  await deletedResume.call('thread/start',{cwd:directory,approvalPolicy:'never',sandbox:'read-only'});
+  await deletedResume.close();
+  console.log('PASS deletion race: stale resume is rejected without republishing history or blocking other conversations');
   for (const mode of ["imported", "conflict"]) {
     assert.equal((await putSnapshot(pool, `retry-${mode}`, { expectedVersion: 0, snapshot: importedSnapshot }, {})).status, 200);
     const app = await client(mode);
     await app.call("thread/resume", { threadId: importedId, cwd: directory, model: "gpt-5.4" });
+    assert(app.context.historyWrites.every(write=>write.mode==='append'), "resuming an existing conversation cannot replace canonical history");
+    const resumedHistory = await getThreadHistory(pool, app.context.store, importedId, null, null);
+    assert.deepEqual(resumedHistory.body.items.slice(0, importedSnapshot.histories[importedId].length), importedSnapshot.histories[importedId], "resume preserves every canonical prefix record");
     if (mode === "conflict") app.context.conflictNext = true;
     const started = await app.call("turn/start", { threadId: importedId, input: [{ type: "text", text: "Only reply IMPORT_OK; no tools." }] });
     assert.equal((await app.wait(started.turn.id)).status, mode === "conflict" ? "failed" : "completed");

@@ -20,11 +20,16 @@ local JSONL mirror, disk outbox, or alternate source of truth.
   succeeds after acknowledgement. It does not download the whole store again.
 - Authorization/validation failures, incompatible responses and actual optimistic
   conflicts are not blindly retried. Authorization/protocol failures latch a
-  runtime storage error; an optimistic conflict fences writes and durability
-  barriers for the affected thread only. Unrelated threads (including subagents)
-  can continue, and canonical history remains readable after a thread conflict.
+  runtime storage error; optimistic conflicts and thread request rejections
+  (HTTP 404/410/413) fence writes and durability barriers for the affected thread
+  only. Unrelated threads (including subagents) can continue, and canonical history
+  remains readable after a thread conflict.
   Resolve the conflict, then restart the affected runtime; unknown-outcome commits
   must be inspected before resubmitting work. There is no automatic tool replay.
+- Resuming an existing thread only reopens persistence for future appends. The
+  caller's replay history cannot replace canonical records or recreate a thread
+  deleted while the history request was in flight. Check existence against the
+  current scoped metadata before applying resume metadata.
 - Keep the raw canonical state alongside the typed in-memory projection. Determine
   intended leaf changes from the typed before/after snapshots, but build CAS
   expectations from the original raw JSON. Missing optional fields are different
@@ -147,7 +152,8 @@ CODEX_TEST_BINARY=/absolute/canonical-package/bin/codex \
 This creates and removes its own database on local PostgreSQL (default port
 55432; override `MIRA_TEST_DATABASE_URL`). It uses loopback-only model/store
 fixtures, checks exactly-once tool output after a 502 and lost acknowledgement,
-V1/V2 history consistency, fresh-process resume, permanent-error termination, and
+V1/V2 history consistency, fresh-process resume, deletion during resume without
+history republication or failure of other threads, permanent-error termination, and
 malformed-history termination in both debug and release builds. It never uses a
 production identity or runs the historic failing command.
 
