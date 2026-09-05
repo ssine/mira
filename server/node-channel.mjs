@@ -485,6 +485,8 @@ export class NodeChannel {
       return;
     }
     await this.finishThreadStart(proxy, message);
+    const reportedThread = message.params?.thread ?? message.result?.thread;
+    if (reportedThread?.ephemeral === true && typeof reportedThread.id === "string") proxy.ephemeralThreadIds.add(reportedThread.id);
     const observedThreadId = message.params?.threadId ?? message.params?.thread?.id ?? null;
     if (typeof message.method === "string" && /^(?:thread|turn|item)\//.test(message.method) &&
         typeof observedThreadId === "string") {
@@ -494,9 +496,16 @@ export class NodeChannel {
       const requestedThreadId = proxy.threadRequestBindings.get(String(message.id));
       proxy.threadRequestBindings.delete(String(message.id));
       const threadId = message.error ? null : message.result?.thread?.id ?? requestedThreadId;
+      if (proxy.ephemeralStartRequests.delete(String(message.id)) && typeof threadId === "string") proxy.ephemeralThreadIds.add(threadId);
+      if (proxy.toolFreeStartRequests.delete(String(message.id)) && typeof threadId === "string") proxy.toolFreeThreadIds.add(threadId);
       if (typeof threadId === "string") this.bindProxyThread(proxy, threadId);
     }
     if (message.method === "item/tool/call" && message.params?.namespace === dynamicToolNamespace && message.id !== undefined) {
+      if (proxy.toolFreeThreadIds?.has(message.params?.threadId)) {
+        this.trySendToNode(proxy.targetNodeId, { type: "appserver.message", sessionId: proxy.sessionId,
+          payload: JSON.stringify({ id: message.id, error: { code: -32601, message: "Tools are disabled for this temporary thread" } }) });
+        return;
+      }
       const executionActor = {
         kind: "node", nodeId: proxy.targetNodeId, subjectId: null,
         clientType: "app-server", transport: "internal", revoked: false,
@@ -534,6 +543,7 @@ export class NodeChannel {
   }
 
   bindProxyThread(proxy, threadId, primary = true) {
+    if (proxy.ephemeralThreadIds?.has(threadId)) return;
     if (primary || !proxy.threadId) proxy.threadId = threadId;
     proxy.boundThreadIds ??= new Set();
     if (proxy.boundThreadIds.has(threadId)) return;
@@ -579,13 +589,17 @@ export class NodeChannel {
       }
       message.params.approvalPolicy ??= "never";
       message.params.sandbox ??= "danger-full-access";
+      const toolFree = message.method === "thread/start" && message.params.ephemeral === true &&
+        Array.isArray(message.params.dynamicTools) && message.params.dynamicTools.length === 0;
+      if (message.params.ephemeral === true && message.id !== undefined) proxy.ephemeralStartRequests.add(String(message.id));
+      if (toolFree && message.id !== undefined) proxy.toolFreeStartRequests.add(String(message.id));
       // Fork inherits the source tools; ThreadForkParams has no dynamicTools field.
-      if (message.method !== "thread/fork") message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
+      if (message.method !== "thread/fork" && !toolFree) message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
       if (message.method === "thread/start" &&
           (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {
         message.params.cwd = targetDefaultCwd(proxy.target) ?? message.params.cwd;
       }
-      message.params.developerInstructions = mergeDeveloperInstructions(
+      if (!toolFree) message.params.developerInstructions = mergeDeveloperInstructions(
         message.params.developerInstructions,
         miraCLIInstructions(proxy.target),
       );
@@ -610,6 +624,7 @@ export class NodeChannel {
       targetNodeId, callerNodeId: caller.kind === "node" ? caller.nodeId : null,
       actorKey: proxyActorKey(caller), sessionId, ws, storeId, target, threadId: null,
       threadRequestBindings: new Map(), idempotentThreadStarts: new Map(), boundThreadIds: new Set(),
+      ephemeralStartRequests: new Set(), ephemeralThreadIds: new Set(), toolFreeStartRequests: new Set(), toolFreeThreadIds: new Set(),
       clientClosed: false, detachTimer: null,
     };
     this.proxies.set(sessionId, proxy);

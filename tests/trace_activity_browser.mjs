@@ -11,6 +11,7 @@ const root = new URL("../server/", import.meta.url);
 const assets = new Map([
   ["/", ["public/index.html", "text/html"]],
   ["/app.js", ["public/app.js", "text/javascript"]],
+  ["/thread-title.js", ["public/thread-title.js", "text/javascript"]],
   ["/trace-activity.js", ["public/trace-activity.js", "text/javascript"]],
   ["/conversation-progress.js", ["public/conversation-progress.js", "text/javascript"]],
   ["/theme.js", ["public/theme.js", "text/javascript"]],

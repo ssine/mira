@@ -319,3 +319,34 @@ test("App Server proxy emits native Windows CLI and cwd syntax", () => {
     /& 'C:\\Program Files\\Mira\\mira\.exe' nodes list --json/);
   channel.close();
 });
+
+test('tool-free ephemeral threads retain isolation and never acquire durable runtime bindings', async () => {
+  const pool = new ThreadStartPool();
+  const channel = new NodeChannel({ server: new EventEmitter(), authService: {}, pool });
+  const node = new Socket(), client = new Socket();
+  channel.attachNode('node-1', node);
+  channel.attachProxy('node-1', client, { kind: 'admin' }, 'personal', { platform: 'linux' });
+  const proxy = [...channel.proxies.values()][0];
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({ id: 1, method: 'thread/start', params: {
+    ephemeral: true, dynamicTools: [], sandbox: 'read-only', developerInstructions: 'Title only',
+  } }));
+  const request = JSON.parse(node.sent.at(-1).payload);
+  assert.deepEqual(request.params.dynamicTools, []);
+  assert.equal(request.params.developerInstructions, 'Title only');
+  assert.equal(request.params.sandbox, 'read-only');
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({ method: 'thread/started', params: { thread: { id: 'temporary', ephemeral: true } } }));
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({ id: 1, result: { thread: { id: 'temporary', ephemeral: true } } }));
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({ id: 2, method: 'turn/start', params: { threadId: 'temporary' } }));
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({ id: 2, result: { turn: { id: 'title-turn' } } }));
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({ method: 'turn/started', params: { threadId: 'temporary' } }));
+  assert.equal(pool.runtimeWrites.length, 0);
+  assert.equal(proxy.threadId, null);
+  let dispatched = false;
+  channel.capabilityService = { invoke: () => { dispatched = true; } };
+  await channel.forwardAppServerMessage(proxy, JSON.stringify({ id: 3, method: 'item/tool/call', params: {
+    threadId: 'temporary', namespace: 'home_nodes', tool: 'process', arguments: {},
+  } }));
+  assert.equal(dispatched, false);
+  assert.equal(JSON.parse(node.sent.at(-1).payload).error.code, -32601);
+  channel.close();
+});

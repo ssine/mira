@@ -5,6 +5,7 @@ import { marked } from "/vendor/marked.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
+import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -168,6 +169,8 @@ const agent = {
   // Acknowledged creations remain visible while the PostgreSQL list catches up.
   // These in-memory previews are replaced by canonical summaries on the next read.
   pendingThreadSummaries: new Map(),
+  titleJobs: new Map(),
+  untitledNewThreadIds: new Set(),
   transcriptThreadId: null,
   transcriptGeneration: null,
   transcriptItems: [],
@@ -1566,6 +1569,7 @@ function syncConversationSendUi() {
   $("#threadFork").disabled = busy;
   $("#threadArchive").disabled = busy;
   $("#threadDelete").disabled = busy;
+  syncTitleMenu();
   const running = agent.activeTurns.has(agent.threadId);
   const stopping = agent.interruptRequests.has(JSON.stringify([agent.threadId, agent.turnId]));
   $("#conversationSend").classList.toggle("hidden", running);
@@ -2883,7 +2887,8 @@ function renderAgentThreads() {
       button.dataset.threadId = thread.threadId;
       if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
       button.title = thread.title || "未命名会话";
-      button.append(element("strong", "", button.title), element("span", "", `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
+      button.append(element("strong", "", button.title), element("span", "", agent.titleJobs.has(thread.threadId)
+        ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`));
       const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
       menu.type = "button";
       menu.dataset.threadMenu = thread.threadId;
@@ -2907,6 +2912,7 @@ function openThreadWindow(event, link) {
 function openThreadMenu(threadId, anchor, point = null) {
   if (!threadId) return;
   agent.menuThreadId = threadId;
+  syncTitleMenu();
   const menu = $("#threadOptionsMenu");
   $("#threadOpenWindow").href = `/?thread=${encodeURIComponent(threadId)}`;
   $("#threadArchive").textContent = agent.threads.find(thread => thread.threadId === threadId)?.archived ? "恢复对话" : "归档对话";
@@ -2919,6 +2925,7 @@ function openThreadMenu(threadId, anchor, point = null) {
 
 async function editThreadTitle() {
   const threadId = agent.menuThreadId;
+  if (!agent.titleJobs.get(threadId)?.saving) agent.titleJobs.get(threadId)?.controller.abort();
   $("#threadOptionsMenu").hidePopover();
   // Fetch the latest name for compare-and-swap, including edits from another window.
   const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
@@ -2927,6 +2934,73 @@ async function editThreadTitle() {
   $("#threadRenameError").textContent = "";
   $("#threadRenameDialog").showModal();
   $("#threadRenameInput").select();
+}
+
+function syncTitleMenu() {
+  const job = agent.titleJobs.get(agent.menuThreadId);
+  $("#threadRegenerateTitle").disabled = Boolean(job || agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
+  $("#threadRegenerateTitle").textContent = job ? (job.saving ? "正在保存标题…" : "正在生成标题…") : "重新生成标题";
+  $("#threadCancelTitle").classList.toggle("hidden", !job || job.saving);
+}
+
+async function regenerateThreadTitle(threadId, { automatic = false, firstMessage = "" } = {}) {
+  if (!threadId || agent.titleJobs.has(threadId)) return;
+  const job = { controller: new AbortController(), saving: false };
+  const deadline = setTimeout(() => job.controller.abort(new Error("生成标题超时，原标题已保留，请重试。")), 90_000);
+  agent.titleJobs.set(threadId, job);
+  renderAgentThreads();
+  syncTitleMenu();
+  if (!automatic) toast("正在生成标题，可从对话菜单取消。");
+  try {
+    const signal = job.controller.signal;
+    let source;
+    // A new thread's canonical projection can arrive just after turn/start's acknowledgement.
+    for (let attempt = 0; ; attempt++) {
+      try { source = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal }); }
+      catch (error) { if (!automatic || error.status !== 404 || attempt >= 9) throw error; }
+      if (!automatic || attempt >= 9 || (Number.isSafeInteger(source?.generation) && (source.runtimeNodeId || source.sourceNodeId))) break;
+      await new Promise(resolve => setTimeout(resolve, 300));
+      signal.throwIfAborted();
+    }
+    if (automatic && source.name) return;
+    if (!Number.isSafeInteger(source.generation)) throw new Error("会话信息尚未就绪，请稍后重试。");
+    const nodeId = source.runtimeNodeId || source.sourceNodeId;
+    if (!nodeId) throw new Error("此对话未关联运行节点，请先选择节点继续对话后重试。");
+    const node = await api(`/v1/nodes/${nodeId}`, { signal });
+    let messages = automatic ? [{ kind: "user", body: firstMessage }] : [];
+    if (!automatic) {
+      let cursor;
+      do {
+        const query = new URLSearchParams({ storeId: "personal", tail: "1", limit: "60", ...(cursor ? { cursor } : {}) });
+        const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal });
+        if (transcript.generation !== source.generation) throw new Error("会话内容已变化，请重新生成标题。");
+        messages = [...titleMessages(transcript.trace ?? []), ...messages].slice(-8);
+        cursor = transcript.nextCursor;
+      } while (cursor && messages.length < 8);
+    }
+    const prompt = titlePrompt(messages);
+    const title = await generateThreadTitle({ node, cwd: source.cwd, prompt, signal });
+    signal.throwIfAborted();
+    job.saving = true;
+    syncTitleMenu();
+    // Saving is an independent acknowledged store write; cancellation cannot discard it.
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, {
+      method: "PATCH", body: JSON.stringify({ name: title, expectedName: source.name ?? null,
+        generation: source.generation, operationId: crypto.randomUUID() }),
+    });
+    agent.pendingThreadSummaries.delete(threadId);
+    agent.threads = agent.threads.map(value => value.threadId === threadId ? thread : value);
+    if (agent.threadId === threadId) setConversationTitle(thread.title);
+    threadMetadataChannel?.postMessage({ threadId });
+    if (!automatic) toast("标题已更新");
+  } catch (error) {
+    if (!automatic) toast(error.name === "AbortError" ? "已取消生成，原标题已保留。" : error.message);
+  } finally {
+    clearTimeout(deadline);
+    agent.titleJobs.delete(threadId);
+    renderAgentThreads();
+    syncTitleMenu();
+  }
 }
 
 async function forkWithNode(node, params) {
@@ -3035,6 +3109,7 @@ async function loadAgentThreads() {
 }
 
 function removeThreadFromWindow(threadId, deleted) {
+  if (!agent.titleJobs.get(threadId)?.saving) agent.titleJobs.get(threadId)?.controller.abort();
   const selected = agent.threadId === threadId;
   const project = selected ? projectForThread(currentAgentThread()) : null;
   agent.threads = agent.threads.filter(thread => thread.threadId !== threadId);
@@ -3601,6 +3676,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    agent.untitledNewThreadIds.add(agent.threadId);
     agent.resumeRequestedThreadId = agent.threadId;
     writeBrowserRoute("agent", agent.threadId, { replace: true });
     agent.loadedThreadIds.add(agent.threadId);
@@ -3670,6 +3746,9 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     agent.turnTimings.set(result.turn.id, timing);
   }
   syncActiveTurnUi();
+  if (text.trim() && agent.untitledNewThreadIds.delete(turnThreadId)) {
+    void regenerateThreadTitle(turnThreadId, { automatic: true, firstMessage: text });
+  }
 }
 
 async function openAgentConsole() {
@@ -4001,6 +4080,15 @@ $("#threadOptionsMenu").addEventListener("keydown", (event) => {
 });
 $("#threadFork").addEventListener("click", forkThreadFromMenu);
 $("#threadRename").addEventListener("click", () => editThreadTitle().catch((error) => toast(error.message)));
+$("#threadRegenerateTitle").addEventListener("click", () => {
+  const threadId = agent.menuThreadId;
+  $("#threadOptionsMenu").hidePopover();
+  void regenerateThreadTitle(threadId);
+});
+$("#threadCancelTitle").addEventListener("click", () => {
+  agent.titleJobs.get(agent.menuThreadId)?.controller.abort();
+  $("#threadOptionsMenu").hidePopover();
+});
 $("#threadCopyId").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText(agent.menuThreadId); $("#threadOptionsMenu").hidePopover(); toast("已复制对话 ID"); }
   catch { toast("复制失败，请允许剪贴板访问后重试。"); }
