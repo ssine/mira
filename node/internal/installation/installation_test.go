@@ -868,6 +868,93 @@ func TestRepairMigratesManagedSystemdTemplateAndRestartsService(t *testing.T) {
 	}
 }
 
+func TestRepairPersistsLinuxInstallStateBeforeSelfRestart(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux service repair uses Unix filesystem semantics")
+	}
+
+	for _, manager := range []ServiceManager{ServiceManagerSystemd, ServiceManagerProcd} {
+		t.Run(string(manager), func(t *testing.T) {
+			root := t.TempDir()
+			stateDir := filepath.Join(root, "state")
+			servicePath := filepath.Join(root, "service", "mira")
+			files := &testFileSystem{osRelease: []byte("ID=debian\n")}
+			options := PlanOptions{
+				StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+				Role: RoleNode, ServiceManager: manager, ServiceScope: ScopeSystem,
+			}
+			if manager == ServiceManagerSystemd {
+				servicePath += ".service"
+				options.SystemdUnitPath = servicePath
+			} else {
+				files.osRelease = []byte("ID=openwrt\n")
+				files.openWrtRelease = true
+				files.procdHost = true
+				options.ProcdInitPath = servicePath
+			}
+
+			plan, err := BuildPlan(options, files)
+			if err != nil {
+				t.Fatal(err)
+			}
+			versionDir := filepath.Join(stateDir, "versions", plan.State.Version)
+			if err := os.MkdirAll(versionDir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join("versions", plan.State.Version), filepath.Join(stateDir, "current")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Install(context.Background(), plan, Dependencies{Files: files, Runner: &testRunner{}}, ApplyOptions{}); err != nil {
+				t.Fatal(err)
+			}
+
+			migrated := plan
+			migratedDefinition := plan.State.ServiceDefinition + "# repaired template\n"
+			migrated.State.ServiceDefinition = migratedDefinition
+			digest := sha256.Sum256([]byte(migratedDefinition))
+			migrated.State.ServiceDefinitionSHA256 = hex.EncodeToString(digest[:])
+			migrated.Files = []PlannedFile{{
+				Path: servicePath, Content: []byte(migratedDefinition), Mode: plan.Files[0].Mode, DirMode: plan.Files[0].DirMode,
+			}}
+
+			restartInterrupted := errors.New("calling service stopped the SSH worker")
+			restartObserved := false
+			runner := &testRunner{handle: func(command Command) (string, error) {
+				if !slices.Contains(command.Args, "restart") {
+					return "", nil
+				}
+				restartObserved = true
+				state, err := LoadState(files, stateDir)
+				if err != nil {
+					return "", fmt.Errorf("load state at restart: %w", err)
+				}
+				if state != migrated.State {
+					return "", fmt.Errorf("state at restart = %+v, want %+v", state, migrated.State)
+				}
+				definition, err := os.ReadFile(servicePath)
+				if err != nil {
+					return "", fmt.Errorf("read service at restart: %w", err)
+				}
+				if string(definition) != migratedDefinition {
+					return "", fmt.Errorf("service definition was not persisted before restart")
+				}
+				return "", restartInterrupted
+			}}
+
+			_, err = Repair(context.Background(), migrated, Dependencies{Files: files, Runner: runner}, ApplyOptions{})
+			if !errors.Is(err, restartInterrupted) || !strings.Contains(err.Error(), "service definition and install state were persisted") {
+				t.Fatalf("repair interruption error = %v", err)
+			}
+			if !restartObserved {
+				t.Fatal("repair did not reach the service restart")
+			}
+			if report := Doctor(context.Background(), stateDir, Dependencies{Files: files, Runner: &testRunner{}}); !report.Healthy {
+				t.Fatalf("doctor reports drift after restart interrupted the caller: %+v", report)
+			}
+		})
+	}
+}
+
 func TestSystemdUnitEscapesOptionalEnvironmentFileAsOneItem(t *testing.T) {
 	definition, err := systemdUnit("/var/lib/mira state", RoleNode, ScopeSystem)
 	if err != nil {

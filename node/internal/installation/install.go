@@ -20,16 +20,21 @@ func Install(ctx context.Context, plan InstallPlan, dependencies Dependencies, o
 // registration and state persistence. This prevents two installers from each
 // switching current before only one discovers the ownership conflict.
 func InstallPrepared(ctx context.Context, plan InstallPlan, dependencies Dependencies, options ApplyOptions, prepare func() error) (ApplyReport, error) {
-	return installPrepared(ctx, plan, dependencies, options, prepare, false)
+	return installPrepared(ctx, plan, dependencies, options, prepare, installBehavior{})
 }
 
-func installPrepared(ctx context.Context, plan InstallPlan, dependencies Dependencies, options ApplyOptions, prepare func() error, allowServiceDrift bool) (ApplyReport, error) {
+type installBehavior struct {
+	allowServiceDrift             bool
+	persistStateBeforeLastCommand bool
+}
+
+func installPrepared(ctx context.Context, plan InstallPlan, dependencies Dependencies, options ApplyOptions, prepare func() error, behavior installBehavior) (ApplyReport, error) {
 	dependencies = withDefaults(dependencies)
 	if err := validatePlan(plan); err != nil {
 		return ApplyReport{Plan: plan}, err
 	}
 	if options.DryRun {
-		if _, _, err := inspectInstall(ctx, plan, dependencies, allowServiceDrift); err != nil {
+		if _, _, err := inspectInstall(ctx, plan, dependencies, behavior.allowServiceDrift); err != nil {
 			return ApplyReport{Plan: plan}, err
 		}
 		return ApplyReport{Plan: plan}, nil
@@ -47,7 +52,7 @@ func installPrepared(ctx context.Context, plan InstallPlan, dependencies Depende
 		return ApplyReport{Plan: plan}, err
 	}
 	defer lock.Close()
-	_, serviceExists, err := inspectInstall(ctx, plan, dependencies, allowServiceDrift)
+	_, serviceExists, err := inspectInstall(ctx, plan, dependencies, behavior.allowServiceDrift)
 	if err != nil {
 		return ApplyReport{Plan: plan}, err
 	}
@@ -67,6 +72,19 @@ func installPrepared(ctx context.Context, plan InstallPlan, dependencies Depende
 			return ApplyReport{Plan: plan}, err
 		}
 	}
+	statePersisted := false
+	persistState := func() error {
+		content, err := encodeState(plan.State)
+		if err != nil {
+			return err
+		}
+		if err := dependencies.Files.AtomicWrite(plan.StatePath, content, 0600); err != nil {
+			return err
+		}
+		statePersisted = true
+		return nil
+	}
+
 	// Nix ownership is intentionally command-free. The user reviews and imports
 	// the generated module; Mira never invokes nixos-rebuild or systemctl here.
 	if plan.State.ServiceOwner != ServiceOwnerNix {
@@ -87,18 +105,31 @@ func installPrepared(ctx context.Context, plan InstallPlan, dependencies Depende
 				}
 			}
 		}
-		for _, command := range commands {
+		for index, command := range commands {
+			// A Mira-owned Linux restart can terminate the process that invoked
+			// repair (for example, its own SSH worker). Persist the matching unit
+			// and install state before only that final restart command. Earlier
+			// setup failures still leave the old state in place for diagnosis and
+			// retry; initial installs and Windows service changes keep their
+			// existing commands-before-state ordering.
+			persistedBeforeCommand := behavior.persistStateBeforeLastCommand && index == len(commands)-1
+			if persistedBeforeCommand {
+				if err := persistState(); err != nil {
+					return ApplyReport{Plan: plan}, fmt.Errorf("persist repaired install state before service restart: %w", err)
+				}
+			}
 			if _, err := dependencies.Runner.Run(ctx, command.Name, command.Args...); err != nil {
+				if persistedBeforeCommand {
+					return ApplyReport{Plan: plan}, fmt.Errorf("restart repaired service after service definition and install state were persisted: %w", err)
+				}
 				return ApplyReport{Plan: plan}, fmt.Errorf("install service: %w", err)
 			}
 		}
 	}
-	content, err := encodeState(plan.State)
-	if err != nil {
-		return ApplyReport{Plan: plan}, err
-	}
-	if err := dependencies.Files.AtomicWrite(plan.StatePath, content, 0600); err != nil {
-		return ApplyReport{Plan: plan}, err
+	if !statePersisted {
+		if err := persistState(); err != nil {
+			return ApplyReport{Plan: plan}, err
+		}
 	}
 	return ApplyReport{Plan: plan, Applied: true}, nil
 }
@@ -198,7 +229,10 @@ func Repair(ctx context.Context, plan InstallPlan, dependencies Dependencies, op
 			{Name: "systemctl", Args: append(append([]string(nil), arguments...), "restart", plan.State.ServiceName)},
 		}
 	}
-	return installPrepared(ctx, plan, dependencies, options, nil, true)
+	return installPrepared(ctx, plan, dependencies, options, nil, installBehavior{
+		allowServiceDrift:             true,
+		persistStateBeforeLastCommand: plan.State.ServiceOwner == ServiceOwnerMira && plan.State.Platform == "linux",
+	})
 }
 
 // Uninstall removes Mira-managed services. Nix-owned service removal is always
