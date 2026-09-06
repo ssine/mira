@@ -110,6 +110,8 @@ try {
   console.log("PASS: lifecycle migration/backfill, CLI/subagent activity, raw NUL preservation, old completion isolation, Node offline/restart, v1/v2 commits, idempotency, generations and rebuild");
 } finally {
   await pool.end();
-  await owner.query(`DROP DATABASE ${database} WITH (FORCE)`);
+  // pg-pool can resolve end() before PostgreSQL receives every socket close.
+  // Let those connections exit normally instead of sending them a fatal error.
+  await owner.query(`DROP DATABASE ${database}`);
   await owner.end();
 }

@@ -14,7 +14,7 @@ try {
     VALUES($1::uuid,$1::text,'quota-test','linux','amd64','linux','test','{"appServer":true}','[]','approved','{"connected":true}','{"status":"running","codexHome":"/test"}')`, [nodeId]);
   const node = await getNode(pool, nodeId);
   let reads = 0, email = "first@example.test", used = 10, fail = false, gate;
-  const channel = { isConnected: () => true, accountReader: { read: async () => {
+  const channel = { isConnected: id => id === nodeId, accountReader: { read: async () => {
     reads++; if (gate) await gate;
     if (fail) throw new Error("sensitive upstream error must not be stored");
     return { account: { type: "chatgpt", email, planType: "pro", token: "never-persist" }, limits: {
