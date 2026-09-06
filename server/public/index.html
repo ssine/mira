@@ -151,6 +151,9 @@
               <div class="conversation-identity hidden"><h2 id="conversationTitle">选择或新建会话</h2><p id="conversationMeta" class="muted"><span class="conversation-directory">默认目录</span><span class="conversation-meta-separator">·</span><span class="conversation-model">默认模型</span></p></div>
             </header>
             <button id="conversationMenuToggle" class="chat-icon-button conversation-menu-toggle hidden" type="button" aria-label="对话选项" title="对话选项" aria-haspopup="menu">⋯</button>
+            <button id="conversationDetailsToggle" class="chat-icon-button conversation-details-toggle hidden" type="button" aria-label="打开会话详情" aria-expanded="false" aria-controls="conversationDetails" title="会话详情">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="14" height="13" rx="1.5"></rect><path d="M12 4v12"></path></svg>
+            </button>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
@@ -178,7 +181,8 @@
             </div>
           </section>
     <dialog id="conversationDetails" class="conversation-details" aria-labelledby="conversationDetailsTitle">
-      <div class="sidebar-popover-head"><strong id="conversationDetailsTitle">会话详情</strong><button id="conversationDetailsClose" class="chat-icon-button" type="button" aria-label="关闭会话详情">×</button></div>
+      <div class="conversation-details-head"><strong id="conversationDetailsTitle">会话详情</strong><button id="conversationDetailsClose" class="chat-icon-button" type="button" aria-label="收起会话详情" title="收起会话详情"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"></path></svg></button></div>
+      <div class="conversation-details-body">
       <h3 id="conversationDetailsName"></h3>
       <dl id="conversationDetailsFacts" class="navigation-facts"></dl>
       <section class="conversation-token-usage" aria-label="会话 Token 用量">
@@ -186,6 +190,7 @@
         <dl id="conversationTokenUsageFacts" class="navigation-facts"></dl>
       </section>
       <p id="conversationDetailsStatus" class="muted" role="status"></p>
+      </div>
     </dialog>
         </div>
       </section>

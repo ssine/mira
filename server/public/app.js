@@ -215,7 +215,9 @@ const agent = {
 
 const transcriptPageSize = 60;
 const accountSidebar = new AccountSidebar($("#agentAccount"));
-const conversationDetailsWide = window.matchMedia("(min-width: 1280px)");
+const conversationDetailsWide = window.matchMedia("(min-width: 1100px)");
+let conversationDetailsCloseTimer = null;
+let resetConversationDetailsDrag = () => {};
 const traceImages = new TraceImages($("#conversationTrace"), readTraceImage, () => {
   const follow = traceNearBottom($("#conversationTrace"));
   return () => { if (follow) scrollTraceToBottom($("#conversationTrace")); };
@@ -1935,6 +1937,7 @@ function notificationIsForOpenThread(params = {}) {
 function syncActiveTurnUi() {
   agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
+  $("#conversationDetailsToggle").classList.toggle("hidden", !agent.threadId);
   syncConversationSendUi();
   renderReplyProgress();
   renderThreadStates();
@@ -3470,11 +3473,107 @@ function renderConversationDetails(thread) {
 
 function showConversationDetailsPanel() {
   const panel = $("#conversationDetails");
+  clearTimeout(conversationDetailsCloseTimer);
+  conversationDetailsCloseTimer = null;
+  resetConversationDetailsDrag();
   if (!panel.open) {
     if (conversationDetailsWide.matches) panel.show();
     else panel.showModal();
   }
   $(".chat-shell").classList.add("details-open");
+  // Commit the off-screen position before entering, including when reopening
+  // while a previous close is still settling.
+  panel.getBoundingClientRect();
+  panel.classList.add("revealed");
+  $("#conversationDetailsToggle").setAttribute("aria-expanded", "true");
+  $("#conversationDetailsToggle").setAttribute("aria-label", "关闭会话详情");
+}
+
+function closeConversationDetailsPanel() {
+  const panel = $("#conversationDetails");
+  if (!panel.open || conversationDetailsCloseTimer) return;
+  resetConversationDetailsDrag();
+  panel.classList.remove("revealed");
+  if (conversationDetailsWide.matches || window.matchMedia("(prefers-reduced-motion: reduce)").matches) panel.close();
+  else conversationDetailsCloseTimer = setTimeout(() => panel.close(), 210);
+}
+
+function installConversationDetailsGestures() {
+  const panel = $("#conversationDetails");
+  let gesture = null, outsideDown = false, suppressClickUntil = 0;
+  const outside = event => {
+    const rect = panel.getBoundingClientRect();
+    return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
+  };
+  resetConversationDetailsDrag = () => {
+    const previous = gesture;
+    gesture = null;
+    if (previous && panel.hasPointerCapture(previous.id)) panel.releasePointerCapture(previous.id);
+    panel.classList.remove("details-dragging");
+    panel.style.removeProperty("transform");
+    panel.style.removeProperty("--details-shade");
+  };
+  panel.addEventListener("pointerdown", event => {
+    outsideDown = outside(event);
+    resetConversationDetailsDrag();
+    if (conversationDetailsWide.matches || conversationDetailsCloseTimer || event.pointerType !== "touch" || !event.isPrimary ||
+        (window.visualViewport?.scale ?? 1) > 1.05 || window.getSelection()?.type === "Range" ||
+        event.target.closest("input, textarea, select, [contenteditable=true]")) return;
+    for (let node = event.target; node && node !== panel; node = node.parentElement) {
+      if (node.scrollWidth > node.clientWidth + 2 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowX)) return;
+    }
+    gesture = { id: event.pointerId, x: event.clientX, y: event.clientY, time: event.timeStamp,
+      width: panel.getBoundingClientRect().width, horizontal: false, position: 0,
+      samples: [{ x: event.clientX, time: event.timeStamp }] };
+  });
+  const move = event => {
+    const dx = event.clientX - gesture.x, dy = Math.abs(event.clientY - gesture.y);
+    if (!gesture.horizontal) {
+      if (event.timeStamp - gesture.time > 450 || dx < -8 || dy > 8 && dy >= Math.abs(dx)) { resetConversationDetailsDrag(); return; }
+      if (dx < 8 || dx < dy * 1.15) return;
+      gesture.horizontal = true;
+      panel.classList.add("details-dragging");
+      panel.setPointerCapture(gesture.id);
+    }
+    event.preventDefault();
+    gesture.position = Math.max(0, Math.min(gesture.width, dx));
+    const samples = gesture.samples;
+    if (samples.at(-1).x !== event.clientX) {
+      samples.push({ x: event.clientX, time: event.timeStamp });
+      while (samples.length > 2 && samples[1].time < event.timeStamp - 100) samples.shift();
+    }
+    panel.style.transform = `translate3d(${gesture.position}px, 0, 0)`;
+    panel.style.setProperty("--details-shade", String(1 - gesture.position / gesture.width));
+  };
+  panel.addEventListener("pointermove", event => {
+    if (gesture?.id === event.pointerId) move(event);
+  });
+  panel.addEventListener("touchmove", event => {
+    if (gesture?.horizontal && event.cancelable) event.preventDefault();
+  }, { passive: false });
+  panel.addEventListener("pointerup", event => {
+    if (gesture?.id !== event.pointerId) return;
+    if (!gesture.horizontal) { resetConversationDetailsDrag(); return; }
+    move(event);
+    const first = gesture.samples[0], last = gesture.samples.at(-1);
+    const velocity = last.time > first.time && event.timeStamp - last.time < 100 ? (last.x - first.x) / (last.time - first.time) : 0;
+    const close = Math.abs(event.clientX - gesture.x) >= 32 && Math.abs(velocity) >= 0.45
+      ? velocity > 0 : gesture.position >= gesture.width * 0.4;
+    suppressClickUntil = performance.now() + 400;
+    panel.getBoundingClientRect();
+    resetConversationDetailsDrag();
+    if (close) closeConversationDetailsPanel();
+  });
+  for (const type of ["pointercancel", "lostpointercapture"]) panel.addEventListener(type, event => {
+    if (type === "lostpointercapture" && event.target !== panel) return;
+    if (gesture?.id === event.pointerId) resetConversationDetailsDrag();
+  });
+  panel.addEventListener("click", event => {
+    if (performance.now() < suppressClickUntil) { event.preventDefault(); event.stopImmediatePropagation(); return; }
+    if (!conversationDetailsWide.matches && outsideDown && outside(event)) closeConversationDetailsPanel();
+  }, { capture: true });
+  window.addEventListener("resize", resetConversationDetailsDrag);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) resetConversationDetailsDrag(); });
 }
 
 async function openConversationDetails(threadId) {
@@ -4466,10 +4565,23 @@ $("#threadShowDetails").addEventListener("click", () => {
   $("#threadOptionsMenu").hidePopover();
   void openConversationDetails(agent.menuThreadId);
 });
-$("#conversationDetailsClose").addEventListener("click", () => $("#conversationDetails").close());
-$("#conversationDetails").addEventListener("close", () => {
-  if (!$("#conversationDetails").open) $(".chat-shell").classList.remove("details-open");
+$("#conversationDetailsToggle").addEventListener("click", () => {
+  if ($("#conversationDetails").open && !conversationDetailsCloseTimer) closeConversationDetailsPanel();
+  else void openConversationDetails(agent.threadId);
 });
+$("#conversationDetailsClose").addEventListener("click", closeConversationDetailsPanel);
+$("#conversationDetails").addEventListener("cancel", event => { event.preventDefault(); closeConversationDetailsPanel(); });
+$("#conversationDetails").addEventListener("close", () => {
+  if ($("#conversationDetails").open) return;
+  clearTimeout(conversationDetailsCloseTimer);
+  conversationDetailsCloseTimer = null;
+  resetConversationDetailsDrag();
+  $("#conversationDetails").classList.remove("revealed");
+  $(".chat-shell").classList.remove("details-open");
+  $("#conversationDetailsToggle").setAttribute("aria-expanded", "false");
+  $("#conversationDetailsToggle").setAttribute("aria-label", "打开会话详情");
+});
+installConversationDetailsGestures();
 conversationDetailsWide.addEventListener("change", () => {
   if (!$("#conversationDetails").open) return;
   $("#conversationDetails").close();
@@ -4486,7 +4598,7 @@ window.addEventListener("popstate", () => {
 agentThreadDrawerWide.addEventListener("change", () => setAgentThreadDrawer(agentThreadDrawerWide.matches, { focus: false }));
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || document.querySelector("[popover]:popover-open")) return;
-  if ($("#conversationDetails").open && conversationDetailsWide.matches) { $("#conversationDetails").close(); return; }
+  if ($("#conversationDetails").open && conversationDetailsWide.matches) { closeConversationDetailsPanel(); return; }
   if (document.querySelector("dialog[open]")) return;
   if (event.key === "Escape" && $("#agentThreadDrawer").classList.contains("open")) setAgentThreadDrawer(false);
 });
