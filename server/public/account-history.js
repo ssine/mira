@@ -2,17 +2,11 @@ const ns = "http://www.w3.org/2000/svg";
 const percent = value => `${Number(value.toFixed(1))}%`;
 const timeLabel = value => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
-export function quotaSegments(points, intervalMs) {
-  const segments = [];
-  let segment;
-  for (const point of points) {
-    if (!Number.isFinite(point.remaining)) { segment = null; continue; }
-    if (!segment || point.at - segment.at(-1).at > intervalMs * 2.5) {
-      segment = []; segments.push(segment);
-    }
-    segment.push(point);
-  }
-  return segments;
+export function quotaSegments(points) {
+  // Missing samples mean that no change was observed. Keep the last known
+  // value until the next real sample, where the step path changes vertically.
+  const samples = points.filter(point => Number.isFinite(point.remaining));
+  return samples.length ? [samples] : [];
 }
 
 export class AccountHistory {
@@ -98,7 +92,7 @@ export class AccountHistory {
     // An offline Node can still show its last recorded account, explicitly named.
     const offline = this.node?.status === "offline" && !this.account;
     const points = (sameAccount || offline) && Array.isArray(data?.points) ? data.points : [];
-    const segments = quotaSegments(points, data?.intervalMs ?? 300_000);
+    const segments = quotaSegments(points);
     this.valid = segments.flat(); this.pointIndex = null;
     this.svg.replaceChildren();
     this.marker = this.tooltip = null;
@@ -108,7 +102,7 @@ export class AccountHistory {
     empty.textContent = this.message || (!this.key ? "选择运行节点后查看额度历史" : this.account?.type && this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" :
       data?.account && this.account?.email && !sameAccount ? "账号已切换，等待首次采样" : "这个时间段暂无记录，采样后会显示在这里");
     this.svg.classList.toggle("hidden", !this.valid.length);
-    this.root.querySelector("[data-history-note]").textContent = `${offline && data?.account?.email ? `${data.account.email} · ` : ""}每 5 分钟记录 · 空档表示未采集到额度`;
+    this.root.querySelector("[data-history-note]").textContent = `${offline && data?.account?.email ? `${data.account.email} · ` : ""}每 5 分钟记录 · 缺失时延续上次额度`;
     if (!this.valid.length) return;
     const el = (tag, attrs, text) => {
       const node = document.createElementNS(ns, tag);

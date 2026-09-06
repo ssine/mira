@@ -56,8 +56,10 @@ test("account replacement between identity and limits rejects the sample", async
   assert.equal(reader.sessions.size, 0);
 });
 
-test("chart preserves zeros and reset jumps while breaking failed and offline samples", () => {
+test("chart carries the last quota through missing samples and jumps at the next real point", () => {
   const points = [{ at: 0, remaining: 20 }, { at: 300, remaining: 0 }, { at: 600, remaining: 100 },
     { at: 900, remaining: null }, { at: 1200, remaining: 90 }, { at: 3000, remaining: 70 }];
-  assert.deepEqual(quotaSegments(points, 300).map(part => part.map(point => point.remaining)), [[20, 0, 100], [90], [70]]);
+  assert.deepEqual(quotaSegments(points).map(part => part.map(point => [point.at, point.remaining])),
+    [[[0, 20], [300, 0], [600, 100], [1200, 90], [3000, 70]]]);
+  assert.deepEqual(quotaSegments([{ at: 0, remaining: null }]), []);
 });
