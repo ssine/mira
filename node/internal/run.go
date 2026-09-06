@@ -27,6 +27,16 @@ func Run(ctx context.Context) error {
 	return runConfigured(ctx, configuration, nil)
 }
 
+// RunNodeWorker starts only the Node role. Supervisor uses this explicit role
+// so the same executable can also host Server and maintenance commands.
+func RunNodeWorker(ctx context.Context, args []string) error {
+	configuration, err := loadConfigArgs(args)
+	if err != nil {
+		return err
+	}
+	return runConfigured(ctx, configuration, nil)
+}
+
 func runConfigured(ctx context.Context, configuration config, status *desktopStatus) error {
 	if configuration.ExitWithParent {
 		if err := enableParentExitGuard(); err != nil {

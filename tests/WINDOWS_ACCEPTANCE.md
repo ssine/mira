@@ -1,21 +1,19 @@
 # Windows and release acceptance — 0.9.x
 
-0.9.1 follow-up: real GitHub installation exposed MSIX AppData/HKCU virtualization when launched
-from the packaged Codex app. New Windows installs now use `%USERPROFILE%\.mira`; user PATH is
-persisted by a temporary, non-elevated task outside that virtualization. Environment notification
-is bounded, and the temporary task is removed. The native Node login task successfully runs from
-this independent directory. Existing device identity was retained during the acceptance migration.
+0.9.1 follow-up: the legacy current-user task exposed MSIX AppData/HKCU virtualization when launched
+from the packaged Codex app. Current Windows installs use `%USERPROFILE%\.mira` for state and one
+Windows Service for Supervisor ownership. Existing device identity was retained during the migration.
 
 0.9.2 follow-up: domain enrollment exposed shared TLS configuration between net/http and Gorilla.
 The reverse-channel dialer now clones the configuration and advertises HTTP/1.1 only. The automated
 regression test first negotiates HTTP/2 with a TLS test server and then requires a successful WSS
 hello exchange; it runs on Linux and Windows.
 
-0.9.3 follow-up: reinstalling the real Windows login task found a Server reconnect race: the old
+0.9.3 follow-up: the legacy Windows login task found a Server reconnect race: the old
 socket's delayed close marked its replacement offline despite fresh heartbeats. Stale sockets can
 no longer change successor state or consume its responses, old work is rejected at replacement,
 and per-Node status writes are serialized. Regression tests cover delayed close, active requests,
-App Server proxies and delayed database completion (`node --test tests/node_channel_test.mjs`).
+App Server proxies and delayed database completion (`go test ./internal/miraserver/channel`).
 
 Verified on native Windows 11 x64 from WSL → Windows PowerShell, not Windows binaries running
 inside a Linux compatibility shim:
@@ -29,7 +27,7 @@ inside a Linux compatibility shim:
 - resize to 132 × 37, confirmed from inside the child console;
 - official npm Codex executable discovery (`codex-cli 0.152.1`), App Server start/health/stop;
 - no model inference or production Codex conversation was created by this test;
-- per-user Scheduled Task installation and upgrade, with unchanged identity/configuration;
+- system-service Supervisor installation, with unchanged identity/configuration across Supervisor updates;
 - checksum failure refusal and retained old binary directory.
 
 Reproduce the native Node acceptance against a **local test Server** configured with the usual
@@ -39,10 +37,10 @@ local test administrator password (never point these credentials at production):
 .\tests\windows_node_e2e.ps1 -BinaryDirectory C:\path\to\extracted\release -ServerUrl http://127.0.0.1:18787 -TestAppServer
 ```
 
-On WSL, run `scripts/build-release.sh dist`, then
-`MIRA_TEST_WINDOWS_SERVICE=1 node tests/installers_e2e.mjs`. The service test refuses to replace an
-existing `MiraNode-<username>` task. Portable install tests do not require that flag. The test uses
-a synthetic previous-version label, not a claim that a public 0.8.999 release exists.
+Windows installation ownership, service command generation and rollback semantics are covered by
+native Go tests in `node/internal/installation` and `node/internal/supervisor`. The cross-platform
+`tests/installers_e2e.mjs` covers first Linux node/server bootstrap and explicitly verifies that the
+removed bootstrap `--update` path cannot mutate an installation.
 
 Windows native Go tests also run in GitHub CI. Linux Go tests, race detection, authentication and
 Web console E2E passed locally. Android arm64 cross-build, debug APK, release APK and APK signature

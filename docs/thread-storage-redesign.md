@@ -125,20 +125,8 @@ store and should be handled under the administrator's normal backup retention.
 
 ## Acceptance coverage
 
-- `tests/storage_rows_e2e.mjs`: schema 15 to 17 migration; unchanged raw JSON text,
-  hashes and timestamps; full projection rebuild; removed snapshot table; retired
-  version reads; identical concurrent retries; unrelated projection preservation;
-  reversed preparation/publication timing; generation recreation and v1 adapter.
-- `tests/thread_management_e2e.mjs`: rename, CAS/retry, archive/restore, permanent
-  deletion fences, shared fork provenance, erasure failure/retry and concurrent writes.
-- `tests/session_transfer_e2e.mjs`: raw/unknown fields, subagent metadata, imported
-  fork lineage, large streamed import and compatibility reads.
-- `tests/fork_titles_e2e.mjs`: inherited fork names, numbered collisions (including archived
-  threads), concurrent allocation, idempotent retries and preservation of manual edits.
-- `tests/thread_fork_e2e.mjs`: real Codex App Server fork, inherited name and fresh-process resume.
-- `tests/thread_cli_e2e.mjs`: CLI creation and resume with a fresh `CODEX_HOME`,
-  reconstructing the previous model context entirely from PostgreSQL.
-- `tests/runtime_reliability_e2e.mjs`: streaming, lost replies, UUID-stable retry,
-  cancellation, permanent errors and preservation of imported unknown fields.
-- Codex `remote_http` tests verify direct append without downloading 10,000 prior
-  records, scoped requests, ordered cancellation-safe writes and retry behavior.
+- Go tests under `node/internal/miraserver/` cover schema initialization, immutable history,
+  V1/V2 compatibility, generation replacement, management, imports and read projections.
+- Opt-in PostgreSQL integration tests cover the database-specific registry and view behavior.
+- `tests/web_console_e2e.mjs` covers the public API, Node channel and Web behavior together.
+- Codex `remote_http` tests verify scoped appends, cancellation-safe ordering and retry behavior.

@@ -6,7 +6,7 @@ flag and never rewrites history. Existing CLI, App Server and subagent records
 work immediately after migration, including after projection rebuilds.
 
 The Server inspects a bounded tail of lifecycle candidates in the current
-generation and item-count boundary. JavaScript validates the raw envelope so
+generation and item-count boundary. Go validates the raw envelope so
 unknown items and JSON containing escaped NUL remain safe. An immutable-boundary
 cache retains at most 1,000 projections per pool. Node reachability is checked
 afresh. An unfinished turn becomes uncertain when its Node is offline, its
@@ -28,6 +28,6 @@ This also covers CLI execution and conversations on different Nodes that have no
 live subscription in that browser. App Server subscribers keep immediate live
 updates; other windows display newly persisted output on their next check.
 
-Run `tests/thread_activity_e2e.mjs` against a disposable PostgreSQL database,
-`tests/thread_activity_browser.mjs` against a disposable Server, and the existing
-`tests/trace_activity_browser.mjs` for live-event/reconnect/history regressions.
+Run `go test ./internal/miraserver/views` from `node/` for projection and PostgreSQL
+coverage, and `tests/thread_activity_browser.mjs` against a disposable Server for
+browser live-event/reconnect/history regressions.

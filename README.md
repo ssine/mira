@@ -55,13 +55,12 @@ amd64 发布包内置同一 `CODEX_VERSION` 基线的 Mira 版 Codex 及 code-mo
 ## 安装与升级
 
 在管理员网站展开「添加设备」即可复制带当前 Server 地址的安装命令。
-Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。当前源码已将发行拆成
-**Mira 节点包**与**可选 Codex 运行包**：节点包只包含 Mira 和内嵌 OpenSSH；首次执行 `mira codex`
+Windows / Linux / WSL 提供一条指令安装，Android 直接安装正式签名 APK。Server、Node、CLI、
+Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 Node.js。发行仍拆成
+**Mira 程序包**与**可选 Codex 运行包**：Mira 包包含单一程序镜像和内嵌 OpenSSH；首次执行 `mira codex`
 或启动受控 App Server 时，按需安装固定兼容版本的完整 Codex package。缓存跨 Mira 版本复用，
 节点升级不会重复下载 Codex；Android 不下载 Codex。拆分不会自动改变已经发布的 0.12.0 包。
-后续桌面端执行 `mira update`；Android 在 APP 内检查更新。身份和配置随升级保留。
-OpenWrt / FriendlyWrt 使用同一 Linux 安装脚本，自动补齐依赖并通过 procd 管理开机启动；
-自定义持久目录可使用 `--prefix /opt/mira --service procd`，不需要运行 Codex。
+后续桌面端执行 `mira update`；首次安装脚本不再承担更新。Android 在 APP 内检查更新。身份和配置随升级保留。
 具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 
 ## 架构
@@ -80,6 +79,9 @@ Codex / mira CLI / Admin Web + Agent Console
           Windows/WSL          Linux/NAS    Android APK
           file/process/PTY     file/process  file/process
           Codex App Server     /PTY/Codex    screen/input
+
+本机进程管理：Server Supervisor → Server worker + Node worker
+              设备 Supervisor → Node worker
 ```
 
 Server 在代理的 `thread/start` 和 `thread/resume` 中注入 `home_nodes`。运行在 Node A 的 Codex
@@ -112,8 +114,9 @@ CLI 登录、Node ACL 或长期 token query parameter。
 
 | 路径 | 作用 |
 | --- | --- |
-| `server/` | Node.js Mira Server、认证、审计、CapabilityService、App Server broker 与 ThreadStore API |
-| `server/public/` | Server 同源提供的管理员设备控制台，无独立前端构建链 |
+| `node/internal/miraserver/` | 原生 Go Server、认证、审计、CapabilityService、App Server broker 与 ThreadStore API |
+| `node/internal/webassets/` | 内嵌 Web 资源及仓库受控的第三方静态文件 |
+| `server/public/` | 管理员设备控制台的前端源码，无独立运行时 |
 | `node/cmd/mira-node/` | Windows/Linux/WSL/Android 共用的常驻 Node |
 | `node/cmd/mira/` | 人类和 Codex 共用的远程控制 CLI |
 | `node/internal/` | 身份、接入、反向通道、文件、进程、PTY、屏幕和平台适配 |
@@ -122,21 +125,24 @@ CLI 登录、Node ACL 或长期 token query parameter。
 | `patches/codex/` | 官方 Codex ThreadStore HTTP 适配与 subagent dynamicTools 补丁 |
 | `skills/mira/` | 可安装的 Codex 使用说明，不包含任何 credential 或固定设备信息 |
 | `tests/` | 存储、认证、Node、App Server、subagent、多节点与 Android E2E |
-| `scripts/` | 统一版本检查、跨平台 Release 构建、Linux/Windows 安装与更新 |
+| `scripts/` | 统一版本检查、跨平台 Release 构建和 Linux/Windows 首次引导 |
 
 ## 本地启动与网站验收
 
-需要 Docker、Node.js 22+、Go 1.26.6+ 和 npm：
+Server 本身只需要 Go 与 PostgreSQL；Node.js 22+ 仅用于仓库中的 JavaScript 测试和构建辅助脚本：
 
 ```bash
 docker compose up -d postgres
-npm ci --prefix server
+go -C node build -o /tmp/mira ./cmd/mira
 
 # 只在 Server 主机本地运行；密码从隐藏终端或 stdin 读取
-npm run admin --prefix server -- set-password admin
+printf '%s\n' 'mira-local-admin-password' | \
+  DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira \
+  /tmp/mira server admin set-password admin
 
 # loopback HTTP 验收时允许非 Secure Cookie；生产不要设置 false
-MIRA_SECURE_COOKIES=false npm start --prefix server
+DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira \
+MIRA_SECURE_COOKIES=false /tmp/mira server-worker
 ```
 
 打开 [http://127.0.0.1:8787](http://127.0.0.1:8787)。网站可登录、查看待审批申请、批准/拒绝、
@@ -265,19 +271,20 @@ adb install -r build/outputs/apk/debug/mira-node-debug.apk
 
 ```bash
 cp .env.example .env
-docker compose --env-file .env -f compose.homeserver.yaml up -d postgres
+# 编辑外部 DATABASE_URL、公网 HTTPS endpoint，并固定 MIRA_VERSION。
+docker compose --env-file .env -f compose.homeserver.yaml pull
 printf '%s\n' 'your-admin-password' | \
-docker compose --env-file .env -f compose.homeserver.yaml run --rm -T control \
-  npm run admin -- set-password admin
-docker compose --env-file .env -f compose.homeserver.yaml up -d --build postgres control
+docker compose --env-file .env -f compose.homeserver.yaml run --rm -T server \
+  mira server admin set-password admin
+docker compose --env-file .env -f compose.homeserver.yaml up -d server
 ```
 
-`.env` 只需要 PostgreSQL 密码。Mira 管理员密码不进入 Compose/Nix 环境。Server 只发布到宿主机
+PostgreSQL 独立部署和备份，不属于这个 Compose stack。Mira 管理员密码不进入 Compose/Nix 环境。Server 只发布到宿主机
 `127.0.0.1:8787`，由同机 Caddy 提供 TLS/WSS；不要把 8787 直接暴露到 LAN 或公网。Compose 只在
 这个 loopback-only 前提下信任 Caddy 写入的 `X-Forwarded-For`，用于登录限速和审计来源地址。
 Node 继续只主动连出。宿主原生 Node 的 OS 运行身份决定整机实际可访问范围；需要额外隔离时再显式
-配置较窄的 allowed roots。PostgreSQL 与 Server 使用 `restart: unless-stopped`，数据保存在命名卷
-`postgres-data`。
+配置较窄的 allowed roots。容器部署通过固定镜像版本更新；需要 Supervisor 自动回滚时使用
+`mira install --role server` 的原生服务部署。
 
 Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件、进程和 PTY 才对应真实主机，
 而不是容器命名空间。Compose 中的 `node` 服务只保留作隔离测试，需要时显式启用
@@ -318,14 +325,14 @@ CLI。
 ## 验证
 
 ```bash
-npm run check --prefix server
+node scripts/check-version.mjs
+diff -qr --exclude vendor server/public node/internal/webassets/web
 go -C node test ./...
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build -o /tmp/mira.exe ./cmd/mira
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build -o /tmp/mira-node.exe ./cmd/mira-node
 GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build -o /tmp/mira-node-android ./cmd/mira-node
 for file in tests/*.mjs; do node --check "$file"; done
 python3 -m compileall -q tests
-node tests/auth_enrollment_e2e.mjs
 node tests/web_console_e2e.mjs
 ```
 

@@ -8,12 +8,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
+
+	"github.com/ssine/mira/node/internal/installation"
+	"github.com/ssine/mira/node/internal/supervisor"
+	"github.com/ssine/mira/node/internal/supervisorapi"
 )
 
 var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
@@ -35,6 +37,18 @@ func compareReleaseVersions(left, right string) int {
 	return 0
 }
 
+// effectiveUpdateTarget preserves the no-implicit-downgrade behavior of
+// `mira update` while still letting the Supervisor finish an interrupted
+// handoff. In that recovery window current already selects the new image, but
+// install-state (and on Windows the service BinaryPath) can still name the old
+// one, so a same-version request must not be treated as a no-op.
+func effectiveUpdateTarget(requested, target, current, recorded string) (string, bool) {
+	if requested == "latest" && releaseVersionPattern.MatchString(current) && compareReleaseVersions(target, current) < 0 {
+		target = current
+	}
+	return target, target == current && recorded == current
+}
+
 func defaultConfigFile() (string, error) {
 	identity, err := DefaultIdentityFile()
 	if err != nil {
@@ -51,6 +65,11 @@ func runSetup(args []string) (any, error) {
 	set := flagSet("setup")
 	server := set.String("server", "", "Mira Server URL")
 	configPath := set.String("config", defaultPath, "Node configuration file")
+	defaultIdentity, err := DefaultIdentityFile()
+	if err != nil {
+		return nil, err
+	}
+	identityFlag := set.String("identity", defaultIdentity, "Node identity file")
 	if err := set.Parse(args); err != nil {
 		return nil, err
 	}
@@ -59,9 +78,9 @@ func runSetup(args []string) (any, error) {
 		return nil, fmt.Errorf("setup requires --server with an absolute HTTP(S) Mira URL")
 	}
 	serverURL := strings.TrimRight(parsed.String(), "/")
-	identityPath, err := DefaultIdentityFile()
-	if err != nil {
-		return nil, err
+	identityPath := *identityFlag
+	if !filepath.IsAbs(identityPath) {
+		return nil, fmt.Errorf("identity path must be absolute")
 	}
 	if !filepath.IsAbs(*configPath) {
 		return nil, fmt.Errorf("configuration path must be absolute")
@@ -169,58 +188,22 @@ func latestRelease(ctx context.Context) (string, error) {
 	return version, nil
 }
 
-func updatePreflight(ctx context.Context, options cliOptions) error {
-	client, err := newCLIClient(options)
-	if err != nil {
-		if os.IsNotExist(err) || cliExitCode(err) == 2 {
-			return nil
-		}
-		return err
-	}
-	var node map[string]any
-	if err := client.request(ctx, http.MethodGet, "/v1/nodes/"+client.identity.NodeID, nil, &node); err != nil {
-		return err
-	}
-	if reported, ok := node["reportedAppServer"].(map[string]any); ok && (reported["status"] == "running" || reported["status"] == "starting") {
-		return fmt.Errorf("Codex App Server is active; stop it first or explicitly use --force")
-	}
-	if node["status"] != "online" {
-		return fmt.Errorf("Node is offline; cannot verify active sessions. Restore its connection or explicitly use --force")
-	}
-	if count, ok := node["sshSessionCount"].(float64); ok && count > 0 {
-		return fmt.Errorf("active SSH session exists; close it first or explicitly use --force")
-	}
-	for _, capability := range []string{"process", "pty"} {
-		result, _, err := client.invoke(ctx, client.identity.NodeID, capability, map[string]any{"action": "list"})
-		if err != nil {
-			return err
-		}
-		view, _ := result.(map[string]any)
-		key := "processes"
-		if capability == "pty" {
-			key = "sessions"
-		}
-		items, _ := view[key].([]any)
-		for _, raw := range items {
-			item, _ := raw.(map[string]any)
-			if item["running"] == true {
-				return fmt.Errorf("active %s session exists; close it first or explicitly use --force", capability)
-			}
-		}
-	}
-	return nil
-}
-
 func runUpdate(ctx context.Context, options cliOptions, args []string, stdin io.Reader, stdout, stderr io.Writer) (any, error) {
+	_ = stdin
+	_ = stderr
+	defaultState, err := defaultSupervisorStateDir()
+	if err != nil {
+		return nil, err
+	}
 	set := flagSet("update")
 	check := set.Bool("check", false, "only check for a release")
-	force := set.Bool("force", false, "allow active sessions to be interrupted")
+	noWait := set.Bool("no-wait", false, "return after Supervisor accepts the update")
+	stateDir := set.String("state-dir", defaultState, "Mira state directory")
 	requested := set.String("version", "latest", "target release version")
 	if err := set.Parse(args); err != nil {
 		return nil, err
 	}
 	target := strings.TrimPrefix(*requested, "v")
-	var err error
 	if target == "latest" {
 		target, err = latestRelease(ctx)
 	}
@@ -230,68 +213,57 @@ func runUpdate(ctx context.Context, options cliOptions, args []string, stdin io.
 	if !releaseVersionPattern.MatchString(target) {
 		return nil, fmt.Errorf("--version must be a semantic version or latest")
 	}
+	state, err := installation.LoadState(nil, *stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("read Mira installation: %w", err)
+	}
+	layout, err := supervisor.NewLayout(*stateDir)
+	if err != nil {
+		return nil, err
+	}
+	supervisorState, err := layout.ReadState()
+	if err != nil {
+		return nil, fmt.Errorf("read Supervisor state: %w", err)
+	}
+	if supervisorState.ServiceOwner != state.ServiceOwner {
+		return nil, fmt.Errorf("%w: install state says %s but Supervisor says %s", installation.ErrOwnershipConflict, state.ServiceOwner, supervisorState.ServiceOwner)
+	}
+	current := supervisorState.Current
 	if *check {
-		return map[string]any{"currentVersion": Version, "targetVersion": target, "updateAvailable": compareReleaseVersions(target, Version) > 0, "releaseUrl": "https://github.com/ssine/mira/releases/tag/v" + target}, nil
+		available := current != target
+		if releaseVersionPattern.MatchString(current) {
+			available = compareReleaseVersions(target, current) > 0
+		}
+		return map[string]any{"currentVersion": current, "targetVersion": target, "updateAvailable": available, "releaseUrl": "https://github.com/ssine/mira/releases/tag/v" + target, "serviceOwner": state.ServiceOwner}, nil
 	}
-	if options.JSON {
-		return nil, fmt.Errorf("--json is supported for update --check, not an interactive update")
+	target, settled := effectiveUpdateTarget(*requested, target, current, state.Version)
+	if settled {
+		return map[string]any{"status": "up_to_date", "version": current, "serviceOwner": state.ServiceOwner}, nil
 	}
-	if (target == Version && !*force) || (*requested == "latest" && compareReleaseVersions(target, Version) < 0) {
-		return map[string]any{"status": "up_to_date", "version": Version}, nil
+	client, err := supervisorapi.Discover(*stateDir)
+	if err != nil {
+		return nil, fmt.Errorf("connect to local Mira Supervisor: %w", err)
 	}
-	if !*force {
-		if err := updatePreflight(ctx, options); err != nil {
-			return nil, fmt.Errorf("update preflight: %w", err)
-		}
+	operation, err := client.RequestUpdate(ctx, target)
+	if err != nil {
+		return nil, err
 	}
-	var command *exec.Cmd
-	executable, _ := os.Executable()
-	installRoot := filepath.Dir(filepath.Dir(filepath.Dir(executable)))
-	if filepath.Base(filepath.Dir(filepath.Dir(executable))) != "versions" {
-		installRoot = ""
+	if !options.JSON {
+		fmt.Fprintf(stdout, "Mira Supervisor accepted update %s -> %s (%s).\n", current, target, operation.OperationID)
 	}
-	if runtime.GOOS == "windows" {
-		if installRoot == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return nil, err
-			}
-			installRoot = filepath.Join(home, ".mira")
-		}
-		installer := filepath.Join(installRoot, "install.ps1")
-		if _, err := os.Stat(installer); err != nil {
-			return nil, fmt.Errorf("this copy was not installed by the Mira installer; install the release first")
-		}
-		installer, err = downloadUpdateInstaller(ctx, "https://github.com/ssine/mira/releases/download/v"+target, installRoot, "install.ps1")
-		if err != nil {
-			return nil, err
-		}
-		defer os.Remove(installer)
-		command = exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", installer, "-Update", "-Version", target, "-InstallDirectory", installRoot)
-	} else {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, err
-		}
-		if installRoot == "" {
-			installRoot = filepath.Join(home, ".local", "share", "mira")
-		}
-		installer := filepath.Join(installRoot, "install.sh")
-		if _, err := os.Stat(installer); err != nil {
-			return nil, fmt.Errorf("this copy was not installed by the Mira installer; install the release first")
-		}
-		installer, err = downloadUpdateInstaller(ctx, "https://github.com/ssine/mira/releases/download/v"+target, installRoot, "install.sh")
-		if err != nil {
-			return nil, err
-		}
-		defer os.Remove(installer)
-		arguments := []string{installer, "--update", "--version", target}
-		if installRoot != filepath.Join(home, ".local", "share", "mira") {
-			arguments = append(arguments, "--prefix", filepath.Dir(filepath.Dir(installRoot)))
-		}
-		command = exec.CommandContext(ctx, "sh", arguments...)
+	if *noWait {
+		return map[string]any{"status": "accepted", "operation": operation, "serviceOwner": state.ServiceOwner}, nil
 	}
-	fmt.Fprintf(stdout, "Updating Mira %s -> %s. Node identity and configuration will be preserved.\n", Version, target)
-	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
-	return nil, command.Run()
+	status, err := client.Wait(ctx, operation.OperationID)
+	if err != nil {
+		return nil, fmt.Errorf("wait for Supervisor update: %w; the update continues independently", err)
+	}
+	result := map[string]any{"status": status.Phase, "operation": status, "serviceOwner": state.ServiceOwner}
+	if status.Phase == supervisorapi.PhaseSucceeded {
+		return result, nil
+	}
+	if status.Error == "" {
+		status.Error = "Mira update did not succeed"
+	}
+	return result, fmt.Errorf("%s: %s", status.Phase, status.Error)
 }

@@ -1,63 +1,38 @@
 name: mira
 
 services:
-  postgres:
-    image: postgres:17-alpine
+  server:
+    image: ghcr.io/ssine/mira:${MIRA_VERSION:?pin a released Mira version in .env}
     restart: unless-stopped
+    command: ["mira", "server-worker"]
     environment:
-      POSTGRES_DB: mira
-      POSTGRES_USER: mira
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U mira -d mira"]
-      interval: 2s
-      timeout: 3s
-      retries: 20
-
-  control:
-    build: ./server
-    restart: unless-stopped
-    environment:
-      DATABASE_URL: postgresql://mira:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/mira
+      DATABASE_URL: ${DATABASE_URL:?set an external PostgreSQL URL in .env}
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: "8787"
       MIRA_SECURE_COOKIES: "true"
-      # Managed App Servers run on remote Nodes, so they must receive the
-      # externally reachable ThreadStore endpoint rather than this container's
-      # loopback/default listen address.
-      MIRA_CODEX_STORE_ENDPOINT: https://mira.ssine.cc
-      # Safe because the published port below is loopback-only and Caddy is the
-      # only network-facing caller. Never enable this on a directly exposed port.
+      MIRA_CODEX_STORE_ENDPOINT: ${MIRA_CODEX_STORE_ENDPOINT:?set the public HTTPS Mira URL in .env}
+      # Safe only because the published port is loopback-only and Caddy is the
+      # sole network-facing caller.
       MIRA_TRUST_PROXY_HEADERS: "true"
       MIRA_SSH_MAX_SESSIONS: "128"
       MIRA_SSH_MAX_SESSIONS_PER_NODE: "32"
     ports:
       - "127.0.0.1:8787:8787"
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)})",
-        ]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/healthz"]
       interval: 2s
       timeout: 3s
       retries: 20
 
+  # This profile is for isolation tests only. A Home Server that should expose
+  # host files/processes runs its Node through `mira install --role server`.
   node:
-    build:
-      context: .
-      dockerfile: node/Dockerfile
+    image: ghcr.io/ssine/mira:${MIRA_VERSION:?pin a released Mira version in .env}
     profiles: ["container-node"]
     restart: unless-stopped
+    command: ["mira-node"]
     environment:
-      MIRA_SERVER_URL: http://control:8787
+      MIRA_SERVER_URL: http://server:8787
       MIRA_NODE_KEY: mira-homeserver-docker
       MIRA_IDENTITY_FILE: /home/node/.config/mira/identity.json
       MIRA_NODE_HEARTBEAT_SECONDS: "1"
@@ -67,10 +42,9 @@ services:
       - homeserver-codex-home:/home/node/.codex
       - homeserver-node-identity:/home/node/.config/mira
     depends_on:
-      control:
+      server:
         condition: service_healthy
 
 volumes:
-  postgres-data:
   homeserver-codex-home:
   homeserver-node-identity:

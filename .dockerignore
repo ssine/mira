@@ -1,0 +1,12 @@
+.git
+.env
+codex
+dist
+node/android/.gradle
+node/android/build
+node/openssh/.cache
+node/openssh/out/windows-amd64
+node/openssh/out/android-arm64
+node_modules
+tests/client-*
+tests/workspace

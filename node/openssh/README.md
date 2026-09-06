@@ -74,10 +74,12 @@ The one APK source can use the independent debug application ID described in
 overrides). No implicit plain-Go fallback. `MIRA_RELEASE_TARGETS` can select an
 explicit subset for local packaging tests; official Release builds require all.
 
-The optional container Node consumes the same verified native bundle. Build it
-from the repository root with `docker build -f node/Dockerfile .` after placing
-the matching architecture in `node/openssh/out/`. It does not compile a second
-plain-Go implementation or install a system SSH service.
+The unified container consumes the same verified native bundle and can run either
+`mira server-worker` or `mira-node`. Build it from the repository root with
+`docker build --build-arg MIRA_VERSION=$(cat VERSION) -f node/Dockerfile .` after placing
+the matching architecture in `node/openssh/out/`. Node.js is used only in the verification
+build stage; the runtime image contains no Node.js server or npm dependency. It does not
+compile a second plain-Go implementation or install a system SSH service.
 
 Linux tarballs contain one executable and role symlinks. Windows ZIP contains one
 PE, manifest and notices; the per-user installer creates NTFS hard links before

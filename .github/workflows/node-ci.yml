@@ -1,27 +1,39 @@
-name: Node CI
+name: Unified Mira CI
 
 on:
   workflow_dispatch:
   push:
     paths:
       - "node/**"
+      - "package.json"
+      - "package-lock.json"
       - "scripts/build-release.sh"
       - "scripts/install.ps1"
       - "scripts/install.sh"
+      - "scripts/release-container.sh"
+      - "scripts/release-state.sh"
       - "tests/installers_e2e.mjs"
-      - "tests/openwrt_installer_e2e.mjs"
-      - "tests/node_channel_test.mjs"
-      - "tests/ssh_relay_test.mjs"
+      - "tests/release_publication_test.mjs"
+      - "node/openssh/tests/e2e.mjs"
+      - ".github/workflows/node-ci.yml"
+      - ".github/workflows/promote-release.yml"
+      - ".github/workflows/release.yml"
   pull_request:
     paths:
       - "node/**"
+      - "package.json"
+      - "package-lock.json"
       - "scripts/build-release.sh"
       - "scripts/install.ps1"
       - "scripts/install.sh"
+      - "scripts/release-container.sh"
+      - "scripts/release-state.sh"
       - "tests/installers_e2e.mjs"
-      - "tests/openwrt_installer_e2e.mjs"
-      - "tests/node_channel_test.mjs"
-      - "tests/ssh_relay_test.mjs"
+      - "tests/release_publication_test.mjs"
+      - "node/openssh/tests/e2e.mjs"
+      - ".github/workflows/node-ci.yml"
+      - ".github/workflows/promote-release.yml"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: read
@@ -40,27 +52,34 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: server/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: node/go.mod
           cache-dependency-path: node/go.sum
 
-      - name: Install server dependencies
-        run: npm ci --prefix server
+      - name: Install JavaScript test dependencies
+        run: npm ci --ignore-scripts
 
-      - name: Check Node integration JavaScript
+      - name: Verify checked-in browser dependencies
         run: |
-          npm run check --prefix server
-          node --test tests/codex_release_test.mjs tests/codex_runtime_ui_test.mjs
-          node --test tests/node_channel_test.mjs tests/ssh_relay_test.mjs
+          cmp node_modules/@xterm/xterm/lib/xterm.mjs node/internal/webassets/web/vendor/xterm.js
+          cmp node_modules/@xterm/xterm/css/xterm.css node/internal/webassets/web/vendor/xterm.css
+          cmp node_modules/@xterm/addon-fit/lib/addon-fit.mjs node/internal/webassets/web/vendor/xterm-addon-fit.js
+          cmp node_modules/marked/lib/marked.esm.js node/internal/webassets/web/vendor/marked.js
+          cmp node_modules/dompurify/dist/purify.es.mjs node/internal/webassets/web/vendor/dompurify.js
 
-      - name: Test Mira Node
+      - name: Check release integration JavaScript
+        run: >-
+          node --test tests/codex_release_test.mjs tests/codex_runtime_ui_test.mjs
+          tests/release_publication_test.mjs
+
+      - name: Test unified Mira program
         working-directory: node
         run: go test -race ./...
 
-      - name: Cross-compile Mira Node
+      - name: Cross-compile Mira
         working-directory: node
         run: |
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira-node.exe ./cmd/mira-node
@@ -86,31 +105,22 @@ jobs:
             tar -xzf "$RUNNER_TEMP/native/openssh-$target.tar.gz" -C "node/openssh/out/$target"
           done
 
-      - name: Build release archives and test installers
+      - name: Build release archives and test initial bootstrap
         run: |
           ./scripts/build-release.sh dist
           node tests/installers_e2e.mjs
 
-      - name: Build integration Server container
-        run: docker build -t mira-control:node-ci ./server
+      - name: Build the Node-free unified Mira image
+        run: docker build --build-arg MIRA_VERSION="$(cat VERSION)" -f node/Dockerfile -t mira:ci .
 
-      - name: Test embedded OpenSSH through Mira transport
+      - name: Test embedded OpenSSH through the Go Server
         env:
-          MIRA_SECURE_COOKIES: "false"
+          MIRA_TEST_DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
+          MIRA_TEST_LINUX_SINGLEFILE: ${{ github.workspace }}/node/openssh/out/linux-amd64/mira-node
         run: |
           docker compose -f compose.yaml up -d --wait postgres
-          trap 'docker rm -f mira-node-ci-control >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
-          printf '%s\n' 'mira-local-admin-password' | npm run admin --prefix server -- set-password admin
-          docker run -d --name mira-node-ci-control --network host \
-            -e DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira \
-            -e MIRA_SECURE_COOKIES=false -e LISTEN_HOST=127.0.0.1 \
-            mira-control:node-ci
-          for attempt in $(seq 1 40); do
-            if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
-            if [ "$attempt" -eq 40 ]; then docker logs mira-node-ci-control; exit 1; fi
-            sleep 0.5
-          done
-          MIRA_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira MIRA_TEST_LINUX_SINGLEFILE="$PWD/node/openssh/out/linux-amd64/mira-node" node node/openssh/tests/e2e.mjs
+          trap 'docker compose -f compose.yaml down -v' EXIT
+          node node/openssh/tests/e2e.mjs
 
   windows-native:
     strategy:
@@ -123,9 +133,18 @@ jobs:
         with:
           go-version-file: node/go.mod
           cache-dependency-path: node/go.sum
-      - name: Test native Windows capabilities and ConPTY
+      - name: Test native Windows capabilities and Supervisor
         working-directory: node
         run: go test -v ./...
+      - name: Reject the removed installer update path
+        shell: pwsh
+        run: |
+          try {
+            & scripts/install.ps1 -Update
+            throw "legacy installer update unexpectedly succeeded"
+          } catch {
+            if ("$_" -notmatch "Installer-driven updates were removed") { throw }
+          }
       - name: Test Windows tray startup, close, duplicate launch and exit
         shell: pwsh
         run: |

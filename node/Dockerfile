@@ -12,10 +12,12 @@ COPY node/openssh/out/linux-${TARGETARCH}/ /native/
 RUN test "$(cat VERSION)" = "$MIRA_VERSION" \
   && node node/openssh/stage-package.mjs /native /out linux "$TARGETARCH"
 
-FROM node:22-bookworm-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update \
-  && apt-get install --yes --no-install-recommends ca-certificates procps util-linux \
+  && apt-get install --yes --no-install-recommends ca-certificates curl procps util-linux \
+  && groupadd --gid 1000 node \
+  && useradd --uid 1000 --gid node --create-home --shell /bin/sh node \
   && rm -rf /var/lib/apt/lists/*
 RUN install -d -o node -g node /home/node/.codex /home/node/.config/mira
 COPY --from=build /out/ /opt/mira/

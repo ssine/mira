@@ -11,6 +11,9 @@ import (
 )
 
 func main() {
+	if handled, code := miranode.RunWindowsServiceIfNeeded(os.Args[1:]); handled {
+		os.Exit(code)
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--mira-tray-build" {
 		if !miranode.SupportsTray() {
 			os.Exit(1)
@@ -26,6 +29,9 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if handled, code := miranode.RunSystemRole(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
+		os.Exit(code)
+	}
 	// APKs ship one executable. The same embedded client can be invoked from
 	// a Node process/shell with its normal MIRA_IDENTITY_FILE environment.
 	if len(os.Args) > 1 && os.Args[1] == "cli" {

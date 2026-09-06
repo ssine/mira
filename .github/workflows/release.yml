@@ -13,6 +13,11 @@ on:
 
 permissions:
   contents: write
+  packages: write
+
+concurrency:
+  group: mira-release-publication
+  cancel-in-progress: false
 
 jobs:
   embedded-openssh:
@@ -43,6 +48,7 @@ jobs:
           test "$(gh release view "$tag" --json isDraft --jq .isDraft)" = false
 
       - name: Validate unified version
+        id: version
         shell: bash
         run: |
           node scripts/check-version.mjs
@@ -51,6 +57,7 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match VERSION ${version}" >&2
             exit 1
           fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - uses: actions/download-artifact@v4
         with:
@@ -69,11 +76,22 @@ jobs:
             tar -xzf "$RUNNER_TEMP/native/openssh-$target.tar.gz" -C "node/openssh/out/$target"
           done
 
-      - name: Build desktop Node and CLI artifacts
+      - name: Build unified Mira artifacts
         run: |
+          npm ci --ignore-scripts
+          diff -qr --exclude vendor server/public node/internal/webassets/web
+          cmp node_modules/@xterm/xterm/lib/xterm.mjs node/internal/webassets/web/vendor/xterm.js
+          cmp node_modules/@xterm/xterm/css/xterm.css node/internal/webassets/web/vendor/xterm.css
+          cmp node_modules/@xterm/addon-fit/lib/addon-fit.mjs node/internal/webassets/web/vendor/xterm-addon-fit.js
+          cmp node_modules/marked/lib/marked.esm.js node/internal/webassets/web/vendor/marked.js
+          cmp node_modules/dompurify/dist/purify.es.mjs node/internal/webassets/web/vendor/dompurify.js
+          node --test tests/release_publication_test.mjs
           go -C node test ./...
           ./scripts/build-release.sh dist
           node tests/installers_e2e.mjs
+
+      - name: Validate the Node-free Mira container
+        run: docker build --build-arg MIRA_VERSION="${{ steps.version.outputs.version }}" -f node/Dockerfile -t mira:release-check .
 
       - uses: actions/setup-java@v5
         with:
@@ -113,19 +131,114 @@ jobs:
           path: dist/*
           retention-days: 7
 
+      - name: Create the promotion draft for acceptance-only runs
+        if: github.event_name == 'workflow_dispatch' && inputs.publish != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash scripts/release-state.sh prepare draft "$GITHUB_SHA" "$GITHUB_OUTPUT"
+
+      - name: Verify publication identity before any container push
+        id: publication
+        if: github.ref_type == 'tag' || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: bash scripts/release-state.sh prepare publish "$GITHUB_SHA" "$GITHUB_OUTPUT"
+
+      - name: Stage or verify GitHub Release assets
+        if: github.ref_type == 'tag' || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: >-
+          bash scripts/release-state.sh sync-assets
+          "${{ steps.publication.outputs.tag }}"
+          "${{ steps.publication.outputs.release_state }}" dist
+
+      - uses: docker/setup-qemu-action@v3
+        if: github.ref_type == 'tag' || inputs.publish == true
+
+      - uses: docker/setup-buildx-action@v3
+        if: github.ref_type == 'tag' || inputs.publish == true
+
+      - uses: docker/login-action@v3
+        if: github.ref_type == 'tag' || inputs.publish == true
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check immutable version container state
+        id: container
+        if: github.ref_type == 'tag' || inputs.publish == true
+        shell: bash
+        run: >-
+          bash scripts/release-container.sh check
+          "ghcr.io/${{ github.repository }}:${{ steps.publication.outputs.version }}"
+          "${{ steps.publication.outputs.recorded_digest }}"
+          "$GITHUB_OUTPUT"
+
+      - name: Build the unified Mira container under a staging tag
+        id: staged_image
+        uses: docker/build-push-action@v6
+        if: (github.ref_type == 'tag' || inputs.publish == true) && steps.container.outputs.push == 'true'
+        with:
+          context: .
+          file: node/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: MIRA_VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.container.outputs.staging_image }}
+
+      - name: Publish the immutable version container
+        id: version_image
+        if: (github.ref_type == 'tag' || inputs.publish == true) && steps.container.outputs.push == 'true'
+        shell: bash
+        run: >-
+          bash scripts/release-container.sh promote
+          "ghcr.io/${{ github.repository }}:${{ steps.publication.outputs.version }}"
+          "${{ steps.container.outputs.staging_image }}"
+          "${{ steps.staged_image.outputs.digest }}"
+          "$GITHUB_OUTPUT"
+
+      - name: Resolve the verified version container digest
+        id: verified_image
+        if: github.ref_type == 'tag' || inputs.publish == true
+        env:
+          NEW_DIGEST: ${{ steps.version_image.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.container.outputs.existing_digest }}
+        shell: bash
+        run: |
+          digest=${NEW_DIGEST:-$EXISTING_DIGEST}
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the version container digest to the GitHub Release
+        if: (github.ref_type == 'tag' || inputs.publish == true) && steps.container.outputs.needs_record == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          bash scripts/release-container.sh record \
+            "${{ steps.publication.outputs.tag }}" \
+            "${{ steps.publication.outputs.digest_asset }}" \
+            "${{ steps.verified_image.outputs.digest }}"
+
       - name: Publish GitHub Release
         if: github.ref_type == 'tag' || inputs.publish == true
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          version=$(<VERSION)
-          tag="v${version}"
-          if [[ "${GITHUB_REF_TYPE}" != "tag" ]]; then
-            git tag "${tag}"
-            git push origin "${tag}"
-          fi
-          gh release create "${tag}" dist/* \
-            --verify-tag \
-            --generate-notes \
-            --title "Mira ${version}"
+          tag="${{ steps.publication.outputs.tag }}"
+          gh release edit "$tag" --draft=false --latest
+
+      - name: Move latest container tag after the GitHub Release is public
+        if: github.ref_type == 'tag' || inputs.publish == true
+        shell: bash
+        run: |
+          version="${{ steps.publication.outputs.version }}"
+          docker buildx imagetools create \
+            --tag "ghcr.io/${GITHUB_REPOSITORY}:latest" \
+            "ghcr.io/${GITHUB_REPOSITORY}:${version}@${{ steps.verified_image.outputs.digest }}"

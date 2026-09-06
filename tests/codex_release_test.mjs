@@ -64,12 +64,11 @@ test("Mira and Codex have separate jobs, tags and latest policy", async () => {
   assert.match(codex, /CODEX_VERSION patches\/codex\//);
 });
 
-test("Codex fault tests wait for PostgreSQL's final TCP SQL listener", async () => {
+test("Codex runtime checks do not restore the removed Node.js Server", async () => {
   const workflow = await fs.readFile(path.join(root, ".github/workflows/codex-release.yml"), "utf8");
-  assert.match(workflow, /psql -h 127\.0\.0\.1 -U mira -d mira -XAtqc 'SELECT 1'/);
-  assert.doesNotMatch(workflow, /pg_isready -U mira/,
-    "socket readiness can match the temporary initdb server that is about to stop");
-  assert.match(workflow, /docker logs mira-codex-test-postgres/);
+  assert.match(workflow, /name: Test runtime fixture cleanup/);
+  assert.match(workflow, /node --test tests\/runtime_fixture_cleanup_test\.mjs/);
+  assert.doesNotMatch(workflow, /npm ci --prefix server|runtime_reliability_e2e\.mjs/);
 });
 
 test("compiler objects use bounded batched snapshots, not per-object GHA uploads", async () => {
@@ -99,9 +98,9 @@ test("post-build failures retain diagnostic packages without making failed runs 
     assert(upload, `missing ${name} upload`);
     assert(upload.includes("if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success')"));
   }
-  const fault = steps.find((step) => step.startsWith("name: Fault-inject persistence"));
-  assert(fault.includes("node --test tests/runtime_fixture_cleanup_test.mjs"));
-  assert.doesNotMatch(fault, /continue-on-error/);
+  const cleanup = steps.find((step) => step.startsWith("name: Test runtime fixture cleanup"));
+  assert(cleanup.includes("node --test tests/runtime_fixture_cleanup_test.mjs"));
+  assert.doesNotMatch(cleanup, /continue-on-error/);
   const releaseHeader = workflow.split("\n  release:\n")[1].split("    steps:")[0];
   assert.match(releaseHeader, /needs: codex/);
   assert.doesNotMatch(releaseHeader, /if:/, "do not bypass failed platform jobs for release packaging");

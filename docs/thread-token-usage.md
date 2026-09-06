@@ -13,7 +13,7 @@ Missing fields are unknown, and real zero values remain zero. Out-of-range or ma
 not coerced into numbers. No requests to a model or a running Node are needed.
 
 Schema 21 adds a partial event lookup index only. Raw events stay untouched. The fallback validates
-candidate structure in JavaScript because PostgreSQL JSON extraction can reject canonical JSON that
+candidate structure in Go because PostgreSQL JSON extraction can reject canonical JSON that
 contains escaped NUL. Its cache is bounded and keyed by store, thread, generation and immutable item
 count. Metadata updates bypass that cache, so updates without new history items still become visible.
 All values can be reconstructed from existing canonical metadata/history after a projection rebuild.
@@ -29,8 +29,8 @@ resizable from 240 to 480 px, supports keyboard arrows/Home/End and persists as 
 mobile retains its existing gesture drawer. Recency labels use only time today, weekday within seven
 calendar days, and date for older conversations (including the year when different).
 
-Validation: `npm run check --prefix server`, `tests/thread_token_usage_e2e.mjs` against a disposable
-Server database, and `tests/thread_token_usage_browser.mjs` cover cumulative snapshots, imported
+Validation: `go test ./internal/miraserver/views` from `node/`, its opt-in PostgreSQL integration test,
+and `tests/thread_token_usage_browser.mjs` cover cumulative snapshots, imported
 history, zero/unknown, raw NUL, subagents, generation replacement, metadata-only updates, projection
 rebuilds, API authentication, responsive layout and live updates of both views.
 
@@ -70,7 +70,7 @@ the requested page. The final assistant message in each completed turn shows tha
 estimated cost beside its total elapsed time. Zero, partial and unavailable estimates remain distinct;
 the tooltip states that the value uses Standard API prices rather than ChatGPT plan deductions.
 
-The estimate uses the dated Standard USD prices in `server/model-pricing.mjs`, sourced from
+The estimate uses the dated Standard USD prices in `node/internal/miraserver/views/cost.go`, sourced from
 https://developers.openai.com/api/docs/pricing and the corresponding model pages. It prices each new
 `last_token_usage` snapshot against its recorded model context/settings, deduplicating repeated
 cumulative snapshots. Ordinary input excludes cache reads/writes; reasoning output is already included
@@ -89,7 +89,7 @@ The details panel shows a direct dollar amount, the sidebar separates its compac
 token summary with a middle dot, and completed-turn footers show the per-turn amount; none adds an
 approximation sign.
 
-Additional validation: `thread_cost_test.mjs`, `thread_cost_e2e.mjs`, `thread_models_browser.mjs` and
+Additional validation: the Go views tests, `thread_models_browser.mjs` and
 `thread_token_usage_browser.mjs` cover pricing, model changes, cache writes, long-context thresholds,
 cache/rebuild/generation behavior, authentication, mixed-model cost display, default/model selection,
 project races and live updates. Browser execution uses simulated Node RPCs and sends no real model calls.

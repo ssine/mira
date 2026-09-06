@@ -10,8 +10,7 @@ not an authorization boundary.
 Create or reset the sole administrator on the Server host:
 
 ```bash
-cd server
-npm run admin -- set-password admin
+mira server admin set-password admin
 ```
 
 The command reads a password from a hidden TTY, stdin, or `MIRA_ADMIN_PASSWORD_FILE`, hashes it with

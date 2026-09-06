@@ -7,10 +7,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {spawn,execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
-import pg from '../../../server/node_modules/pg/lib/index.js';
+import pg from 'pg';
 import net from 'node:net';
-import {initializeDatabase} from '../../../server/db.mjs';
-import {hashPassword} from '../../../server/auth.mjs';
 import {loginAdmin,approvePendingNode,adminRequest} from '../../../tests/auth_helpers.mjs';
 
 const repo=path.resolve(import.meta.dirname,'../../..');
@@ -60,15 +58,16 @@ async function enroll(name,env={}){
 }
 try{
   await rootPool.query(`CREATE DATABASE ${database}`);created=true;
-  pool=new pg.Pool({connectionString:connection.toString()});await initializeDatabase(pool);
-  const password=crypto.randomBytes(24).toString('base64url');
-  await pool.query("INSERT INTO mira_admin_users(username,password_hash) VALUES ('admin',$1)",[await hashPassword(password)]);
   assert(process.env.MIRA_TEST_LINUX_SINGLEFILE,'set MIRA_TEST_LINUX_SINGLEFILE to the linked Linux image');
   const image=path.resolve(process.env.MIRA_TEST_LINUX_SINGLEFILE);
   await fs.copyFile(image,nodeBinary);await fs.chmod(nodeBinary,0o700);
   for(const role of ['mira','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen'])await fs.link(nodeBinary,path.join(binaries,role));
   assert.equal(execFileSync(nodeBinary,['--mira-openssh-build'],{encoding:'utf8'}).trim(),'MIRA_LINKED_OPENSSH_LINUX_STATIC_V1');
-  launch(process.execPath,['server/server.mjs'],{DATABASE_URL:connection.toString(),LISTEN_HOST:process.env.MIRA_OPENSSH_TEST_LISTEN??'127.0.0.1',LISTEN_PORT:String(port),MIRA_SECURE_COOKIES:'false'});
+  const password=crypto.randomBytes(24).toString('base64url');
+  const serverEnvironment={...process.env,DATABASE_URL:connection.toString(),LISTEN_HOST:process.env.MIRA_OPENSSH_TEST_LISTEN??'127.0.0.1',LISTEN_PORT:String(port),MIRA_SECURE_COOKIES:'false',MIRA_CODEX_STORE_ENDPOINT:publicURL};
+  execFileSync(nodeBinary,['cli','server','admin','set-password','admin'],{env:serverEnvironment,input:password+'\n'});
+  pool=new pg.Pool({connectionString:connection.toString()});
+  launch(nodeBinary,['cli','server-worker'],serverEnvironment);
   await wait(async()=>{try{return(await fetch(url+'/healthz')).ok}catch{return false}},'test Server');
   admin=await loginAdmin(url,'admin',password);
   const a=await enroll('source'),b=await enroll('target');

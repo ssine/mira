@@ -1,24 +1,32 @@
-name: Server CI
+name: Server and Web CI
 
 on:
   workflow_dispatch:
   push:
     paths:
       - ".github/workflows/ci.yml"
-      - "CODEX_VERSION"
       - "VERSION"
       - "compose*.yaml"
       - "scripts/check-version.mjs"
-      - "server/**"
+      - "node/go.mod"
+      - "node/go.sum"
+      - "node/internal/miraserver/**"
+      - "node/internal/server_worker.go"
+      - "node/internal/webassets/**"
+      - "server/public/**"
       - "tests/**"
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
-      - "CODEX_VERSION"
       - "VERSION"
       - "compose*.yaml"
       - "scripts/check-version.mjs"
-      - "server/**"
+      - "node/go.mod"
+      - "node/go.sum"
+      - "node/internal/miraserver/**"
+      - "node/internal/server_worker.go"
+      - "node/internal/webassets/**"
+      - "server/public/**"
       - "tests/**"
 
 permissions:
@@ -33,54 +41,66 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
 
-      - name: Install server dependencies
-        run: npm ci --prefix server
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
 
-      - name: Check Server and Web code
+      - name: Check version and Web sources
         run: |
-          npm run check --prefix server
-          for file in tests/*.mjs; do node --check "$file"; done
+          node scripts/check-version.mjs
+          diff -qr --exclude vendor server/public node/internal/webassets/web
+          for file in server/public/*.js tests/*.mjs; do node --check "$file"; done
+          node --test \
+            tests/account_status_test.mjs \
+            tests/conversation_progress_test.mjs \
+            tests/thread_title_test.mjs \
+            tests/thread_token_usage_test.mjs \
+            tests/trace_copy_test.mjs
+
+      - name: Test native Go Server and embedded Web assets
+        working-directory: node
+        run: go test -race ./internal/miraserver/... ./internal/webassets/...
 
       - name: Check Python helpers
         run: python3 -m compileall -q tests
 
       - name: Validate Compose files
         env:
-          POSTGRES_PASSWORD: ci-only-password
+          DATABASE_URL: postgresql://mira:ci-only@postgres.example.internal:5432/mira
+          MIRA_CODEX_STORE_ENDPOINT: https://mira.example.test
+          MIRA_VERSION: 0.13.5
         run: |
           docker compose -f compose.yaml config --quiet
           docker compose -f compose.homeserver.yaml config --quiet
 
-      - name: Build production Server container
-        run: docker build -t mira-control:ci ./server
-
-      - name: Test Server, Web, authentication, and session transfer
+      - name: Test PostgreSQL migrations and read models
         env:
-          MIRA_SECURE_COOKIES: "false"
+          TEST_DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
         run: |
           docker compose -f compose.yaml up -d --wait postgres
-          trap 'docker rm -f mira-ci-control >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
-          printf '%s\n' 'mira-local-admin-password' | npm run admin --prefix server -- set-password admin
-          docker run -d --name mira-ci-control --network host \
-            -e DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira \
-            -e MIRA_SECURE_COOKIES=false -e LISTEN_HOST=127.0.0.1 \
-            mira-control:ci
+          trap 'docker compose -f compose.yaml down -v' EXIT
+          MIRA_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/foundation
+          MIRA_NODES_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/nodes
+          MIRA_VIEWS_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/views
+          MIRA_IMPORT_ADAPTER_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver ./internal/miraserver/imports
+
+      - name: Test Go Server, Web, authentication, and Node channel
+        env:
+          DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
+          MIRA_SECURE_COOKIES: "false"
+          LISTEN_HOST: 127.0.0.1
+        run: |
+          docker compose -f compose.yaml up -d --wait postgres
+          go -C node build -o "$RUNNER_TEMP/mira" ./cmd/mira
+          printf '%s\n' 'mira-local-admin-password' | "$RUNNER_TEMP/mira" server admin set-password admin
+          "$RUNNER_TEMP/mira" server-worker >"$RUNNER_TEMP/mira-server.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
           for attempt in $(seq 1 40); do
             if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
-            if [ "$attempt" -eq 40 ]; then docker logs mira-ci-control; exit 1; fi
+            if [ "$attempt" -eq 40 ]; then cat "$RUNNER_TEMP/mira-server.log"; exit 1; fi
             sleep 0.5
           done
-          node tests/auth_enrollment_e2e.mjs
           node tests/web_console_e2e.mjs
-          MIRA_TRANSFER_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/session_transfer_e2e.mjs
-          MIRA_STORAGE_ROWS_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/storage_rows_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_management_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/fork_titles_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_activity_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_reads_api_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/account_history_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_token_usage_e2e.mjs
-          MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL=postgresql://mira:mira-local@127.0.0.1:55432/mira node tests/thread_cost_e2e.mjs

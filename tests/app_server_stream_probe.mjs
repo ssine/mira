@@ -7,13 +7,13 @@ import fs from 'node:fs/promises';
 import http from 'node:http';
 import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
-import {WebSocket, WebSocketServer} from '../server/node_modules/ws/wrapper.mjs';
+import {WebSocket, WebSocketServer} from 'ws';
 import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import assert from 'node:assert/strict';
 const {chromium} = await import(process.argv[2] ?? 'playwright');
-const root=fileURLToPath(new URL('../server/', import.meta.url));
+const root=fileURLToPath(new URL('../node/internal/webassets/web/', import.meta.url));
 const cli=process.env.MIRA_CLI_PATH;
 assert(cli && path.isAbsolute(cli), 'MIRA_CLI_PATH must be the absolute installed Mira CLI path');
 const nodeId=process.env.MIRA_STREAM_NODE_ID;
@@ -25,19 +25,18 @@ assert(/^[a-z0-9_-]+$/i.test(label), 'MIRA_STREAM_LABEL must be a filename label
 const output=process.env.MIRA_STREAM_OUTPUT ?? path.join(os.tmpdir(), `mira-stream-${label}.json`);
 const stamp=()=>performance.timeOrigin+performance.now();
 const capture=[]; const children=[]; const progress=setInterval(()=>{console.log(JSON.stringify({stage:'progress',direct:capture.filter(e=>e.stage==='direct'&&e.message.method==='item/agentMessage/delta').length,proxy:capture.filter(e=>e.stage==='proxy'&&e.message.method==='item/agentMessage/delta').length,last:capture.slice(-2).map(e=>({stage:e.stage,method:e.message.method}))}));},10000);
-const vendors={'/vendor/xterm-addon-fit.js':'@xterm/addon-fit/lib/addon-fit.mjs','/vendor/xterm.js':'@xterm/xterm/lib/xterm.mjs','/vendor/xterm.css':'@xterm/xterm/css/xterm.css','/vendor/dompurify.js':'dompurify/dist/purify.es.mjs','/vendor/marked.js':'marked/lib/marked.esm.js'};
 const publicAssets = new Set(['/', '/app.js', '/styles.css', '/trace-activity.js', '/conversation-progress.js', '/theme.js', '/pwa.js']);
 const server=http.createServer(async(req,res)=>{
  try{
   if(req.url.startsWith('/v1/')){res.setHeader('content-type','application/json');res.end(JSON.stringify(req.url.includes('transcript')?{trace:[],generation:1,nextCursor:null}:{data:[]}));return;}
-  if (!vendors[req.url] && !publicAssets.has(req.url)) {res.writeHead(404);res.end();return;}
-  const path=vendors[req.url]?'node_modules/'+vendors[req.url]:'public/'+(req.url==='/'?'index.html':req.url.slice(1));
-  let body=await fs.readFile(root+path,'utf8');
+  if (!req.url.startsWith('/vendor/') && !publicAssets.has(req.url)) {res.writeHead(404);res.end();return;}
+  const assetPath=req.url==='/'?'index.html':req.url.slice(1);
+  let body=await fs.readFile(path.join(root,assetPath),'utf8');
   if(req.url==='/app.js')body=body.replace('void bootstrap();',`show('agentView'); window.streamProbe={agent,call:rpc,upsertTrace,renderTranscript,ready:false};
   const probeSocket=new WebSocket('ws://'+location.host+'/stream'); agent.socket=probeSocket; agent.socketNodeId='probe';
   probeSocket.addEventListener('message',onAgentSocketMessage);
   probeSocket.addEventListener('open',async()=>{ await rpc('initialize',{clientInfo:{name:'mira_stream_probe',version:'1'},capabilities:{experimentalApi:true}});probeSocket.send(JSON.stringify({method:'initialized'}));agent.socketInitialized=true;window.streamProbe.ready=true;});`);
-  res.setHeader('content-type',path.endsWith('.html')?'text/html':path.endsWith('.css')?'text/css':'text/javascript');res.end(body);
+  res.setHeader('content-type',assetPath.endsWith('.html')?'text/html':assetPath.endsWith('.css')?'text/css':'text/javascript');res.end(body);
  }catch(e){res.writeHead(404);res.end();}
 });
 const wss=new WebSocketServer({server,path:'/stream'});

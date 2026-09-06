@@ -2,16 +2,11 @@ package node
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
-	"time"
 )
 
 func TestReleaseVersionComparison(t *testing.T) {
@@ -35,7 +30,8 @@ func TestReleaseVersionComparison(t *testing.T) {
 
 func TestSetupPreservesConfigurationAndBinding(t *testing.T) {
 	directory := t.TempDir()
-	t.Setenv("MIRA_IDENTITY_FILE", filepath.Join(directory, "identity.json"))
+	identity := filepath.Join(directory, "identity.json")
+	t.Setenv("MIRA_IDENTITY_FILE", identity)
 	arguments := []string{"--server", "https://mira.example.test"}
 	if _, err := runSetup(arguments); err != nil {
 		t.Fatal(err)
@@ -54,6 +50,37 @@ func TestSetupPreservesConfigurationAndBinding(t *testing.T) {
 	after, err := os.ReadFile(configuration)
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatal("setup modified existing configuration")
+	}
+	var parsed fileConfig
+	if err := json.Unmarshal(after, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.IdentityFile != identity {
+		t.Fatalf("configured identity path = %q, want %q", parsed.IdentityFile, identity)
+	}
+}
+
+func TestSetupStoresExplicitServiceIdentity(t *testing.T) {
+	directory := t.TempDir()
+	configuration := filepath.Join(directory, "state", "node.json")
+	identity := filepath.Join(directory, "state", "node-identity.json")
+	if _, err := runSetup([]string{
+		"--server", "https://mira.example.test",
+		"--config", configuration,
+		"--identity", identity,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(configuration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed fileConfig
+	if err := json.Unmarshal(content, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed.IdentityFile != identity {
+		t.Fatalf("configured identity path = %q, want %q", parsed.IdentityFile, identity)
 	}
 }
 
@@ -82,54 +109,5 @@ func TestOutputPreservesSplitUTF8(t *testing.T) {
 	}
 	if output.String() != expected {
 		t.Fatalf("UTF-8 corrupted: %q", output.String())
-	}
-}
-
-func TestUpdatePreflightRequiresKnownIdleState(t *testing.T) {
-	for _, test := range []struct {
-		name, status, appServer, want string
-		busy                          bool
-		sshSessions                   int
-	}{
-		{"offline", "offline", "stopped", "offline", false, 0},
-		{"app-server", "online", "running", "App Server is active", false, 0},
-		{"process", "online", "stopped", "active process", true, 0},
-		{"ssh", "online", "stopped", "active SSH", false, 1},
-		{"idle", "online", "stopped", "", false, 0},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			var nodeID string
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("content-type", "application/json")
-				if r.URL.Path == "/v1/nodes" {
-					_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"nodeId": nodeID, "nodeKey": "preflight-test", "status": test.status}}})
-					return
-				}
-				if r.Method == http.MethodGet {
-					_ = json.NewEncoder(w).Encode(map[string]any{"status": test.status, "sshSessionCount": test.sshSessions, "reportedAppServer": map[string]any{"status": test.appServer}})
-					return
-				}
-				_ = json.NewEncoder(w).Encode(map[string]any{"result": map[string]any{"processes": []map[string]any{{"running": test.busy}}, "sessions": []any{}}})
-			}))
-			defer server.Close()
-			identity := filepath.Join(t.TempDir(), "identity.json")
-			state, err := loadOrCreateNodeState(config{ServerURL: server.URL, IdentityFile: identity}, nodeIdentity{NodeKey: "preflight-test"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			state.NodeID, _ = randomUUID()
-			nodeID = state.NodeID
-			state.Enrollment.Status = "approved"
-			if err := state.save(identity); err != nil {
-				t.Fatal(err)
-			}
-			err = updatePreflight(context.Background(), cliOptions{Identity: identity, Timeout: time.Second})
-			if test.want == "" && err != nil {
-				t.Fatal(err)
-			}
-			if test.want != "" && (err == nil || !strings.Contains(err.Error(), test.want)) {
-				t.Fatalf("wanted %q, got %v", test.want, err)
-			}
-		})
 	}
 }

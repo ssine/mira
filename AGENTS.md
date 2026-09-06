@@ -26,6 +26,7 @@ need to run Codex itself.
 
 - **Mira Server**: the central control plane, App Server broker and persistence API.
 - **Mira Node**: infrastructure software running on a physical or logical device.
+- **Mira Supervisor**: the long-running local owner of Node/Server workers and the transactional update boundary.
 - **node**: one registered Mira Node instance, such as Windows, WSL, Linux, NAS or Android.
 - **Codex Agent**: the AI execution associated with a Codex thread.
 - **Codex subagent**: a child Codex Agent/thread created by the multi-agent system.
@@ -41,14 +42,25 @@ Collections remain plural: `/v1/nodes`, database resources and variables holding
 
 ```text
 Clients
-  -> Mira Server
+  -> Mira Server worker
        -> PostgreSQL authoritative thread store
        -> node registry and desired/reported state
        -> App Server WebSocket proxy and dynamicTools broker
        -> outbound-connected Mira Nodes
             -> local file/process/PTY/screen capabilities
             -> optional local Codex App Server
+
+Local service ownership
+  -> Server host Supervisor -> Server worker + Node worker
+  -> Device Supervisor      -> Node worker
 ```
+
+Server, Node, CLI, Supervisor and embedded Web assets ship as one native Mira image and one version.
+The `server` install role runs both Server and Node workers under one Supervisor. PostgreSQL remains
+external: Mira may migrate its schema but never installs, upgrades or rolls back the database service.
+An update is owned end-to-end by the old local Supervisor, not by Server, Node, an SSH session or the
+bootstrap scripts. It stops old workers before starting candidates; Server updates accept a short
+outage instead of running two database writers. Failed candidate health checks restore the old workers.
 
 Mira Server does not mount devices or initiate network connections into them. Mira Nodes maintain
 outbound control connections. SSH v1 is an additional end-to-end SSH byte transport over dedicated
@@ -151,6 +163,9 @@ parallel conversation model.
 - Add explicit protocol versions and backward-compatible readers before changing emitted formats.
 - Database migrations are ordered, transactional and checksum-verified.
 - Never edit SQL text in an already released migration; append a new migration instead.
+- A candidate Server may migrate before its health check completes, so every release migration must
+  preserve the immediately previous Server's SQL contract. Use expand/contract across releases;
+  destructive constraint/column cleanup cannot ship in the same rollback window as its replacement.
 - Test a supported Codex baseline through CLI, App Server resume and subagent scenarios before
   changing the baseline in `patches/codex/`.
 - The patch should stay narrowly focused on replacing the ThreadStore persistence boundary. Avoid
@@ -196,12 +211,11 @@ Discovery is read-only. Import is an explicit administrator action: preserve eve
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing
 divergent PostgreSQL history.
 
-Windows installation uses a current-user login task and the native `--tray` Node mode. Closing its
-status window hides it; explicit tray exit cancels the Node and cleans up its managed sessions.
-Keep console CLI/OpenSSH roles and foreground Node debugging intact. Captured background children
-must not create consoles. Local diagnostic logs rotate with bounded retention; the tray is only an
-in-memory status projection, never a conversation store. Probe tray support when installing an older
-release and preserve that release's foreground launch path for rollback.
+Windows installation uses one system service whose service dispatcher hosts the Supervisor. The
+Supervisor launches Node and optional Server workers from the selected immutable image. Keep console
+CLI/OpenSSH roles and foreground Node debugging intact; background workers must not create consoles.
+The interactive `--tray` Node mode remains a manual diagnostic UI, not installation ownership or a
+second startup path. Local diagnostic logs rotate with bounded retention and never store conversations.
 
 Mira Node/Server/APK releases (`v<VERSION>`) and optional Codex runtime releases
 (`codex-v<upstream>-mira.<revision>`) are independent. Never mark a Codex release as GitHub's latest
@@ -281,8 +295,9 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 
 ## Repository layout
 
-- `server/`: Node.js control plane, PostgreSQL migrations, persistence adapters and node broker.
-- `server/public/`: same-origin administrator device console served by Mira Server.
+- `node/internal/miraserver/`: native Go control plane, PostgreSQL migrations, persistence adapters and node broker.
+- `node/internal/webassets/`: embedded administrator console and repository-controlled vendor assets.
+- `server/public/`: framework-independent Web source; it is not a separate runtime.
 - `node/cmd/mira-node/`: Go command entry point.
 - `node/cmd/mira/`: Go control CLI using the current machine's Node identity.
 - `node/internal/`: shared node runtime and platform adapters.
@@ -315,33 +330,42 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   version are separate concepts. Never regenerate the production Android signing identity.
 - Install/update code must preserve Node identity and configuration, retain old binaries, verify
   release checksums, refuse unrelated service replacement and avoid silently interrupting sessions.
+- Bootstrap scripts perform first install only. Never restore `scripts/install --update`; all later
+  changes go through the running local Supervisor via `mira update`.
+- Nix and Mira service ownership are mutually exclusive for one state directory. Nix ownership may
+  generate a reviewable module but must never run `nixos-rebuild` or mutate an external repository.
 - Windows PTY uses real ConPTY behind a build-tagged adapter. Test native Windows, not just cross
   compilation. Keep UTF-8 decoding state across output chunks and bound all retained data.
 - Plain Go builds are compile/development checks, never release artifacts; there is no Go SSH/SFTP fallback.
 - Keep role aliases inside immutable version directories and verify they refer to the running image. Never install system SSH services or mutate user SSH config.
 - Narrow file roots disable native SSH instead of silently widening policy.
 - For release changes, first build native bundles via `node/openssh/build.sh`; then run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`. Test linked images with `node/openssh/tests/e2e.mjs`; see the component README for real Windows/Android hooks.
-- `.github/workflows/ci.yml` is the Server/Web fast path: it validates the Server container,
-  PostgreSQL, authentication, Web APIs and session transfer without compiling Node/OpenSSH clients.
-- `.github/workflows/node-ci.yml` is the client path: Node, installer or SSH transport changes run
+- `.github/workflows/ci.yml` is the Go Server/Web fast path: it validates native packages,
+  PostgreSQL, authentication, Web APIs and Node channels without rebuilding native OpenSSH.
+- `.github/workflows/node-ci.yml` is the unified release-image path: program, installer or SSH transport changes run
   native Go tests, Windows/Android cross-compiles, embedded OpenSSH builds and linked-image E2E.
   Android signed acceptance runs automatically only for `node/**` changes, or manually.
-- A Server/Web-only deployment rebuilds and replaces only the `control` service. It does not create a
-  `v<VERSION>` release, rebuild clients, restart native Nodes or alter the PostgreSQL volume. Tagged
-  Mira releases remain the full Node/CLI/APK distribution path.
+- Server implementation changes do not have a separate Node.js deployment path. Production deployment
+  uses a unified `v<VERSION>` release or its matching container image; PostgreSQL stays external.
+- A first production cutover from the legacy source/Node.js deployment must explicitly stop and remove
+  the old Server/Node units or Compose stack before enabling `mira.service`; never let both Servers write
+  the same PostgreSQL database. Do not infer or mutate a downstream production deployment from this repo.
 
 Run the baseline checks from the repository root:
 
 ```bash
-npm run check --prefix server
+node scripts/check-version.mjs
+diff -qr --exclude vendor server/public node/internal/webassets/web
 (cd node && go test ./...)
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build ./cmd/mira-node
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build ./cmd/mira
 GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build ./cmd/mira-node
 for file in tests/*.mjs; do node --check "$file"; done
 python3 -m compileall -q tests
-POSTGRES_PASSWORD=ci-only-password docker compose -f compose.yaml config --quiet
-POSTGRES_PASSWORD=ci-only-password docker compose -f compose.homeserver.yaml config --quiet
+docker compose -f compose.yaml config --quiet
+DATABASE_URL=postgresql://mira:test@postgres.example/mira \
+MIRA_CODEX_STORE_ENDPOINT=https://mira.example.test \
+docker compose -f compose.homeserver.yaml config --quiet
 ```
 
 ## Web design language

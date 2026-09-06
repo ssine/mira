@@ -39,7 +39,7 @@ leave; touch labels stay after a tap. The chart has no permanent sample detail r
 the browser's local timezone. A single sample is shown as a point, and empty history never invents
 past data.
 
-Validation: `npm run check --prefix server`, `tests/account_history_e2e.mjs` with a disposable Server
-database, and `tests/account_sidebar_browser.mjs` cover quota normalization, read-only transport,
+Validation: `go test ./internal/miraserver/accountsampler ./internal/miraserver/views` from `node/`,
+the opt-in PostgreSQL integration tests, and `tests/account_sidebar_browser.mjs` cover quota normalization, read-only transport,
 concurrent/restarted sampling, identity/runtime changes, history authorization, gaps, cache behavior,
 keyboard/pointer interaction, mobile layout and light/dark themes.

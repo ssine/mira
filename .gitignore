@@ -4,7 +4,7 @@
 # Project-local build toolchains and caches.
 /.cargo/
 /.rustup/
-/server/node_modules/
+/node_modules/
 /.android-sdk/
 /node/dist/
 /node/openssh/.cache/

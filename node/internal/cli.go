@@ -879,6 +879,10 @@ Usage:
   mira [global options] <command> [arguments]
 
 Commands:
+  install        Install Supervisor and choose system-service ownership
+  doctor         Check installation ownership, release and service drift
+  repair         Repair only the declared service owner's configuration
+  uninstall      Remove a Mira-owned service or show Nix removal guidance
   setup          Enroll or install this Mira Node
   status         Show this Node's local and Server connection state
   version        Show build information
@@ -950,9 +954,20 @@ Shows non-secret identity metadata. The Node credential itself is never printed.
 		"setup": `Usage: mira setup [options]
 
 Configure or enroll this machine. Run this command's platform-specific setup before starting mira-node.`,
-		"status":  `Usage: mira status [--json]`,
-		"version": `Usage: mira version [--json]`,
-		"update":  `Usage: mira update [--check] [--json]`,
+		"install": `Usage: mira install [--role node|server] [--service-owner nix|mira] [--state-dir DIR] [--server-url URL] [--dry-run]
+
+On NixOS, an interactive install asks who owns the system service. Non-interactive
+installs must pass --service-owner explicitly. Nix and Mira ownership are mutually exclusive.`,
+		"doctor":    `Usage: mira doctor [--state-dir DIR]`,
+		"repair":    `Usage: mira repair [--state-dir DIR] [--dry-run]`,
+		"uninstall": `Usage: mira uninstall [--state-dir DIR] [--dry-run]`,
+		"status":    `Usage: mira status [--json]`,
+		"version":   `Usage: mira version [--json]`,
+		"update": `Usage: mira update [--check] [--version VERSION] [--state-dir DIR] [--no-wait] [--json]
+
+The installed executable discovers its own state directory. --state-dir is
+available for diagnostics or nonstandard launchers. The old local Supervisor
+continues an accepted update if this CLI, SSH session, Node, or Server exits.`,
 		"codex": `Usage: mira codex [-- Codex arguments...]
 
 Runs the compatible pinned Codex runtime with Mira's PostgreSQL ThreadStore.`,
@@ -1044,7 +1059,7 @@ func printNodesHuman(writer io.Writer, value any, get bool) error {
 }
 
 func cliUsage() string {
-	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
+	return "usage: mira [--json] [--timeout 30s] <install|doctor|repair|uninstall|setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
 }
 
 func cliExitCode(err error) int {
@@ -1117,10 +1132,18 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 		return 0
 	}
-	if remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" || remaining[0] == "codex-runtime" {
+	if remaining[0] == "install" || remaining[0] == "doctor" || remaining[0] == "repair" || remaining[0] == "uninstall" || remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" || remaining[0] == "codex-runtime" {
 		var value any
 		var localErr error
 		switch remaining[0] {
+		case "install":
+			value, localErr = runSystemInstall(ctx, remaining[1:], stdin, stdout)
+		case "doctor":
+			value, localErr = runDoctor(remaining[1:])
+		case "repair":
+			value, localErr = runRepair(ctx, remaining[1:])
+		case "uninstall":
+			value, localErr = runUninstall(ctx, remaining[1:])
 		case "setup":
 			value, localErr = runSetup(remaining[1:])
 		case "status":

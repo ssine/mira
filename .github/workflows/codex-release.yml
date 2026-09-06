@@ -11,7 +11,6 @@ on:
       - CODEX_VERSION
       - patches/codex/**
       - node/internal/codex-runtime.json
-      - tests/runtime_reliability_e2e.mjs
       - tests/runtime_fixture_cleanup*.mjs
       - tests/compiler_cache_snapshot_e2e.mjs
       - .github/workflows/codex-release.yml
@@ -356,32 +355,12 @@ jobs:
           fi
           python upstream-codex/scripts/build_codex_package.py "${arguments[@]}"
 
-      - name: Fault-inject persistence and terminal errors against the packaged runtime
+      - name: Test runtime fixture cleanup
         if: runner.os == 'Linux' && inputs.codex_release == ''
         shell: bash
-        env:
-          PACKAGE: ${{ matrix.package }}
         run: |
           set -euo pipefail
-          npm ci --prefix server
           node --test tests/runtime_fixture_cleanup_test.mjs
-          docker run -d --name mira-codex-test-postgres \
-            -e POSTGRES_USER=mira -e POSTGRES_PASSWORD=mira-local -e POSTGRES_DB=mira \
-            -p 127.0.0.1:55432:5432 postgres:17-alpine
-          trap 'docker rm -f mira-codex-test-postgres >/dev/null 2>&1 || true' EXIT
-          for attempt in $(seq 1 40); do
-            # The image's initialization server accepts Unix sockets, then exits.
-            # Wait for the final TCP listener and an authenticated SQL round trip.
-            if docker exec -e PGPASSWORD=mira-local mira-codex-test-postgres \
-              psql -h 127.0.0.1 -U mira -d mira -XAtqc 'SELECT 1' >/dev/null 2>&1; then break; fi
-            if [[ "$attempt" == 40 ]]; then
-              docker logs mira-codex-test-postgres >&2
-              exit 1
-            fi
-            sleep 0.5
-          done
-          CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex" \
-            node tests/runtime_reliability_e2e.mjs
 
       - uses: actions/upload-artifact@v4
         # Retain a completed candidate for diagnosis even if acceptance fails.

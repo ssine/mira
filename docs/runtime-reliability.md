@@ -109,18 +109,6 @@ Captures include the diagnostic conversation payloads: do not commit them or use
 production credential files as test fixtures. Set `MIRA_BROWSER_EXECUTABLE` if
 Playwright's default browser is unavailable.
 
-The real payloads can then exercise the renderer without contacting a model:
-
-```sh
-MIRA_STREAM_CAPTURE=/tmp/mira-stream-capture.json \
-  node tests/trace_activity_browser.mjs /absolute/path/to/playwright/index.mjs
-```
-
-Replay uses 20 times the captured rate, a mobile viewport, 6 times CPU throttling
-and long conversation history. It checks lossless output and receive-to-frame
-latency, independently of model generation speed. Live text enters the DOM in
-the message task; scroll updates and secondary metadata updates share a frame.
-
 A 2026-09-05 sample with the same `gpt-6-astra`, `xhigh`, `priority` configuration
 and a 30-line Chinese prompt measured the following. These are sample results,
 not a guaranteed model rate:
@@ -142,20 +130,9 @@ The upstream patch includes ThreadStore tests for 502/429, lost acknowledgements
 exact request reuse, cancellation and ordering, permanent failures and worker
 panics, plus a core lifecycle test for panic/error/completion/idle state.
 
-For the real runtime + disposable PostgreSQL regression (no model account needed):
-
-```sh
-CODEX_TEST_BINARY=/absolute/canonical-package/bin/codex \
-  node tests/runtime_reliability_e2e.mjs
-```
-
-This creates and removes its own database on local PostgreSQL (default port
-55432; override `MIRA_TEST_DATABASE_URL`). It uses loopback-only model/store
-fixtures, checks exactly-once tool output after a 502 and lost acknowledgement,
-V1/V2 history consistency, fresh-process resume, deletion during resume without
-history republication or failure of other threads, permanent-error termination, and
-malformed-history termination in both debug and release builds. It never uses a
-production identity or runs the historic failing command.
+The native Go store tests cover V1/V2 history consistency, idempotent operation IDs,
+generation replacement and conflict handling. The Codex `remote_http` tests remain
+the source of truth for exactly-once retries, cancellation and permanent-error behavior.
 
 Fixture cleanup waits for PostgreSQL's backends to disconnect after `pool.end()`
 and only then drops its uniquely named test database, without `FORCE`. A pool's

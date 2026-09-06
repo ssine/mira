@@ -4,8 +4,9 @@ The web console projects official Codex items into a readable activity trace. Po
 rollout history remains authoritative; activity labels, statistics and headings are rebuildable UI
 metadata, not a second event log. This feature does not require a database migration or a Codex fork.
 
-`server/public/trace-activity.js` is shared by the browser's App Server event adapter and
-`server/codex-transcript.mjs`. Keep its code browser-compatible and free of side effects.
+`server/public/trace-activity.js` implements the browser's live App Server event projection. The Go
+Server mirrors its stable projection in `node/internal/miraserver/views`; keep both representations
+compatible when the trace contract changes.
 
 - `commandExecution.commandActions` (live) and `CommandExecution.parsed_cmd` (rollout) describe read,
   search and directory-list operations. Unrecognized commands remain ordinary command activities;
@@ -32,18 +33,15 @@ Codex baseline's `app-server-protocol/src/protocol/item_builders.rs`.
 
 ## Validation
 
-`npm run check --prefix server` covers cross-format metadata, paired tool records, nested commands,
-failure states, diff statistics, summary handling and copy-button regressions.
-
-For a real browser without starting a Mira service, enrolling a Node or making model calls:
+The Go projection tests cover cross-format metadata, paired tool records, nested commands, failure
+states, diff statistics and summary handling. Browser unit tests retain copy-button and presentation
+regressions:
 
 ```sh
-node tests/trace_activity_browser.mjs
-# Or supply an installed Playwright module and browser channel:
-node tests/trace_activity_browser.mjs /absolute/path/to/playwright/index.mjs msedge
+go -C node test ./internal/miraserver/views
+node --test tests/trace_copy_test.mjs
 ```
 
-The browser test starts its own loopback fixture server and replaces bootstrap only in the HTTP
-response, not in the application source. It exercises the actual page, event handler, renderer and
-CSS at desktop and mobile widths, then closes both server and browser. Playwright is an optional test
-dependency, not a runtime dependency. Set `MIRA_TRACE_SCREENSHOT` to save the final page if useful.
+The full `tests/web_console_e2e.mjs` suite exercises the embedded page, event handler, renderer and
+Go transcript API against a temporary PostgreSQL database. Playwright remains an optional test
+dependency, not a production runtime dependency.

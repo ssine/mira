@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#ffffff">
+    <title>Mira · 等待连接</title>
+    <link rel="icon" href="/icons/mira.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/offline.css">
+    <script src="/offline.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <img src="/icons/mira.svg" width="56" height="56" alt="Mira">
+      <h1>暂时无法连接 Mira</h1>
+      <p>网络恢复后会自动回到刚才的页面。</p>
+      <p class="muted">手机断网不会主动停止设备上已经开始的任务。</p>
+      <button id="retry" type="button">重新连接</button>
+      <p id="status" role="status"></p>
+    </main>
+  </body>
+</html>
