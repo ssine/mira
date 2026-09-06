@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -312,7 +313,7 @@ func supervisorRoleArgument(role string) string {
 }
 
 func systemdUnit(stateDir, role, scope string) (string, error) {
-	executable, err := systemdQuote(filepath.Join(stateDir, "current", "mira"))
+	executable, err := systemdQuote(path.Join(stateDir, "current", "mira"))
 	if err != nil {
 		return "", err
 	}
@@ -320,7 +321,7 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	environmentFile, err := systemdQuote("-" + filepath.Join(stateDir, "mira.env"))
+	environmentFile, err := systemdQuote("-" + path.Join(stateDir, "mira.env"))
 	if err != nil {
 		return "", err
 	}
