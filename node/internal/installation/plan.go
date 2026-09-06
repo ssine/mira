@@ -313,7 +313,10 @@ func systemdQuote(value string) (string, error) {
 // the filename. Hex escapes avoid word splitting and quote parsing, while %%
 // survives systemd's separate specifier expansion as one literal percent.
 func systemdEnvironmentFilePath(value string) (string, error) {
-	if !path.IsAbs(value) {
+	// BuildPlan is intentionally cross-platform testable. A Windows runner may
+	// construct a Linux plan in a native temporary directory even though real
+	// systemd installation only occurs on Linux.
+	if !path.IsAbs(value) && !(runtime.GOOS == "windows" && filepath.IsAbs(value)) {
 		return "", fmt.Errorf("systemd environment file path must be absolute")
 	}
 	if strings.IndexByte(value, 0) >= 0 {
