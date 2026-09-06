@@ -67,7 +67,7 @@ type fakeStager struct {
 
 func (stager *fakeStager) Stage(_ context.Context, version, destination string) (string, error) {
 	stager.log.add("stage:%s", version)
-	executable := filepath.Join(destination, "mira")
+	executable := filepath.Join(destination, testExecutableName())
 	if err := os.WriteFile(executable, []byte("candidate "+version), 0700); err != nil {
 		return "", err
 	}
@@ -87,7 +87,7 @@ func (stager *retryStager) Stage(_ context.Context, version, destination string)
 	if err := os.Remove(filepath.Join(destination, "partial")); err != nil {
 		return "", err
 	}
-	executable := filepath.Join(destination, "mira")
+	executable := filepath.Join(destination, testExecutableName())
 	return executable, os.WriteFile(executable, []byte("candidate "+version), 0700)
 }
 
@@ -127,12 +127,19 @@ func bootstrapVersion(t *testing.T, layout Layout, version string) {
 	if err := os.MkdirAll(directory, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(directory, "mira"), []byte("release "+version), 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(directory, testExecutableName()), []byte("release "+version), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := layout.InitializeCurrent(version); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func testExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "mira.exe"
+	}
+	return "mira"
 }
 
 func testConfig(stateDir string, log *eventLog, health HealthChecker) Config {
