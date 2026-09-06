@@ -219,9 +219,6 @@ export class AccountSidebar {
     find("[data-account-status]").textContent = this.message ?? "";
     find("[data-account-status]").classList.toggle("hidden", !this.message);
     find("[data-account-refresh]").disabled = !this.available || Boolean(this.operation);
-    const cached = this.cache.get(this.cacheKey);
-    const minutes = cached ? Math.max(0, Math.floor((Date.now() - cached.updatedAt) / 60_000)) : null;
-    find("[data-account-updated]").textContent = `${minutes === null ? "" : minutes === 0 ? "刚刚更新 · " : `${minutes} 分钟前更新 · `}每 5 分钟刷新`;
     this.root.setAttribute("aria-busy", String(Boolean(this.operation)));
     this.history.select(this.node, this.account, Boolean(this.key));
   }

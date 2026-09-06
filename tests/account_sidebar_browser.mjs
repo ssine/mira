@@ -77,7 +77,7 @@ try {
  await panel.locator('.quota-chart:not(.hidden)').waitFor();
  assert.equal(await panel.locator('.quota-line').count(),1,'missing samples keep one continuous step line');
  assert.match(await panel.locator('.quota-line').getAttribute('d'),/H.*V.*H.*V/,'quota changes remain vertical steps at real sample times');
- assert.match(await panel.locator('[data-history-note]').textContent(),/缺失时延续上次额度/);
+ assert.equal(await panel.locator('[data-account-updated], [data-history-note]').count(),0,'account refresh and history sampling notes are removed');
  assert.equal(await panel.locator('[data-history-point]').count(),0,'the permanent sample detail row is removed');
  assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'labels appear only during inspection');
  await panel.locator('[aria-label="额度历史时间范围"]').selectOption('24h');

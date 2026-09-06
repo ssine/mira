@@ -102,7 +102,6 @@ export class AccountHistory {
     empty.textContent = this.message || (!this.key ? "选择运行节点后查看额度历史" : this.account?.type && this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" :
       data?.account && this.account?.email && !sameAccount ? "账号已切换，等待首次采样" : "这个时间段暂无记录，采样后会显示在这里");
     this.svg.classList.toggle("hidden", !this.valid.length);
-    this.root.querySelector("[data-history-note]").textContent = `${offline && data?.account?.email ? `${data.account.email} · ` : ""}每 5 分钟记录 · 缺失时延续上次额度`;
     if (!this.valid.length) return;
     const el = (tag, attrs, text) => {
       const node = document.createElementNS(ns, tag);

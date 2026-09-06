@@ -785,7 +785,6 @@ progress { width: 100%; accent-color: var(--accent); }
 .sidebar-nav-menu > button { display: block; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; background: transparent; text-align: left; font-size: 13px; }
 .sidebar-nav-menu > button:hover, .sidebar-nav-menu > button:focus-visible { background: var(--hover); }
 .sidebar-nav-menu hr { margin: 5px; border: 0; border-top: 1px solid var(--line); }
-.sidebar-account-updated { margin: 12px 0 0; color: var(--muted); font-size: 10px; }
 .navigation-facts { margin: 0; font-size: 12px; }
 .navigation-facts > div + div { margin-top: 16px; }
 .navigation-facts dt { display: flex; align-items: center; justify-content: space-between; min-height: 24px; color: var(--muted); font-size: 11px; }
