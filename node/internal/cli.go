@@ -15,8 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -169,11 +171,93 @@ func (client *cliClient) request(ctx context.Context, method, route string, body
 }
 
 func (client *cliClient) nodes(ctx context.Context) ([]map[string]any, error) {
+	return client.filteredNodes(ctx, false, "", "", nil)
+}
+
+func (client *cliClient) filteredNodes(ctx context.Context, summary bool, capability, status string, labels []string) ([]map[string]any, error) {
 	var response struct {
 		Data []map[string]any `json:"data"`
 	}
-	err := client.request(ctx, http.MethodGet, "/v1/nodes", nil, &response)
+	query := url.Values{}
+	if summary {
+		query.Set("view", "summary")
+	}
+	if capability != "" {
+		query.Set("capability", capability)
+	}
+	if status != "" {
+		query.Set("status", status)
+	}
+	for _, label := range labels {
+		query.Add("label", label)
+	}
+	route := "/v1/nodes"
+	if encoded := query.Encode(); encoded != "" {
+		route += "?" + encoded
+	}
+	err := client.request(ctx, http.MethodGet, route, nil, &response)
+	if err == nil && summary {
+		for index, node := range response.Data {
+			response.Data[index] = summarizeNode(node)
+		}
+	}
+	if err == nil && (capability != "" || status != "" || len(labels) > 0) {
+		filtered := make([]map[string]any, 0, len(response.Data))
+		for _, node := range response.Data {
+			capabilities, _ := node["capabilities"].(map[string]any)
+			enabled, _ := capabilities[capability].(bool)
+			if (capability == "" || enabled) && (status == "" || selectorValue(node, "status") == status) && nodeMatchesLabels(node, labels) {
+				filtered = append(filtered, node)
+			}
+		}
+		response.Data = filtered
+	}
 	return response.Data, err
+}
+
+func nodeMatchesLabels(node map[string]any, filters []string) bool {
+	labels, _ := node["labels"].(map[string]any)
+	for _, filter := range filters {
+		parts := strings.SplitN(filter, "=", 2)
+		if len(parts) != 2 || fmt.Sprint(labels[parts[0]]) != parts[1] {
+			return false
+		}
+	}
+	return true
+}
+
+func summarizeNode(node map[string]any) map[string]any {
+	aliases := node["aliases"]
+	if aliases == nil {
+		aliases = []string{}
+	}
+	labels := node["labels"]
+	if labels == nil {
+		labels = map[string]any{}
+	}
+	capabilities := map[string]any{}
+	if reported, ok := node["capabilities"].(map[string]any); ok {
+		for name, value := range reported {
+			if enabled, ok := value.(bool); ok && enabled {
+				capabilities[name] = true
+			}
+		}
+	}
+	appServerStatus := selectorValue(node, "appServerStatus")
+	if appServerStatus == "" {
+		if enabled, _ := capabilities["appServer"].(bool); enabled {
+			appServerStatus = nodeAppServerStatus(node)
+		} else {
+			appServerStatus = "unsupported"
+		}
+	}
+	return map[string]any{
+		"nodeId": node["nodeId"], "nodeKey": node["nodeKey"], "displayName": node["displayName"],
+		"aliases": aliases, "labels": labels, "hostname": node["hostname"],
+		"platform": node["platform"], "architecture": node["architecture"], "nodeMode": node["nodeMode"],
+		"status": node["status"], "capabilities": capabilities,
+		"appServerStatus": appServerStatus, "lastSeenAt": node["lastSeenAt"],
+	}
 }
 
 func selectorValue(node map[string]any, key string) string {
@@ -185,13 +269,40 @@ func (client *cliClient) resolveNode(ctx context.Context, selector string) (map[
 	if selector == "" {
 		return nil, fmt.Errorf("--node is required")
 	}
+	var resolved struct {
+		Node map[string]any `json:"node"`
+	}
+	err := client.request(ctx, http.MethodGet, "/v1/nodes/resolve?"+url.Values{"selector": []string{selector}}.Encode(), nil, &resolved)
+	if err == nil {
+		return resolved.Node, nil
+	}
+	var httpError *cliHTTPError
+	if !errors.As(err, &httpError) || httpError.Status != http.StatusNotFound {
+		return nil, err
+	}
+	// Older Servers do not expose the resolver endpoint. Retain the original
+	// list-based resolution so a newer CLI can still operate during upgrades.
 	nodes, err := client.nodes(ctx)
 	if err != nil {
 		return nil, err
 	}
 	matches := []map[string]any{}
+	bestRank := 5
 	for _, item := range nodes {
-		if selector == selectorValue(item, "nodeId") || selector == selectorValue(item, "nodeKey") || selector == selectorValue(item, "hostname") {
+		rank := 5
+		switch {
+		case selector == selectorValue(item, "nodeId"):
+			rank = 1
+		case selector == selectorValue(item, "nodeKey"):
+			rank = 2
+		case nodeHasAlias(item, selector):
+			rank = 3
+		case selector == selectorValue(item, "hostname"):
+			rank = 4
+		}
+		if rank < bestRank {
+			bestRank, matches = rank, []map[string]any{item}
+		} else if rank == bestRank && rank < 5 {
 			matches = append(matches, item)
 		}
 	}
@@ -204,17 +315,40 @@ func (client *cliClient) resolveNode(ctx context.Context, selector string) (map[
 	return matches[0], nil
 }
 
+func nodeHasAlias(node map[string]any, selector string) bool {
+	switch aliases := node["aliases"].(type) {
+	case []any:
+		for _, raw := range aliases {
+			if alias, ok := raw.(string); ok && strings.EqualFold(alias, selector) {
+				return true
+			}
+		}
+	case []string:
+		for _, alias := range aliases {
+			if strings.EqualFold(alias, selector) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (client *cliClient) invoke(ctx context.Context, selector, capability string, params map[string]any) (any, map[string]any, error) {
 	node, err := client.resolveNode(ctx, selector)
 	if err != nil {
 		return nil, nil, err
 	}
+	result, err := client.invokeNode(ctx, selectorValue(node, "nodeId"), capability, params)
+	return result, node, err
+}
+
+func (client *cliClient) invokeNode(ctx context.Context, nodeID, capability string, params map[string]any) (any, error) {
 	var response struct {
 		Result any `json:"result"`
 	}
 	body := map[string]any{"capability": capability, "params": params, "timeoutMs": client.options.Timeout.Milliseconds()}
-	err = client.request(ctx, http.MethodPost, "/v1/nodes/"+selectorValue(node, "nodeId")+"/invoke", body, &response)
-	return response.Result, node, err
+	err := client.request(ctx, http.MethodPost, "/v1/nodes/"+nodeID+"/invoke", body, &response)
+	return response.Result, err
 }
 
 func flagSet(name string) *flag.FlagSet {
@@ -254,8 +388,36 @@ func parseNodeOnly(name string, args []string) (string, error) {
 }
 
 func (client *cliClient) runNodes(ctx context.Context, args []string) (any, error) {
-	if len(args) == 1 && args[0] == "list" {
-		return client.nodes(ctx)
+	if len(args) == 0 || args[0] == "list" {
+		listArgs := args
+		if len(args) > 0 {
+			listArgs = args[1:]
+		}
+		set := flagSet("nodes list")
+		summary := set.Bool("summary", false, "return only fields used to identify and select Nodes")
+		full := set.Bool("full", false, "return the complete Node records")
+		capability := set.String("capability", "", "include only Nodes advertising this capability")
+		online := set.Bool("online", false, "include only online Nodes")
+		var labels stringList
+		set.Var(&labels, "label", "include only Nodes with this key=value label; repeatable")
+		if err := set.Parse(listArgs); err != nil {
+			return nil, err
+		}
+		if set.NArg() != 0 || (*summary && *full) {
+			return nil, fmt.Errorf("nodes list accepts --summary or --full, --capability <name>, repeated --label key=value, and --online")
+		}
+		useSummary := *summary || (!client.options.JSON && !*full)
+		status := ""
+		if *online {
+			status = "online"
+		}
+		for _, label := range labels {
+			parts := strings.SplitN(label, "=", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				return nil, fmt.Errorf("--label must be key=value")
+			}
+		}
+		return client.filteredNodes(ctx, useSummary, *capability, status, labels)
 	}
 	if len(args) >= 1 && args[0] == "get" {
 		selector, err := parseNodeOnly("nodes get", args[1:])
@@ -264,7 +426,7 @@ func (client *cliClient) runNodes(ctx context.Context, args []string) (any, erro
 		}
 		return client.resolveNode(ctx, selector)
 	}
-	return nil, fmt.Errorf("usage: mira nodes list | mira nodes get --node <selector>")
+	return nil, fmt.Errorf("usage: mira nodes [list] [--summary|--full] [--capability <name>] [--label key=value] [--online] | mira nodes get --node <selector>")
 }
 
 func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Reader) (any, error) {
@@ -437,7 +599,7 @@ func (client *cliClient) runProcess(ctx context.Context, args []string, stdout i
 			return nil, &cliHTTPError{Status: 504, Code: "timeout", Message: "process run timed out; process remains managed on target Node"}
 		}
 		time.Sleep(250 * time.Millisecond)
-		poll, _, err := client.invoke(ctx, selectorValue(selected, "nodeId"), "process", map[string]any{"action": "poll", "processId": id, "cursor": nextCursor})
+		poll, err := client.invokeNode(ctx, selectorValue(selected, "nodeId"), "process", map[string]any{"action": "poll", "processId": id, "cursor": nextCursor})
 		if err != nil {
 			return nil, err
 		}
@@ -697,6 +859,190 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 	return command.Run()
 }
 
+func requestedCLIHelp(args []string) ([]string, bool) {
+	if len(args) > 0 && args[0] == "help" {
+		return args[1:], true
+	}
+	for index, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return args[:index], true
+		}
+	}
+	return nil, false
+}
+
+func cliHelpText(topic []string) (string, bool) {
+	if len(topic) == 0 {
+		return `Mira connects trusted personal devices and runs Codex close to their workspaces.
+
+Usage:
+  mira [global options] <command> [arguments]
+
+Commands:
+  setup          Enroll or install this Mira Node
+  status         Show this Node's local and Server connection state
+  version        Show build information
+  update         Check for or install a Mira update
+  identity       Inspect this Node's non-secret identity metadata
+  nodes          Discover Nodes and resolve selectors
+  file           Inspect or change files through a Node capability
+  process        Count, list, start, poll or signal managed processes
+  pty            Open and operate managed terminal sessions
+  screen         Inspect or control an Android display
+  app-server     Inspect, start, stop or connect to Codex App Server
+  codex          Run the Mira-managed Codex CLI
+  codex-runtime  Inspect or prepare the pinned Codex runtime
+  ssh/scp/sftp   Use native OpenSSH over Mira's relay
+
+Global options:
+  --json          Emit one stable JSON result envelope
+  --timeout 30s   Bound requests between 100ms and 10m
+  -h, --help      Show local help without contacting Mira Server
+  --version       Show version information
+
+Run "mira <command> --help" for command-specific help.`, true
+	}
+	key := topic[0]
+	if len(topic) > 1 && !strings.HasPrefix(topic[1], "-") {
+		key += " " + topic[1]
+	}
+	help := map[string]string{
+		"nodes": `Discover trusted Nodes and use stable selectors.
+
+Usage:
+  mira nodes [list] [--summary|--full] [--capability <name>] [--label key=value] [--online] [--json]
+  mira nodes get --node <UUID|nodeKey|alias|hostname> [--json]
+
+The list command prints a compact table for people. --json retains the full
+versioned record for compatibility; combine --summary --json for Agent use.
+Aliases are exact, user-defined selectors. Hostnames must resolve uniquely.`,
+		"nodes list": `Usage: mira nodes [list] [options]
+
+Options:
+  --summary             Return identification, aliases, status and capabilities
+  --full                Return complete registry records
+  --capability <name>   Include only Nodes advertising a capability such as ssh
+  --label key=value     Include only Nodes with this label; may be repeated
+  --online              Include only currently online Nodes
+  --json                Emit a versioned JSON envelope`,
+		"nodes get": `Usage: mira nodes get --node <selector> [--json]
+
+The selector may be a Node UUID, exact nodeKey, user-defined alias, or a unique hostname.`,
+		"file": `Usage: mira file <roots|stat|list|read|write|mkdir|move|remove> --node <selector> [options]
+
+Common options: --path, --destination, --offset, --length, --recursive, --overwrite.
+Use --output for local file reads. Writes require exactly one of --input or --stdin.`,
+		"process": `Usage: mira process <count|list|start|run|poll|signal> --node <selector> [options] [-- executable args...]
+
+Options include --cwd, --process-id, --cursor, --signal, --system and repeated --env KEY=VALUE.
+run waits and streams output; start returns a managed process ID.`,
+		"pty": `Usage: mira pty <list|open|poll|write|resize|close> --node <selector> [options] [-- executable args...]
+
+Options include --session-id, --cwd, --input, --cursor, --rows and --cols.`,
+		"screen": `Usage: mira screen <display|screenshot|hierarchy|tap|swipe|key|text> --node <selector> [options]
+
+Screenshots require --output. Input actions use --x/--y, --start-x/--start-y,
+--end-x/--end-y, --duration-ms, --key-code or --text.`,
+		"app-server": `Usage: mira app-server <status|start|stop|connect> --node <selector>`,
+		"identity": `Usage: mira identity show [--json]
+
+Shows non-secret identity metadata. The Node credential itself is never printed.`,
+		"setup": `Usage: mira setup [options]
+
+Configure or enroll this machine. Run this command's platform-specific setup before starting mira-node.`,
+		"status":  `Usage: mira status [--json]`,
+		"version": `Usage: mira version [--json]`,
+		"update":  `Usage: mira update [--check] [--json]`,
+		"codex": `Usage: mira codex [-- Codex arguments...]
+
+Runs the compatible pinned Codex runtime with Mira's PostgreSQL ThreadStore.`,
+		"codex-runtime": `Usage: mira codex-runtime <status|prepare> [--json]`,
+		"ssh":           `Usage: mira ssh [OpenSSH options] <node-id|nodeKey|alias> [-- command...]`,
+		"scp": `Usage: mira scp [OpenSSH options] <source> <destination>
+
+Remote operands use <node-selector>::<absolute-path>.`,
+		"sftp": `Usage: mira sftp [OpenSSH options] <node-id|nodeKey|alias>`,
+	}
+	value, ok := help[key]
+	if !ok && len(topic) > 1 {
+		value, ok = help[topic[0]]
+	}
+	return value, ok
+}
+
+func nodeStringValues(node map[string]any, name string) []string {
+	result := []string{}
+	switch values := node[name].(type) {
+	case []any:
+		for _, raw := range values {
+			if value, ok := raw.(string); ok {
+				result = append(result, value)
+			}
+		}
+	case []string:
+		result = append(result, values...)
+	}
+	return result
+}
+
+func nodeDisplayName(node map[string]any) string {
+	if value := selectorValue(node, "displayName"); value != "" {
+		return value
+	}
+	return selectorValue(node, "hostname")
+}
+
+func nodeAppServerStatus(node map[string]any) string {
+	if value := selectorValue(node, "appServerStatus"); value != "" {
+		return value
+	}
+	if reported, ok := node["reportedAppServer"].(map[string]any); ok {
+		if value := selectorValue(reported, "status"); value != "" {
+			return value
+		}
+	}
+	return "unsupported"
+}
+
+func printNodesHuman(writer io.Writer, value any, get bool) error {
+	if get {
+		node, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("unexpected Node response")
+		}
+		fmt.Fprintf(writer, "Name:       %s\nHostname:   %s\nAliases:    %s\nNode key:   %s\nNode ID:    %s\nStatus:     %s\nPlatform:   %s/%s (%s)\nApp Server: %s\n",
+			nodeDisplayName(node), selectorValue(node, "hostname"), strings.Join(nodeStringValues(node, "aliases"), ", "),
+			selectorValue(node, "nodeKey"), selectorValue(node, "nodeId"), selectorValue(node, "status"),
+			selectorValue(node, "platform"), selectorValue(node, "architecture"), selectorValue(node, "nodeMode"), nodeAppServerStatus(node))
+		if labels, ok := node["labels"].(map[string]any); ok && len(labels) > 0 {
+			keys := make([]string, 0, len(labels))
+			for key := range labels {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, key := range keys {
+				parts = append(parts, key+"="+fmt.Sprint(labels[key]))
+			}
+			fmt.Fprintf(writer, "Labels:     %s\n", strings.Join(parts, ", "))
+		}
+		return nil
+	}
+	nodes, ok := value.([]map[string]any)
+	if !ok {
+		return fmt.Errorf("unexpected Node list response")
+	}
+	table := tabwriter.NewWriter(writer, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(table, "NAME\tALIASES\tSTATUS\tPLATFORM\tMODE\tAPP SERVER\tNODE KEY")
+	for _, node := range nodes {
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s/%s\t%s\t%s\t%s\n",
+			nodeDisplayName(node), strings.Join(nodeStringValues(node, "aliases"), ","), selectorValue(node, "status"),
+			selectorValue(node, "platform"), selectorValue(node, "architecture"), selectorValue(node, "nodeMode"),
+			nodeAppServerStatus(node), selectorValue(node, "nodeKey"))
+	}
+	return table.Flush()
+}
+
 func cliUsage() string {
 	return "usage: mira [--json] [--timeout 30s] <setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
 }
@@ -744,6 +1090,15 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		fmt.Fprintln(stderr, err)
 		fmt.Fprintln(stderr, cliUsage())
 		return 64
+	}
+	if topic, requested := requestedCLIHelp(remaining); requested {
+		help, ok := cliHelpText(topic)
+		if !ok {
+			fmt.Fprintf(stderr, "unknown help topic %s\n", strings.Join(topic, " "))
+			return 64
+		}
+		fmt.Fprintln(stdout, help)
+		return 0
 	}
 	if len(remaining) == 0 {
 		printCLIError(stderr, options, fmt.Errorf("command is required"))
@@ -885,6 +1240,13 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return cliExitCode(err)
 	}
 	if result != nil {
+		if remaining[0] == "nodes" && !options.JSON {
+			if err := printNodesHuman(stdout, result, len(remaining) > 1 && remaining[1] == "get"); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		if err := printResult(stdout, options, result); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1

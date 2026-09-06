@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { appendAudit, parseNodeToken, requestAddress } from "./auth.mjs";
+import { normalizeNodeAliasKey } from "./node-registry.mjs";
 
 const enrollmentLifetimeMinutes = 15;
 
@@ -159,6 +160,12 @@ export async function createEnrollment(pool, request, body) {
   if (activeNode.rowCount > 0) {
     return { status: 409, body: { error: "an approved node already uses this node key", code: "enrollment_conflict" } };
   }
+  const reservedAlias = await pool.query(
+    "SELECT node_id FROM mira_node_aliases WHERE alias_key = $1", [normalizeNodeAliasKey(descriptor.nodeKey)],
+  );
+  if (reservedAlias.rowCount > 0) {
+    return { status: 409, body: { error: "a Node alias already uses this node key", code: "enrollment_conflict" } };
+  }
 
   const address = requestAddress(request);
   const recent = await pool.query(
@@ -244,6 +251,7 @@ export async function approveEnrollment(pool, request, principal, enrollmentId, 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query("SELECT pg_advisory_xact_lock(hashtext('mira_node_selector_namespace'))");
     await expireRequests(client, enrollmentId);
     const requestResult = await client.query(
       `SELECT * FROM mira_node_enrollment_requests WHERE enrollment_id = $1 FOR UPDATE`,
@@ -257,6 +265,13 @@ export async function approveEnrollment(pool, request, principal, enrollmentId, 
     if (row.status !== "pending") {
       await client.query("ROLLBACK");
       return { status: 409, body: { error: `enrollment is ${row.status}` } };
+    }
+    const reservedAlias = await client.query(
+      "SELECT node_id FROM mira_node_aliases WHERE alias_key = $1", [normalizeNodeAliasKey(row.node_key)],
+    );
+    if (reservedAlias.rowCount > 0) {
+      await client.query("ROLLBACK");
+      return { status: 409, body: { error: "a Node alias already uses this node key", code: "enrollment_conflict" } };
     }
     const existing = await client.query(
       "SELECT node_id, approval_status FROM codex_nodes WHERE node_key = $1 FOR UPDATE",

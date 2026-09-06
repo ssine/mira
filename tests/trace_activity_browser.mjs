@@ -7,7 +7,6 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import { projectCodexTranscript } from "../server/codex-transcript.mjs";
 
-const { chromium } = await import(process.argv[2] ?? "playwright");
 const root = new URL("../server/", import.meta.url);
 const assets = new Map([
   ["/", ["public/index.html", "text/html"]],
@@ -49,6 +48,17 @@ const server = http.createServer(async (request, response) => {
   } catch (error) { response.writeHead(500); response.end(String(error)); }
 });
 await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+const fixtureUrl = `http://127.0.0.1:${server.address().port}/`;
+if (process.env.MIRA_TRACE_SERVER_ONLY === "1") {
+  console.log(fixtureUrl);
+  await new Promise((resolve) => {
+    process.once("SIGINT", resolve);
+    process.once("SIGTERM", resolve);
+  });
+  await new Promise((resolve) => server.close(resolve));
+  process.exit(0);
+}
+const { chromium } = await import(process.argv[2] ?? "playwright");
 let browser;
 try {
   browser = await chromium.launch({ headless: true, ...(process.argv[3] ? { channel: process.argv[3] } : {}) });
@@ -124,8 +134,28 @@ try {
       }
     });
   });
-  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  await page.goto(fixtureUrl);
   await page.waitForFunction(() => !!window.traceHarness);
+  await page.evaluate(() => {
+    const node = {
+      nodeId: "00000000-0000-4000-8000-000000000099", nodeKey: "router-node", hostname: "openwrt-host",
+      displayName: "家里的软路由", aliases: ["软路由", "openwrt"], labels: { role: "router", site: "home" },
+      metadataRevision: 4, platform: "linux", architecture: "arm64", nodeMode: "linux", nodeVersion: "test",
+      status: "online", approvalStatus: "approved", lastSeenAt: new Date().toISOString(), capabilities: { files: true, ssh: true },
+    };
+    window.traceHarness.nodes.set(node.nodeId, node);
+    window.traceHarness.show("dashboardView");
+    window.traceHarness.renderNodes([node]);
+  });
+  assert.equal(await page.locator(".node-card .title").textContent(), "家里的软路由");
+  assert.deepEqual(await page.locator(".node-alias").allTextContents(), ["软路由", "openwrt"]);
+  assert.deepEqual(await page.locator(".node-label").allTextContents(), ["role=router", "site=home"]);
+  await page.getByRole("button", { name: "编辑名称与标签", exact: true }).click();
+  await page.locator("#nodeMetadataDialog").waitFor({ state: "visible" });
+  assert.equal(await page.locator("#nodeDisplayName").inputValue(), "家里的软路由");
+  assert.equal(await page.locator("#nodeAliases").inputValue(), "软路由\nopenwrt");
+  await page.locator("#nodeMetadataCancel").click();
+  await page.evaluate(() => window.traceHarness.show("agentView"));
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   assert.equal(await page.locator("#globalAgent").getAttribute("aria-current"), "page");
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "false", "wide chat opens its sidebar by default");

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { TextDecoder } from "node:util";
 import { AccountReader } from "./account-reader.mjs";
 import { WebSocket, WebSocketServer } from "ws";
 
@@ -10,6 +11,12 @@ import {
 } from "./dynamic-tools.mjs";
 import { getNode, setNodeChannelStatus } from "./node-registry.mjs";
 import { assertThreadsNotDeleted } from "./thread-store.mjs";
+
+const maxDeveloperInstructionsFileBytes = 256 * 1024;
+const miraCLIInstructionsBegin = "MIRA_CLI_INSTRUCTIONS_V1_BEGIN";
+const miraCLIInstructionsEnd = "MIRA_CLI_INSTRUCTIONS_V1_END";
+const nodeDeveloperInstructionsBegin = "MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_BEGIN";
+const nodeDeveloperInstructionsEnd = "MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_END";
 
 function jsonMessage(data) {
   return JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data));
@@ -62,6 +69,17 @@ function targetDefaultCwd(target) {
   return validNativeAbsolutePath(value, target?.platform) ? value : null;
 }
 
+function targetDeveloperInstructionsFile(target) {
+  const value = target?.desiredAppServer?.developerInstructionsFile;
+  if (value === null || value === undefined || value === "") return null;
+  if (validNativeAbsolutePath(value, target?.platform)) return value;
+  throw channelError(
+    "the configured Node Developer instructions file is not a valid native absolute path",
+    500,
+    "invalid_developer_instructions_file",
+  );
+}
+
 function shellInvocation(path, platform) {
   const quoted = platform === "windows"
     ? `'${path.replaceAll("'", "''")}'`
@@ -74,28 +92,31 @@ function miraCLIInstructions(target) {
   if (!path) return null;
   const executable = shellInvocation(path, target.platform);
   return [
-    "MIRA_CLI_INSTRUCTIONS_V1_BEGIN",
+    miraCLIInstructionsBegin,
     "Mira node-to-node SSH access is available from this execution node.",
     `The Mira CLI absolute path is ${JSON.stringify(path)}. Invoke that exact path as a normal shell command; do not assume mira is on PATH.`,
     "SSH, SCP, and SFTP are CLI-only operations. They are not home_nodes dynamic tools and must not be modeled or invoked as dynamic tools.",
-    `List approved nodes before selecting a target: ${executable} nodes list --json`,
-    `Run a remote command: ${executable} ssh <node-id-or-exact-node-key> -- pwd`,
-    `Open an interactive remote shell: ${executable} ssh -t <node-id-or-exact-node-key>`,
+    `List SSH-capable nodes before selecting a target: ${executable} nodes list --summary --capability ssh --json`,
+    `Run a remote command: ${executable} ssh <node-id-or-exact-node-key-or-alias> -- pwd`,
+    `Open an interactive remote shell: ${executable} ssh -t <node-id-or-exact-node-key-or-alias>`,
     `Upload one regular file: ${executable} scp <local-path> <node-id>::<absolute-remote-path>`,
     `Download one regular file: ${executable} scp <node-id>::<absolute-remote-path> <local-path>`,
     `Copy a directory with native SCP: ${executable} scp -rp <local-directory> <node-id>::<absolute-remote-directory>`,
     `Use SFTP interactively: ${executable} sftp <node-id>; batch: ${executable} sftp -b <commands-file> <node-id>. Native SCP/SFTP overwrite semantics apply.`,
-    "Use a Node ID or exact nodeKey returned by nodes list; do not guess selectors. Never read or expose the Mira identity credential.",
-    "MIRA_CLI_INSTRUCTIONS_V1_END",
+    "Use a Node ID, exact nodeKey, or exact user-defined alias returned by nodes list; do not guess selectors. Never read or expose the Mira identity credential.",
+    miraCLIInstructionsEnd,
   ].join("\n");
 }
 
-function mergeDeveloperInstructions(existing, addition) {
-  if (!addition) return existing;
+function mergeDeveloperInstructions(existing, ...additions) {
   const current = typeof existing === "string"
-    ? existing.replace(/\n?MIRA_CLI_INSTRUCTIONS_V1_BEGIN[\s\S]*?MIRA_CLI_INSTRUCTIONS_V1_END\n?/g, "\n").trim()
+    ? existing
+      .replace(/\n?MIRA_CLI_INSTRUCTIONS_V1_BEGIN[\s\S]*?MIRA_CLI_INSTRUCTIONS_V1_END\n?/g, "\n")
+      .replace(/\n?MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_BEGIN[\s\S]*?MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_END\n?/g, "\n")
+      .trim()
     : "";
-  return current ? `${current}\n\n${addition}` : addition;
+  const sections = [current, ...additions.filter((addition) => typeof addition === "string" && addition.length > 0)];
+  return sections.filter(Boolean).join("\n\n") || undefined;
 }
 
 function rejectUpgrade(socket, status, label) {
@@ -166,6 +187,13 @@ export class NodeChannel {
 
   setCapabilityService(service) {
     this.capabilityService = service;
+  }
+
+  updateProxyDesiredAppServer(nodeId, desiredAppServer) {
+    for (const proxy of this.proxies.values()) {
+      if (proxy.targetNodeId !== nodeId || !proxy.target) continue;
+      proxy.target = { ...proxy.target, desiredAppServer };
+    }
   }
 
   isConnected(nodeId) {
@@ -561,6 +589,93 @@ export class NodeChannel {
     ).catch((error) => console.error("thread runtime binding failed", error));
   }
 
+  async nodeDeveloperInstructions(proxy, requestId) {
+    const path = targetDeveloperInstructionsFile(proxy.target);
+    if (!path) return null;
+    if (proxy.target?.capabilities?.files !== true || !this.capabilityService) {
+      throw channelError(
+        "the configured Node Developer instructions file cannot be read because file access is unavailable",
+        409,
+        "developer_instructions_file_unavailable",
+      );
+    }
+    const actor = {
+      kind: "node", nodeId: proxy.targetNodeId, subjectId: null,
+      clientType: "app-server", transport: "internal", revoked: false,
+    };
+    let result;
+    try {
+      result = await this.capabilityService.invoke(
+        actor,
+        proxy.targetNodeId,
+        "file",
+        { action: "read", path, offset: 0, length: maxDeveloperInstructionsFileBytes + 1, encoding: "base64" },
+        {
+          requestId: requestId === undefined ? null : String(requestId),
+          timeoutMs: 5_000,
+          auditMetadata: { source: "app-server-developer-instructions" },
+        },
+      );
+    } catch (error) {
+      throw channelError(
+        `could not read the configured Node Developer instructions file: ${error.message}`,
+        error.statusCode ?? 500,
+        "developer_instructions_file_read_failed",
+      );
+    }
+    if (!result || result.encoding !== "base64" || typeof result.content !== "string" ||
+        !Number.isSafeInteger(result.bytesRead) || result.bytesRead < 0 || typeof result.eof !== "boolean" ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(result.content)) {
+      throw channelError(
+        "the Node returned an invalid Developer instructions file response",
+        502,
+        "invalid_developer_instructions_file_response",
+      );
+    }
+    const bytes = Buffer.from(result.content, "base64");
+    if (bytes.length !== result.bytesRead) {
+      throw channelError(
+        "the Node returned an inconsistent Developer instructions file length",
+        502,
+        "invalid_developer_instructions_file_response",
+      );
+    }
+    if (bytes.length > maxDeveloperInstructionsFileBytes || !result.eof) {
+      throw channelError(
+        `the configured Node Developer instructions file exceeds ${maxDeveloperInstructionsFileBytes} bytes`,
+        413,
+        "developer_instructions_file_too_large",
+      );
+    }
+    let content;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      throw channelError(
+        "the configured Node Developer instructions file is not valid UTF-8",
+        400,
+        "invalid_developer_instructions_file_encoding",
+      );
+    }
+    if (content.includes("\0") || [
+      miraCLIInstructionsBegin, miraCLIInstructionsEnd,
+      nodeDeveloperInstructionsBegin, nodeDeveloperInstructionsEnd,
+    ].some((marker) => content.includes(marker))) {
+      throw channelError(
+        "the configured Node Developer instructions file contains reserved Mira content",
+        400,
+        "invalid_developer_instructions_file_content",
+      );
+    }
+    if (content.length === 0) return null;
+    return [
+      nodeDeveloperInstructionsBegin,
+      "The following persistent Developer instructions were loaded by Mira for this execution Node.",
+      content,
+      nodeDeveloperInstructionsEnd,
+    ].join("\n");
+  }
+
   async forwardProxyClientMessage(proxy, data) {
     let payload = Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
     let message;
@@ -595,18 +710,31 @@ export class NodeChannel {
       message.params.sandbox ??= "danger-full-access";
       const toolFree = message.method === "thread/start" && message.params.ephemeral === true &&
         Array.isArray(message.params.dynamicTools) && message.params.dynamicTools.length === 0;
-      if (message.params.ephemeral === true && message.id !== undefined) proxy.ephemeralStartRequests.add(String(message.id));
-      if (toolFree && message.id !== undefined) proxy.toolFreeStartRequests.add(String(message.id));
       // Fork inherits the source tools; ThreadForkParams has no dynamicTools field.
       if (message.method !== "thread/fork" && !toolFree) message.params.dynamicTools = mergeDynamicTools(message.params.dynamicTools);
       if (message.method === "thread/start" &&
           (typeof message.params.cwd !== "string" || message.params.cwd.trim() === "")) {
         message.params.cwd = targetDefaultCwd(proxy.target) ?? message.params.cwd;
       }
-      if (!toolFree) message.params.developerInstructions = mergeDeveloperInstructions(
-        message.params.developerInstructions,
-        miraCLIInstructions(proxy.target),
-      );
+      if (!toolFree) {
+        try {
+          const configuredInstructions = targetDeveloperInstructionsFile(proxy.target)
+            ? await this.nodeDeveloperInstructions(proxy, message.id)
+            : null;
+          message.params.developerInstructions = mergeDeveloperInstructions(
+            message.params.developerInstructions,
+            miraCLIInstructions(proxy.target),
+            configuredInstructions,
+          );
+        } catch (error) {
+          const response = { id: message.id ?? null, error: { code: -32005, message: error.message } };
+          await this.finishThreadStart(proxy, response);
+          this.sendProxyError(proxy, message.id ?? null, error.message, -32005);
+          return;
+        }
+      }
+      if (message.params.ephemeral === true && message.id !== undefined) proxy.ephemeralStartRequests.add(String(message.id));
+      if (toolFree && message.id !== undefined) proxy.toolFreeStartRequests.add(String(message.id));
     }
     if (["thread/start", "thread/resume", "thread/fork", "turn/start"].includes(message.method) && message.id !== undefined) {
       proxy.threadRequestBindings.set(String(message.id),

@@ -185,7 +185,12 @@ Desktop/server nodes may discover and run Codex App Server. Android reports App 
 unsupported. Desired state comes from Mira Server; reported state describes what is actually
 running. Each execution Node may keep a Server-side `desiredAppServer.defaultCwd`; the broker applies
 it only when `thread/start` omits `cwd`, never when resuming a persisted thread. Secrets such as server
-tokens stay local and must not be included in desired state.
+tokens stay local and must not be included in desired state. A Node may also keep a Server-side
+`desiredAppServer.developerInstructionsFile`. For managed App Server traffic only, the broker reads
+that UTF-8 file through the Node's bounded file capability and injects its content as Developer
+instructions on `thread/start`, `thread/resume` and `thread/fork`; read or validation failures stop the
+request instead of silently dropping policy. Tool-free ephemeral title threads skip the file. The
+setting does not apply to `mira codex` CLI sessions.
 Nodes also discover rollout JSONL files under their configured, environment and default Codex homes.
 Discovery is read-only. Import is an explicit administrator action: preserve every original record in
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing

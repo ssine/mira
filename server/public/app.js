@@ -17,6 +17,7 @@ const $ = (selector) => document.querySelector(selector);
 let csrfToken = null;
 let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
+let nodeMetadataTarget = null;
 
 const themeStorageKey = "mira.theme";
 const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
@@ -894,6 +895,15 @@ function capabilityEnabled(node, name) {
   return node?.capabilities?.[name] === true;
 }
 
+function nodeUserName(node) {
+  return node?.displayName?.trim() || node?.hostname || "未命名设备";
+}
+
+function nodeIdentitySuffix(node) {
+  const aliases = Array.isArray(node?.aliases) && node.aliases.length ? ` · ${node.aliases.join(", ")}` : "";
+  return `${node?.nodeKey ?? "—"}${aliases}`;
+}
+
 function actionButton(label, action, id, className) {
   const button = element("button", className, label);
   button.type = "button";
@@ -936,7 +946,7 @@ function renderNodes(nodes) {
     const card = element("article", "node-card");
     const top = element("div", "node-top");
     const identity = element("div");
-    identity.append(element("div", "title", node.hostname), element("div", "sub", `${node.nodeKey ?? "—"} · ${node.nodeId}`));
+    identity.append(element("div", "title", nodeUserName(node)), element("div", "sub", `${nodeIdentitySuffix(node)} · ${node.nodeId}`));
     top.append(identity, element("span", `badge ${node.status ?? "offline"}`, node.status ?? "offline"));
 
     const metadata = element("div", "node-meta");
@@ -949,7 +959,14 @@ function renderNodes(nodes) {
     const enabled = Object.entries(node.capabilities ?? {}).filter(([, value]) => value === true).map(([name]) => name);
     for (const name of enabled.length ? enabled : ["未上报能力"]) capabilities.append(element("span", "", name));
 
+    const userMetadata = element("div", "node-user-metadata");
+    for (const alias of node.aliases ?? []) userMetadata.append(element("span", "node-alias", alias));
+    for (const [key, value] of Object.entries(node.labels ?? {}).sort(([left], [right]) => left.localeCompare(right))) {
+      userMetadata.append(element("span", "node-label", `${key}=${value}`));
+    }
+
     const actions = element("div", "node-actions");
+    actions.append(actionButton("编辑名称与标签", "metadata", node.nodeId, "secondary"));
     if (node.approvalStatus === "approved") {
       actions.append(actionButton("打开工作台", "workspace", node.nodeId, "approve"));
       if (node.capabilities?.appServer === true) {
@@ -960,7 +977,7 @@ function renderNodes(nodes) {
       }
       actions.append(actionButton("撤销设备", "revoke", node.nodeId, "danger"));
     }
-    card.append(top, metadata, capabilities, actions);
+    card.append(top, metadata, capabilities, userMetadata, actions);
     grid.append(card);
   }
 }
@@ -1034,7 +1051,7 @@ async function refreshNodeModels(nodeId) {
       agent.modelCatalogLoadedAt = Date.now();
       agent.modelCatalogError = "";
     }
-    toast(`${node.hostname} 的模型目录已刷新 · ${catalog.models.length} 个模型`);
+    toast(`${nodeUserName(node)} 的模型目录已刷新 · ${catalog.models.length} 个模型`);
   } catch (error) {
     if (composerJob && conversationModelKey() === key && agent.modelCatalogJob === composerJob) agent.modelCatalogError = error.message;
     throw error;
@@ -1055,6 +1072,38 @@ async function revoke(id) {
   await api(`/v1/admin/nodes/${id}/revoke`, { method: "POST", body: JSON.stringify({ reason: "revoked from admin console" }) });
   toast("设备已撤销；历史和审计记录已保留");
   await loadDashboard();
+}
+
+function showNodeMetadataDialog(id) {
+  const node = dashboardNodes.get(id);
+  if (!node) throw new Error("找不到要编辑的设备");
+  nodeMetadataTarget = { nodeId: id, expectedRevision: Number(node.metadataRevision ?? 0) };
+  $("#nodeMetadataIdentity").textContent = `${node.hostname ?? "—"} · ${node.nodeKey ?? "—"}`;
+  $("#nodeDisplayName").value = node.displayName ?? "";
+  $("#nodeAliases").value = (node.aliases ?? []).join("\n");
+  $("#nodeLabels").value = Object.entries(node.labels ?? {}).sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`).join("\n");
+  $("#nodeMetadataError").textContent = "";
+  $("#nodeMetadataDialog").showModal();
+  $("#nodeDisplayName").focus();
+}
+
+function nodeMetadataFormValue() {
+  const aliases = $("#nodeAliases").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+  const labels = {};
+  for (const line of $("#nodeLabels").value.split(/\r?\n/).map(value => value.trim()).filter(Boolean)) {
+    const separator = line.indexOf("=");
+    if (separator <= 0 || separator === line.length - 1) throw new Error(`Label 必须使用 key=value：${line}`);
+    const key = line.slice(0, separator).trim();
+    if (Object.hasOwn(labels, key)) throw new Error(`Label key 重复：${key}`);
+    labels[key] = line.slice(separator + 1).trim();
+  }
+  return {
+    displayName: $("#nodeDisplayName").value.trim() || null,
+    aliases,
+    labels,
+    expectedRevision: nodeMetadataTarget?.expectedRevision,
+  };
 }
 
 async function invokeNode(nodeId, capability, params, timeoutMs = 30000, signal = undefined) {
@@ -1088,7 +1137,7 @@ function setWorkspaceNotice(message = "", kind = "") {
 
 function renderWorkspaceHeader() {
   const node = workspace.node;
-  $("#workspaceTitle").textContent = node?.hostname ?? "设备工作台";
+  $("#workspaceTitle").textContent = node ? nodeUserName(node) : "设备工作台";
   $("#workspaceSubtitle").textContent = node ? `${node.nodeKey ?? "—"} · ${node.platform ?? "—"}/${node.architecture ?? "—"} · ${node.nodeId}` : "";
   $("#workspaceStatus").textContent = node?.status ?? "offline";
   $("#workspaceStatus").className = `badge ${node?.status ?? "offline"}`;
@@ -1246,7 +1295,7 @@ function renderDebugPresetFields(tool, action, preset) {
   if (!fields.length) {
     const explanation = tool.name === "status" && action === "list"
       ? "无需参数：列出 Agent 当前可发现的全部节点。"
-      : `无需额外参数：将直接对 ${workspace.node?.hostname ?? "当前节点"} 执行 ${tool.name}.${action}。`;
+      : `无需额外参数：将直接对 ${workspace.node ? nodeUserName(workspace.node) : "当前节点"} 执行 ${tool.name}.${action}。`;
     target.append(element("p", "debug-no-params", explanation));
     return;
   }
@@ -2088,7 +2137,7 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
       const connected = agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN;
       if (connected) {
         const node = dashboardNodes.get(agent.socketNodeId);
-        setAgentRuntimeState(`已连接 ${node?.hostname ?? agent.socketNodeId}`, "online");
+        setAgentRuntimeState(`已连接 ${node ? nodeUserName(node) : agent.socketNodeId}`, "online");
         agent.recoveryNotice = `恢复会话失败：${error.message}`;
         setConversationNotice(agent.recoveryNotice, "error");
       } else {
@@ -2951,7 +3000,7 @@ async function openNodeFile(path, line = null) {
   controller.signal.throwIfAborted();
   const mime = blob.type || "application/octet-stream";
   const node = dashboardNodes.get(selectedNode);
-  $("#nodeFileMeta").textContent = `${formatBytes(blob.size)} · ${mime} · ${node?.hostname ?? selectedNode}${line ? ` · 第 ${line} 行` : ""}`;
+  $("#nodeFileMeta").textContent = `${formatBytes(blob.size)} · ${mime} · ${node ? nodeUserName(node) : selectedNode}${line ? ` · 第 ${line} 行` : ""}`;
   $("#nodeFileLoading").classList.add("hidden");
   agent.fileObjectUrl = URL.createObjectURL(blob);
   const download = $("#nodeFileDownload");
@@ -3737,7 +3786,7 @@ async function connectAgentSocket(nodeId) {
   }
   syncConversationSendUi();
   const node = dashboardNodes.get(nodeId);
-  setAgentRuntimeState(`已连接 ${node?.hostname ?? nodeId}`, "online");
+  setAgentRuntimeState(`已连接 ${node ? nodeUserName(node) : nodeId}`, "online");
   scheduleAgentHeartbeat();
 }
 
@@ -3752,12 +3801,12 @@ async function refreshAgentNodes() {
   clear(runtimeSelect);
   clear(sourceSelect);
   for (const node of nodes.filter((value) => value.capabilities?.appServer === true)) {
-    const option = element("option", "", `${node.hostname} · ${node.platform} · ${node.status}`);
+    const option = element("option", "", `${nodeUserName(node)} · ${node.platform} · ${node.status}`);
     option.value = node.nodeId;
     runtimeSelect.append(option);
   }
   for (const node of nodes.filter((value) => value.capabilities?.codexSessions === true)) {
-    const option = element("option", "", `${node.hostname} · ${node.nodeMode} · ${node.status}`);
+    const option = element("option", "", `${nodeUserName(node)} · ${node.nodeMode} · ${node.status}`);
     option.value = node.nodeId;
     sourceSelect.append(option);
   }
@@ -3766,6 +3815,7 @@ async function refreshAgentNodes() {
   const selected = dashboardNodes.get(runtimeSelect.value);
   const defaultCwd = selected?.desiredAppServer?.defaultCwd ?? "";
   $("#agentRuntimeDefaultCwd").value = defaultCwd;
+  $("#agentRuntimeDeveloperInstructionsFile").value = selected?.desiredAppServer?.developerInstructionsFile ?? "";
   if (!agent.threadId && !$("#conversationCwd").value.trim()) $("#conversationCwd").value = defaultCwd;
   if (selected && agent.socketNodeId !== selected.nodeId) {
     setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
@@ -3791,6 +3841,24 @@ async function saveAgentRuntimeDefaultCwd() {
   $("#agentRuntimeDefaultCwd").value = result.desiredAppServer.defaultCwd ?? "";
   if (!agent.threadId) $("#conversationCwd").value = result.desiredAppServer.defaultCwd ?? "";
   toast(defaultCwd ? "已保存该节点的默认工作目录" : "已清除该节点的默认工作目录");
+}
+
+async function saveAgentRuntimeDeveloperInstructionsFile() {
+  const nodeId = $("#agentRuntimeNode").value;
+  const node = dashboardNodes.get(nodeId);
+  if (!node) throw new Error("没有可配置的 Codex 运行节点");
+  const developerInstructionsFile = $("#agentRuntimeDeveloperInstructionsFile").value.trim();
+  const result = await api(`/v1/nodes/${nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({
+      running: node.desiredAppServer?.running === true,
+      developerInstructionsFile: developerInstructionsFile || null,
+    }),
+  });
+  node.desiredAppServer = result.desiredAppServer;
+  dashboardNodes.set(nodeId, node);
+  $("#agentRuntimeDeveloperInstructionsFile").value = result.desiredAppServer.developerInstructionsFile ?? "";
+  toast(developerInstructionsFile ? "已保存该节点的 Developer Message 文件" : "已清除该节点的 Developer Message 文件");
 }
 
 function projectForThread(thread) {
@@ -3827,7 +3895,7 @@ function renderAgentThreads() {
     const copy = element("span", "thread-project-identity");
     const name = projectName(group);
     const node = dashboardNodes.get(group.nodeId);
-    const machine = node?.hostname || (group.nodeId ? "未连接的机器" : "未关联运行机器");
+    const machine = node ? nodeUserName(node) : (group.nodeId ? "未连接的机器" : "未关联运行机器");
     const isWsl = node?.nodeMode === "wsl";
     const location = `${machine}${isWsl ? " · WSL" : ""} · ${group.cwd || "目录未知"}`;
     copy.append(element("strong", "", name));
@@ -3941,7 +4009,7 @@ function navigationFacts(target, rows) {
 
 function nodeDisplayName(nodeId) {
   const node = dashboardNodes.get(nodeId);
-  return node ? `${node.hostname}${node.nodeMode === "wsl" ? " · WSL" : node.platform === "windows" ? " · Windows" : ""}` : "未关联运行机器";
+  return node ? `${nodeUserName(node)}${node.nodeMode === "wsl" ? " · WSL" : node.platform === "windows" ? " · Windows" : ""}` : "未关联运行机器";
 }
 
 function openProjectDetails(group, name, anchor) {
@@ -4425,7 +4493,7 @@ function renderLocalSessions() {
       element("strong", "", session.title || "未命名会话"),
       element("span", "session-source", `${({ desktop: "Codex Desktop", cli: "CLI", ide: "IDE 扩展", subagent: "子 Agent" })[session.clientKind] ?? "其他 / 旧节点"}${session.archived ? " · 已归档" : ""} · ${session.codexVersion || "版本未知"}`),
       element("span", "", `${formatBytes(session.sizeBytes)} · ${when(session.modifiedAt)}`),
-      element("small", "", `存储：${sourceNode?.hostname ?? "来源节点"} · 运行环境：${executionLabel}`),
+      element("small", "", `存储：${sourceNode ? nodeUserName(sourceNode) : "来源节点"} · 运行环境：${executionLabel}`),
       element("small", "", session.cwd || "工作目录未知"),
       element("small", "", session.threadId),
       element("small", "", session.path),
@@ -5184,6 +5252,7 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
 }));
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
+$("#agentRuntimeSaveDeveloperInstructions").addEventListener("click", () => saveAgentRuntimeDeveloperInstructionsFile().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
   agent.modelChoice = null;
   agent.effortChoice = null;
@@ -5192,11 +5261,12 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
+  $("#agentRuntimeDeveloperInstructionsFile").value = node?.desiredAppServer?.developerInstructionsFile ?? "";
   if (!agent.threadId) {
     $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
     setConversationMeta($("#conversationCwd").value);
   }
-  setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
+  setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node ? nodeUserName(node) : ""}`, node?.status === "online" ? "online" : "offline");
   syncConversationSendUi();
   void loadConversationModels();
 });
@@ -5553,6 +5623,28 @@ $("#projectForm").addEventListener("submit", (event) => {
 
 $("#refreshButton").addEventListener("click", () => loadDashboard().then(() => toast("状态已刷新")).catch((error) => toast(error.message)));
 $("#showRevoked").addEventListener("change", () => loadDashboard().catch((error) => toast(error.message)));
+$("#nodeMetadataCancel").addEventListener("click", () => { $("#nodeMetadataDialog").close(); nodeMetadataTarget = null; });
+$("#nodeMetadataForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const save = $("#nodeMetadataSave");
+  if (!nodeMetadataTarget || save.disabled) return;
+  save.disabled = true;
+  $("#nodeMetadataError").textContent = "";
+  try {
+    const value = nodeMetadataFormValue();
+    await api(`/v1/admin/nodes/${encodeURIComponent(nodeMetadataTarget.nodeId)}/metadata`, {
+      method: "PUT", body: JSON.stringify(value),
+    });
+    $("#nodeMetadataDialog").close();
+    nodeMetadataTarget = null;
+    await loadDashboard();
+    toast("设备名称与标签已保存");
+  } catch (error) {
+    $("#nodeMetadataError").textContent = error.message;
+  } finally {
+    save.disabled = false;
+  }
+});
 $("#workspaceBack").addEventListener("click", () => leaveWorkspace().catch((error) => toast(error.message)));
 $("#workspaceRefresh").addEventListener("click", () => refreshWorkspace().then(() => toast("节点已刷新")).catch((error) => toast(error.message)));
 $("#previewClose").addEventListener("click", clearPreview);
@@ -5654,6 +5746,7 @@ document.addEventListener("click", (event) => {
   button.disabled = true;
   let task;
   if (button.dataset.action === "revoke") task = revoke(button.dataset.id);
+  else if (button.dataset.action === "metadata") task = Promise.resolve().then(() => showNodeMetadataDialog(button.dataset.id));
   else if (button.dataset.action === "workspace") task = openWorkspace(button.dataset.id);
   else if (button.dataset.action === "refresh-models") task = refreshNodeModels(button.dataset.id);
   else task = decide(button.dataset.id, button.dataset.action);

@@ -2,7 +2,7 @@ export const dynamicToolNamespace = "home_nodes";
 
 const nodeIdProperty = {
   type: "string",
-  description: "Target node UUID from home_nodes.status(action=list).",
+  description: "Target Node UUID, exact nodeKey, or user-defined alias from home_nodes.status(action=list).",
 };
 
 export function dynamicToolSpecs() {

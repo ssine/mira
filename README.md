@@ -200,7 +200,10 @@ mira identity show --json
 mira status
 mira version
 mira update --check
-mira nodes list --json
+mira --help
+mira nodes                         # 面向人的紧凑表格
+mira nodes list --summary --json   # 面向 Agent 的精简、稳定 JSON
+mira nodes get --node 软路由 --json
 mira codex                         # 本机 Mira Codex；personal PostgreSQL store，默认 YOLO
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
 mira process count --node homeserver --json
@@ -211,7 +214,10 @@ mira app-server start --node wsl-main
 mira app-server connect --node wsl-main
 ```
 
-Node selector 可以是 UUID、精确 `nodeKey` 或唯一 hostname；歧义时失败。进程命令始终使用
+Node selector 可以是 UUID、精确 `nodeKey`、用户定义的 alias 或唯一 hostname；歧义时失败。管理员可在
+Web 设备卡中设置显示名称、最多 8 个全局唯一 aliases，以及用于筛选的 key/value labels。alias 可直接用于
+CLI、SSH/SCP/SFTP 和动态工具；labels 不会隐式选择单台设备。使用 `--label role=router`、
+`--capability ssh`、`--online` 和 `--summary` 可进一步限制 Agent 的发现结果。进程命令始终使用
 executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
 SSH relay 默认允许全局 128 路、每个相关 Node 32 路并发连接；可用
 `MIRA_SSH_MAX_SESSIONS` 和 `MIRA_SSH_MAX_SESSIONS_PER_NODE` 调整，但始终保留有界保护。
@@ -302,6 +308,12 @@ Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件�
 | `WS` | `/v1/nodes/{id}/app-server` | Cookie 或 `auth.*` subprotocol；无 token query |
 | `GET/POST` | `/v2/stores/...` | 细粒度权威 event/delta ThreadStore |
 | `GET/PUT` | `/v1/stores/{storeId}` | snapshot 兼容接口 |
+
+每个运行节点可在 Web 的“运行节点”页配置一个本机 UTF-8 Developer Message 文件。Mira Server
+会在托管 App Server 的 `thread/start`、`thread/resume` 和 `thread/fork` 请求中，通过该 Node
+的文件能力读取最多 256 KiB 并注入 `developerInstructions`；读取失败会阻止请求，避免策略被
+静默忽略。内容会进入 Codex 会话的长期上下文，因此不应包含密钥。该设置不影响 `mira codex`
+CLI。
 
 ## 验证
 

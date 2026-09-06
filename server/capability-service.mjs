@@ -1,5 +1,5 @@
 import { appendAudit } from "./auth.mjs";
-import { getNode, listNodes } from "./node-registry.mjs";
+import { getNode, listNodes, nodeSummary, resolveNode } from "./node-registry.mjs";
 
 const actions = {
   status: new Set(["get"]),
@@ -116,16 +116,20 @@ export class CapabilityService {
 
   async list(actor) {
     await this.validateActor(actor);
-    return listNodes(this.pool, { includeRevoked: actor.kind === "admin" });
+    return (await listNodes(this.pool, { includeRevoked: actor.kind === "admin" })).map(nodeSummary);
   }
 
-  async invoke(actor, targetNodeId, capability, params = {}, context = {}) {
+  async invoke(actor, targetNodeSelector, capability, params = {}, context = {}) {
     await this.validateActor(actor);
-    if (typeof targetNodeId !== "string") throw serviceError("target nodeId is required", 400, "invalid_request");
+    if (typeof targetNodeSelector !== "string") throw serviceError("target Node selector is required", 400, "invalid_request");
     if (!Object.hasOwn(actions, capability)) throw serviceError("unknown capability", 400, "invalid_request");
     const validated = validateParams(capability, params);
-    const node = await getNode(this.pool, targetNodeId);
-    if (!node) throw serviceError("approved target Node not found", 404, "not_found");
+    const resolution = await resolveNode(this.pool, targetNodeSelector);
+    if (resolution.status !== 200) {
+      throw serviceError(resolution.body.error, resolution.status, resolution.body.code);
+    }
+    const node = resolution.body.node;
+    const targetNodeId = node.nodeId;
     if (!advertised(node, capability)) {
       throw serviceError(`target Node does not advertise ${capability}`, 409, "capability_unavailable");
     }

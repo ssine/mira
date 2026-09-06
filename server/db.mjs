@@ -564,6 +564,43 @@ const migrations = [
       ON codex_thread_events(store_id, thread_id, generation, item_seq)
       WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_complete|turn_complete|turn_aborted)"';`,
   },
+  {
+    version: 24,
+    name: "node-user-metadata",
+    sql: `
+      ALTER TABLE codex_nodes
+        ADD COLUMN display_name TEXT,
+        ADD COLUMN labels JSONB NOT NULL DEFAULT '{}'::jsonb,
+        ADD COLUMN metadata_revision BIGINT NOT NULL DEFAULT 0 CHECK (metadata_revision >= 0);
+
+      CREATE TABLE mira_node_aliases (
+        alias_key TEXT PRIMARY KEY,
+        alias TEXT NOT NULL,
+        node_id UUID NOT NULL REFERENCES codex_nodes(node_id) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (node_id, alias_key)
+      );
+
+      CREATE INDEX mira_node_aliases_node_idx ON mira_node_aliases(node_id, alias_key);
+    `,
+  },
+  {
+    version: 25,
+    name: "node-developer-instructions-file",
+    sql: `
+      ALTER TABLE codex_nodes ALTER COLUMN desired_app_server
+        SET DEFAULT '{"running":true,"developerInstructionsFile":null}'::jsonb;
+
+      UPDATE codex_nodes
+      SET desired_app_server = jsonb_set(desired_app_server, '{developerInstructionsFile}', 'null'::jsonb, true)
+      WHERE NOT desired_app_server ? 'developerInstructionsFile';
+
+      UPDATE mira_node_enrollment_requests
+      SET default_desired_app_server = jsonb_set(default_desired_app_server, '{developerInstructionsFile}', 'null'::jsonb, true)
+      WHERE NOT default_desired_app_server ? 'developerInstructionsFile';
+    `,
+  },
 ];
 
 export async function initializeDatabase(pool, { throughVersion = Infinity } = {}) {

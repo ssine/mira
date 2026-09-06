@@ -27,7 +27,8 @@ import {
   approveEnrollment, createEnrollment, getEnrollment, listEnrollments, rejectEnrollment,
 } from "./node-enrollment.mjs";
 import {
-  getNode, heartbeatNode, listNodes, registerNode, revokeNode, setDesiredAppServer,
+  getNode, heartbeatNode, listNodes, nodeSummary, registerNode, resolveNode,
+  revokeNode, setDesiredAppServer, setNodeMetadata,
 } from "./node-registry.mjs";
 import {
   commitDelta, getSnapshot, getStoreHead, getThreadHistory, listStoreEvents,
@@ -315,7 +316,7 @@ async function route(request, response) {
     if (!principal) return;
     sendJson(response, 200, {
       storageModel: "postgresql-event-log", eventFormatVersion: 1, adapterProtocolVersion: 2,
-      snapshotProjection: true, nodeRegistry: true, nodeCapabilityChannel: true,
+      snapshotProjection: true, nodeRegistry: true, nodeUserMetadata: true, nodeCapabilityChannel: true,
       appServerProxy: true, dynamicTools: true, androidNodeApp: true,
       imageToolResults: true, databaseIsSourceOfTruth: true,
       authenticationVersion: 1, identities: ["admin", "node"], nodeApprovalRequired: true,
@@ -334,8 +335,34 @@ async function route(request, response) {
     const principal = await authorize(request, response, "trusted", { clientType: "cli" });
     if (!principal) return;
     const includeRevoked = principal.kind === "admin" && url.searchParams.get("includeRevoked") === "true";
-    const nodes = await listNodes(pool, { includeRevoked });
-    sendJson(response, 200, { data: nodes.map(node => ({ ...node, sshSessionCount: sshRelay.sessionCount(node.nodeId) })) });
+    const view = url.searchParams.get("view") ?? "full";
+    const capability = url.searchParams.get("capability");
+    const status = url.searchParams.get("status");
+    const labelFilters = url.searchParams.getAll("label").map((value) => {
+      const separator = value.indexOf("=");
+      return separator <= 0 || separator === value.length - 1
+        ? null : [value.slice(0, separator), value.slice(separator + 1)];
+    });
+    if (!["full", "summary"].includes(view) || (capability !== null && !/^[a-zA-Z][a-zA-Z0-9]{0,63}$/.test(capability)) ||
+        (status !== null && !["online", "offline"].includes(status)) ||
+        labelFilters.length > 16 || labelFilters.some((filter) => filter === null || !/^[a-z][a-z0-9._-]{0,31}$/.test(filter[0]))) {
+      errorJson(response, 400, "invalid Node list filter", "invalid_request");
+      return;
+    }
+    let nodes = await listNodes(pool, { includeRevoked });
+    if (capability !== null) nodes = nodes.filter((node) => node.capabilities?.[capability] === true);
+    if (status !== null) nodes = nodes.filter((node) => node.status === status);
+    for (const [key, value] of labelFilters) nodes = nodes.filter((node) => node.labels?.[key] === value);
+    sendJson(response, 200, { data: nodes.map(node => view === "summary"
+      ? nodeSummary(node) : { ...node, sshSessionCount: sshRelay.sessionCount(node.nodeId) }) });
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/v1/nodes/resolve") {
+    const principal = await authorize(request, response, "trusted", { clientType: "cli" });
+    if (!principal) return;
+    const selector = url.searchParams.get("selector");
+    const result = await resolveNode(pool, selector, { includeRevoked: principal.kind === "admin" });
+    sendJson(response, result.status, result.body);
     return;
   }
   match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})$/i);
@@ -554,10 +581,13 @@ async function route(request, response) {
       codexHome: typeof body.codexHome === "string" ? body.codexHome : node.desiredAppServer?.codexHome,
       configOverrides,
     });
-    if (result.status === 200) await appendAudit(pool, {
-      action: `codex_runtime.${running ? "started" : "stopped"}`, principal,
-      targetNodeId: match[1], request, metadata: { storeId },
-    });
+    if (result.status === 200) {
+      nodeChannel.updateProxyDesiredAppServer(match[1], result.body.desiredAppServer);
+      await appendAudit(pool, {
+        action: `codex_runtime.${running ? "started" : "stopped"}`, principal,
+        targetNodeId: match[1], request, metadata: { storeId },
+      });
+    }
     sendJson(response, result.status, result.body);
     return;
   }
@@ -590,10 +620,13 @@ async function route(request, response) {
     const principal = await authorize(request, response, "trusted", { clientType: "cli" });
     if (!principal) return;
     const result = await setDesiredAppServer(pool, match[1], await readJson(request));
-    if (result.status === 200) await appendAudit(pool, {
-      action: "app_server.desired.updated", principal, targetNodeId: match[1], request,
-      metadata: { running: result.body.desiredAppServer.running },
-    });
+    if (result.status === 200) {
+      nodeChannel.updateProxyDesiredAppServer(match[1], result.body.desiredAppServer);
+      await appendAudit(pool, {
+        action: "app_server.desired.updated", principal, targetNodeId: match[1], request,
+        metadata: { running: result.body.desiredAppServer.running },
+      });
+    }
     sendJson(response, result.status, result.body);
     return;
   }
@@ -617,6 +650,14 @@ async function route(request, response) {
     const reason = typeof body.reason === "string" ? body.reason.slice(0, 2_000) : null;
     const result = await revokeNode(pool, request, principal, match[1], reason);
     if (result.status === 200) nodeChannel.disconnectNode(match[1], "Node authorization revoked");
+    sendJson(response, result.status, result.body);
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/admin\/nodes\/([0-9a-f-]{36})\/metadata$/i);
+  if (request.method === "PUT" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const result = await setNodeMetadata(pool, request, principal, match[1], await readJson(request));
     sendJson(response, result.status, result.body);
     return;
   }

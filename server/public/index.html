@@ -233,6 +233,9 @@
             <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
             <label>该节点的默认工作目录<input id="agentRuntimeDefaultCwd" type="text" placeholder="Unix /path 或 Windows C:\\path"></label>
             <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
+            <label>Developer Message 文件<input id="agentRuntimeDeveloperInstructionsFile" type="text" placeholder="节点上的 UTF-8 绝对路径"></label>
+            <button id="agentRuntimeSaveDeveloperInstructions" class="secondary runtime-setting" type="button">保存 Developer Message 文件</button>
+            <p class="muted">在新建、恢复或分叉会话时读取（最大 256 KiB）。内容会发送给 Codex 并随会话长期存在，请勿存放密钥。</p>
             <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
             <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
           </section>
@@ -373,6 +376,21 @@
       <div class="sidebar-popover-head"><strong id="projectDetailsTitle">项目详情</strong><button class="chat-icon-button" type="button" data-close-popover aria-label="关闭项目详情">×</button></div>
       <dl id="projectDetailsFacts" class="navigation-facts"></dl>
     </div>
+    <dialog id="nodeMetadataDialog" class="chat-edit-dialog" aria-labelledby="nodeMetadataTitle">
+      <form id="nodeMetadataForm">
+        <h2 id="nodeMetadataTitle">编辑设备名称与标签</h2>
+        <p id="nodeMetadataIdentity" class="muted"></p>
+        <label for="nodeDisplayName">显示名称</label>
+        <input id="nodeDisplayName" maxlength="80" autocomplete="off" placeholder="例如：家里的软路由">
+        <label for="nodeAliases">别名（Aliases）</label>
+        <textarea id="nodeAliases" rows="4" autocomplete="off" placeholder="每行一个，例如：&#10;软路由&#10;openwrt"></textarea>
+        <p class="muted">每台设备最多 8 个；在整个 Mira 中唯一，可直接用于 CLI、SSH 和 Agent 工具。</p>
+        <label for="nodeLabels">标签（Labels）</label>
+        <textarea id="nodeLabels" rows="4" autocomplete="off" placeholder="每行一个 key=value，例如：&#10;role=router&#10;site=home"></textarea>
+        <p id="nodeMetadataError" class="chat-edit-error" role="status"></p>
+        <div class="chat-edit-actions"><button id="nodeMetadataCancel" class="ghost" type="button">取消</button><button id="nodeMetadataSave" class="primary" type="submit">保存</button></div>
+      </form>
+    </dialog>
     <dialog id="threadDeleteDialog" class="chat-edit-dialog" aria-labelledby="threadDeleteTitle">
       <form id="threadDeleteForm">
         <h2 id="threadDeleteTitle">永久删除对话？</h2>

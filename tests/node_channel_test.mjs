@@ -182,7 +182,8 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   assert.equal(start.params.approvalPolicy, "never");
   assert.equal(start.params.sandbox, "danger-full-access");
   assert.match(start.params.developerInstructions, /^Keep the user's existing instruction\./);
-  assert.match(start.params.developerInstructions, /'\/opt\/mira\/versions\/0\.11\.2\/mira' nodes list --json/);
+  assert.match(start.params.developerInstructions, /'\/opt\/mira\/versions\/0\.11\.2\/mira' nodes list --summary --capability ssh --json/);
+  assert.match(start.params.developerInstructions, /exact user-defined alias/);
   assert.match(start.params.developerInstructions, /SSH, SCP, and SFTP are CLI-only operations/);
   assert.equal(start.params.dynamicTools.filter((tool) => tool.name === "home_nodes").length, 1);
   assert.equal(start.params.dynamicTools.filter((tool) => tool.name === "client_tool").length, 1);
@@ -228,6 +229,148 @@ test("App Server proxy tells Codex to use the absolute Mira CLI without adding S
   assert.equal(explicit.params.approvalPolicy, "on-request");
   assert.equal(explicit.params.sandbox, "read-only");
 
+  channel.close();
+});
+
+test("App Server proxy loads per-Node Developer instructions for start, resume, and fork", async () => {
+  const reads = [];
+  let content = "Always keep the Node policy active.\n";
+  const channel = new NodeChannel({
+    server: new EventEmitter(), authService: {},
+    pool: { query: async sql => ({ rowCount: sql.includes("mira_thread_actions") ? 0 : 1, rows: [] }) },
+  });
+  channel.capabilityService = {
+    invoke: async (...args) => {
+      reads.push(args);
+      const bytes = Buffer.from(content);
+      return {
+        encoding: "base64", content: bytes.toString("base64"), bytesRead: bytes.length, eof: true,
+      };
+    },
+  };
+  const node = new Socket();
+  channel.attachNode("node-1", node);
+  const client = new Socket();
+  channel.attachProxy("node-1", client, { kind: "admin" }, "personal", {
+    platform: "linux",
+    capabilities: { appServer: true, files: true },
+    desiredAppServer: { developerInstructionsFile: "/etc/mira/developer.md" },
+    reportedAppServer: { miraCliPath: "/opt/mira/mira" },
+  });
+  const proxy = [...channel.proxies.values()][0];
+
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({
+    id: 1, method: "thread/start", params: { developerInstructions: "Keep the client policy too." },
+  }));
+  const start = JSON.parse(node.sent.at(-1).payload);
+  assert.match(start.params.developerInstructions, /^Keep the client policy too\./);
+  assert.match(start.params.developerInstructions, /MIRA_CLI_INSTRUCTIONS_V1_BEGIN/);
+  assert.match(start.params.developerInstructions, /MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_BEGIN/);
+  assert.match(start.params.developerInstructions, /Always keep the Node policy active\./);
+  assert.equal(reads[0][1], "node-1");
+  assert.equal(reads[0][2], "file");
+  assert.deepEqual(reads[0][3], {
+    action: "read", path: "/etc/mira/developer.md", offset: 0, length: 256 * 1024 + 1, encoding: "base64",
+  });
+  assert.equal(reads[0][4].timeoutMs, 5_000);
+
+  content = "Use the newly saved Node policy.\n";
+  channel.updateProxyDesiredAppServer("node-1", { developerInstructionsFile: "/etc/mira/new-developer.md" });
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({
+    id: 2,
+    method: "thread/resume",
+    params: {
+      threadId: "thread-1",
+      developerInstructions: [
+        "Keep this resume policy.",
+        "MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_BEGIN",
+        "obsolete Node policy",
+        "MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_END",
+      ].join("\n"),
+    },
+  }));
+  const resume = JSON.parse(node.sent.at(-1).payload);
+  assert.match(resume.params.developerInstructions, /^Keep this resume policy\./);
+  assert.doesNotMatch(resume.params.developerInstructions, /obsolete Node policy/);
+  assert.match(resume.params.developerInstructions, /Use the newly saved Node policy\./);
+  assert.equal(resume.params.developerInstructions.match(/MIRA_NODE_DEVELOPER_INSTRUCTIONS_V1_BEGIN/g)?.length, 1);
+  assert.equal(reads[1][3].path, "/etc/mira/new-developer.md");
+
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({
+    id: 3, method: "thread/fork", params: { threadId: "thread-1" },
+  }));
+  const fork = JSON.parse(node.sent.at(-1).payload);
+  assert.match(fork.params.developerInstructions, /Use the newly saved Node policy\./);
+  assert.equal(reads.length, 3);
+  channel.close();
+});
+
+test("Developer instructions file failures fail closed and release thread creation idempotency", async () => {
+  const pool = new ThreadStartPool();
+  const channel = new NodeChannel({ server: new EventEmitter(), authService: {}, pool });
+  const node = new Socket();
+  channel.attachNode("node-1", node);
+  const client = new Socket();
+  channel.attachProxy("node-1", client, { kind: "admin", subjectId: "admin-1" }, "personal", {
+    platform: "linux",
+    capabilities: { appServer: true, files: true },
+    desiredAppServer: { developerInstructionsFile: "/etc/mira/developer.md" },
+  });
+  const proxy = [...channel.proxies.values()][0];
+  channel.capabilityService = { invoke: async () => { throw new Error("file not found"); } };
+  const miraRequestId = "8c043d32-a487-4b37-959f-4ec51673b1eb";
+
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({
+    id: 10, method: "thread/start", params: { miraRequestId },
+  }));
+  assert.equal(client.sent.at(-1).error.code, -32005);
+  assert.match(client.sent.at(-1).error.message, /file not found/);
+  assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 0);
+  assert.equal(pool.records.values().next().value.status, "failed");
+
+  channel.capabilityService = {
+    invoke: async () => ({ encoding: "base64", content: "cmVjb3ZlcmVk", bytesRead: 9, eof: true }),
+  };
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({
+    id: 11, method: "thread/start", params: { miraRequestId },
+  }));
+  assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 1,
+    "a corrected file could not retry the same idempotent creation request");
+  channel.close();
+});
+
+test("Developer instructions files must be bounded valid UTF-8", async () => {
+  const channel = new NodeChannel({
+    server: new EventEmitter(), authService: {},
+    pool: { query: async () => ({ rowCount: 0, rows: [] }) },
+  });
+  const node = new Socket();
+  channel.attachNode("node-1", node);
+  const client = new Socket();
+  channel.attachProxy("node-1", client, { kind: "admin" }, "personal", {
+    platform: "linux",
+    capabilities: { appServer: true, files: true },
+    desiredAppServer: { developerInstructionsFile: "/etc/mira/developer.md" },
+  });
+  const proxy = [...channel.proxies.values()][0];
+
+  channel.capabilityService = {
+    invoke: async () => ({ encoding: "base64", content: "/w==", bytesRead: 1, eof: true }),
+  };
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({ id: 1, method: "thread/start", params: {} }));
+  assert.equal(client.sent.at(-1).error.code, -32005);
+  assert.match(client.sent.at(-1).error.message, /valid UTF-8/);
+
+  const oversized = Buffer.alloc(256 * 1024 + 1, 97);
+  channel.capabilityService = {
+    invoke: async () => ({
+      encoding: "base64", content: oversized.toString("base64"), bytesRead: oversized.length, eof: true,
+    }),
+  };
+  await channel.forwardProxyClientMessage(proxy, JSON.stringify({ id: 2, method: "thread/start", params: {} }));
+  assert.equal(client.sent.at(-1).error.code, -32005);
+  assert.match(client.sent.at(-1).error.message, /exceeds 262144 bytes/);
+  assert.equal(node.sent.filter((message) => message.type === "appserver.message").length, 0);
   channel.close();
 });
 
@@ -316,7 +459,7 @@ test("App Server proxy emits native Windows CLI and cwd syntax", () => {
   const start = JSON.parse(node.sent.at(-1).payload);
   assert.equal(start.params.cwd, "C:\\code\\mira");
   assert.match(start.params.developerInstructions,
-    /& 'C:\\Program Files\\Mira\\mira\.exe' nodes list --json/);
+    /& 'C:\\Program Files\\Mira\\mira\.exe' nodes list --summary --capability ssh --json/);
   channel.close();
 });
 
@@ -325,14 +468,20 @@ test('tool-free ephemeral threads retain isolation and never acquire durable run
   const channel = new NodeChannel({ server: new EventEmitter(), authService: {}, pool });
   const node = new Socket(), client = new Socket();
   channel.attachNode('node-1', node);
-  channel.attachProxy('node-1', client, { kind: 'admin' }, 'personal', { platform: 'linux' });
+  channel.attachProxy('node-1', client, { kind: 'admin' }, 'personal', {
+    platform: 'linux', capabilities: { files: true },
+    desiredAppServer: { developerInstructionsFile: '/etc/mira/developer.md' },
+  });
   const proxy = [...channel.proxies.values()][0];
+  let instructionsRead = false;
+  channel.capabilityService = { invoke: () => { instructionsRead = true; } };
   await channel.forwardProxyClientMessage(proxy, JSON.stringify({ id: 1, method: 'thread/start', params: {
     ephemeral: true, dynamicTools: [], sandbox: 'read-only', developerInstructions: 'Title only',
   } }));
   const request = JSON.parse(node.sent.at(-1).payload);
   assert.deepEqual(request.params.dynamicTools, []);
   assert.equal(request.params.developerInstructions, 'Title only');
+  assert.equal(instructionsRead, false);
   assert.equal(request.params.sandbox, 'read-only');
   await channel.forwardAppServerMessage(proxy, JSON.stringify({ method: 'thread/started', params: { thread: { id: 'temporary', ephemeral: true } } }));
   await channel.forwardAppServerMessage(proxy, JSON.stringify({ id: 1, result: { thread: { id: 'temporary', ephemeral: true } } }));

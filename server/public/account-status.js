@@ -191,7 +191,7 @@ export class AccountSidebar {
     find("[data-account-email]").textContent = email;
     find("[data-account-email]").title = email;
     const mode = this.node?.nodeMode === "wsl" ? " · WSL" : this.node?.platform === "windows" ? " · Windows" : "";
-    const nodeLabel = this.node ? `${this.node.hostname}${mode}` : "当前运行节点";
+    const nodeLabel = this.node ? `${this.node.displayName?.trim() || this.node.hostname}${mode}` : "当前运行节点";
     find("[data-account-node]").textContent = nodeLabel;
     find("[data-account-node]").title = nodeLabel;
     find("[data-account-plan]").textContent = this.account?.planType?.toUpperCase() ?? "";

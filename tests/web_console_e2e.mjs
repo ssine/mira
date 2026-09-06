@@ -10,12 +10,15 @@ const projectDirectory = path.dirname(path.dirname(fileURLToPath(import.meta.url
 const serverUrl = (process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const adminPassword = process.env.MIRA_TEST_ADMIN_PASSWORD ?? "mira-local-admin-password";
 const nodeKey = `web-console-e2e-${process.pid}`;
+const nodeAlias = `软路由-${process.pid}`;
+const alternateNodeAlias = `openwrt-${process.pid}`;
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-web-console-e2e-"));
 const identityFile = path.join(temporary, "identity.json");
 const nodeBinary = path.join(temporary, "mira-node");
 const fixtureName = "console-fixture.txt";
 const fixturePath = path.join(temporary, fixtureName);
 const fixtureContent = `Mira console file browser ${process.pid}\n`;
+const developerInstructionsPath = path.join(temporary, "developer-instructions.md");
 const processMarker = `MIRA_PROCESS_${process.pid}`;
 const terminalMarker = `MIRA_PTY_${process.pid}`;
 const codexHome = path.join(temporary, "codex-home");
@@ -26,6 +29,7 @@ execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira-node"], {
   cwd: path.join(projectDirectory, "node"),
 });
 await fs.writeFile(fixturePath, fixtureContent);
+await fs.writeFile(developerInstructionsPath, "Keep this Node's long-lived test instruction.\n");
 const sessionDirectory = path.join(codexHome, "sessions", "2026", "09", "04");
 await fs.mkdir(sessionDirectory, { recursive: true });
 const sessionPath = path.join(sessionDirectory, `rollout-2026-09-04-${importedThreadId}.jsonl`);
@@ -133,6 +137,12 @@ assert(assets["/"].includes("loginForm"), "website does not expose the administr
 for (const control of ["globalNav", "globalNodes", "globalAgent", "globalRuntime", "themeToggle"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted Nexus-style shell control ${control}`);
 }
+for (const control of ["nodeMetadataDialog", "nodeMetadataForm", "nodeDisplayName", "nodeAliases", "nodeLabels"]) {
+  assert(assets["/"].includes(`id="${control}"`), `website omitted Node metadata control ${control}`);
+}
+for (const wiring of ["function showNodeMetadataDialog(", "function nodeMetadataFormValue(", "/metadata`", "nodeUserName(node)"]) {
+  assert(assets["/app.js"].includes(wiring), `website omitted Node metadata behavior: ${wiring}`);
+}
 for (const wiring of ["themeStorageKey", "function terminalTheme()", "function toggleTheme()", "function navigateGlobal("]) {
   assert(assets["/app.js"].includes(wiring), `website omitted shell behavior: ${wiring}`);
 }
@@ -165,13 +175,13 @@ for (const wiring of [
 for (const control of ["workspaceView", "fileRootSelect", "terminalOutput", "systemProcessCount", "memoryResource", "diskResources"]) {
   assert(assets["/"].includes(control), `website omitted workbench control ${control}`);
 }
-for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationScroll", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
+for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentThreadDrawerToggle", "agentHome", "agentRuntimeNode", "agentRuntimeDefaultCwd", "agentRuntimeSaveCwd", "agentRuntimeDeveloperInstructionsFile", "agentRuntimeSaveDeveloperInstructions", "agentThreadList", "sessionSourceNode", "localSessionList", "conversationScroll", "conversationTrace", "conversationForm", "conversationAttach", "conversationFileInput", "conversationAttachments", "nodeFileDialog", "nodeFileDownload"]) {
   assert(assets["/"].includes(control), `website omitted Agent console control ${control}`);
 }
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "desiredAppServer?.developerInstructionsFile", "saveAgentRuntimeDeveloperInstructionsFile", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
 assert(!assets["/app.js"].includes('$("#conversationSend").disabled = false'),
@@ -362,21 +372,93 @@ try {
   }, "approved Node reverse channel");
   nodeId = online.nodeId;
 
+  const metadataWithoutCsrf = await fetchBody(`/v1/admin/nodes/${nodeId}/metadata`, {
+    method: "PUT", headers: { cookie: session.cookie, "content-type": "application/json" },
+    body: JSON.stringify({ displayName: "家里的软路由", aliases: [nodeAlias], labels: {}, expectedRevision: 0 }),
+  });
+  assert(metadataWithoutCsrf.response.status === 403 && metadataWithoutCsrf.body.code === "invalid_csrf",
+    "Node metadata update did not enforce administrator CSRF");
+  const metadata = await admin(`/v1/admin/nodes/${nodeId}/metadata`, {
+    method: "PUT",
+    body: JSON.stringify({
+      displayName: "家里的软路由", aliases: [nodeAlias, alternateNodeAlias],
+      labels: { role: "router", site: "home" }, expectedRevision: online.metadataRevision,
+    }),
+  });
+  assert(metadata.response.ok && metadata.body.metadataRevision === 1 && metadata.body.aliases.includes(nodeAlias),
+    `Node metadata was not saved: ${JSON.stringify(metadata.body)}`);
+  const aliasKeyEnrollment = await fetchBody("/v1/node-enrollments", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      credentialId: randomUUID(), credentialSecretHash: "a".repeat(64), nodeKey: nodeAlias,
+      hostname: "selector-conflict", platform: "linux", architecture: "amd64", nodeMode: "linux",
+      nodeVersion: "test", capabilities: {},
+    }),
+  });
+  assert(aliasKeyEnrollment.response.status === 409 && aliasKeyEnrollment.body.code === "enrollment_conflict",
+    "a new Node key was allowed to conflict with an existing alias");
+  const staleMetadata = await admin(`/v1/admin/nodes/${nodeId}/metadata`, {
+    method: "PUT",
+    body: JSON.stringify({ displayName: null, aliases: [], labels: {}, expectedRevision: 0 }),
+  });
+  assert(staleMetadata.response.status === 409 && staleMetadata.body.code === "metadata_conflict",
+    "stale Node metadata update did not conflict");
+  const keyAliasConflict = await admin(`/v1/admin/nodes/${nodeId}/metadata`, {
+    method: "PUT",
+    body: JSON.stringify({ displayName: null, aliases: [nodeKey], labels: {}, expectedRevision: 1 }),
+  });
+  assert(keyAliasConflict.response.status === 409 && keyAliasConflict.body.code === "alias_conflict",
+    "Node alias was allowed to conflict with the selector namespace");
+  const invalidAlias = await admin(`/v1/admin/nodes/${nodeId}/metadata`, {
+    method: "PUT",
+    body: JSON.stringify({ displayName: null, aliases: ["bad:alias"], labels: {}, expectedRevision: 1 }),
+  });
+  assert(invalidAlias.response.status === 400 && invalidAlias.body.code === "invalid_request",
+    "unsafe Node alias syntax was accepted");
+  const resolvedAlias = await admin(`/v1/nodes/resolve?selector=${encodeURIComponent(nodeAlias)}`);
+  assert(resolvedAlias.response.ok && resolvedAlias.body.node?.nodeId === nodeId && resolvedAlias.body.matchedBy === "alias",
+    `Node alias did not resolve: ${JSON.stringify(resolvedAlias.body)}`);
+  const aliasStatus = await dynamicCall("status", { action: "get", nodeId: nodeAlias });
+  assert(aliasStatus.hostname === online.hostname, "dynamic tool did not accept a Node alias");
+  const cliAlias = JSON.parse(execFileSync(nodeBinary, ["cli", "nodes", "get", "--node", nodeAlias, "--json"], {
+    env: { ...process.env, MIRA_IDENTITY_FILE: identityFile }, encoding: "utf8",
+  }));
+  assert(cliAlias.data.nodeId === nodeId && cliAlias.data.aliases.includes(alternateNodeAlias),
+    "CLI did not resolve a user-defined Node alias");
+  const cliSummary = JSON.parse(execFileSync(nodeBinary, ["cli", "nodes", "list", "--summary", "--capability", "files", "--label", "role=router", "--json"], {
+    env: { ...process.env, MIRA_IDENTITY_FILE: identityFile }, encoding: "utf8",
+  }));
+  const summarized = cliSummary.data.find((node) => node.nodeId === nodeId);
+  assert(summarized?.aliases.includes(nodeAlias) && summarized.machineStatus === undefined && summarized.codexInstallations === undefined,
+    "CLI summary was not compact or omitted Node aliases");
+
   const configuredDefaultCwd = await admin(`/v1/nodes/${nodeId}/desired-app-server`, {
     method: "PUT",
-    body: JSON.stringify({ running: false, defaultCwd: temporary }),
+    body: JSON.stringify({
+      running: false, defaultCwd: temporary, developerInstructionsFile: developerInstructionsPath,
+    }),
   });
   assert(configuredDefaultCwd.response.ok && configuredDefaultCwd.body.desiredAppServer?.defaultCwd === temporary,
     `default working directory was not persisted: ${JSON.stringify(configuredDefaultCwd.body)}`);
+  assert(configuredDefaultCwd.body.desiredAppServer?.developerInstructionsFile === developerInstructionsPath,
+    `Developer instructions file was not persisted: ${JSON.stringify(configuredDefaultCwd.body)}`);
   const relativeDefaultCwd = await admin(`/v1/nodes/${nodeId}/desired-app-server`, {
     method: "PUT",
     body: JSON.stringify({ running: false, defaultCwd: "relative/path" }),
   });
   assert(relativeDefaultCwd.response.status === 400 && relativeDefaultCwd.body.code === "invalid_request",
     "relative default working directory was accepted");
+  const relativeDeveloperInstructions = await admin(`/v1/nodes/${nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({ running: false, developerInstructionsFile: "relative/instructions.md" }),
+  });
+  assert(relativeDeveloperInstructions.response.status === 400 && relativeDeveloperInstructions.body.code === "invalid_request",
+    "relative Developer instructions file was accepted");
   const configuredNode = await admin(`/v1/nodes/${nodeId}`);
   assert(configuredNode.body.desiredAppServer?.defaultCwd === temporary,
     "default working directory did not survive the rejected update");
+  assert(configuredNode.body.desiredAppServer?.developerInstructionsFile === developerInstructionsPath,
+    "Developer instructions file did not survive the rejected update");
 
   const scanned = await admin(`/v1/nodes/${nodeId}/codex-sessions`);
   assert(scanned.response.ok, `Codex session scan failed: ${scanned.response.status} ${JSON.stringify(scanned.body)}`);
@@ -598,6 +680,7 @@ try {
     friendlyDebuggerForm: true,
     nodeApproval: true,
     nodeDefaultCwd: true,
+    nodeDeveloperInstructionsFile: true,
     aggregateStatus: true,
     machineConfiguration: true,
     resourceUsage: true,
