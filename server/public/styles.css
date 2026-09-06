@@ -432,6 +432,11 @@ tbody tr:hover { background: var(--hover); }
 .agent-thread-row:has(.agent-thread.active) { box-shadow: inset 0 0 0 1px var(--line-strong); }
 .agent-thread.active { border-left-color: var(--accent); }
 .agent-thread-row[data-unread="true"] strong { font-weight: 650; }
+.agent-thread { container: thread-row / inline-size; }
+.thread-meta { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.thread-meta .thread-state-label { flex: 1; min-width: 0; }
+.thread-token-usage { display: none; flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+@container thread-row (min-width: 224px) { .thread-token-usage:not([hidden]) { display: inline; } }
 .thread-state-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-thread-row[data-state="running"] .thread-state-label,
 .agent-thread-row[data-state="idle"][data-unread="true"] .thread-state-label,
@@ -758,6 +763,10 @@ progress { width: 100%; accent-color: var(--accent); }
 .navigation-facts dd { margin: 3px 0 0; line-height: 1.6; overflow-wrap: anywhere; user-select: text; }
 .navigation-copy { margin: 0; padding: 2px 5px; min-height: 24px; font-size: 11px; }
 .conversation-details { width: min(440px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); padding: 18px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); color: var(--text); }
+.conversation-token-usage { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
+.conversation-token-usage h4 { margin: 0 0 12px; font-size: 13px; font-weight: 600; }
+.conversation-token-usage .navigation-facts > div + div { margin-top: 12px; }
+.conversation-token-usage dd { font-variant-numeric: tabular-nums; }
 .conversation-details::backdrop { background: rgb(18 31 47 / 22%); }
 .conversation-details h3 { margin: 0 0 18px; font-size: 16px; line-height: 1.5; overflow-wrap: anywhere; }
 .conversation-details > .muted { font-size: 12px; }

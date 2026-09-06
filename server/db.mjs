@@ -3,6 +3,7 @@ import { storageRowsMigration } from "./storage-rows-migration.mjs";
 import { threadReadStateMigration } from "./thread-read-state-migration.mjs";
 
 import { accountHistoryMigration } from "./account-history-migration.mjs";
+import { tokenUsageMigration } from "./thread-token-usage-migration.mjs";
 
 const migrations = [
   {
@@ -550,6 +551,7 @@ const migrations = [
   },
   { version: 19, name: "shared-web-thread-read-positions", sql: threadReadStateMigration },
   { version: 20, name: "account-quota-history", sql: accountHistoryMigration },
+  { version: 21, name: "thread-token-usage-lookup", sql: tokenUsageMigration },
 ];
 
 export async function initializeDatabase(pool, { throughVersion = Infinity } = {}) {

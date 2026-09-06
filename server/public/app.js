@@ -7,6 +7,7 @@ import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { AccountSidebar } from "/account-status.js";
+import { compactTokenUsage, tokenCount, tokenUsageTitle } from "/thread-usage.js";
 import { TraceImages, mergeImages } from "/trace-images.js";
 
 marked.setOptions({ gfm: true, breaks: false });
@@ -149,6 +150,7 @@ const agent = {
   threadId: null,
   turnId: null,
   persistedActivity: new Map(),
+  tokenUsages: new Map(),
   readStates: new Map(),
   readTimer: null,
   readRequest: null,
@@ -309,7 +311,30 @@ function recordLiveActivity(threadId, turnId, state) {
     generation: stored?.generation ?? 0, itemCount: stored?.itemCount ?? 0, observedAt: Date.now() });
 }
 
+function acceptThreadTokenUsage(thread, checkedAt = Date.now()) {
+  if (!Object.hasOwn(thread, "tokenUsage") || !Number.isSafeInteger(thread.generation) || !Number.isSafeInteger(thread.itemCount)) return;
+  const previous = agent.tokenUsages.get(thread.threadId);
+  if (previous && (thread.generation < previous.generation || (thread.generation === previous.generation &&
+      (thread.itemCount < previous.itemCount || (thread.itemCount === previous.itemCount && checkedAt < previous.checkedAt))))) return;
+  agent.tokenUsages.set(thread.threadId, { usage: thread.tokenUsage, generation: thread.generation, itemCount: thread.itemCount, checkedAt });
+  while (agent.tokenUsages.size > 1000) agent.tokenUsages.delete(agent.tokenUsages.keys().next().value);
+}
+
+function renderConversationTokenUsage(threadId) {
+  const usage = agent.tokenUsages.get(threadId)?.usage;
+  const target = $("#conversationTokenUsageFacts");
+  const key = JSON.stringify([threadId, usage?.inputTokens, usage?.cachedInputTokens, usage?.outputTokens]);
+  if (target._miraUsageKey === key) return;
+  target._miraUsageKey = key;
+  navigationFacts(target, [
+    ["累计输入 Token（含缓存）", tokenCount(usage?.inputTokens)],
+    ["其中缓存输入 Token", tokenCount(usage?.cachedInputTokens)],
+    ["累计输出 Token", tokenCount(usage?.outputTokens)],
+  ]);
+}
+
 function acceptThreadActivity(thread, checkedAt = Date.now()) {
+  acceptThreadTokenUsage(thread, checkedAt);
   if (thread.readState) acceptThreadReadState(thread.threadId, thread.readState);
   const incoming = thread.activity;
   if (!incoming) return;
@@ -343,7 +368,16 @@ function renderThreadStates() {
     label.textContent = stateLabel || label.dataset.recency || "";
     label.dataset.state = activity.state;
     label.title = stateLabel ? activity.state === "idle" ? stateLabel : activityLabel(activity) : label.dataset.recency || "";
+    const usage = agent.tokenUsages.get(id)?.usage;
+    const usageLabel = row.querySelector("[data-thread-token-usage]");
+    if (usageLabel) {
+      const compact = compactTokenUsage(usage), title = tokenUsageTitle(usage);
+      if (usageLabel.textContent !== compact) usageLabel.textContent = compact;
+      usageLabel.hidden = !compact;
+      if (usageLabel.title !== title) usageLabel.title = title;
+    }
   }
+  if ($("#conversationDetails").open) renderConversationTokenUsage($("#conversationDetails").dataset.threadId);
   scheduleThreadRead();
 }
 
@@ -1951,6 +1985,7 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
   // visible (disabled offline) until a completion event or a fresh turn read.
   if (resetTurnState) {
     agent.persistedActivity.clear();
+    agent.tokenUsages.clear();
     agent.readStates.clear();
     clearTimeout(agent.readTimer);
     agent.readTimer = null;
@@ -3347,7 +3382,12 @@ function renderAgentThreads() {
       status.dataset.threadActivity = thread.threadId;
       status.dataset.recency = agent.titleJobs.has(thread.threadId)
         ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`;
-      button.append(element("strong", "", button.title), status);
+      const meta = element("span", "thread-meta");
+      const usage = element("span", "thread-token-usage");
+      usage.dataset.threadTokenUsage = thread.threadId;
+      usage.hidden = true;
+      meta.append(status, usage);
+      button.append(element("strong", "", button.title), meta);
       const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
       menu.type = "button";
       menu.dataset.threadMenu = thread.threadId;
@@ -3417,6 +3457,7 @@ function openProjectDetails(group, name, anchor) {
 }
 
 function renderConversationDetails(thread) {
+  renderConversationTokenUsage(thread?.threadId);
   $("#conversationDetailsName").textContent = thread?.title || "未命名会话";
   navigationFacts($("#conversationDetailsFacts"), [
     ["运行机器", nodeDisplayName(thread?.runtimeNodeId || thread?.sourceNodeId)],
@@ -3441,11 +3482,13 @@ async function openConversationDetails(threadId) {
   panel._miraRevision = revision;
   panel.dataset.threadId = threadId;
   renderConversationDetails(agent.threads.find(thread => thread.threadId === threadId));
+  const checkedAt = Date.now();
   $("#conversationDetailsStatus").textContent = "正在更新…";
   showConversationDetailsPanel();
   try {
     const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
     if (!panel.open || panel._miraRevision !== revision) return;
+    acceptThreadTokenUsage(thread, checkedAt);
     renderConversationDetails(thread);
     $("#conversationDetailsStatus").textContent = "";
   } catch (error) {

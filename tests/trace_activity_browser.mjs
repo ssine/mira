@@ -13,6 +13,7 @@ const assets = new Map([
   ["/", ["public/index.html", "text/html"]],
   ["/app.js", ["public/app.js", "text/javascript"]],
   ["/thread-title.js", ["public/thread-title.js", "text/javascript"]],
+  ["/thread-usage.js", ["public/thread-usage.js", "text/javascript"]],
   ["/account-history.js", ["public/account-history.js", "text/javascript"]],
   ["/account-quota.js", ["public/account-quota.js", "text/javascript"]],
   ["/account-status.js", ["public/account-status.js", "text/javascript"]],
