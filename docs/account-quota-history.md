@@ -33,9 +33,11 @@ five-minute cache.
 
 The account details popover shows a height-limited step chart. A step indicates the new observed
 value at the sample time, not an exact consumption/reset time. Failed samples and time gaps exceeding
-2.5 sample intervals break the line. Clicking, hovering or using arrow/Home/End keys inspects a sample.
-Timestamps use the browser's local timezone. A single sample is shown as a point, and empty history
-never invents past data.
+2.5 sample intervals break the line. Clicking, hovering or using arrow/Home/End keys shows the sample
+time and remaining percentage in a label beside the active point. Hover labels disappear on pointer
+leave; touch labels stay after a tap. The chart has no permanent sample detail row. Timestamps use
+the browser's local timezone. A single sample is shown as a point, and empty history never invents
+past data.
 
 Validation: `npm run check --prefix server`, `tests/account_history_e2e.mjs` with a disposable Server
 database, and `tests/account_sidebar_browser.mjs` cover quota normalization, read-only transport,

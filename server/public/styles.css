@@ -733,12 +733,16 @@ progress { width: 100%; accent-color: var(--accent); }
 .account-history-empty { display: grid; place-items: center; min-height: 110px; margin: 8px 0; color: var(--muted); font-size: 12px; text-align: center; }
 .account-history-empty[hidden] { display: none; }
 .quota-chart { display: block; width: 100%; height: auto; max-height: 180px; margin-top: 8px; overflow: visible; color: var(--muted); touch-action: pan-y; }
+.quota-chart:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .quota-chart text { fill: currentColor; font-family: var(--font-ui); font-size: 16px; }
 .quota-grid { stroke: var(--line); stroke-width: 1; }
 .quota-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
 .quota-dot, .quota-marker { fill: var(--accent); }
 .quota-marker { stroke: var(--surface-raised); stroke-width: 2; }
-.account-history-point { min-height: 34px; margin: 2px 0; color: var(--text); font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.quota-tooltip { pointer-events: none; }
+.quota-tooltip rect { fill: var(--surface-raised); stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.quota-tooltip text { font-size: 18px; font-variant-numeric: tabular-nums; }
+.quota-tooltip .quota-tooltip-value { fill: var(--text); font-size: 21px; font-weight: 600; }
 @media (forced-colors: active) { .quota-line, .quota-grid { stroke: CanvasText; } .quota-dot, .quota-marker { fill: Highlight; } }
 .sidebar-popover-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; min-width: 0; font-size: 14px; }
 .sidebar-popover-head > strong { min-width: 0; overflow-wrap: anywhere; }

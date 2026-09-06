@@ -33,7 +33,15 @@ export class AccountHistory {
       const rect = this.svg.getBoundingClientRect();
       this.inspect((event.clientX - rect.left) / rect.width * 600);
     });
+    this.svg.addEventListener("pointerleave", event => {
+      if (event.pointerType !== "touch") this.hidePoint();
+    });
+    this.svg.addEventListener("focus", () => {
+      if (this.valid?.length) this.showPoint(this.valid[this.pointIndex ?? this.valid.length - 1]);
+    });
+    this.svg.addEventListener("blur", () => this.hidePoint());
     this.svg.addEventListener("keydown", event => {
+      if (event.key === "Escape") this.hidePoint();
       if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || !this.valid?.length) return;
       event.preventDefault();
       this.pointIndex = event.key === "Home" ? 0 : event.key === "End" ? this.valid.length - 1 :
@@ -93,12 +101,13 @@ export class AccountHistory {
     const segments = quotaSegments(points, data?.intervalMs ?? 300_000);
     this.valid = segments.flat(); this.pointIndex = null;
     this.svg.replaceChildren();
+    this.marker = this.tooltip = null;
+    this.svg.setAttribute("aria-label", `额度历史，${this.valid.length} 次采样。左右方向键查看采样点。`);
     const empty = this.root.querySelector("[data-history-empty]");
     empty.hidden = this.valid.length > 0;
     empty.textContent = this.message || (!this.key ? "选择运行节点后查看额度历史" : this.account?.type && this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" :
       data?.account && this.account?.email && !sameAccount ? "账号已切换，等待首次采样" : "这个时间段暂无记录，采样后会显示在这里");
     this.svg.classList.toggle("hidden", !this.valid.length);
-    this.root.querySelector("[data-history-point]").textContent = "";
     this.root.querySelector("[data-history-note]").textContent = `${offline && data?.account?.email ? `${data.account.email} · ` : ""}每 5 分钟记录 · 空档表示未采集到额度`;
     if (!this.valid.length) return;
     const el = (tag, attrs, text) => {
@@ -116,15 +125,18 @@ export class AccountHistory {
     for (const fraction of [0, .5, 1]) {
       const at = data.from + fraction * (data.to - data.from);
       const label = new Date(at).toLocaleString("zh-CN", this.range === "24h" ? { hour: "2-digit", minute: "2-digit", hour12: false } : { month: "2-digit", day: "2-digit" });
-      el("text", { x: 42 + fraction * 540, y: 197, "text-anchor": fraction === 0 ? "start" : fraction === 1 ? "end" : "middle" }, label);
+      el("text", { x: 42 + fraction * 540, y: 197, class: "quota-time-tick", "text-anchor": fraction === 0 ? "start" : fraction === 1 ? "end" : "middle" }, label);
     }
     for (const segment of segments) {
       const first = segment[0];
       if (segment.length === 1) el("circle", { cx: this.x(first.at), cy: this.y(first.remaining), r: 3, class: "quota-dot" });
       else el("path", { d: `M${this.x(first.at)},${this.y(first.remaining)}${segment.slice(1).map(point => `H${this.x(point.at)}V${this.y(point.remaining)}`).join("")}`, class: "quota-line" });
     }
-    this.marker = el("circle", { r: 4, class: "quota-marker" });
-    this.showPoint(this.valid.at(-1));
+    this.marker = el("circle", { r: 4, class: "quota-marker hidden" });
+    this.tooltip = el("g", { class: "quota-tooltip hidden", "aria-hidden": "true" });
+    this.tooltipTime = el("text", { x: 12, y: 23 });
+    this.tooltipValue = el("text", { x: 12, y: 47, class: "quota-tooltip-value" });
+    this.tooltip.append(el("rect", { width: 200, height: 60, rx: 5 }), this.tooltipTime, this.tooltipValue);
   }
 
   inspect(x) {
@@ -134,10 +146,21 @@ export class AccountHistory {
   }
 
   showPoint(point) {
-    this.marker.setAttribute("cx", this.x(point.at)); this.marker.setAttribute("cy", this.y(point.remaining));
-    const reset = point.resetsAt ? ` · ${timeLabel(point.resetsAt)} 重置` : "";
-    const credits = point.resetCount === null ? "" : ` · 重置机会 ${point.resetCount} 次`;
-    this.root.querySelector("[data-history-point]").textContent = `${timeLabel(point.at)} · 剩余 ${percent(point.remaining)}${reset}${credits}`;
+    const x = this.x(point.at), y = this.y(point.remaining);
+    this.marker.setAttribute("cx", x); this.marker.setAttribute("cy", y);
+    this.marker.classList.remove("hidden");
+    // Flip the label at the plot edges so it stays beside the active point.
+    const left = Math.max(8, x + 212 > 592 ? x - 212 : x + 12);
+    const top = y - 72 < 8 ? y + 12 : y - 72;
+    this.tooltip.setAttribute("transform", `translate(${left},${top})`);
+    this.tooltipTime.textContent = timeLabel(point.at);
+    this.tooltipValue.textContent = `剩余 ${percent(point.remaining)}`;
+    this.tooltip.classList.remove("hidden");
     this.svg.setAttribute("aria-label", `额度历史，${this.valid.length} 次采样。${timeLabel(point.at)}，剩余 ${percent(point.remaining)}。左右方向键查看采样点。`);
+  }
+
+  hidePoint() {
+    this.marker?.classList.add("hidden");
+    this.tooltip?.classList.add("hidden");
   }
 }

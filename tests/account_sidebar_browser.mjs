@@ -73,18 +73,34 @@ try {
  assert.ok(calls.every(r=>['initialize','account/read','account/rateLimits/read'].includes(r.method)));
  await panel.locator('.quota-chart:not(.hidden)').waitFor();
  assert.equal(await panel.locator('.quota-line').count(),2,'failed samples create a visible break');
+ assert.equal(await panel.locator('[data-history-point]').count(),0,'the permanent sample detail row is removed');
+ assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'labels appear only during inspection');
  await panel.locator('[aria-label="额度历史时间范围"]').selectOption('24h');
- await page.waitForFunction(()=>document.querySelector('[data-account-history] svg text:last-of-type')?.textContent.includes(':'));
+ await page.waitForFunction(()=>document.querySelector('[data-account-history] .quota-time-tick:last-of-type')?.textContent.includes(':'));
  const chart = panel.locator('.quota-chart');
  await chart.focus(); await page.keyboard.press('Home');
- assert.match(await panel.locator('[data-history-point]').textContent(),/剩余 80%/);
+ assert.match(await panel.locator('.quota-tooltip').textContent(),/剩余 80%/);
  await page.keyboard.press('End');
- assert.match(await panel.locator('[data-history-point]').textContent(),/重置机会 0 次/);
+ assert.match(await panel.locator('.quota-tooltip').textContent(),/剩余 48.8%/);
+ assert.doesNotMatch(await panel.locator('.quota-tooltip').textContent(),/重置/);
  const graph = await chart.boundingBox();
+ const assertLabelFits = async () => {
+  const bounds = await chart.boundingBox(), label = await panel.locator('.quota-tooltip').boundingBox();
+  assert.ok(label && label.x >= bounds.x && label.x + label.width <= bounds.x + bounds.width, 'label stays within the chart horizontally');
+  assert.ok(label.y >= bounds.y && label.y + label.height <= bounds.y + bounds.height, 'label stays within the chart vertically');
+ };
+ await assertLabelFits();
+ await page.keyboard.press('Home'); await assertLabelFits();
  await page.mouse.move(graph.x+graph.width*.5,graph.y+graph.height*.5);
- assert.match(await panel.locator('[data-history-point]').textContent(),/剩余/);
+ assert.match(await panel.locator('.quota-tooltip').textContent(),/剩余/);
+ await assertLabelFits();
+ await page.mouse.move(graph.x + graph.width + 15, graph.y);
+ assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'leaving the chart dismisses the hover label');
+ await chart.focus(); await page.keyboard.press('End'); await page.keyboard.press('Escape');
+ assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'Escape dismisses the active label');
+ if (!await page.locator('#agentAccountDetails').evaluate(element => element.matches(':popover-open'))) await accountDetails(page);
  await panel.locator('[aria-label="额度历史时间范围"]').selectOption('30d');
- await page.waitForFunction(()=>document.querySelector('[data-account-history] svg text:last-of-type')?.textContent.includes('/'));
+ await page.waitForFunction(()=>document.querySelector('[data-account-history] .quota-time-tick:last-of-type')?.textContent.includes('/'));
  await panel.locator('[aria-label="额度历史时间范围"]').selectOption('24h');
  const initialHistoryCalls=historyCalls.length;
  // Frequent quota notifications and drawer toggles share a five-minute cache.
@@ -156,17 +172,20 @@ try {
  await panel.locator('.quota-chart:not(.hidden)').waitFor();
  assert.ok((await panel.locator('.quota-chart').boundingBox()).height<=180,'chart has a bounded mobile height');
  const mobileChart=await panel.locator('.quota-chart').boundingBox();
- await page.mouse.click(mobileChart.x+mobileChart.width*.6,mobileChart.y+mobileChart.height*.5);
- assert.match(await panel.locator('[data-history-point]').textContent(),/剩余/);
+ await chart.dispatchEvent('pointerdown',{pointerType:'touch',clientX:mobileChart.x+mobileChart.width*.6,clientY:mobileChart.y+mobileChart.height*.5});
+ await chart.dispatchEvent('pointerleave',{pointerType:'touch'});
+ assert.equal(await panel.locator('.quota-tooltip').isVisible(),true,'touch labels remain visible after lifting the finger');
+ await assertLabelFits();
+ assert.match(await panel.locator('.quota-tooltip').textContent(),/剩余/);
  await sidebarAction(page, "agentThemeToggle");
  assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
  if(process.env.MIRA_WEB_SCREENSHOT_DIR) {
   await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR,{recursive:true});
   await panel.scrollIntoViewIfNeeded();await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-sidebar-mobile.png`});
-  await accountDetails(page);await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-details-mobile.png`});
+  await accountDetails(page);await chart.focus();await page.keyboard.press('Home');await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-details-mobile.png`});
   await page.setViewportSize({width:1440,height:1000});await sidebarAction(page, "agentThemeToggle");
   await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-sidebar-desktop.png`});
-  await accountDetails(page);await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-details-desktop.png`});
+  await accountDetails(page);await chart.focus();await page.keyboard.press('End');await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/account-details-desktop.png`});
  }
  await sidebarAction(page, "agentLogout");await page.locator('#loginView:not(.hidden)').waitFor();
  assert.equal((await panel.textContent()).includes('first@example.test'),false,'logout clears account data');
