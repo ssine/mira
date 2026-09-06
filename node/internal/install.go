@@ -134,7 +134,7 @@ func localStatus(ctx context.Context, options cliOptions) (any, error) {
 	identity, err := loadIdentity(options.Identity)
 	if os.IsNotExist(err) {
 		configuration, _ := defaultConfigFile()
-		return map[string]any{"status": "not_started", "configFile": configuration, "hint": "Start mira-node to submit an enrollment request"}, nil
+		return map[string]any{"status": "not_started", "configFile": configuration, "hint": "Start mira node-worker to submit an enrollment request"}, nil
 	}
 	if err != nil {
 		return nil, err

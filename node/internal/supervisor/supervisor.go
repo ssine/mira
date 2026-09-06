@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -531,20 +532,17 @@ func (supervisor *Supervisor) installedCandidate(version string) (Candidate, err
 	if err != nil {
 		return Candidate{}, err
 	}
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return Candidate{}, fmt.Errorf("read Mira version %s: %w", version, err)
+	name := "mira"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
 	}
-	for _, name := range []string{"mira", "mira.exe", "mira-node", "mira-node.exe"} {
-		path := filepath.Join(directory, name)
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			return supervisor.safeCandidate(version, directory, path)
-		}
+	path := filepath.Join(directory, name)
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		return supervisor.safeCandidate(version, directory, path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Candidate{}, fmt.Errorf("inspect Mira version %s: %w", version, err)
 	}
-	if len(entries) == 1 && !entries[0].IsDir() {
-		return supervisor.safeCandidate(version, directory, filepath.Join(directory, entries[0].Name()))
-	}
-	return Candidate{}, fmt.Errorf("Mira version %s has no executable", version)
+	return Candidate{}, fmt.Errorf("Mira version %s has no canonical %s executable", version, name)
 }
 
 func (supervisor *Supervisor) safeCandidate(version, directory, executable string) (Candidate, error) {
@@ -566,7 +564,11 @@ func (supervisor *Supervisor) safeCandidate(version, directory, executable strin
 	if !pathInside(resolvedDirectory, resolvedExecutable) {
 		return Candidate{}, fmt.Errorf("Mira version %s executable resolves outside its version directory", version)
 	}
-	return Candidate{Version: version, Directory: resolvedDirectory, Executable: resolvedExecutable}, nil
+	relative, err := filepath.Rel(filepath.Clean(directory), filepath.Clean(executable))
+	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return Candidate{}, fmt.Errorf("Mira version %s executable is outside its version directory", version)
+	}
+	return Candidate{Version: version, Directory: resolvedDirectory, Executable: filepath.Join(resolvedDirectory, relative)}, nil
 }
 
 func (supervisor *Supervisor) roles() []WorkerRole {

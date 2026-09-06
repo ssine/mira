@@ -18,7 +18,7 @@ const workspace = `${projectDirectory}/tests/workspace`;
 const codexBinary =
   process.env.CODEX_TEST_BINARY ??
   `${projectDirectory}/codex/codex-rs/target/debug/codex`;
-const nodeBinary = process.env.MIRA_NODE_TEST_BINARY ?? `${projectDirectory}/tests/bin/mira-node`;
+const nodeBinary = process.env.MIRA_NODE_TEST_BINARY ?? `${projectDirectory}/tests/bin/mira`;
 const nodeStateDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "mira-node-e2e-"));
 const identityFile = path.join(nodeStateDirectory, "identity.json");
 const adminSession = await loginAdmin(controlUrl);
@@ -27,7 +27,7 @@ await fs.mkdir(workspace, { recursive: true });
 await fs.mkdir(`${projectDirectory}/tests/client-a`, { recursive: true });
 await fs.mkdir(`${projectDirectory}/tests/bin`, { recursive: true });
 if (!process.env.MIRA_NODE_TEST_BINARY) {
-  execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira-node"], {
+  execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira"], {
     cwd: `${projectDirectory}/node`,
   });
 }
@@ -163,7 +163,7 @@ async function waitManaged(tool, idField, id, marker) {
   }, `${tool} output`);
 }
 
-const child = spawn(nodeBinary, [], {
+const child = spawn(nodeBinary, ["node-worker"], {
   cwd: projectDirectory,
   env: {
     ...process.env,

@@ -1,7 +1,7 @@
 FROM node:22-bookworm-slim AS build
 
 ARG TARGETARCH
-ARG MIRA_VERSION=1.0.1
+ARG MIRA_VERSION=1.0.2
 
 WORKDIR /src
 # Build from the repository root after producing the matching native bundle.
@@ -21,9 +21,8 @@ RUN apt-get update \
   && rm -rf /var/lib/apt/lists/*
 RUN install -d -o node -g node /home/node/.codex /home/node/.config/mira
 COPY --from=build /out/ /opt/mira/
-RUN ln -s /opt/mira/mira-node /usr/local/bin/mira-node \
-  && ln -s /opt/mira/mira /usr/local/bin/mira
+RUN ln -s /opt/mira/mira /usr/local/bin/mira
 
 USER node
 WORKDIR /home/node
-CMD ["mira-node"]
+CMD ["mira", "node-worker"]

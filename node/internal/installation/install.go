@@ -108,7 +108,7 @@ func inspectInstall(ctx context.Context, plan InstallPlan, dependencies Dependen
 	if err != nil {
 		return InstallState{}, false, err
 	}
-	if existingState.SchemaVersion != 0 && existingState != plan.State {
+	if existingState.SchemaVersion != 0 && existingState != plan.State && !(allowServiceDrift && sameInstallIdentity(existingState, plan.State)) {
 		return InstallState{}, false, fmt.Errorf("%w: an existing installation may only change version through mira update or service settings through mira repair", ErrOwnershipConflict)
 	}
 	if plan.State.ServiceOwner != ServiceOwnerMira {
@@ -145,6 +145,14 @@ func cloneCommands(source []Command) []Command {
 	return result
 }
 
+func sameInstallIdentity(existing, planned InstallState) bool {
+	existing.ServiceDefinition = ""
+	existing.ServiceDefinitionSHA256 = ""
+	planned.ServiceDefinition = ""
+	planned.ServiceDefinitionSHA256 = ""
+	return existing == planned
+}
+
 func validatePlan(plan InstallPlan) error {
 	if err := validateState(plan.State); err != nil {
 		return err
@@ -179,6 +187,16 @@ func Repair(ctx context.Context, plan InstallPlan, dependencies Dependencies, op
 	}
 	if plan.State.ServiceManager == ServiceManagerProcd {
 		plan.Commands = procdCommands(plan.State.ServicePath, "restart")
+	} else if plan.State.ServiceManager == ServiceManagerSystemd {
+		arguments := []string{}
+		if plan.State.ServiceScope == ScopeUser {
+			arguments = append(arguments, "--user")
+		}
+		plan.Commands = []Command{
+			{Name: "systemctl", Args: append(append([]string(nil), arguments...), "daemon-reload")},
+			{Name: "systemctl", Args: append(append([]string(nil), arguments...), "enable", plan.State.ServiceName)},
+			{Name: "systemctl", Args: append(append([]string(nil), arguments...), "restart", plan.State.ServiceName)},
+		}
 	}
 	return installPrepared(ctx, plan, dependencies, options, nil, true)
 }

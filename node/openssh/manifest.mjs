@@ -8,7 +8,7 @@ const [directory,platform,arch,workspace]=process.argv.slice(2);
 const component=path.dirname(fileURLToPath(import.meta.url));
 const markers={linux:'MIRA_LINKED_OPENSSH_LINUX_STATIC_V1',windows:'MIRA_LINKED_OPENSSH_WINDOWS_FULL_V1',android:'MIRA_LINKED_OPENSSH_ANDROID_ROOT_V1'};
 if(!markers[platform]||!['amd64','arm64'].includes(arch)||!workspace)throw Error('Usage: manifest.mjs bundle platform arch build-workspace');
-const filename='mira-node'+(platform==='windows'?'.exe':'');
+const filename='mira'+(platform==='windows'?'.exe':'');
 const bytes=fs.readFileSync(path.join(directory,filename));
 if(!bytes.includes(Buffer.from(markers[platform]+'\0')))throw Error('Not a linked OpenSSH image');
 const info=execFileSync('go',['version','-m',path.join(directory,filename)],{encoding:'utf8'});
@@ -16,7 +16,7 @@ const metadata=name=>info.match(new RegExp('github.com/ssine/mira/node/internal\
 if(metadata('BundledOpenSSH')!=='true')throw Error('Go adapter was not built for embedded OpenSSH');
 const build={version:metadata('Version'),commit:metadata('Commit'),buildTime:metadata('BuildTime')};
 if(!build.version||!build.commit||!build.buildTime)throw Error('Missing linked build metadata');
-const roles=['mira','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen'];
+const roles=['ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen'];
 if(platform==='windows')roles.push('ssh-shellhost','ssh-agent','ssh-add','ssh-keyscan','ssh-sk-helper','ssh-pkcs11-helper');
 const sources=JSON.parse(fs.readFileSync(path.join(component,'sources.json'),'utf8')).filter(s=>s.platforms.includes(platform));
 const licenses=path.join(directory,'licenses');fs.mkdirSync(licenses,{recursive:true});

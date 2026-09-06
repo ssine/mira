@@ -82,9 +82,8 @@ jobs:
       - name: Cross-compile Mira
         working-directory: node
         run: |
-          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira-node.exe ./cmd/mira-node
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira.exe ./cmd/mira
-          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/mira-node-android ./cmd/mira-node
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/mira-android ./cmd/mira
 
       - uses: actions/download-artifact@v4
         with:
@@ -116,7 +115,7 @@ jobs:
       - name: Test embedded OpenSSH through the Go Server
         env:
           MIRA_TEST_DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
-          MIRA_TEST_LINUX_SINGLEFILE: ${{ github.workspace }}/node/openssh/out/linux-amd64/mira-node
+          MIRA_TEST_LINUX_SINGLEFILE: ${{ github.workspace }}/node/openssh/out/linux-amd64/mira
         run: |
           docker compose -f compose.yaml up -d --wait postgres
           trap 'docker compose -f compose.yaml down -v' EXIT
@@ -148,5 +147,5 @@ jobs:
       - name: Test Windows tray startup, close, duplicate launch and exit
         shell: pwsh
         run: |
-          go -C node build -o "$env:RUNNER_TEMP/mira-tray.exe" ./cmd/mira-node
+          go -C node build -o "$env:RUNNER_TEMP/mira-tray.exe" ./cmd/mira
           & tests/windows_tray_e2e.ps1 -Binary "$env:RUNNER_TEMP/mira-tray.exe"

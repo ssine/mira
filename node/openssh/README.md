@@ -22,9 +22,10 @@ node/
   android/            the only Android application source
 ```
 
-The executable dispatches by its role name **before starting Go**. This avoids
-forking OpenSSH out of an already multithreaded Go process. `mira` selects the Go
-CLI; `mira-node` selects the Go service; SSH role links select native C entrypoints.
+The executable dispatches only private OpenSSH links by role name **before starting Go**. This avoids
+forking OpenSSH out of an already multithreaded Go process. The canonical `mira`
+program selects Node, Server, Supervisor and SSH worker roles through explicit arguments;
+SSH role links select native C entrypoints.
 The Go bridge is a `.go.in` template injected only into native build snapshots.
 Plain `go build`/cross-compilation remains a development check, without usable SSH.
 
@@ -75,7 +76,7 @@ overrides). No implicit plain-Go fallback. `MIRA_RELEASE_TARGETS` can select an
 explicit subset for local packaging tests; official Release builds require all.
 
 The unified container consumes the same verified native bundle and can run either
-`mira server-worker` or `mira-node`. Build it from the repository root with
+`mira server-worker` or `mira node-worker`. Build it from the repository root with
 `docker build --build-arg MIRA_VERSION=$(cat VERSION) -f node/Dockerfile .` after placing
 the matching architecture in `node/openssh/out/`. Node.js is used only in the verification
 build stage; the runtime image contains no Node.js server or npm dependency. It does not
@@ -96,7 +97,7 @@ be reviewed; this is not a claim of bit-for-bit reproducibility across toolchain
 ## Regression entry points
 
 ```sh
-MIRA_TEST_LINUX_SINGLEFILE=/absolute/bundle/mira-node \
+MIRA_TEST_LINUX_SINGLEFILE=/absolute/bundle/mira \
   node node/openssh/tests/e2e.mjs
 ```
 

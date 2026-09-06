@@ -30,11 +30,9 @@ func currentExecutable(layout Layout) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, name := range []string{"mira", "mira-node"} {
-		executable := filepath.Join(directory, name)
-		if info, err := os.Stat(executable); err == nil && !info.IsDir() {
-			return executable, nil
-		}
+	executable := filepath.Join(directory, "mira")
+	if info, err := os.Stat(executable); err == nil && !info.IsDir() {
+		return executable, nil
 	}
-	return "", fmt.Errorf("current Mira version %s has no executable", version)
+	return "", fmt.Errorf("current Mira version %s has no canonical mira executable", version)
 }

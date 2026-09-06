@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -378,6 +379,62 @@ func TestEnsureWindowsReleaseAliasesCreatesServiceAndCLIRoles(t *testing.T) {
 		if err != nil || !os.SameFile(imageInfo, info) {
 			t.Fatalf("role %s is not the release image: %v", name, err)
 		}
+	}
+}
+
+func TestEnsureWindowsReleaseAliasesAcceptsCanonicalImage(t *testing.T) {
+	directory := t.TempDir()
+	image := filepath.Join(directory, "mira.exe")
+	if err := os.WriteFile(image, []byte("single-image"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := ensureWindowsReleaseAliases(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executable != image {
+		t.Fatalf("service executable = %q", executable)
+	}
+	if _, err := os.Stat(filepath.Join(directory, "mira-node.exe")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("canonical release created a legacy Mira role: %v", err)
+	}
+	imageInfo, err := os.Stat(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ssh.exe", "sftp-server.exe", "ssh-pkcs11-helper.exe"} {
+		info, err := os.Stat(filepath.Join(directory, name))
+		if err != nil || !os.SameFile(imageInfo, info) {
+			t.Fatalf("role %s is not the release image: %v", name, err)
+		}
+	}
+}
+
+func TestInstalledCandidateRejectsLegacyOnlyMiraRole(t *testing.T) {
+	layout, err := NewLayout(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := layout.VersionDir("2.0.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	name := "mira-node"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	if err := os.WriteFile(filepath.Join(directory, name), []byte("legacy"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	supervisor := &Supervisor{layout: layout}
+	if _, err := supervisor.installedCandidate("2.0.0"); err == nil || !strings.Contains(err.Error(), "canonical") {
+		t.Fatalf("legacy-only candidate error = %v", err)
 	}
 }
 

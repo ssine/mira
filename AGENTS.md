@@ -187,8 +187,9 @@ tree from durable metadata even if parent and child ran on different nodes.
 
 ## Mira Node design
 
-`node/` is one Go module. Release builds link it with OpenSSH into one executable; `mira-node`,
-`mira` and OpenSSH roles are aliases of that image. Android packages it in one APK.
+`node/` is one Go module. Release builds link it with OpenSSH into one canonical `mira` executable;
+Node, Server, Supervisor and SSH worker are explicit subcommands. Only private OpenSSH role names are
+aliases of that image. Android packages it in one APK.
 Keep shared Go sources directly in `node/internal/` and Android application sources directly in
 `node/android/src/main/`. The Android root project applies the application plugin itself; do not
 add redundant implementation or application-module directory layers.
@@ -278,7 +279,7 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   accept a default or environment-provided administrator password.
 - A new Node generates a credential UUID and 256-bit secret before requesting enrollment. The
   Server stores only the secret hash; there is no activation secret or replacement token.
-- `mira-node`, `mira`, local Codex and local App Server share one protected identity file and Node
+- `mira`, local Codex and local App Server share one protected identity file and Node
   credential. Do not introduce CLI login or a global ThreadStore token.
 - All approved Nodes are mutually trusted in v1. The Mira Node process' OS identity and resource
   limits remain the effective boundary. File roots cover the filesystems visible to that identity by
@@ -303,8 +304,7 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - `node/internal/miraserver/`: native Go control plane, PostgreSQL migrations, persistence adapters and node broker.
 - `node/internal/webassets/`: embedded administrator console and repository-controlled vendor assets.
 - `server/public/`: framework-independent Web source; it is not a separate runtime.
-- `node/cmd/mira-node/`: Go command entry point.
-- `node/cmd/mira/`: Go control CLI using the current machine's Node identity.
+- `node/cmd/mira/`: the single Go program entry point for CLI and explicit runtime roles.
 - `node/internal/`: shared node runtime and platform adapters.
 - `node/android/`: Android application shell.
 - `node/openssh/`: the only SSH backend: native dispatch/linking, platform patches, source manifest and device regressions.
@@ -337,6 +337,12 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   release checksums, refuse unrelated service replacement and avoid silently interrupting sessions.
 - Bootstrap scripts perform first install only. Never restore `scripts/install --update`; all later
   changes go through the running local Supervisor via `mira update`.
+- An Agent updating the machine that currently carries its own Mira connection must expect a short
+  disconnect. Warn the user, send the update to the local old Supervisor, then verify the version and
+  health after reconnecting. Never overwrite `current/mira`, kill the old worker first, or make the
+  transaction depend on the initiating SSH/WebSocket staying alive. If a release must be transferred
+  manually, place it only in a new immutable `versions/<version>/` directory and still let
+  `mira update --version <version>` perform validation, stop/start, pointer commit and rollback.
 - OpenWrt/FriendlyWrt may auto-select procd only for Mira-owned, system-scoped Node installs. Keep
   `/etc/init.d/mira` pointed at `current/mira supervisor`; never add an installer-driven update path.
 - Nix and Mira service ownership are mutually exclusive for one state directory. Nix ownership may
@@ -344,7 +350,9 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - Windows PTY uses real ConPTY behind a build-tagged adapter. Test native Windows, not just cross
   compilation. Keep UTF-8 decoding state across output chunks and bound all retained data.
 - Plain Go builds are compile/development checks, never release artifacts; there is no Go SSH/SFTP fallback.
-- Keep role aliases inside immutable version directories and verify they refer to the running image. Never install system SSH services or mutate user SSH config.
+- Keep OpenSSH role aliases inside immutable version directories and verify they refer to the canonical
+  `mira` image. Mira's own roles must be explicit arguments and must never depend on the executable
+  filename. Never install system SSH services or mutate user SSH config.
 - Narrow file roots disable native SSH instead of silently widening policy.
 - For release changes, first build native bundles via `node/openssh/build.sh`; then run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`. Test linked images with `node/openssh/tests/e2e.mjs`; see the component README for real Windows/Android hooks.
 - `.github/workflows/ci.yml` is the Go Server/Web fast path: it validates native packages,
@@ -364,9 +372,8 @@ Run the baseline checks from the repository root:
 node scripts/check-version.mjs
 diff -qr --exclude vendor server/public node/internal/webassets/web
 (cd node && go test ./...)
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build ./cmd/mira-node
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build ./cmd/mira
-GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build ./cmd/mira-node
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build ./cmd/mira
 for file in tests/*.mjs; do node --check "$file"; done
 python3 -m compileall -q tests
 docker compose -f compose.yaml config --quiet

@@ -16,7 +16,7 @@ fi
 snapshot_node() {
   mkdir -p "$1/node"
   tar -C "$repo/node" -cf - go.mod go.sum cmd internal | tar -C "$1/node" -xf -
-  cp "$component/common/go-export.go.in" "$1/node/cmd/mira-node/openssh_export.go"
+  cp "$component/common/go-export.go.in" "$1/node/cmd/mira/openssh_export.go"
 }
 
 fetch_sources() {

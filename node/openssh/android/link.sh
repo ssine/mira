@@ -11,7 +11,7 @@ crypto=$(cd "$ssh_build/../crypto/install/lib" && pwd)
 mkdir -p "$work/combined" "$work/go-link" "$work/bin"
 CGO_ENABLED=1 GOOS=android GOARCH=arm64 CC="$cc" go -C "$work/node" build \
   -buildmode=c-shared -tags=netcgo -ldflags="-tmpdir=$work/go-link $metadata" \
-  -o "$work/libnode-not-shipped.so" ./cmd/mira-node > "$work/go-build.log" 2>&1
+  -o "$work/libnode-not-shipped.so" ./cmd/mira > "$work/go-build.log" 2>&1
 # Reuse unlinked object files, never embed/extract a prelinked shared library.
 mapfile -t go_objects < <(find "$work/go-link" -type f -name '*.o' | sort)
 ((${#go_objects[@]} > 0))
@@ -29,16 +29,16 @@ while IFS='|' read -r role inputs; do
 done < <(make -s -C "$ssh_build" -f Makefile -f "$component/common/objects.mk" mira-objects)
 "$cc" -O2 -fPIE -pie -Wl,-T,"$component/common/go-init.ld" \
   -Wl,-z,relro,-z,now,-z,noexecstack,-z,max-page-size=16384 \
-  -o "$work/bin/mira-node" "$component/common/dispatcher-unix.c" \
+  -o "$work/bin/mira" "$component/common/dispatcher-unix.c" \
   "${objects[@]}" "$work"/combined/go-*.o "$crypto/libcrypto.a" -lz -ldl -lm -llog
-for role in mira ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen; do
-  ln -s mira-node "$work/bin/$role"
+for role in ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen; do
+  ln -s mira "$work/bin/$role"
 done
-"$toolchain/llvm-strip" "$work/bin/mira-node"
-"$toolchain/llvm-readelf" -lWd "$work/bin/mira-node" > "$work/elf-report.txt"
-sha256sum "$work/bin/mira-node"
-node "$repo/scripts/check-android-build.mjs" "$work/bin/mira-node"
-node "$component/android/check-image.mjs" "$work/bin/mira-node"
+"$toolchain/llvm-strip" "$work/bin/mira"
+"$toolchain/llvm-readelf" -lWd "$work/bin/mira" > "$work/elf-report.txt"
+sha256sum "$work/bin/mira"
+node "$repo/scripts/check-android-build.mjs" "$work/bin/mira"
+node "$component/android/check-image.mjs" "$work/bin/mira"
 node "$component/manifest.mjs" "$work/bin" android arm64 "$work"
 if [[ -n ${MIRA_OPENSSH_OUTPUT:-} ]]; then cp -a "$work/bin" "$MIRA_OPENSSH_OUTPUT"; fi
 echo "Linked single executable and role aliases: $work/bin"

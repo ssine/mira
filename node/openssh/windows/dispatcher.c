@@ -28,12 +28,8 @@ int wmain(int argc,wchar_t **argv){
 #define DISPATCH(id,name) if(!_wcsicmp(role,name))return openssh_##id##_wmain(argc,argv);
     ROLES(DISPATCH)
     EXTRA_ROLES(DISPATCH)
-    // Mira's generated ProxyCommand may already include the embedded "cli"
-    // prefix. Do not add it a second time when this executable re-enters.
-    int cli=!_wcsicmp(role,L"mira.exe") && !(argc>1&&!wcscmp(argv[1],L"cli"));
-    char **utf8=calloc(argc+cli+1,sizeof(char*));if(!utf8)return 70;
-    for(int i=0;i<argc;i++){int j=i+(cli&&i>0);int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,NULL,0,NULL,NULL);if(!size)return 70;utf8[j]=malloc(size);if(!utf8[j]||!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,utf8[j],size,NULL,NULL))return 70;}
-    if(cli)utf8[1]="cli";
+    char **utf8=calloc(argc+1,sizeof(char*));if(!utf8)return 70;
+    for(int i=0;i<argc;i++){int size=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,NULL,0,NULL,NULL);if(!size)return 70;utf8[i]=malloc(size);if(!utf8[i]||!WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[i],-1,utf8[i],size,NULL,NULL))return 70;}
     mira_go_constructor();
-    return mira_node_main(argc+cli,utf8,0,NULL);
+    return mira_node_main(argc,utf8,0,NULL);
 }

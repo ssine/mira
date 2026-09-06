@@ -14,7 +14,7 @@ const nodeAlias = `软路由-${process.pid}`;
 const alternateNodeAlias = `openwrt-${process.pid}`;
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-web-console-e2e-"));
 const identityFile = path.join(temporary, "identity.json");
-const nodeBinary = path.join(temporary, "mira-node");
+const nodeBinary = path.join(temporary, "mira");
 const fixtureName = "console-fixture.txt";
 const fixturePath = path.join(temporary, fixtureName);
 const fixtureContent = `Mira console file browser ${process.pid}\n`;
@@ -25,7 +25,7 @@ const codexHome = path.join(temporary, "codex-home");
 const importedThreadId = randomUUID();
 const importStoreId = `web-console-e2e-${process.pid}`;
 
-execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira-node"], {
+execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira"], {
   cwd: path.join(projectDirectory, "node"),
 });
 await fs.writeFile(fixturePath, fixtureContent);
@@ -318,7 +318,7 @@ const dynamicMissingCsrf = await fetchBody("/v1/dynamic-tools/call", {
 });
 assert(dynamicMissingCsrf.response.status === 403 && dynamicMissingCsrf.body.code === "invalid_csrf", "dynamic tool debugger did not enforce CSRF");
 
-const child = spawn(nodeBinary, [], {
+const child = spawn(nodeBinary, ["node-worker"], {
   cwd: temporary,
   env: {
     ...process.env,
@@ -346,7 +346,7 @@ let managedProcessId = null;
 let terminalSessionId = null;
 try {
   const pending = await waitFor(async () => {
-    if (child.exitCode !== null) throw new Error(`mira-node exited: ${logs.join("").slice(-2000)}`);
+    if (child.exitCode !== null) throw new Error(`mira node-worker exited: ${logs.join("").slice(-2000)}`);
     const result = await admin("/v1/admin/enrollments?status=pending");
     assert(result.response.ok, `enrollment list failed: ${result.response.status}`);
     return result.body.data?.find((item) => item.nodeKey === nodeKey);
@@ -365,7 +365,7 @@ try {
   assert(approval.response.ok && approval.body.status === "approved", `approval failed: ${JSON.stringify(approval.body)}`);
 
   const online = await waitFor(async () => {
-    if (child.exitCode !== null) throw new Error(`mira-node exited: ${logs.join("").slice(-2000)}`);
+    if (child.exitCode !== null) throw new Error(`mira node-worker exited: ${logs.join("").slice(-2000)}`);
     const result = await admin("/v1/nodes");
     assert(result.response.ok, `Node list failed: ${result.response.status}`);
     return result.body.data?.find((node) => node.nodeKey === nodeKey && node.channelStatus?.connected === true);

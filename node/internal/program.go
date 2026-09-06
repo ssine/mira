@@ -9,30 +9,27 @@ import (
 
 var ErrSupervisorHandoff = errors.New("Mira Supervisor handed off to the installed release")
 
-// RunSystemRole recognizes process roles that must bypass normal remote CLI
-// authentication. The embedded OpenSSH dispatcher inserts a leading "cli"
-// when the binary is invoked through its mira alias, so both forms are
-// accepted without exposing a second executable.
+// RunSystemRole recognizes explicit process roles that must bypass normal
+// remote CLI authentication. Mira roles are selected only by arguments; the
+// executable name is reserved for the embedded OpenSSH entry points.
 func RunSystemRole(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (bool, int) {
-	roleArgs := args
-	if len(roleArgs) > 1 && roleArgs[0] == "cli" && isSystemRole(roleArgs[1:]) {
-		roleArgs = roleArgs[1:]
-	}
-	if !isSystemRole(roleArgs) {
+	if !isSystemRole(args) {
 		return false, 0
 	}
 	var err error
-	switch roleArgs[0] {
+	switch args[0] {
 	case "node-worker":
-		err = RunNodeWorker(ctx, roleArgs[1:])
+		err = RunNodeWorker(ctx, args[1:])
 	case "server-worker":
-		err = RunServerWorker(ctx, roleArgs[1:])
+		err = RunServerWorker(ctx, args[1:])
 	case "server":
-		err = RunServerAdmin(ctx, roleArgs[2:], stdin, stdout)
+		err = RunServerAdmin(ctx, args[2:], stdin, stdout)
 	case "supervisor":
-		err = RunSupervisor(ctx, roleArgs[1:])
+		err = RunSupervisor(ctx, args[1:])
 	case "supervisor-check":
-		err = ValidateSupervisorCandidate(roleArgs[1:])
+		err = ValidateSupervisorCandidate(args[1:])
+	case "ssh-worker", "--internal-ssh-worker":
+		err = RunSSHWorker(ctx)
 	}
 	if err != nil && err != context.Canceled {
 		fmt.Fprintln(stderr, err)
@@ -45,7 +42,7 @@ func isSystemRole(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	if args[0] == "node-worker" || args[0] == "server-worker" || args[0] == "supervisor" || args[0] == "supervisor-check" {
+	if args[0] == "node-worker" || args[0] == "server-worker" || args[0] == "supervisor" || args[0] == "supervisor-check" || args[0] == "ssh-worker" || args[0] == "--internal-ssh-worker" {
 		return true
 	}
 	return len(args) >= 2 && args[0] == "server" && args[1] == "admin"

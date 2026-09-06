@@ -5,6 +5,9 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.2 将 Node、Server、Supervisor 和 SSH worker 统一为 canonical `mira` 的显式子命令，移除
+Mira 角色对链接文件名的依赖，并修复 systemd 可选环境文件与 system service `HOME` 配置。
+
 1.0.1 修复长会话历史被错误报告为不完整的问题，并让 OpenWrt/FriendlyWrt Node 安装器自动接入
 已有的 procd；安装后的更新仍统一由本机 Supervisor 执行。
 
@@ -102,7 +105,7 @@ Codex 仍以 Mira Node 所在用户身份运行，因此应只在受信任的个
 v1 只有两类安全身份：
 
 - 一个管理员账号：本地命令设置 Argon2id 密码，网页使用数据库 Session、严格 Cookie 和 CSRF；
-- 每台设备一个 Node credential：`mira-node`、`mira` CLI、本地 Codex/App Server 共用同一个
+- 每台设备一个 Node credential：`mira` Node worker、CLI、本地 Codex/App Server 共用同一个
   `identity.json`。
 
 Node 在首次启动前生成 256-bit secret，只向 Server 提交 SHA-256。管理员在网站核对六位验证码并
@@ -122,8 +125,7 @@ CLI 登录、Node ACL 或长期 token query parameter。
 | `node/internal/miraserver/` | 原生 Go Server、认证、审计、CapabilityService、App Server broker 与 ThreadStore API |
 | `node/internal/webassets/` | 内嵌 Web 资源及仓库受控的第三方静态文件 |
 | `server/public/` | 管理员设备控制台的前端源码，无独立运行时 |
-| `node/cmd/mira-node/` | Windows/Linux/WSL/Android 共用的常驻 Node |
-| `node/cmd/mira/` | 人类和 Codex 共用的远程控制 CLI |
+| `node/cmd/mira/` | CLI 及 Windows/Linux/WSL/Android 共用的显式运行角色入口 |
 | `node/internal/` | 身份、接入、反向通道、文件、进程、PTY、屏幕和平台适配 |
 | `node/android/` | root/非 root 统一 APK 外壳和 Android Framework bridge |
 | `node/openssh/` | 单文件内嵌 OpenSSH：平台构建、补丁、分发清单和真实节点回归 |
@@ -183,7 +185,7 @@ MIRA_NODE_KEY=wsl-main \
 MIRA_IDENTITY_FILE=/home/user/.config/mira/identity.json \
 CODEX_BINARY=/absolute/path/to/codex \
 APP_SERVER_CODEX_HOME=/path/to/codex-home \
-go -C node run ./cmd/mira-node
+go -C node run ./cmd/mira node-worker
 ```
 
 Node 显示 enrollment ID 和六位验证码，等待网站批准。身份文件默认位于 Linux/WSL 的
@@ -192,13 +194,12 @@ APK 私有 no-backup 目录；`MIRA_IDENTITY_FILE` 可覆盖。写入采用临�
 Unix `0600` 权限；Windows 使用受保护的当前用户 / SYSTEM / Administrators DACL。
 
 未配置 `MIRA_NODE_ALLOWED_ROOTS` 时，Linux/WSL/Android 从 `/` 开始，Windows 自动列出所有当前
-可用盘符。最终能否读取仍由 `mira-node` 的 OS 用户权限决定。如需把某台 Node 收紧到特定工作区，
+可用盘符。最终能否读取仍由 `mira` Node worker 的 OS 用户权限决定。如需把某台 Node 收紧到特定工作区，
 可显式设置 `MIRA_NODE_ALLOWED_ROOTS='["/path/to/workspace"]'`。
 
-构建两个桌面命令：
+构建桌面程序：
 
 ```bash
-go -C node build -o dist/mira-node ./cmd/mira-node
 go -C node build -o dist/mira ./cmd/mira
 ```
 
@@ -261,7 +262,7 @@ multi_agent_v2 = true
 
 ## Android APK
 
-APK 内嵌相同 Go `mira-node`，不依赖 ADB、Node.js 或 Termux。Java 负责 Activity、前台服务、
+APK 内嵌相同 Go `mira` 程序并以 `node-worker` 启动，不依赖 ADB、Node.js 或 Termux。Java 负责 Activity、前台服务、
 Accessibility、MediaProjection、权限与子进程生命周期；Go 负责共同协议和数据面。root 只能由用户
 通过 KernelSU、Magisk 或 APatch 明确授权，APK 无法自行获得 root。非 root 模式遵循 Android
 权限限制。
@@ -334,8 +335,7 @@ node scripts/check-version.mjs
 diff -qr --exclude vendor server/public node/internal/webassets/web
 go -C node test ./...
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build -o /tmp/mira.exe ./cmd/mira
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go -C node build -o /tmp/mira-node.exe ./cmd/mira-node
-GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build -o /tmp/mira-node-android ./cmd/mira-node
+GOOS=android GOARCH=arm64 CGO_ENABLED=0 go -C node build -o /tmp/mira-android ./cmd/mira
 for file in tests/*.mjs; do node --check "$file"; done
 python3 -m compileall -q tests
 node tests/web_console_e2e.mjs

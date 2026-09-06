@@ -13,7 +13,7 @@ export default async function(ctx){
   await fs.mkdir(directory,{recursive:true});
   {
     // Do not silently replace the linked Go/OpenSSH image with standalone Go.
-    const hashes=await Promise.all(['mira','mira-node','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen','ssh-shellhost'].map(async command=>crypto.createHash('sha256').update(await fs.readFile(path.join(directory,command+'.exe'))).digest('hex')));
+    const hashes=await Promise.all(['mira','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen','ssh-shellhost'].map(async command=>crypto.createHash('sha256').update(await fs.readFile(path.join(directory,command+'.exe'))).digest('hex')));
     assert.equal(new Set(hashes).size,1,'all roles must contain the same linked image');
     console.log('Testing one linked Windows PE image for Node, CLI and all OpenSSH roles');
   }

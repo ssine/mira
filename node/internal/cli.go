@@ -106,12 +106,12 @@ func newCLIClient(options cliOptions) (*cliClient, error) {
 	identity, err := loadIdentity(options.Identity)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira-node to submit an enrollment request"}
+			return nil, &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira node-worker to submit an enrollment request"}
 		}
 		return nil, err
 	}
 	if identity.NodeID == "" || identity.Enrollment.Status != "approved" {
-		return nil, &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira-node and wait for administrator approval"}
+		return nil, &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira node-worker and wait for administrator approval"}
 	}
 	server := strings.TrimRight(identity.ServerURL, "/")
 	parsed, err := url.Parse(server)
@@ -953,7 +953,7 @@ Screenshots require --output. Input actions use --x/--y, --start-x/--start-y,
 Shows non-secret identity metadata. The Node credential itself is never printed.`,
 		"setup": `Usage: mira setup [options]
 
-Configure or enroll this machine. Run this command's platform-specific setup before starting mira-node.`,
+Configure or enroll this machine. Run this command's platform-specific setup before starting mira node-worker.`,
 		"install": `Usage: mira install [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd] [--state-dir DIR] [--server-url URL] [--dry-run]
 
 On NixOS, an interactive install asks who owns the system service. Non-interactive
@@ -1186,7 +1186,7 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		state, err := loadIdentity(options.Identity)
 		if err != nil {
 			if os.IsNotExist(err) {
-				err = &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira-node to submit an enrollment request"}
+				err = &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira node-worker to submit an enrollment request"}
 			}
 			printCLIError(stderr, options, err)
 			return cliExitCode(err)

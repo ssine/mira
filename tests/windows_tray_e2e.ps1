@@ -65,7 +65,7 @@ function Start-Tray {
 }
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
-    $nodeBinary = Join-Path $testRoot 'mira-node.exe'
+    $nodeBinary = Join-Path $testRoot 'mira.exe'
     Copy-Item -LiteralPath $Binary -Destination $nodeBinary
     $identityPath = Join-Path $testRoot 'identity.json'
     $configPath = Join-Path $testRoot "node's config.json"
@@ -91,7 +91,7 @@ try {
         $settings=New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
         Register-ScheduledTask -TaskName $taskName -Action $action -Principal $principal -Settings $settings | Out-Null
         Start-ScheduledTask -TaskName $taskName
-        $process=Wait-Until { Get-Process -Name mira-node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $nodeBinary } | Select-Object -First 1 } 'scheduled Node process'
+        $process=Wait-Until { Get-Process -Name mira -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $nodeBinary } | Select-Object -First 1 } 'scheduled Node process'
     } else { $process = Start-Tray }
     $window = Wait-Until { $w = [MiraTrayTest]::NodeWindow($process.Id); if ($w -ne [IntPtr]::Zero) { $w } } 'tray window'
     Assert-True (-not [MiraTrayTest]::IsWindowVisible($window)) 'Background startup showed the status window'

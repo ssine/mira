@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,26 +86,38 @@ func (stager GitHubStager) Stage(ctx context.Context, version, destination strin
 		}
 		return executable, nil
 	}
-	for _, name := range []string{"mira", "mira.exe", "mira-node", "mira-node.exe"} {
-		candidate := filepath.Join(destination, name)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
-		}
+	candidate := filepath.Join(destination, "mira")
+	if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+		return candidate, nil
 	}
-	return "", fmt.Errorf("release archive contains no Mira executable")
+	return "", fmt.Errorf("release archive contains no canonical mira executable")
 }
 
 func ensureWindowsReleaseAliases(directory string) (string, error) {
-	image := filepath.Join(directory, "mira-node.exe")
+	image := filepath.Join(directory, "mira.exe")
 	imageInfo, err := os.Stat(image)
+	if errors.Is(err, os.ErrNotExist) {
+		legacy := filepath.Join(directory, "mira-node.exe")
+		legacyInfo, legacyErr := os.Stat(legacy)
+		if legacyErr != nil {
+			return "", fmt.Errorf("Windows release contains no mira.exe: %w", legacyErr)
+		}
+		if !legacyInfo.Mode().IsRegular() {
+			return "", fmt.Errorf("Windows Mira image is not a regular file")
+		}
+		if linkErr := os.Link(legacy, image); linkErr != nil {
+			return "", fmt.Errorf("create canonical Windows Mira image: %w", linkErr)
+		}
+		imageInfo, err = os.Stat(image)
+	}
 	if err != nil {
-		return "", fmt.Errorf("Windows release contains no mira-node.exe: %w", err)
+		return "", fmt.Errorf("inspect Windows mira.exe: %w", err)
 	}
 	if !imageInfo.Mode().IsRegular() {
 		return "", fmt.Errorf("Windows Mira image is not a regular file")
 	}
 	roles := []string{
-		"mira", "ssh", "sshd", "sshd-session", "sshd-auth", "scp", "sftp", "sftp-server", "ssh-keygen",
+		"ssh", "sshd", "sshd-session", "sshd-auth", "scp", "sftp", "sftp-server", "ssh-keygen",
 		"ssh-shellhost", "ssh-agent", "ssh-add", "ssh-keyscan", "ssh-sk-helper", "ssh-pkcs11-helper",
 	}
 	for _, role := range roles {
@@ -121,7 +134,7 @@ func ensureWindowsReleaseAliases(directory string) (string, error) {
 			return "", fmt.Errorf("create Windows Mira %s role: %w", role, err)
 		}
 	}
-	return filepath.Join(directory, "mira.exe"), nil
+	return image, nil
 }
 
 func downloadLimited(ctx context.Context, client *http.Client, location string, maximum int64) ([]byte, error) {

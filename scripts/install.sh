@@ -96,7 +96,6 @@ if [ -e "$bin_dir/mira" ] || [ -L "$bin_dir/mira" ]; then
   [ "$current" = "$state_dir/current/mira" ] || { printf 'Refusing to replace unrelated path: %s\n' "$bin_dir/mira" >&2; exit 1; }
 fi
 ln -sfn "$state_dir/current/mira" "$bin_dir/mira"
-ln -sfn "$state_dir/current/mira-node" "$bin_dir/mira-node"
 
 printf '\nMira %s installed as %s. Later updates: %s/mira update --state-dir %s\n' "$version" "$role" "$bin_dir" "$state_dir"
 case ":$PATH:" in *":$bin_dir:"*) ;; *) printf 'Add %s to PATH.\n' "$bin_dir" ;; esac

@@ -47,15 +47,6 @@ int main(int argc, char **argv) {
     // Initialize it before constructing any synthetic CLI argument vector.
     for (size_t i = 0; i < (size_t)(__stop_mira_go_init - __start_mira_go_init); i++)
         __start_mira_go_init[i](argc, argv, environ);
-    // Desktop staging may expose the embedded client as a "mira" alias.
-    // Generated ProxyCommand invocations can already carry this prefix.
-    if (!strcmp(role, "mira") && !(argc > 1 && !strcmp(argv[1], "cli"))) {
-        char **forward = calloc((size_t)argc + 2, sizeof(char *));
-        if (!forward) return 70;
-        forward[0] = argv[0]; forward[1] = "cli";
-        for (int i = 1; i < argc; i++) forward[i + 1] = argv[i];
-        argv = forward; argc++;
-    }
     int envc = 0;
     while (environ[envc]) envc++;
     return mira_node_main(argc, argv, envc, environ);

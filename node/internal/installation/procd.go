@@ -100,6 +100,7 @@ func procdInitScript(stateDir, role string) (string, error) {
 		"start_service() {",
 		"\tprocd_open_instance",
 		"\tprocd_set_param command " + executable + " supervisor --state-dir " + state + " --service-owner mira",
+		"\tprocd_set_param env HOME=/root",
 		"\tprocd_set_param respawn 3600 3 0",
 		"\tprocd_set_param term_timeout 30",
 		"\tprocd_set_param stdout 1",

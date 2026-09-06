@@ -40,17 +40,17 @@ if [[ -n ${MIRA_BUILD_CACHE:-} ]]; then
   export GOCACHE="$MIRA_BUILD_CACHE/go-$native_key"
 fi
 go_started=$SECONDS
-PATH=/opt/go/bin:$PATH CGO_ENABLED=1 CC=gcc /opt/go/bin/go -C node build -buildmode=c-archive -tags=netgo,osusergo -ldflags="${MIRA_OPENSSH_METADATA:?}" -o "$work/node.a" ./cmd/mira-node > go-build.log 2>&1
+PATH=/opt/go/bin:$PATH CGO_ENABLED=1 CC=gcc /opt/go/bin/go -C node build -buildmode=c-archive -tags=netgo,osusergo -ldflags="${MIRA_OPENSSH_METADATA:?}" -o "$work/node.a" ./cmd/mira > go-build.log 2>&1
 echo "Mira Go compilation: $((SECONDS - go_started))s"
 objcopy --rename-section .init_array=mira_go_init,alloc,load,data,contents node.a node-lazy.a
 objects=();for role in ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen;do objects+=("combined/$role.o");done
-gcc -O2 -static-pie -Wl,-T,go-init.ld -Wl,-z,relro,-z,now,-z,noexecstack -o bin/mira-node dispatcher.c \
+gcc -O2 -static-pie -Wl,-T,go-init.ld -Wl,-z,relro,-z,now,-z,noexecstack -o bin/mira dispatcher.c \
   "${objects[@]}" node-lazy.a crypto/install/lib/libcrypto.a -lz -lpthread -ldl -lm > link.log 2>&1
-strip bin/mira-node
-for role in mira ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen;do ln -s mira-node "bin/$role";done
-readelf -lWd bin/mira-node > elf-report.txt
+strip bin/mira
+for role in ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen;do ln -s mira "bin/$role";done
+readelf -lWd bin/mira > elf-report.txt
 if grep -Eq 'INTERP|NEEDED' elf-report.txt;then echo 'Unexpected runtime library/loader dependency' >&2;exit 1;fi
-bin/mira-node --mira-dispatch-probe
-bin/mira-node --version
+bin/mira --mira-dispatch-probe
+bin/mira --version
 bin/ssh -V
-sha256sum bin/mira-node
+sha256sum bin/mira

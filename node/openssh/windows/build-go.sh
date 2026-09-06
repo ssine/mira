@@ -12,7 +12,7 @@ chmod 700 "$work/cc"
 echo "Windows Go archive workspace: $work"
 export MIRA_OPENSSH_GOROOT=$(go -C "$work/node" env GOROOT)
 CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC="$work/cc" CGO_CFLAGS=-D__USE_MINGW_ANSI_STDIO=0 \
-  go -C "$work/node" build -buildmode=c-archive -ldflags="-extar=${MIRA_LLVM_BIN:-/usr/lib/llvm-18/bin}/llvm-ar $metadata" -o "$work/node.a" ./cmd/mira-node > "$work/go-build.log" 2>&1
+  go -C "$work/node" build -buildmode=c-archive -ldflags="-extar=${MIRA_LLVM_BIN:-/usr/lib/llvm-18/bin}/llvm-ar $metadata" -o "$work/node.a" ./cmd/mira > "$work/go-build.log" 2>&1
 (cd "$work/go-objects" && ${MIRA_LLVM_BIN:-/usr/lib/llvm-18/bin}/llvm-ar x "$work/node.a")
 # Unlike ELF, MSVC does not automatically execute GNU .ctors. Export the pointer
 # itself and put it in read-only data; the C dispatcher calls it only for Node.

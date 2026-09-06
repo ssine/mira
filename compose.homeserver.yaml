@@ -30,7 +30,7 @@ services:
     image: ghcr.io/ssine/mira:${MIRA_VERSION:?pin a released Mira version in .env}
     profiles: ["container-node"]
     restart: unless-stopped
-    command: ["mira-node"]
+    command: ["mira", "node-worker"]
     environment:
       MIRA_SERVER_URL: http://server:8787
       MIRA_NODE_KEY: mira-homeserver-docker

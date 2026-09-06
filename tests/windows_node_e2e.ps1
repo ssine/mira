@@ -69,9 +69,8 @@ function Invoke-Native([string]$Program, [string[]]$Arguments) {
 
 try {
     New-Item -ItemType Directory -Path $testRoot | Out-Null
-    Copy-Item (Join-Path $BinaryDirectory "mira-node.exe") $testRoot
     Copy-Item (Join-Path $BinaryDirectory "mira.exe") $testRoot
-    $nodeBinary = Join-Path $testRoot "mira-node.exe"
+    $nodeBinary = Join-Path $testRoot "mira.exe"
     $cliBinary = Join-Path $testRoot "mira.exe"
     $identityFile = Join-Path $testRoot "identity.json"
     $configuration = @{
@@ -85,14 +84,14 @@ try {
     $configPath = Join-Path $testRoot "node.json"
     [IO.File]::WriteAllText($configPath, ($configuration | ConvertTo-Json), $utf8)
     $versionLine = Invoke-Native $nodeBinary @("--version")
-    Assert-True ($versionLine -match [regex]::Escape($ExpectedVersion)) "mira-node does not report the expected version"
+    Assert-True ($versionLine -match [regex]::Escape($ExpectedVersion)) "mira does not report the expected version"
     $cliVersion = (Invoke-Native $cliBinary @("--json", "version") | ConvertFrom-Json)
     Assert-True ($cliVersion.data.build.version -eq $ExpectedVersion) "CLI version differs from Node version"
 
     $password = if ($env:MIRA_TEST_ADMIN_PASSWORD) { $env:MIRA_TEST_ADMIN_PASSWORD } else { "mira-local-admin-password" }
     $login = Invoke-Mira "/v1/admin/login" "POST" @{ username = "admin"; password = $password }
     $csrf = $login.csrfToken
-    $nodeProcess = Start-Process -FilePath $nodeBinary -ArgumentList @("--config", "`"$configPath`"") `
+    $nodeProcess = Start-Process -FilePath $nodeBinary -ArgumentList @("node-worker", "--config", "`"$configPath`"") `
         -WorkingDirectory $testRoot -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $testRoot "node.stdout.log") `
         -RedirectStandardError (Join-Path $testRoot "node.stderr.log")

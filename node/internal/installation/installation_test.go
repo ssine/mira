@@ -2,8 +2,10 @@ package installation
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -820,6 +822,68 @@ func TestRepairRestoresRecordedLinuxServiceDefinition(t *testing.T) {
 	content, err := os.ReadFile(unitPath)
 	if err != nil || string(content) != plan.State.ServiceDefinition {
 		t.Fatalf("repair did not restore unit: %q err=%v", content, err)
+	}
+}
+
+func TestRepairMigratesManagedSystemdTemplateAndRestartsService(t *testing.T) {
+	stateDir := t.TempDir()
+	unitPath := filepath.Join(t.TempDir(), "mira.service")
+	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
+	runner := &testRunner{}
+	plan, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+		ServiceScope: ScopeSystem, SystemdUnitPath: unitPath,
+	}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependencies := Dependencies{Files: files, Runner: runner}
+	if _, err := Install(context.Background(), plan, dependencies, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	baseline := len(runner.snapshot())
+	migrated := plan
+	migratedDefinition := strings.Replace(plan.State.ServiceDefinition, "Restart=always", "Environment=MIRA_TEMPLATE_TEST=1\nRestart=always", 1)
+	migrated.State.ServiceDefinition = migratedDefinition
+	digest := sha256.Sum256([]byte(migratedDefinition))
+	migrated.State.ServiceDefinitionSHA256 = hex.EncodeToString(digest[:])
+	migrated.Files = []PlannedFile{{Path: unitPath, Content: []byte(migratedDefinition), Mode: 0644, DirMode: 0755}}
+	if _, err := Repair(context.Background(), migrated, dependencies, ApplyOptions{}); err != nil {
+		t.Fatalf("repair rejected a managed service template migration: %v", err)
+	}
+	content, err := os.ReadFile(unitPath)
+	if err != nil || string(content) != migratedDefinition {
+		t.Fatalf("repair did not install the migrated unit: %v", err)
+	}
+	wanted := []Command{
+		{Name: "systemctl", Args: []string{"show", "mira.service", "--property=FragmentPath", "--value"}},
+		{Name: "systemctl", Args: []string{"show", "mira.service", "--property=DropInPaths", "--value"}},
+		{Name: "systemctl", Args: []string{"daemon-reload"}},
+		{Name: "systemctl", Args: []string{"enable", "mira.service"}},
+		{Name: "systemctl", Args: []string{"restart", "mira.service"}},
+	}
+	if commands := runner.snapshot()[baseline:]; !reflect.DeepEqual(commands, wanted) {
+		t.Fatalf("systemd repair commands=%v want=%v", commands, wanted)
+	}
+}
+
+func TestSystemdUnitQuotesOptionalEnvironmentFileAsOneItem(t *testing.T) {
+	definition, err := systemdUnit("/var/lib/mira state", RoleNode, ScopeSystem)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(definition, `EnvironmentFile="-/var/lib/mira state/mira.env"`) {
+		t.Fatalf("optional EnvironmentFile is not quoted as one item:\n%s", definition)
+	}
+	if !strings.Contains(definition, "Environment=HOME=/root") {
+		t.Fatalf("system service has no deterministic HOME:\n%s", definition)
+	}
+	userDefinition, err := systemdUnit("/home/test/mira", RoleNode, ScopeUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(userDefinition, "Environment=HOME=/root") {
+		t.Fatalf("user service overrides its login HOME:\n%s", userDefinition)
 	}
 }
 

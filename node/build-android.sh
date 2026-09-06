@@ -11,9 +11,9 @@ if [[ -z $bundle ]]; then
   bundle="$output/bundle"
 fi
 node "$script_dir/openssh/verify-package.mjs" "$bundle" android arm64
-node "$repo_dir/scripts/check-android-build.mjs" "$bundle/mira-node"
-node "$script_dir/openssh/android/check-image.mjs" "$bundle/mira-node"
-cp "$bundle/mira-node" "$script_dir/dist/mira-node-android-arm64"
+node "$repo_dir/scripts/check-android-build.mjs" "$bundle/mira"
+node "$script_dir/openssh/android/check-image.mjs" "$bundle/mira"
+cp "$bundle/mira" "$script_dir/dist/mira-node-android-arm64"
 chmod 755 "$script_dir/dist/mira-node-android-arm64"
 mkdir -p "$script_dir/dist/openssh-notices"
 cp -R "$bundle/licenses" "$bundle/openssh.json" "$script_dir/dist/openssh-notices/"

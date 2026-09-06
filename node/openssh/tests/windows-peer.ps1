@@ -22,9 +22,9 @@ function Read-Log([string]$Path){
     try{return $reader.ReadToEnd()}finally{$reader.Dispose()}
 }
 try{
-    $nodeArguments=@('--config',(Quote-Arg $config))
+	$nodeArguments=@('node-worker','--config',(Quote-Arg $config))
     if($Tray){$nodeArguments=@('--tray')+$nodeArguments}
-    $nodeProcess=Start-Process -FilePath (Join-Path $BinaryDirectory 'mira-node.exe') -ArgumentList $nodeArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $fixture 'node.out') -RedirectStandardError (Join-Path $fixture 'node.err')
+    $nodeProcess=Start-Process -FilePath (Join-Path $BinaryDirectory 'mira.exe') -ArgumentList $nodeArguments -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $fixture 'node.out') -RedirectStandardError (Join-Path $fixture 'node.err')
     $handle=$nodeProcess.Handle
     @{type='ready';fixture=$fixture;pid=$nodeProcess.Id;user=[Security.Principal.WindowsIdentity]::GetCurrent().Name}|ConvertTo-Json -Compress
     while($null -ne ($line=[Console]::ReadLine())){

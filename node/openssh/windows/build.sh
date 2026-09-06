@@ -17,7 +17,7 @@ MIRA_OPENSSH_GO_OUTPUT="$work/go-objects" bash "$component/windows/build-go.sh"
 node "$component/windows/combine.mjs" "$work/source" "$work/combined"
 node "$component/windows/link.mjs" "$work"
 $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(wslpath -w "$component/windows/stage.ps1")" \
-  -Image "$(wslpath -w "$work/mira-node.exe")" -Destination "$(wslpath -w "$work/bin")"
+  -Image "$(wslpath -w "$work/mira.exe")" -Destination "$(wslpath -w "$work/bin")"
 node "$component/manifest.mjs" "$work/bin" windows amd64 "$work"
 if [[ -n ${MIRA_OPENSSH_OUTPUT:-} ]]; then cp -a "$work/bin" "$MIRA_OPENSSH_OUTPUT"; fi
 echo "Windows single-image bundle: $work/bin"

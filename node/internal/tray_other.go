@@ -8,7 +8,7 @@ import (
 )
 
 func RunTray(context.Context, []string) error {
-	return fmt.Errorf("--tray is only supported on Windows; run mira-node without --tray on this platform")
+	return fmt.Errorf("--tray is only supported on Windows; run mira node-worker on this platform")
 }
 
 func SupportsTray() bool { return false }

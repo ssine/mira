@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 const [directory,platform,arch]=process.argv.slice(2);
 const m=JSON.parse(fs.readFileSync(path.join(directory,'openssh.json'),'utf8'));
 if(m.schemaVersion!==1||m.backend!=='embedded-openssh'||m.platform!==platform||m.arch!==arch)throw Error('Invalid native package manifest');
-const filename='mira-node'+(platform==='windows'?'.exe':'');
+const filename='mira'+(platform==='windows'?'.exe':'');
 if(m.image!==filename)throw Error('Invalid image name');
 const b=fs.readFileSync(path.join(directory,filename));
 if(m.build?.version!==fs.readFileSync(path.join(import.meta.dirname,'../../VERSION'),'utf8').trim())throw Error('Native image version does not match this release');

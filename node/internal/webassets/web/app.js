@@ -939,7 +939,7 @@ function renderEnrollments(items) {
 function renderNodes(nodes) {
   const grid = clear($("#nodeGrid"));
   if (!nodes.length) {
-    grid.append(element("div", "empty", "还没有已知设备。启动 mira-node 来提交第一台设备。"));
+    grid.append(element("div", "empty", "还没有已知设备。启动 mira node-worker 来提交第一台设备。"));
     return;
   }
   for (const node of nodes) {

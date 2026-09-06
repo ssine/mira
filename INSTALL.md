@@ -36,7 +36,7 @@ procd 安装只支持 Mira 管理的 Node system service，并要求可执行的
 
 脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用 `mira install` 安装 Supervisor。
 默认状态目录是 `~/.local/share/mira`，命令入口位于 `~/.local/bin`，身份配置位于
-`~/.config/mira`。可用 `--version 1.0.1` 固定首次安装版本，或用
+`~/.config/mira`。可用 `--version 1.0.2` 固定首次安装版本，或用
 `--state-dir /absolute/path` 选择状态目录。
 
 安装器不再接受 `--update`。首次安装后统一使用 `mira update`。
@@ -159,8 +159,9 @@ bootstrap 脚本更新，也不要并发执行两个更新。`mira repair` 只�
 ## 发布
 
 `VERSION` 是 Mira 版本事实源。正式 Release 包含 Linux amd64/arm64、Windows amd64、Android APK、
-bootstrap 脚本和校验和，并发布相同版本的 `ghcr.io/ssine/mira` 镜像。桌面归档中的角色名都是
-同一原生镜像的链接，不是不同实现。
+bootstrap 脚本和校验和，并发布相同版本的 `ghcr.io/ssine/mira` 镜像。桌面归档只有一个 canonical
+`mira` 程序；Node、Server、Supervisor 和 SSH worker 由显式子命令选择。版本私有目录中的
+`ssh`/`sshd` 等名字只是同一镜像的 OpenSSH 入口，不是不同实现。
 
 正式构建必须先生成并验证内嵌 OpenSSH，再运行：
 

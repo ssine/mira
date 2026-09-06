@@ -22,7 +22,7 @@ const url=`http://127.0.0.1:${port}`;
 const publicURL=process.env.MIRA_OPENSSH_TEST_PUBLIC_URL??url;
 const binaries=path.join(fixture,'bin');await fs.mkdir(binaries);
 const openSSHDir=binaries;
-const nodeBinary=path.join(binaries,'mira-node'),cliBinary=path.join(binaries,'mira');
+const nodeBinary=path.join(binaries,'mira'),cliBinary=nodeBinary;
 const processes=[],logs=[];
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function wait(fn,label){for(let i=0;i<150;i++){const value=await fn();if(value)return value;await sleep(200)}throw Error(`timeout: ${label}`)}
@@ -50,7 +50,7 @@ let admin;
 async function enroll(name,env={}){
   const dir=path.join(fixture,name);await fs.mkdir(dir,{mode:0o700});
   const identity=path.join(dir,'identity.json'),key=`openssh-${process.pid}-${name}`;
-  launch(nodeBinary,[],{MIRA_SERVER_URL:url,MIRA_NODE_KEY:key,MIRA_IDENTITY_FILE:identity,MIRA_NODE_TOKEN:'',CONTROL_SERVER_TOKEN:'',MIRA_NODE_OPENSSH_DIR:'',MIRA_NODE_ALLOWED_ROOTS:'["/"]',APP_SERVER_AUTO_START:'false',CODEX_BINARY:path.join(fixture,'no-codex'),MIRA_NODE_HEARTBEAT_SECONDS:'1',...env});
+  launch(nodeBinary,['node-worker'],{MIRA_SERVER_URL:url,MIRA_NODE_KEY:key,MIRA_IDENTITY_FILE:identity,MIRA_NODE_TOKEN:'',CONTROL_SERVER_TOKEN:'',MIRA_NODE_OPENSSH_DIR:'',MIRA_NODE_ALLOWED_ROOTS:'["/"]',APP_SERVER_AUTO_START:'false',CODEX_BINARY:path.join(fixture,'no-codex'),MIRA_NODE_HEARTBEAT_SECONDS:'1',...env});
   await approvePendingNode(url,admin,key);
   const state=await wait(async()=>{try{const s=JSON.parse(await fs.readFile(identity));return s.nodeId?s:null}catch{return null}},'identity approval');
   await wait(async()=>{const s=await adminRequest(url,admin,`/v1/nodes/${state.nodeId}`);return s.channelStatus?.connected},'reverse channel');
@@ -61,13 +61,13 @@ try{
   assert(process.env.MIRA_TEST_LINUX_SINGLEFILE,'set MIRA_TEST_LINUX_SINGLEFILE to the linked Linux image');
   const image=path.resolve(process.env.MIRA_TEST_LINUX_SINGLEFILE);
   await fs.copyFile(image,nodeBinary);await fs.chmod(nodeBinary,0o700);
-  for(const role of ['mira','ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen'])await fs.link(nodeBinary,path.join(binaries,role));
+  for(const role of ['ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen'])await fs.link(nodeBinary,path.join(binaries,role));
   assert.equal(execFileSync(nodeBinary,['--mira-openssh-build'],{encoding:'utf8'}).trim(),'MIRA_LINKED_OPENSSH_LINUX_STATIC_V1');
   const password=crypto.randomBytes(24).toString('base64url');
   const serverEnvironment={...process.env,DATABASE_URL:connection.toString(),LISTEN_HOST:process.env.MIRA_OPENSSH_TEST_LISTEN??'127.0.0.1',LISTEN_PORT:String(port),MIRA_SECURE_COOKIES:'false',MIRA_CODEX_STORE_ENDPOINT:publicURL};
-  execFileSync(nodeBinary,['cli','server','admin','set-password','admin'],{env:serverEnvironment,input:password+'\n'});
+  execFileSync(nodeBinary,['server','admin','set-password','admin'],{env:serverEnvironment,input:password+'\n'});
   pool=new pg.Pool({connectionString:connection.toString()});
-  launch(nodeBinary,['cli','server-worker'],serverEnvironment);
+  launch(nodeBinary,['server-worker'],serverEnvironment);
   await wait(async()=>{try{return(await fetch(url+'/healthz')).ok}catch{return false}},'test Server');
   admin=await loginAdmin(url,'admin',password);
   const a=await enroll('source'),b=await enroll('target');

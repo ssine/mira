@@ -156,7 +156,7 @@ public final class MiraNodeService extends Service {
                 File launcherPidFile = rootLauncherPidFile();
                 launcherPidFile.delete();
                 String command = "exec " + shellQuote(executable.getAbsolutePath())
-                        + " --config " + shellQuote(configFile.getAbsolutePath());
+                        + " node-worker --config " + shellQuote(configFile.getAbsolutePath());
                 command = "export MIRA_NODE_OPENSSH_DIR=" + shellQuote(openSSH.getAbsolutePath())
                         + " MIRA_NODE_OPENSSH_ANDROID_ROOT=1; " + command;
                 // Keep an app-UID shell as the Process owned by Java. Android
@@ -168,7 +168,7 @@ public final class MiraNodeService extends Service {
                                 + "; su -c " + shellQuote(command));
             } else {
                 rootLauncherPidFile().delete();
-                builder = new ProcessBuilder(executable.getAbsolutePath(), "--config",
+                builder = new ProcessBuilder(executable.getAbsolutePath(), "node-worker", "--config",
                         configFile.getAbsolutePath());
             }
             builder.environment().put("MIRA_NODE_OPENSSH_DIR", openSSH.getAbsolutePath());

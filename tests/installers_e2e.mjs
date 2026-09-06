@@ -56,6 +56,10 @@ async function installRole(role) {
   assert.equal(service.includes(" --server"), role === "server");
   assert.equal(await fs.stat(path.join(state, "versions", version, "mira-codex-package")).catch(() => null), null,
     "the unified Mira image must not bundle the optional Codex runtime");
+  assert.equal(await fs.stat(path.join(state, "versions", version, "mira-node")).catch(() => null), null,
+    "Mira roles must not be selected through a mira-node alias");
+  assert.equal(await fs.stat(path.join(home, ".local", "bin", "mira-node")).catch(() => null), null,
+    "the installer must expose only the canonical mira launcher");
   return { args, environment, executable, state };
 }
 

@@ -129,7 +129,7 @@ jobs:
           node node/openssh/windows/combine.mjs "$work/source" "$work/combined"
           node node/openssh/windows/link.mjs "$work"
           mkdir "$work/bin"
-          cp "$work/mira-node.exe" "$work/bin/"
+          cp "$work/mira.exe" "$work/bin/"
           node node/openssh/manifest.mjs "$work/bin" windows amd64 "$work"
           node node/openssh/verify-package.mjs "$work/bin" windows amd64
           tar -C "$work/bin" -czf "$RUNNER_TEMP/openssh-windows-amd64.tar.gz" .

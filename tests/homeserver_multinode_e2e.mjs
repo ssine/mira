@@ -25,7 +25,7 @@ const configOverrides = [
   `experimental_thread_store.endpoint="${controlUrl}"`,
   `experimental_thread_store.store_id="${storeId}"`,
 ];
-const nodeBinary = process.env.MIRA_NODE_TEST_BINARY ?? `${projectDirectory}/tests/bin/mira-node`;
+const nodeBinary = process.env.MIRA_NODE_TEST_BINARY ?? `${projectDirectory}/tests/bin/mira`;
 const nodeStateDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "mira-homeserver-e2e-"));
 const identityFile = path.join(nodeStateDirectory, "identity.json");
 const adminSession = await loginAdmin(controlUrl);
@@ -34,7 +34,7 @@ await fs.mkdir(`${projectDirectory}/tests/workspace`, { recursive: true });
 await fs.mkdir(`${projectDirectory}/tests/client-a`, { recursive: true });
 await fs.mkdir(`${projectDirectory}/tests/bin`, { recursive: true });
 if (!process.env.MIRA_NODE_TEST_BINARY) {
-  execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira-node"], {
+  execFileSync("go", ["build", "-o", nodeBinary, "./cmd/mira"], {
     cwd: `${projectDirectory}/node`,
   });
 }
@@ -209,7 +209,7 @@ try {
     return outputText(view).includes("HOME_NODE_PTY_OK") ? view : null;
   }, "Home Server PTY output");
 
-  wslNode = spawn(nodeBinary, [], {
+  wslNode = spawn(nodeBinary, ["node-worker"], {
     cwd: projectDirectory,
     env: {
       ...process.env,

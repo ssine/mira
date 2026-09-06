@@ -320,7 +320,7 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	environmentFile, err := systemdQuote(filepath.Join(stateDir, "mira.env"))
+	environmentFile, err := systemdQuote("-" + filepath.Join(stateDir, "mira.env"))
 	if err != nil {
 		return "", err
 	}
@@ -328,7 +328,7 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 	if scope == ScopeUser {
 		wantedBy = "default.target"
 	}
-	return strings.Join([]string{
+	service := []string{
 		"# Managed by Mira installer",
 		"[Unit]",
 		"Description=Mira Supervisor",
@@ -337,8 +337,13 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 		"",
 		"[Service]",
 		"Type=simple",
-		"EnvironmentFile=-" + environmentFile,
-		"ExecStart=" + executable + " supervisor --state-dir " + state + " --service-owner mira" + supervisorRoleArgument(role),
+	}
+	if scope == ScopeSystem {
+		service = append(service, "Environment=HOME=/root")
+	}
+	service = append(service,
+		"EnvironmentFile="+environmentFile,
+		"ExecStart="+executable+" supervisor --state-dir "+state+" --service-owner mira"+supervisorRoleArgument(role),
 		// A successful update deliberately exits the old Supervisor after the
 		// current pointer is committed. The service manager then starts the new
 		// Supervisor from that pointer; explicit systemctl stop is not restarted.
@@ -348,9 +353,10 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 		"KillMode=mixed",
 		"",
 		"[Install]",
-		"WantedBy=" + wantedBy,
+		"WantedBy="+wantedBy,
 		"",
-	}, "\n"), nil
+	)
+	return strings.Join(service, "\n"), nil
 }
 
 func nixString(value string) (string, error) {
@@ -381,6 +387,7 @@ func nixModule(stateDir, role string) (string, error) {
 		"    wantedBy = [ \"multi-user.target\" ];",
 		"    after = [ \"network-online.target\" ];",
 		"    wants = [ \"network-online.target\" ];",
+		"    environment.HOME = \"/root\";",
 		"    serviceConfig = {",
 		"      EnvironmentFile = [ \"-${miraStateDir}/mira.env\" ];",
 		"      ExecStart = \"${miraStateDir}/current/mira supervisor --state-dir ${miraStateDir} --service-owner nix" + supervisorRoleArgument(role) + "\";",

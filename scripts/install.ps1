@@ -44,7 +44,8 @@ try {
 
     Expand-Archive (Join-Path $stage $asset) -DestinationPath $stage
     $package = Join-Path $stage "mira_${Version}_windows_amd64"
-    $image = Join-Path $package "mira-node.exe"
+    $image = Join-Path $package "mira.exe"
+    if (-not (Test-Path $image)) { $image = Join-Path $package "mira-node.exe" }
     if (-not (Test-Path $image)) { throw "Release has no Mira executable" }
     $versionOutput = & $image cli --version
     if ($LASTEXITCODE -ne 0 -or "$versionOutput" -notmatch [regex]::Escape($Version)) { throw "Release version validation failed" }

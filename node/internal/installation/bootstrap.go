@@ -105,7 +105,7 @@ func BootstrapRelease(source, stateDir, version string) (string, error) {
 }
 
 func ensureRoleAliases(directory, target string) error {
-	roles := []string{"mira-node", "ssh", "sshd", "sshd-session", "sshd-auth", "scp", "sftp", "sftp-server", "ssh-keygen"}
+	roles := []string{"ssh", "sshd", "sshd-session", "sshd-auth", "scp", "sftp", "sftp-server", "ssh-keygen"}
 	if runtime.GOOS == "windows" {
 		roles = append(roles, "ssh-shellhost", "ssh-agent", "ssh-add", "ssh-keyscan", "ssh-sk-helper", "ssh-pkcs11-helper")
 	}

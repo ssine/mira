@@ -22,7 +22,7 @@ export default async function(ctx){
         '-v',`${openSSHDir}:/mira:ro`,'-v',`${fixture}:${fixture}`,'-v',`${passwd}:/etc/passwd:ro`,'-v',`${group}:/etc/group:ro`,
         '-e',`MIRA_SERVER_URL=${url}`,'-e',`MIRA_NODE_KEY=${key}`,'-e',`MIRA_IDENTITY_FILE=${directory}/identity.json`,
         '-e','MIRA_NODE_OPENSSH_DIR=/mira','-e','MIRA_NODE_ALLOWED_ROOTS=["/"]','-e','MIRA_NODE_HEARTBEAT_SECONDS=1',
-        '-e','APP_SERVER_AUTO_START=false','-e','CODEX_BINARY=/nonexistent/codex',image,'/mira/mira-node']);
+        '-e','APP_SERVER_AUTO_START=false','-e','CODEX_BINARY=/nonexistent/codex',image,'/mira/mira','node-worker']);
       await approvePendingNode(url,admin,key);
       device=await wait(async()=>{const list=await adminRequest(url,admin,'/v1/nodes');return list.data.find(n=>n.nodeKey===key&&n.channelStatus?.connected)},'container '+image);
       assert.equal(device.machineStatus.ssh.username,'mira-test');
