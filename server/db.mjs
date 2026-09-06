@@ -554,6 +554,16 @@ const migrations = [
   { version: 20, name: "account-quota-history", sql: accountHistoryMigration },
   { version: 21, name: "thread-token-usage-lookup", sql: tokenUsageMigration },
   { version: 22, name: "thread-cost-event-lookup", sql: costEventMigration },
+  {
+    version: 23,
+    name: "transcript-turn-boundary-lookup",
+    sql: `CREATE INDEX codex_thread_events_turn_context_idx
+      ON codex_thread_events(store_id, thread_id, generation, item_seq DESC)
+      WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|turn_context)"';
+    CREATE INDEX codex_thread_events_turn_completion_idx
+      ON codex_thread_events(store_id, thread_id, generation, item_seq)
+      WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_complete|turn_complete|turn_aborted)"';`,
+  },
 ];
 
 export async function initializeDatabase(pool, { throughVersion = Infinity } = {}) {

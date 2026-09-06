@@ -63,6 +63,7 @@ try {
   let nodeRequests = 0;
   let expireLogin = false;
   let transcriptRequests = 0;
+  const lazyDetailRequests = [];
   let missingTranscript = false;
   let deferThreadLists = false;
   const pendingThreadLists = [];
@@ -83,6 +84,18 @@ try {
     assert.equal(url.searchParams.get("tail"), "1");
     const threadId = url.pathname.split("/").at(-2);
     if (missingTranscript) return route.fulfill({ status: 404, json: { error: "thread was deleted" } });
+    if (threadId === "lazy-thread") {
+      const details = url.searchParams.get("toolDetails") === "1";
+      lazyDetailRequests.push(url.searchParams.get("toolDetails"));
+      return route.fulfill({ json: { generation: 1, itemCount: 2, nextCursor: null, pageCursor: "t2:1:3:2", trace: [{
+        key: "lazy-tool", kind: "tool", title: "functions.exec", status: "完成", sourceItemSeq: 1,
+        body: details ? "输入\ninspect\n\n输出\nfull delayed output" : "",
+        toolFragment: details
+          ? { input: "inspect", output: "full delayed output", hasInput: true, hasOutput: true, materialized: false }
+          : { hasInput: true, hasOutput: true, materialized: false },
+        toolDetail: { pages: [{ cursor: "t2:1:3:2", limit: 60, loaded: details }] },
+      }] } });
+    }
     return route.fulfill({ json: { generation: 1, nextCursor: null, trace: [{
       key: `recovered-${threadId}`, kind: "assistant", body: `Recent messages for ${threadId}`,
       sourceItemSeq: 99, turnId: `recovered-turn-${threadId}`,
@@ -125,6 +138,24 @@ try {
     "runtime selection belongs to its own management page");
   assert.equal(await page.locator("#sessionSourceNode").evaluate((node) => node.closest("section[id]")?.id), "runtimeView",
     "session import belongs to its own management page");
+  await page.evaluate(async () => {
+    const h = window.traceHarness;
+    h.agent.threadId = "lazy-thread";
+    h.resetAgentTranscript("lazy-thread");
+    await h.loadAgentTranscript("lazy-thread");
+  });
+  assert.deepEqual(lazyDetailRequests, ["0"], "first paint requests compact tools once");
+  assert.equal(await page.locator('[data-trace-key="lazy-tool"] .trace-body').isVisible(), false);
+  await page.locator(".tool-group > summary").click();
+  await page.locator('[data-trace-key="lazy-tool"] .trace-detail > summary').click();
+  await page.getByText("full delayed output", { exact: false }).waitFor();
+  assert.deepEqual(lazyDetailRequests, ["0", "1"], "expanding a tool loads its immutable page detail once");
+  await page.evaluate(() => {
+    const h = window.traceHarness;
+    h.agent.threadId = null;
+    h.resetAgentTranscript();
+    h.clear();
+  });
   await page.locator("#agentThreadDrawerToggle").click();
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true");
   await page.locator("#agentThreadDrawerToggle").click();
@@ -465,6 +496,33 @@ try {
   assert.equal(fragmentMerge[0].sourceItemSeq, 5);
   assert.equal(fragmentMerge[0].body, "输入\ncommand\n\n输出\nresult");
   assert.equal(fragmentMerge[0].title, "functions.exec");
+
+  const lazyFragmentMerge = await page.evaluate(() => {
+    const merge = window.traceHarness.mergeTranscriptItems;
+    let items = merge([], [
+      { key: "lazy-tool", kind: "tool", turnId: "turn-a", sourceItemSeq: 250, title: "工具输出", body: "", status: "完成",
+        toolFragment: { materialized: false, hasInput: false, hasOutput: true },
+        toolDetail: { pages: [{ cursor: "newer", limit: 60, loaded: false }] } },
+      { key: "lazy-tool", kind: "tool", turnId: "turn-a", sourceItemSeq: 5, title: "functions.exec", body: "", status: "运行",
+        toolFragment: { materialized: false, hasInput: true, hasOutput: false },
+        toolDetail: { pages: [{ cursor: "older", limit: 60, loaded: false }] } },
+    ]);
+    const compact = structuredClone(items[0]);
+    items = merge(items, [
+      { key: "lazy-tool", kind: "tool", turnId: "turn-a", sourceItemSeq: 5, title: "functions.exec", body: "输入\ncommand", status: "运行",
+        toolFragment: { input: "command", output: null, hasInput: true, hasOutput: false, materialized: false },
+        toolDetail: { pages: [{ cursor: "older", limit: 60, loaded: true }] } },
+      { key: "lazy-tool", kind: "tool", turnId: "turn-a", sourceItemSeq: 250, title: "工具输出", body: "输出\nresult", status: "完成",
+        toolFragment: { input: null, output: "result", hasInput: false, hasOutput: true, materialized: false },
+        toolDetail: { pages: [{ cursor: "newer", limit: 60, loaded: true }] } },
+    ]);
+    return { compact, detailed: items[0] };
+  });
+  assert.equal(lazyFragmentMerge.compact.body, "");
+  assert.equal(lazyFragmentMerge.compact.title, "functions.exec");
+  assert.equal(lazyFragmentMerge.compact.toolDetail.pages.length, 2);
+  assert.equal(lazyFragmentMerge.detailed.body, "输入\ncommand\n\n输出\nresult");
+  assert.ok(lazyFragmentMerge.detailed.toolDetail.pages.every((entry) => entry.loaded));
 
   const glass = await page.locator("#agentThreadDrawerToggle").evaluate((head) => {
     const style = getComputedStyle(head);

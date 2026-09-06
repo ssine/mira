@@ -33,6 +33,7 @@ export function projectThreadActivity(rows, exhausted = true) {
   return {
     state: end ? (payload.type === "turn_aborted" ? "interrupted" : payload.error || error ? "failed" : "idle") : error ? "failed" : "running",
     turnId: turnId ?? payload.turn_id ?? null,
+    startedItemSeq: Number.isSafeInteger(Number(start?.item_seq)) ? Number(start.item_seq) : null,
     startedAt: eventTime(start?.payload.payload.started_at) ?? eventTime(start?.payload.timestamp) ?? eventTime(start?.created_at),
     updatedAt: eventTime(payload.completed_at ?? payload.started_at) ?? eventTime(marker.payload.timestamp) ?? eventTime(marker.created_at),
   };
@@ -80,8 +81,21 @@ export async function addThreadActivities(pool, storeId, threads) {
     if (activity.state === "running") {
       const node = byNode.get(thread.runtimeNodeId || thread.sourceNodeId);
       let reason = null;
-      if ((thread.importedAt && Date.parse(activity.startedAt) < Date.parse(thread.importedAt)) ||
-          (thread.createdAt && Date.parse(activity.startedAt) < Date.parse(thread.createdAt))) reason = "history";
+      const importedBoundary = thread.importedItemCount == null ? null : Number(thread.importedItemCount);
+      const hasImportedBoundary = Number.isSafeInteger(importedBoundary) && importedBoundary >= 0;
+      const importedHistory = thread.importedAt && hasImportedBoundary &&
+        Number.isSafeInteger(activity.startedItemSeq) && activity.startedItemSeq <= importedBoundary;
+      // Native lifecycle seconds are less precise than metadata timestamps.
+      // Event positions provide the authoritative import boundary; retain a
+      // one-second clock fallback for older imports and copied histories.
+      const beforeByMoreThanOneSecond = (boundary) => {
+        const startedAt = Date.parse(activity.startedAt), boundaryAt = Date.parse(boundary);
+        return Number.isFinite(startedAt) && Number.isFinite(boundaryAt) && startedAt + 1000 < boundaryAt;
+      };
+      const legacyImportedHistory = thread.importedAt && !hasImportedBoundary &&
+        beforeByMoreThanOneSecond(thread.importedAt);
+      const copiedHistory = !thread.importedAt && thread.createdAt && beforeByMoreThanOneSecond(thread.createdAt);
+      if (importedHistory || legacyImportedHistory || copiedHistory) reason = "history";
       else if (!node) reason = "unbound";
       else if (node.approval_status !== "approved" || node.channel_status?.connected !== true || Date.now() - Date.parse(node.last_seen_at) >= 15_000) reason = "offline";
       else if (thread.runtimeNodeId &&

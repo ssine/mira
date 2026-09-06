@@ -81,9 +81,15 @@ try {
   assert.equal((await (await fetch(endpoint, { headers: { cookie } })).json()).costEstimate, undefined, "ordinary reads don't scan cost history");
   const response = await fetch(endpoint + "&includeCost=1", { headers: { cookie } });
   assert.equal(response.status, 200); assert.deepEqual((await response.json()).costEstimate, updated);
-  const transcript = await (await fetch(`${origin}/v1/codex/threads/${id}/transcript?storeId=${store}&tail=1&includeCost=1`, {headers:{cookie}})).json();
+  assert.equal((await fetch(`${origin}/v1/codex/threads/${id}/costs?storeId=${store}&turnId=turn-b`)).status, 401);
+  const transcript = await (await fetch(`${origin}/v1/codex/threads/${id}/transcript?storeId=${store}&tail=1`, {headers:{cookie}})).json();
   const pricedTurn = transcript.trace.find(item => item.turnId === "turn-b" && item.kind === "assistant");
-  assert.equal(pricedTurn.turnCostEstimate.amount, 0.132, "transcript pages attach only their assistant turn's estimate");
+  assert.equal(pricedTurn.turnCostEstimate, undefined, "transcript first paint never waits for cost history");
+  const costResponse = await fetch(`${origin}/v1/codex/threads/${id}/costs?storeId=${store}&turnId=turn-b`, {headers:{cookie}});
+  assert.equal(costResponse.status, 200);
+  const pageCosts = await costResponse.json();
+  assert.equal(pageCosts.turnCostEstimates["turn-b"].amount, 0.132, "the independent endpoint prices only requested turns");
+  assert.deepEqual(pageCosts.costEstimate, updated);
   const previous = await getSnapshot(pool, store);
   previous.snapshot.histories[id] = [context("gpt-6-astra"), event(usage(0, 0, 0))];
   previous.snapshot.metadata_updates[id].token_usage = usage(0, 0, 0);

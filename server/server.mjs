@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import process from "node:process";
 import { createHash } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 
@@ -81,12 +82,25 @@ const authService = new AuthService({
 });
 const authState = await authService.initialize();
 
-function sendJson(response, status, value, headers = {}) {
+function serverTimingHeader(timings) {
+  return Object.entries(timings ?? {})
+    .filter(([name, duration]) => name !== "startedAt" && /^[a-z][a-z0-9_]*$/i.test(name) && Number.isFinite(duration))
+    .map(([name, duration]) => `${name};dur=${Math.max(0, duration).toFixed(1)}`)
+    .join(", ");
+}
+
+function sendJson(response, status, value, headers = {}, timings = null) {
+  const serializeStartedAt = performance.now();
   const payload = Buffer.from(JSON.stringify(value));
+  if (timings) {
+    timings.serialize = performance.now() - serializeStartedAt;
+    timings.total = performance.now() - timings.startedAt;
+  }
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "content-length": payload.length,
     "cache-control": "no-store",
+    ...(timings ? { "server-timing": serverTimingHeader(timings) } : {}),
     ...headers,
   });
   response.end(payload);
@@ -447,6 +461,28 @@ async function route(request, response) {
     else sendJson(response, 200, thread);
     return;
   }
+  match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})\/costs$/i);
+  if (request.method === "GET" && match) {
+    const principal = await authorize(request, response, "admin");
+    if (!principal) return;
+    const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
+    const turnIds = [...new Set(url.searchParams.getAll("turnId"))];
+    if (!storeId || turnIds.length > 60 || turnIds.some((id) => !id || id.length > 128 || /[\u0000-\u001f]/.test(id))) {
+      errorJson(response, 400, "invalid store id or turn IDs", "invalid_request"); return;
+    }
+    const [thread] = await listImportedThreads(pool, storeId, 1, match[1]);
+    if (!thread) { errorJson(response, 404, "会话不存在或已不可访问", "not_found"); return; }
+    const [costEstimate, turnCostEstimates] = await Promise.all([
+      getThreadCostEstimate(pool, storeId, thread),
+      turnIds.length ? getThreadTurnCostEstimates(pool, storeId, thread, turnIds) : {},
+    ]);
+    sendJson(response, 200, {
+      threadId: thread.threadId, generation: thread.generation, itemCount: thread.itemCount,
+      costEstimate, turnCostEstimates,
+    });
+    return;
+  }
+  match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})$/i);
   if (request.method === "GET" && match) {
     const principal = await authorize(request, response, "admin");
     if (!principal) return;
@@ -466,25 +502,20 @@ async function route(request, response) {
     const storeId = safeStoreId(url.searchParams.get("storeId") ?? defaultStoreId);
     const cursorValue = url.searchParams.get("cursor");
     const tail = url.searchParams.get("tail") === "1";
+    const toolDetailsValue = url.searchParams.get("toolDetails");
+    const toolDetails = toolDetailsValue !== "0";
     const cursor = tail ? cursorValue : cursorValue === null || !/^\d+$/.test(cursorValue)
       ? null
       : boundedInteger(cursorValue, null, 0, Number.MAX_SAFE_INTEGER);
     const limit = boundedInteger(url.searchParams.get("limit"), 60, 10, 200);
-    if (!storeId || (cursorValue !== null && cursor === null)) {
+    if (!storeId || (cursorValue !== null && cursor === null) ||
+        (toolDetailsValue !== null && !["0", "1"].includes(toolDetailsValue))) {
       errorJson(response, 400, "invalid store id or transcript cursor", "invalid_request"); return;
     }
-    const result = await getCodexTranscript(pool, storeId, match[1], { cursor, limit, tail });
-    if (result.status === 200 && url.searchParams.get("includeCost") === "1") {
-      const [thread] = await listImportedThreads(pool, storeId, 1, match[1]);
-      if (thread) {
-        const turnIds = [...new Set((result.body.trace ?? []).filter(item => item.kind === "assistant" && item.turnId).map(item => item.turnId))];
-        const costs = turnIds.length ? await getThreadTurnCostEstimates(pool, storeId, thread, turnIds) : {};
-        for (const item of result.body.trace ?? []) {
-          if (item.kind === "assistant" && item.turnId && Object.hasOwn(costs, item.turnId)) item.turnCostEstimate = costs[item.turnId];
-        }
-      }
-    }
-    sendJson(response, result.status, result.body);
+    const timings = { startedAt: performance.now() };
+    const result = await getCodexTranscript(pool, storeId, match[1], { cursor, limit, tail, toolDetails, timings });
+    timings.handler = performance.now() - timings.startedAt;
+    sendJson(response, result.status, result.body, {}, timings);
     return;
   }
   match = url.pathname.match(/^\/v1\/codex\/runtimes\/([0-9a-f-]{36})\/(start|stop)$/i);

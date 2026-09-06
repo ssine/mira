@@ -17,11 +17,17 @@ try {
   await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data: rows } }));
   await context.route(/\/v1\/codex\/threads\/[^?]+\?/, route => {
     const url = new URL(route.request().url()), path = url.pathname, row = rows.find(row => path.includes(row.threadId));
-    if (path.endsWith("/transcript")) assert.equal(url.searchParams.get("includeCost"), "1", "transcript requests opt into per-turn costs");
+    if (path.endsWith("/transcript")) {
+      assert.equal(url.searchParams.get("includeCost"), null, "transcript first paint does not wait for costs");
+      assert.equal(url.searchParams.get("toolDetails"), "0", "transcript first paint defers tool details");
+    }
+    if (path.endsWith("/costs")) return route.fulfill({ json: {
+      threadId: row.threadId, generation: row.generation, itemCount: row.itemCount, costEstimate: row.costEstimate,
+      turnCostEstimates: { [`turn-${row.threadId}`]: estimate(0.21) },
+    } });
     return route.fulfill({ json: path.endsWith("/transcript") ? { generation: row.generation, itemCount: row.itemCount,
       trace: [{ key: "message", kind: "assistant", body: "A persisted conversation.", sourceItemSeq: 1,
-        turnId: `turn-${row.threadId}`, turnCompletedAt: new Date().toISOString(), turnElapsedMs: 6250,
-        turnCostEstimate: estimate(0.21) }], nextCursor: null } : row });
+        turnId: `turn-${row.threadId}`, turnCompletedAt: new Date().toISOString(), turnElapsedMs: 6250 }], nextCursor: null } : row });
   });
   const page = await context.newPage(), errors = [];
   page.setDefaultTimeout(15_000); page.on("pageerror", error => errors.push(error.message));
@@ -30,7 +36,7 @@ try {
   await page.locator('#loginForm button[type="submit"]').click();
   await page.locator("#dashboardView:not(.hidden)").waitFor();
   await page.goto(`${origin}/?thread=${ids[0]}`);
-  await page.locator(".trace-cost").waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.querySelector(".trace-cost")?.textContent === "费用 $0.21");
   assert.equal(await page.locator(".trace-elapsed").textContent(), "本轮总耗时 6.3 秒");
   assert.equal(await page.locator(".trace-cost").textContent(), "费用 $0.21");
   assert.match(await page.locator(".trace-cost").getAttribute("title"), /Standard 公开价，非套餐实际扣费/);

@@ -1,9 +1,28 @@
 import { getStoreHead, getThreadHistory } from "./thread-store.mjs";
 import { isDeepStrictEqual } from "node:util";
+import { performance } from "node:perf_hooks";
 import { toolItemView, responseToolView, reasoningText, reasoningParts } from "./public/trace-activity.js";
 import { outputImages, mergeImages, imageJsonReplacer } from "./public/trace-images.js";
 
 const maximumProjectedTextBytes = 1024 * 1024;
+
+async function measured(timings, name, operation) {
+  if (!timings) return operation();
+  const startedAt = performance.now();
+  try { return await operation(); }
+  finally {
+    const elapsed = performance.now() - startedAt;
+    timings[name] = (timings[name] ?? 0) + elapsed;
+    if (name.startsWith("db_")) timings.db = (timings.db ?? 0) + elapsed;
+  }
+}
+
+function projectMeasured(timings, operation) {
+  if (!timings) return operation();
+  const startedAt = performance.now();
+  try { return operation(); }
+  finally { timings.projection = (timings.projection ?? 0) + performance.now() - startedAt; }
+}
 
 function isoTimestamp(value, numericScale = 1) {
   const milliseconds = typeof value === "number" ? value * numericScale : Date.parse(value ?? "");
@@ -400,12 +419,13 @@ export function paginateCodexTranscript(trace, cursor = null, limit = 60) {
 
 export async function getCodexTranscript(pool, storeId, threadId, options = {}) {
   if (options.tail) return getCodexTranscriptTail(pool, storeId, threadId, options);
-  const head = await getStoreHead(pool, storeId);
+  const head = await measured(options.timings, "db_head", () => getStoreHead(pool, storeId));
   const manifest = head.historyManifest?.[threadId];
   if (!manifest) return { status: 404, body: { error: "thread history not found", code: "not_found" } };
-  const history = await getThreadHistory(pool, storeId, threadId, manifest.generation, head.version);
+  const history = await measured(options.timings, "db_history", () =>
+    getThreadHistory(pool, storeId, threadId, manifest.generation, head.version));
   if (history.status !== 200) return history;
-  const projected = projectCodexTranscript(history.body.items);
+  const projected = projectMeasured(options.timings, () => projectCodexTranscript(history.body.items));
   const page = paginateCodexTranscript(projected, options.cursor ?? null, options.limit ?? 60);
   return {
     status: 200,
@@ -420,17 +440,17 @@ export async function getCodexTranscript(pool, storeId, threadId, options = {}) 
   };
 }
 
-async function restoreImportedTimestamps(pool, storeId, threadId, rows) {
-  const imported = await pool.query(
+async function restoreImportedTimestamps(pool, storeId, threadId, rows, timings = null) {
+  const imported = await measured(timings, "db_provenance", () => pool.query(
     `SELECT import_id, source_item_count::text FROM mira_codex_session_imports
      WHERE store_id=$1 AND thread_id=$2 AND status='imported'
-     ORDER BY store_event_seq DESC, created_at DESC LIMIT 1`, [storeId, threadId]);
+     ORDER BY store_event_seq DESC, created_at DESC LIMIT 1`, [storeId, threadId]));
   const recordedAt = new Map(rows.map((row) => [Number(row.item_seq), row.created_at?.toISOString()]));
   if (!imported.rowCount) return recordedAt;
   const source = imported.rows[0];
-  const segments = await pool.query(
+  const segments = await measured(timings, "db_provenance", () => pool.query(
     `SELECT source_import_id, first_line_seq::text, item_count::text
-     FROM mira_codex_session_import_segments WHERE import_id=$1 ORDER BY segment_index`, [source.import_id]);
+     FROM mira_codex_session_import_segments WHERE import_id=$1 ORDER BY segment_index`, [source.import_id]));
   const parts = segments.rowCount ? segments.rows : [{ source_import_id: source.import_id, first_line_seq: 1, item_count: source.source_item_count }];
   let offset = 0;
   for (const segment of parts) {
@@ -438,10 +458,10 @@ async function restoreImportedTimestamps(pool, storeId, threadId, rows) {
     const matching = rows.filter((row) => Number(row.item_seq) > offset && Number(row.item_seq) <= offset + count);
     const firstLine = Number(segment.first_line_seq);
     if (matching.length) {
-      const raw = await pool.query(
+      const raw = await measured(timings, "db_provenance", () => pool.query(
         `SELECT line_seq::text, raw_record FROM mira_codex_session_import_records
          WHERE import_id=$1 AND line_seq=ANY($2::bigint[])`,
-        [segment.source_import_id, matching.map((row) => firstLine + Number(row.item_seq) - offset - 1)]);
+        [segment.source_import_id, matching.map((row) => firstLine + Number(row.item_seq) - offset - 1)]));
       const byLine = new Map(raw.rows.map((row) => [Number(row.line_seq), row.raw_record]));
       for (const row of matching) {
         const original = byLine.get(firstLine + Number(row.item_seq) - offset - 1);
@@ -458,6 +478,28 @@ async function restoreImportedTimestamps(pool, storeId, threadId, rows) {
   return recordedAt;
 }
 
+function transcriptToolDetails(trace, cursor, limit, loaded) {
+  return trace.map((item) => {
+    if (item.kind !== "tool") return item;
+    const page = { cursor, limit, loaded };
+    if (loaded) return { ...item, toolDetail: { pages: [page] } };
+    const fragment = item.toolFragment ? {
+      materialized: item.toolFragment.materialized === true,
+      hasInput: item.toolFragment.input != null,
+      hasOutput: item.toolFragment.output != null,
+    } : undefined;
+    const images = (item.images ?? []).flatMap((image) =>
+      typeof image?.path === "string" && image.path ? [{ path: image.path }] : []);
+    return {
+      ...item,
+      body: "",
+      ...(fragment ? { toolFragment: fragment } : {}),
+      ...(images.length ? { images } : { images: undefined }),
+      toolDetail: { pages: [page] },
+    };
+  });
+}
+
 // V2 cursors use immutable raw sequence positions, scoped to one generation.
 // Keep the original numeric-cursor reader for already-open older Web clients.
 export async function getCodexTranscriptTail(pool, storeId, threadId, options = {}) {
@@ -465,11 +507,11 @@ export async function getCodexTranscriptTail(pool, storeId, threadId, options = 
   if (options.cursor != null && (!cursor || cursor.slice(1).some((value) => !Number.isSafeInteger(Number(value))))) {
     return { status: 400, body: { error: "invalid transcript cursor", code: "invalid_request" } };
   }
-  const head = await pool.query(
+  const head = await measured(options.timings, "db_head", () => pool.query(
     `SELECT active_generation::text, item_count::text, through_event_seq::text
      FROM codex_thread_projections WHERE store_id = $1 AND thread_id = $2`,
     [storeId, threadId],
-  );
+  ));
   if (!head.rowCount) return { status: 404, body: { error: "thread history not found", code: "not_found" } };
   const generation = Number(head.rows[0].active_generation);
   const itemCount = Number(head.rows[0].item_count);
@@ -483,12 +525,12 @@ export async function getCodexTranscriptTail(pool, storeId, threadId, options = 
   }
   const limit = Math.max(10, Math.min(200, options.limit ?? 60));
   const windowSize = Math.max(120, limit * 4);
-  const result = await pool.query(
+  const result = await measured(options.timings, "db_tail", () => pool.query(
     `SELECT item_seq::text, payload, created_at FROM codex_thread_events AS events
      WHERE store_id = $1 AND thread_id = $2 AND generation = $3 AND item_seq < $4
      ORDER BY events.item_seq DESC LIMIT $5`,
     [storeId, threadId, generation, end, windowSize],
-  );
+  ));
   const rows = result.rows.reverse();
   const start = rows.length ? Number(rows[0].item_seq) : end;
   if (rows.length !== Math.min(windowSize, end - 1) ||
@@ -503,20 +545,21 @@ export async function getCodexTranscriptTail(pool, storeId, threadId, options = 
   let contextRow = null;
   let contextBefore = start;
   while (contextBefore > 1) {
-    const candidates = await pool.query(
+    const candidates = await measured(options.timings, "db_context", () => pool.query(
       `SELECT item_seq::text, payload, created_at FROM codex_thread_events AS events
        WHERE store_id = $1 AND thread_id = $2 AND generation = $3 AND item_seq < $4
          AND payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|turn_context)"'
        ORDER BY events.item_seq DESC LIMIT 1`,
       [storeId, threadId, generation, contextBefore],
-    );
+    ));
     contextRow = candidates.rows.find(({ payload: record }) => record?.type === "turn_context" || (record?.type === "event_msg" &&
       ["task_started", "turn_started"].includes(record.payload?.type)));
     context = contextRow?.payload;
     if (context || candidates.rows.length === 0) break;
     contextBefore = Number(candidates.rows.at(-1).item_seq);
   }
-  const recordedAt = await restoreImportedTimestamps(pool, storeId, threadId, contextRow ? [contextRow, ...rows] : rows);
+  const recordedAt = await restoreImportedTimestamps(
+    pool, storeId, threadId, contextRow ? [contextRow, ...rows] : rows, options.timings);
   context = contextRow?.payload;
   const projectionOptions = {
     itemOffset: start - 1,
@@ -526,38 +569,41 @@ export async function getCodexTranscriptTail(pool, storeId, threadId, options = 
     fragments: true,
     recordedAt,
   };
-  let projected = projectCodexTranscript(rows.map((row) => row.payload), projectionOptions);
+  let projected = projectMeasured(options.timings, () =>
+    projectCodexTranscript(rows.map((row) => row.payload), projectionOptions));
   // A page can end inside a turn. Its completion marker may be in the newer
   // page; read just that marker within the same immutable snapshot boundary.
   if (end <= snapshotCount && projected.some((item) => item.kind === "assistant" && item.turnCompletedAt == null && item.turnElapsedMs == null)) {
     let after = end - 1;
     while (after < snapshotCount) {
-      const candidates = await pool.query(
+      const candidates = await measured(options.timings, "db_completion", () => pool.query(
         `SELECT item_seq::text, payload FROM codex_thread_events
          WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4 AND item_seq<=$5
            AND payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_complete|turn_complete|turn_aborted)"'
-         ORDER BY item_seq LIMIT 1`, [storeId, threadId, generation, after, snapshotCount]);
+         ORDER BY item_seq LIMIT 1`, [storeId, threadId, generation, after, snapshotCount]));
       if (!candidates.rowCount) break;
       let record = candidates.rows[0].payload;
       if (record?.type === "event_msg" && ["task_complete", "turn_complete", "turn_aborted"].includes(record.payload?.type)) {
         if (!recordTimestamp(record)) {
-          await restoreImportedTimestamps(pool, storeId, threadId, candidates.rows);
+          await restoreImportedTimestamps(pool, storeId, threadId, candidates.rows, options.timings);
           record = candidates.rows[0].payload;
         }
-        projected = projectCodexTranscript(rows.map((row) => row.payload), { ...projectionOptions, timingRecords: [record] });
+        projected = projectMeasured(options.timings, () =>
+          projectCodexTranscript(rows.map((row) => row.payload), { ...projectionOptions, timingRecords: [record] }));
         break;
       }
       after = Number(candidates.rows[0].item_seq);
     }
   }
-  const trace = projected.slice(-limit);
+  const pageCursor = `t2:${generation}:${end}:${snapshotCount}`;
+  const trace = transcriptToolDetails(projected.slice(-limit), pageCursor, limit, options.toolDetails !== false);
   const before = projected.length > limit ? Math.min(...trace.map((item) => item.sourceItemSeq)) : start;
   return {
     status: 200,
     body: {
       storeId, threadId, generation, itemCount,
       storeVersion: Number(head.rows[0].through_event_seq),
-      trace, projectionVersion: 2, totalTraceItems: null,
+      trace, projectionVersion: 2, totalTraceItems: null, pageCursor,
       nextCursor: before > 1 ? `t2:${generation}:${before}:${snapshotCount}` : null,
     },
   };

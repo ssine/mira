@@ -361,7 +361,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
             COALESCE(projections.state #>> '{createdThread,metadata,timestamp}',
                      projections.state #>> '{metadata,created_at}') AS created_at,
             projections.active_generation::text, activity.updated_at,
-            imports.import_id, imports.source_node_id, imports.source_codex_version,
+            imports.import_id, imports.source_node_id, imports.source_codex_version, imports.source_item_count::text,
             imports.created_at AS imported_at, runtimes.node_id AS runtime_node_id,
             runtimes.bound_at AS runtime_bound_at
      FROM codex_thread_projections projections
@@ -383,7 +383,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
        ORDER BY priority LIMIT 1
      ) activity ON TRUE
      LEFT JOIN LATERAL (
-       SELECT import_id, source_node_id, source_codex_version, created_at
+       SELECT import_id, source_node_id, source_codex_version, source_item_count, created_at
        FROM mira_codex_session_imports
        WHERE store_id = projections.store_id AND thread_id = projections.thread_id AND status = 'imported'
        ORDER BY created_at DESC LIMIT 1
@@ -402,6 +402,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
     itemCount: Number(row.item_count), generation: Number(row.active_generation), tokenUsage: row.token_usage, model: row.model,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at?.toISOString() ?? null, importId: row.import_id,
+    importedItemCount: row.source_item_count == null ? null : Number(row.source_item_count),
     sourceNodeId: row.source_node_id, sourceCodexVersion: row.source_codex_version,
     importedAt: row.imported_at?.toISOString() ?? null,
     runtimeNodeId: row.runtime_node_id, runtimeBoundAt: row.runtime_bound_at?.toISOString() ?? null,

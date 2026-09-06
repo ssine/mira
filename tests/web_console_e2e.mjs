@@ -416,6 +416,12 @@ try {
     "Codex transcript projection omitted pagination metadata");
   assert(transcript.body.trace[0].kind === "user" && transcript.body.trace[0].body === "Imported Mira session",
     "Codex transcript projection returned an incorrect user message");
+  const serverTiming = transcript.response.headers.get("server-timing") ?? "";
+  assert(["db_head", "projection", "serialize", "total"].every((name) => serverTiming.includes(`${name};dur=`)),
+    `Codex transcript omitted diagnostic Server-Timing phases: ${serverTiming}`);
+  const costs = await admin(`/v1/codex/threads/${importedThreadId}/costs?storeId=${encodeURIComponent(importStoreId)}`);
+  assert(costs.response.ok && costs.body.threadId === importedThreadId && costs.body.turnCostEstimates,
+    "independent transcript cost endpoint failed");
   const nodeIdentity = JSON.parse(await fs.readFile(identityFile, "utf8"));
   if (desktopFixture) {
     const found = scanned.body.sessions.find((item) => item.threadId === desktopFixture.id);

@@ -201,6 +201,8 @@ const agent = {
   transcriptActivityCount: null,
   transcriptGap: null,
   transcriptReconciliations: new Map(),
+  transcriptCostRequests: new Map(),
+  toolDetailRequests: new Map(),
   // Ephemeral diagnostics, not a second transcript store. Keep failures across
   // history refresh/reconnect/selection until explicitly dismissed (or page close).
   diagnostics: new Map(),
@@ -2767,6 +2769,17 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   card.dataset.traceTitle = title;
   card.dataset.traceStatus = status;
   if (options.turnId) card.dataset.turnId = options.turnId;
+  if (options.transcriptKey) card._miraTranscriptKey = options.transcriptKey;
+  if (options.toolDetail) {
+    card._miraToolDetail = options.toolDetail;
+    const details = card.querySelector(".trace-detail");
+    if (details && !details._miraLazyDetailInstalled) {
+      details._miraLazyDetailInstalled = true;
+      details.addEventListener("toggle", () => {
+        if (details.open && card._miraToolDetail?.pages?.some((page) => !page.loaded)) void loadToolDetails(card);
+      });
+    }
+  }
   if (options.activity !== undefined) card._miraActivity = options.activity;
   if (options.summaryParts?.some((part) => part.trim())) card._miraSummaryParts = [...options.summaryParts];
   if (card._miraActivity) {
@@ -3108,19 +3121,34 @@ function mergeTranscriptItems(current, updates) {
   for (const item of [...current, ...updates]) {
     const previous = merged.get(item.key);
     if (previous?.toolFragment && item.toolFragment) {
-      const materialized = item.toolFragment.materialized ? item : previous.toolFragment.materialized ? previous : null;
+      const pageMap = new Map();
+      for (const page of [...(previous.toolDetail?.pages ?? []), ...(item.toolDetail?.pages ?? [])]) {
+        const existing = pageMap.get(page.cursor);
+        pageMap.set(page.cursor, { ...existing, ...page, loaded: Boolean(existing?.loaded || page.loaded) });
+      }
+      const previousHasInput = previous.toolFragment.hasInput ?? previous.toolFragment.input != null;
+      const itemHasInput = item.toolFragment.hasInput ?? item.toolFragment.input != null;
+      const previousHasOutput = previous.toolFragment.hasOutput ?? previous.toolFragment.output != null;
+      const itemHasOutput = item.toolFragment.hasOutput ?? item.toolFragment.output != null;
+      const materialized = item.toolFragment.materialized && item.body ? item
+        : previous.toolFragment.materialized && previous.body ? previous
+          : item.toolFragment.materialized ? item : previous.toolFragment.materialized ? previous : null;
       const fragments = {
         input: item.toolFragment.input ?? previous.toolFragment.input,
         output: item.toolFragment.output ?? previous.toolFragment.output,
+        hasInput: itemHasInput || previousHasInput,
+        hasOutput: itemHasOutput || previousHasOutput,
+        materialized: Boolean(item.toolFragment.materialized || previous.toolFragment.materialized),
       };
       merged.set(item.key, {
         ...previous, ...item, ...(materialized ?? {}),
         images: mergeImages(previous.images, item.images),
         sourceItemSeq: Math.min(previous.sourceItemSeq, item.sourceItemSeq),
+        toolDetail: pageMap.size ? { pages: [...pageMap.values()] } : undefined,
         ...(!materialized ? {
-          title: fragments.input != null ? (item.toolFragment.input != null ? item.title : previous.title) : item.title,
+          title: fragments.hasInput ? (itemHasInput ? item.title : previous.title) : item.title,
           activity: item.activity ?? previous.activity,
-          status: fragments.output != null ? "完成" : item.status,
+          status: fragments.hasOutput ? "完成" : item.status,
           toolFragment: fragments,
           body: [fragments.input ? `输入\n${fragments.input}` : "", fragments.output ? `输出\n${fragments.output}` : ""].filter(Boolean).join("\n\n"),
         } : {}),
@@ -3138,6 +3166,68 @@ function mergeTranscriptItems(current, updates) {
       narratives.set(signature, item);
       return true;
     });
+}
+
+async function loadToolDetails(card) {
+  const threadId = agent.threadId;
+  const epoch = agent.selectionEpoch;
+  const generation = agent.transcriptGeneration;
+  const pages = (card._miraToolDetail?.pages ?? []).filter((page) => !page.loaded);
+  if (!threadId || !pages.length) return;
+  setTraceBody(card, "正在加载工具详情…", "tool");
+  const key = JSON.stringify([threadId, generation, pages.map((page) => page.cursor)]);
+  let job = agent.toolDetailRequests.get(key);
+  if (!job) {
+    job = Promise.all(pages.map((page) => {
+      const query = new URLSearchParams({ storeId: "personal", tail: "1", toolDetails: "1", limit: String(page.limit ?? transcriptPageSize), cursor: page.cursor });
+      return api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`);
+    }));
+    agent.toolDetailRequests.set(key, job);
+    void job.finally(() => agent.toolDetailRequests.delete(key)).catch(() => {});
+  }
+  try {
+    const results = await job;
+    if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || agent.transcriptGeneration !== generation) return;
+    if (results.some((result) => result.generation !== generation)) throw new Error("会话历史已更新，请重新展开详情");
+    agent.transcriptItems = mergeTranscriptItems(agent.transcriptItems, results.flatMap((result) => result.trace ?? []));
+    const scroll = traceScroller();
+    renderTranscript(null, { anchorBottom: false, preserveViewport: { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight } });
+  } catch (error) {
+    if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
+    const current = card.isConnected ? card : $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(card.dataset.traceKey)}"]`);
+    if (current) setTraceBody(current, `工具详情加载失败，收起后可重试：${error.message}`, "tool");
+  }
+}
+
+function scheduleTranscriptCosts(threadId, transcript) {
+  const turnIds = [...new Set((transcript.trace ?? [])
+    .filter((item) => item.kind === "assistant" && item.turnId && item.turnCostEstimate == null)
+    .map((item) => item.turnId))];
+  if (!turnIds.length) return;
+  const key = JSON.stringify([threadId, transcript.generation, transcript.itemCount, turnIds]);
+  if (agent.transcriptCostRequests.has(key)) return;
+  const query = new URLSearchParams({ storeId: "personal" });
+  for (const turnId of turnIds) query.append("turnId", turnId);
+  const job = api(`/v1/codex/threads/${encodeURIComponent(threadId)}/costs?${query}`);
+  agent.transcriptCostRequests.set(key, job);
+  void job.then((result) => {
+    if (agent.threadId !== threadId || agent.transcriptGeneration !== result.generation) return;
+    for (const item of agent.transcriptItems) {
+      if (item.kind === "assistant" && item.turnId && Object.hasOwn(result.turnCostEstimates ?? {}, item.turnId)) {
+        item.turnCostEstimate = result.turnCostEstimates[item.turnId];
+      }
+    }
+    for (const card of $("#conversationTrace").querySelectorAll(".trace-card.assistant[data-turn-id]")) {
+      if (Object.hasOwn(result.turnCostEstimates ?? {}, card.dataset.turnId)) {
+        card._miraTurnCostEstimate = result.turnCostEstimates[card.dataset.turnId];
+      }
+    }
+    const projected = agent.threads.find((thread) => thread.threadId === threadId);
+    if (projected) rememberThreadCost({ ...projected, ...result });
+    refreshTurnFooters();
+    renderThreadStates();
+  }).catch(() => { /* Cost is supplementary and must never block transcript rendering. */ })
+    .finally(() => agent.transcriptCostRequests.delete(key));
 }
 
 function renderHistoryLoader(trace) {
@@ -3211,6 +3301,7 @@ function renderTranscript(fallbackThread, options = {}) {
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
       autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, images: item.images, imageCards, turnId: item.turnId,
+      transcriptKey: item.key, toolDetail: item.toolDetail,
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
       ...(Number.isFinite(item.turnElapsedMs) ? {
@@ -3303,12 +3394,13 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const epoch = agent.selectionEpoch;
   const request = ++agent.transcriptRequest;
   const liveRevision = agent.liveRevision;
-  const query = new URLSearchParams({ storeId: "personal", tail: "1", includeCost: "1", limit: String(options.limit ?? transcriptPageSize) });
+  const query = new URLSearchParams({ storeId: "personal", tail: "1", toolDetails: "0", limit: String(options.limit ?? transcriptPageSize) });
   if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
   const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal: options.signal });
   if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || request !== agent.transcriptRequest) return transcript;
 
   const incoming = Array.isArray(transcript.trace) ? transcript.trace : [];
+  scheduleTranscriptCosts(threadId, transcript);
   const sameThread = agent.transcriptThreadId === threadId &&
     agent.transcriptGeneration === transcript.generation;
   const tailVersion = transcript.storeVersion == null ? null

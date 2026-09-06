@@ -16,7 +16,7 @@ await owner.query(`CREATE DATABASE ${database}`);
 const url = new URL(databaseUrl); url.pathname = `/${database}`;
 const pool = new pg.Pool({ connectionString: url.toString() });
 const store = "activity-test", node = crypto.randomUUID();
-const ids = Object.fromEntries(["running", "idle", "failed", "child", "late", "unbound", "replacement", "copied"].map(name => [name, crypto.randomUUID()]));
+const ids = Object.fromEntries(["running", "idle", "failed", "child", "late", "unbound", "replacement", "copied", "sameSecond"].map(name => [name, crypto.randomUUID()]));
 const timestamp = new Date().toISOString();
 const event = (type, turn_id, extra = {}) => ({ type: "event_msg", payload: { type, turn_id,
   ...(type === "task_started" ? { started_at: Math.floor(Date.parse(timestamp) / 1000) } : { completed_at: Math.floor(Date.parse(timestamp) / 1000) }), ...extra } });
@@ -35,18 +35,21 @@ try {
   snapshot.histories[ids.failed].push(event("task_complete", "failed", { error: { message: "failed\u0000" } }));
   snapshot.histories[ids.child].push(event("turn_aborted", "child"));
   snapshot.created_threads[ids.copied].metadata = { timestamp: new Date(Date.now() + 1000).toISOString() };
+  snapshot.created_threads[ids.sameSecond].metadata = { timestamp };
   snapshot.histories[ids.late].push(event("task_complete", "older"), { type: "future_tool", payload: { type: "task_complete", turn_id: "late" }, text: "\u0000" });
   assert.equal((await putSnapshot(pool, store, { expectedVersion: 0, snapshot }, headers())).status, 200);
   for (const id of Object.values(ids).filter(id => id !== ids.unbound)) await pool.query(`INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,bound_at) VALUES($1,$2,$3,NOW()-INTERVAL '1 minute')`, [store,id,node]);
   await initializeDatabase(pool);
   await initializeDatabase(pool); // checksum verification on restart
   assert.equal((await pool.query("SELECT 1 FROM pg_indexes WHERE indexname='codex_thread_events_lifecycle_idx'")).rowCount, 1);
+  assert.equal((await pool.query("SELECT 1 FROM pg_indexes WHERE indexname='codex_thread_events_turn_context_idx'")).rowCount, 1);
+  assert.equal((await pool.query("SELECT 1 FROM pg_indexes WHERE indexname='codex_thread_events_turn_completion_idx'")).rowCount, 1);
   const read = async () => Object.fromEntries((await listImportedThreads(pool, store)).map(row => [Object.keys(ids).find(name => ids[name] === row.threadId), row]));
   let rows = await read();
   assert.equal(rows.idle.readState.unread, false, "migration establishes an already-read baseline for old history");
   assert.equal(rows.idle.readState.readItemCount, 2);
   assert.equal(rows.late.readState.latestItemSeq, 2, "a nested future tool marker with raw NUL is not a visible update");
-  for (const name of ["running", "late", "replacement"]) assert.equal(rows[name].activity.state, "running", name);
+  for (const name of ["running", "late", "replacement", "sameSecond"]) assert.equal(rows[name].activity.state, "running", name);
   assert.equal(rows.idle.activity.state, "idle");
   assert.equal(rows.failed.activity.state, "failed");
   assert.equal(rows.child.activity.state, "interrupted");
