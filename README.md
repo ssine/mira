@@ -5,6 +5,9 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.1 修复长会话历史被错误报告为不完整的问题，并让 OpenWrt/FriendlyWrt Node 安装器自动接入
+已有的 procd；安装后的更新仍统一由本机 Supervisor 执行。
+
 1.0.0 确立单一原生 Mira 镜像：Server、Node、Supervisor、CLI 和 Web 使用同一个 Go 版本发布，
 PostgreSQL 保持外置。单机更新由旧 Supervisor 完整执行，允许几秒中断，并在候选 worker 启动或
 健康检查失败时恢复旧版本。1.0 不承诺集群批量编排，也不包含 Supervisor 自身无法启动时的启动级
