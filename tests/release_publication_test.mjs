@@ -44,7 +44,14 @@ const args = process.argv.slice(2);
 if (process.env.MOCK_GH_LOG) fs.appendFileSync(process.env.MOCK_GH_LOG, JSON.stringify(args) + "\\n");
 if (args[0] === "api" && args.at(-1).includes("/releases?per_page=100")) {
   const created = process.env.MOCK_CREATED_RELEASE_FILE && fs.existsSync(process.env.MOCK_CREATED_RELEASE_FILE);
-  const body = created ? process.env.MOCK_RELEASES_JSON_AFTER_CREATE : process.env.MOCK_RELEASES_JSON;
+  let visible = created;
+  if (created && Number(process.env.MOCK_RELEASES_HIDDEN_AFTER_CREATE || 0) > 0) {
+    const counterFile = process.env.MOCK_RELEASE_LIST_COUNTER;
+    const count = fs.existsSync(counterFile) ? Number(fs.readFileSync(counterFile, "utf8")) : 0;
+    fs.writeFileSync(counterFile, String(count + 1));
+    visible = count >= Number(process.env.MOCK_RELEASES_HIDDEN_AFTER_CREATE);
+  }
+  const body = visible ? process.env.MOCK_RELEASES_JSON_AFTER_CREATE : process.env.MOCK_RELEASES_JSON;
   process.stdout.write((body || "[[]]").replaceAll("__COMMIT__", process.env.MOCK_COMMIT || ""));
 } else if (args[0] === "api") {
   process.stdout.write((process.env.MOCK_RECORDED_DIGEST || "") + "\\n");
@@ -54,6 +61,9 @@ if (args[0] === "api" && args.at(-1).includes("/releases?per_page=100")) {
   process.stderr.write("unexpected mock gh call: " + args.join(" ") + "\\n");
   process.exitCode = 99;
 }
+`);
+  await executable(path.join(directory, "sleep"), `#!/usr/bin/env node
+process.exit(0);
 `);
   await executable(path.join(directory, "docker"), `#!/usr/bin/env node
 import fs from "node:fs";
@@ -130,6 +140,8 @@ function releaseEnvironment(fakeBin, temporary, overrides = {}) {
     MOCK_RELEASE_STATUS_AFTER_CREATE: "404",
     MOCK_RELEASES_JSON: "[[]]",
     MOCK_RELEASES_JSON_AFTER_CREATE: "[[]]",
+    MOCK_RELEASES_HIDDEN_AFTER_CREATE: "0",
+    MOCK_RELEASE_LIST_COUNTER: path.join(temporary, "release-list-counter"),
     MOCK_LATEST_STATUS: "404",
     MOCK_LATEST_JSON: "{}",
     ...overrides,
@@ -184,6 +196,20 @@ test("an untagged acceptance draft is found through the release listing", async 
     assert.equal(fields.release_state, "draft");
     const calls = (await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8")).trim().split("\n").map(JSON.parse);
     assert.equal(calls.some((args) => args[0] === "release" && args[1] === "create"), false);
+  } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+});
+
+test("draft readback tolerates GitHub release-list convergence", async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-release-draft-convergence-"));
+  try {
+    const fixture = await runState(temporary, "none", "publish", {
+      MOCK_RELEASES_HIDDEN_AFTER_CREATE: "2",
+      MOCK_RELEASES_JSON_AFTER_CREATE: JSON.stringify([[
+        JSON.parse(releaseJSON({ commit: "__COMMIT__", draft: true })),
+      ]]),
+    });
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    assert.equal(await fs.readFile(fixture.env.MOCK_RELEASE_LIST_COUNTER, "utf8"), "3");
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 });
 

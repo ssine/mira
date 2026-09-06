@@ -46,20 +46,28 @@ release_json() {
   # match. This also makes a failed acceptance run safe to retry.
   releases="${output}.releases"
   matches="${output}.matches"
-  gh api --paginate --slurp "repos/$repo/releases?per_page=100" >"$releases"
-  jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' "$releases" >"$matches"
-  count=$(jq 'length' "$matches")
-  case "$count" in
-    0) echo 404 ;;
-    1)
-      jq '.[0]' "$matches" >"$output"
-      echo 200
-      ;;
-    *)
-      echo "Multiple GitHub releases use tag $tag" >&2
-      exit 1
-      ;;
-  esac
+  # A newly created draft can take a few seconds to appear in the list. The
+  # bounded retry also prevents an immediate workflow retry from creating a
+  # second draft while GitHub is converging.
+  for attempt in 1 2 3 4 5 6; do
+    gh api --paginate --slurp "repos/$repo/releases?per_page=100" >"$releases"
+    jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' "$releases" >"$matches"
+    count=$(jq 'length' "$matches")
+    case "$count" in
+      1)
+        jq '.[0]' "$matches" >"$output"
+        echo 200
+        return
+        ;;
+      0) ;;
+      *)
+        echo "Multiple GitHub releases use tag $tag" >&2
+        exit 1
+        ;;
+    esac
+    [[ "$attempt" == 6 ]] || sleep 2
+  done
+  echo 404
 }
 
 decimal_less() {
