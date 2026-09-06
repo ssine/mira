@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -171,6 +172,9 @@ func TestOwnershipConflictStopsInstallRepairAndUninstallBeforeSideEffects(t *tes
 }
 
 func TestLinuxPlanInstallsSupervisorUnitAndDoctorReportsDrift(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux systemd integration uses Unix filesystem semantics")
+	}
 	stateDir := t.TempDir()
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
@@ -611,6 +615,9 @@ func TestFreshInstallRefusesExistingServiceFromAnotherStateDirectory(t *testing.
 }
 
 func TestRecordCurrentVersionPreservesOwnerAndServiceDefinition(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux service state uses Unix symlink semantics")
+	}
 	stateDir := t.TempDir()
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=debian\n")}

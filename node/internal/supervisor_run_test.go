@@ -26,7 +26,11 @@ func TestInstalledStateDirFollowsVersionedExecutable(t *testing.T) {
 	if err := os.Symlink(filepath.Join("versions", "1.2.3"), current); err != nil {
 		t.Fatal(err)
 	}
-	if got, found := installedStateDir(filepath.Join(current, "mira")); !found || got != stateDir {
-		t.Fatalf("installedStateDir = %q, %v; want %q, true", got, found, stateDir)
+	canonicalStateDir, err := filepath.EvalSymlinks(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, found := installedStateDir(filepath.Join(current, "mira")); !found || got != canonicalStateDir {
+		t.Fatalf("installedStateDir = %q, %v; want %q, true", got, found, canonicalStateDir)
 	}
 }
