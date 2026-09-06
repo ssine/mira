@@ -7,8 +7,9 @@ import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { AccountSidebar } from "/account-status.js";
-import { compactTokenUsage, tokenCount, tokenUsageTitle } from "/thread-usage.js";
+import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages, mergeImages } from "/trace-images.js";
+import { readModelCatalog } from "/thread-model.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -151,6 +152,10 @@ const agent = {
   turnId: null,
   persistedActivity: new Map(),
   tokenUsages: new Map(),
+  costEstimates: new Map(),
+  costRequests: new Map(),
+  costRetryAfter: new Map(),
+  costFrame: null,
   readStates: new Map(),
   readTimer: null,
   readRequest: null,
@@ -211,6 +216,11 @@ const agent = {
   sessionImportController: null,
   newThreadRequestId: null,
   newThreadRequestSignature: null,
+  modelChoice: null,
+  modelCatalog: null,
+  modelCatalogKey: null,
+  modelCatalogJob: null,
+  modelCatalogError: "",
 };
 
 const transcriptPageSize = 60;
@@ -345,6 +355,10 @@ function acceptThreadActivity(thread, checkedAt = Date.now()) {
     (incoming.generation === previous.generation && (incoming.itemCount < previous.itemCount ||
       (incoming.itemCount === previous.itemCount && checkedAt < previous.checkedAt))))) return;
   agent.persistedActivity.set(thread.threadId, { ...incoming, checkedAt });
+  const rowLabel = $("#agentThreadList").querySelector(`[data-thread-activity="${thread.threadId}"]`);
+  if (rowLabel && thread.updatedAt) rowLabel.dataset.updatedAt = thread.updatedAt;
+  const projection = agent.threads.find(item => item.threadId === thread.threadId);
+  if (projection && Object.hasOwn(thread, "model")) projection.model = thread.model;
   const current = threadActivity(thread.threadId);
   if (["idle", "interrupted", "failed"].includes(current.state) && current.turnId &&
     agent.activeTurns.get(thread.threadId) === current.turnId) {
@@ -367,6 +381,7 @@ function renderThreadStates() {
       : activity.state === "interrupted" ? `已中断${unread ? " · 未读" : ""}`
       : activity.state === "unknown" ? `状态待确认${unread ? " · 未读" : ""}`
       : unread ? `${activity.turnId ? "已完成" : "有更新"} · 未读` : "";
+    if (label.dataset.updatedAt) label.dataset.recency = agent.titleJobs.has(id) ? "正在生成标题…" : `${label.dataset.subagent === "true" ? "子对话 · " : ""}${threadTimestamp(label.dataset.updatedAt)}`;
     label.textContent = stateLabel || label.dataset.recency || "";
     label.dataset.state = activity.state;
     label.title = stateLabel ? activity.state === "idle" ? stateLabel : activityLabel(activity) : label.dataset.recency || "";
@@ -375,12 +390,65 @@ function renderThreadStates() {
     if (usageLabel) {
       const compact = compactTokenUsage(usage), title = tokenUsageTitle(usage);
       if (usageLabel.textContent !== compact) usageLabel.textContent = compact;
+      usageLabel.dataset.compact = usage ? `${compactTokenCount(usage.inputTokens)}↑ ${compactTokenCount(usage.outputTokens)}↓` : "";
       usageLabel.hidden = !compact;
       if (usageLabel.title !== title) usageLabel.title = title;
     }
+    const price = row.querySelector("[data-thread-cost]");
+    const entry = agent.costEstimates.get(id);
+    const sameGeneration = Boolean(entry && entry.generation === agent.tokenUsages.get(id)?.generation);
+    if (price) {
+      price.hidden = !sameGeneration;
+      if (sameGeneration) {
+        price.textContent = compactCost(entry.estimate);
+        price.title = entry.estimate.amount == null ? "缺少模型、用量或价格，暂无法估算"
+          : `${entry.estimate.status === "partial" ? "部分请求已计价（*）" : "API 估算"}：${formatEstimatedCost(entry.estimate.amount)} USD · Standard 公开价，非套餐扣费`;
+      }
+    }
   }
-  if ($("#conversationDetails").open) renderConversationTokenUsage($("#conversationDetails").dataset.threadId);
+  if ($("#conversationDetails").open) {
+    renderConversationTokenUsage($("#conversationDetails").dataset.threadId);
+    void refreshConversationCost();
+  }
   scheduleThreadRead();
+  scheduleSidebarCosts();
+}
+
+function rememberThreadCost(thread) {
+  const previous = agent.costEstimates.get(thread.threadId);
+  if (previous && (previous.generation > thread.generation || previous.generation === thread.generation && previous.itemCount > thread.itemCount)) return;
+  agent.costEstimates.set(thread.threadId, { estimate: thread.costEstimate ?? {amount:null,status:"unavailable"}, generation: thread.generation, itemCount: thread.itemCount,
+    key: JSON.stringify([thread.threadId, thread.generation, thread.itemCount, thread.tokenUsage]), at: Date.now() });
+  while (agent.costEstimates.size > 1000) agent.costEstimates.delete(agent.costEstimates.keys().next().value);
+}
+
+function scheduleSidebarCosts() {
+  if (agent.costFrame || !agentThreadDrawerOpen || document.hidden || document.body.dataset.view !== "agentView") return;
+  agent.costFrame = requestAnimationFrame(() => { agent.costFrame = null; loadVisibleSidebarCosts(); });
+}
+
+function loadVisibleSidebarCosts() {
+  if (!agentThreadDrawerOpen || document.hidden || document.body.dataset.view !== "agentView") return;
+  const bounds = $("#agentThreadList").getBoundingClientRect();
+  for (const row of $("#agentThreadList").querySelectorAll("[data-thread-row]")) {
+    if (agent.costRequests.size >= 2) break;
+    const id = row.dataset.threadRow, usage = agent.tokenUsages.get(id), key = conversationCostKey(id);
+    const cached = agent.costEstimates.get(id);
+    if (!usage || cached?.key === key || cached?.generation === usage.generation && Date.now() - cached.at < 10_000 || agent.costRequests.has(id) || agent.costRetryAfter.get(id) > Date.now()) continue;
+    const rect = row.getBoundingClientRect();
+    if (!rect.height || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
+    const job = api(`/v1/codex/threads/${encodeURIComponent(id)}?storeId=personal&includeCost=1`, { signal: AbortSignal.timeout(15_000) });
+    agent.costRequests.set(id, job);
+    void job.then(thread => {
+      // Reject stale generations; a newer token snapshot can briefly lead history.
+      const current = agent.tokenUsages.get(id);
+      if (current && (current.generation > thread.generation || current.generation === thread.generation && current.itemCount > thread.itemCount)) return;
+      rememberThreadCost(thread);
+    }).catch(() => {
+      agent.costRetryAfter.set(id, Date.now() + 30_000);
+      while (agent.costRetryAfter.size > 1000) agent.costRetryAfter.delete(agent.costRetryAfter.keys().next().value);
+    }).finally(() => { agent.costRequests.delete(id); renderThreadStates(); });
+  }
 }
 
 function acceptThreadReadState(threadId, state) {
@@ -595,7 +663,47 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
     toggle.focus({ preventScroll: true });
   }
   scheduleThreadRead();
+  if (open) scheduleSidebarCosts();
 }
+
+function installSidebarResize() {
+  const handle = $("#agentSidebarResize"), shell = $(".chat-shell");
+  let desired = 300, drag = null;
+  try { const saved = localStorage.getItem("mira.sidebar.width"); if (saved !== null && Number.isFinite(Number(saved))) desired = Number(saved); } catch { /* optional preference */ }
+  const apply = (width = desired) => {
+    const max = Math.max(240, Math.min(480, innerWidth - 560));
+    const actual = Math.round(Math.max(240, Math.min(max, width)));
+    shell.style.setProperty("--sidebar-width", `${actual}px`);
+    handle.setAttribute("aria-valuenow", String(actual));
+    handle.setAttribute("aria-valuemax", String(max));
+    return actual;
+  };
+  const save = width => { desired = apply(width); try { localStorage.setItem("mira.sidebar.width", String(desired)); } catch { /* optional preference */ } };
+  handle.addEventListener("pointerdown", event => {
+    if (event.button !== 0 || !agentThreadDrawerWide.matches) return;
+    event.preventDefault(); handle.focus(); handle.setPointerCapture(event.pointerId);
+    drag = { id: event.pointerId, x: event.clientX, width: $("#agentThreadDrawer").getBoundingClientRect().width };
+    shell.classList.add("sidebar-resizing");
+  });
+  handle.addEventListener("pointermove", event => { if (drag?.id === event.pointerId) apply(drag.width + event.clientX - drag.x); });
+  const finish = event => {
+    if (drag?.id !== event.pointerId) return;
+    if (event.type === "pointerup") save(Number(handle.getAttribute("aria-valuenow"))); else apply();
+    drag = null; shell.classList.remove("sidebar-resizing");
+    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+    scheduleSidebarCosts();
+  };
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) handle.addEventListener(name, finish);
+  handle.addEventListener("keydown", event => {
+    const step = event.shiftKey ? 50 : 10;
+    const width = Number(handle.getAttribute("aria-valuenow"));
+    const next = { ArrowLeft: width - step, ArrowRight: width + step, Home: 240, End: 480 }[event.key];
+    if (next !== undefined) { event.preventDefault(); save(next); scheduleSidebarCosts(); }
+  });
+  window.addEventListener("resize", () => { if (!drag) apply(); });
+  apply();
+}
+
 
 function closeAgentThreadDrawerOnMobile() {
   if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
@@ -803,6 +911,7 @@ function renderEnrollments(items) {
     list.append(article);
   }
 }
+
 
 function renderNodes(nodes) {
   const grid = clear($("#nodeGrid"));
@@ -1816,7 +1925,7 @@ function setConversationTitle(title) {
 
 function setConversationMeta(cwd, model) {
   const directory = element("span", "conversation-directory", cwd || "默认目录");
-  const runtimeModel = element("span", "conversation-model", model || "默认模型");
+  const runtimeModel = element("span", "conversation-model", model || "模型未记录");
   directory.title = directory.textContent;
   runtimeModel.title = runtimeModel.textContent;
   $("#conversationMeta").replaceChildren(directory, element("span", "conversation-meta-separator", "·"), runtimeModel);
@@ -1966,9 +2075,70 @@ function syncConversationSendUi() {
   $("#agentNewProject").disabled = busy;
   $("#conversationAttach").disabled = busy;
   $("#conversationCwd").disabled = busy;
+  renderConversationModel();
   for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-project-new]")) button.disabled = busy || !button.dataset.projectNode;
+}
+
+function conversationModelKey() {
+  return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim()]);
+}
+
+function selectedConversationModel() {
+  return agent.modelChoice || currentAgentThread()?.model ||
+    (agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog?.defaultModel : null) || null;
+}
+
+function renderConversationModel() {
+  const select = $("#conversationModelSelect");
+  const catalog = agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog : null;
+  const model = selectedConversationModel();
+  const options = [...new Set([model, ...(catalog?.models ?? []).map(item => item.model)].filter(Boolean))];
+  const waiting = Boolean(agent.modelCatalogJob?.key === conversationModelKey());
+  const placeholder = waiting ? "正在读取模型…" : agent.threadId ? "模型未记录 · 点击刷新" : "节点默认 · 点击读取";
+  const signature = JSON.stringify([options, model, catalog?.defaultModel, placeholder, agent.threadId]);
+  if (select.dataset.signature !== signature) {
+    select.replaceChildren();
+    if (!model) select.append(new Option(placeholder, ""));
+    for (const name of options) select.append(new Option(`${name}${!agent.threadId && name === catalog?.defaultModel ? " · 默认" : ""}`, name));
+    select.value = model || "";
+    select.dataset.signature = signature;
+  }
+  const busy = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise || agent.activeTurns.has(agent.threadId));
+  select.disabled = busy || !catalog?.models.length;
+  const error = agent.modelCatalogError;
+  select.title = error || (agent.threadId ? "选择下一轮使用的模型" : "默认值来自此运行节点与项目目录的 Codex 配置");
+  $("#conversationModelRefresh").disabled = busy || waiting || !$("#agentRuntimeNode").value;
+  $("#conversationModelRefresh").title = error || "刷新可用模型";
+  $("#conversationModelStatus").textContent = error || (waiting ? "正在读取模型" : model ? `本轮模型：${model}` : placeholder);
+}
+
+async function loadConversationModels({ refresh = false } = {}) {
+  const node = dashboardNodes.get($("#agentRuntimeNode").value), key = conversationModelKey();
+  if (agent.modelCatalogJob?.key === key) return agent.modelCatalogJob.promise;
+  if (!refresh && agent.modelCatalogKey === key && agent.modelCatalog && Date.now() - agent.modelCatalogLoadedAt < 300_000) { renderConversationModel(); return; }
+  if (agent.modelCatalogKey !== key) { agent.modelCatalog = null; agent.modelCatalogError = ""; }
+  agent.modelCatalogKey = key;
+  if (node?.status !== "online" || node.reportedAppServer?.status !== "running") { renderConversationModel(); return; }
+  const job = { key };
+  agent.modelCatalogJob = job;
+  renderConversationModel();
+  job.promise = (async () => {
+    try {
+      const catalog = await readModelCatalog(node.nodeId, $("#conversationCwd").value.trim(), { refresh });
+      if (conversationModelKey() !== key || agent.modelCatalogJob !== job) return;
+      agent.modelCatalog = catalog;
+      agent.modelCatalogLoadedAt = Date.now();
+      agent.modelCatalogError = "";
+    } catch (error) {
+      if (conversationModelKey() === key && agent.modelCatalogJob === job) agent.modelCatalogError = error.message;
+    } finally {
+      if (agent.modelCatalogJob === job) agent.modelCatalogJob = null;
+      renderConversationModel();
+    }
+  })();
+  return job.promise;
 }
 
 function closeAgentSocket({ preserveSubmission = false, resetTurnState = false } = {}) {
@@ -1989,6 +2159,8 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
   if (resetTurnState) {
     agent.persistedActivity.clear();
     agent.tokenUsages.clear();
+    agent.costEstimates.clear();
+    agent.costRetryAfter.clear();
     agent.readStates.clear();
     clearTimeout(agent.readTimer);
     agent.readTimer = null;
@@ -3336,7 +3508,7 @@ function renderAgentThreads() {
     const project = element("details", "thread-project");
     project.dataset.projectKey = group.key;
     project.open = agent.projectOpen.get(group.key) ?? true;
-    project.addEventListener("toggle", () => agent.projectOpen.set(group.key, project.open));
+    project.addEventListener("toggle", () => { agent.projectOpen.set(group.key, project.open); scheduleSidebarCosts(); });
     const summary = element("summary", "thread-project-summary");
     const copy = element("span", "thread-project-identity");
     const name = projectName(group);
@@ -3386,12 +3558,17 @@ function renderAgentThreads() {
       const status = element("span", "thread-state-label");
       status.dataset.threadActivity = thread.threadId;
       status.dataset.recency = agent.titleJobs.has(thread.threadId)
-        ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${when(thread.updatedAt)}`;
+        ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${threadTimestamp(thread.updatedAt)}`;
+      status.dataset.updatedAt = thread.updatedAt || "";
+      status.dataset.subagent = thread.parentThreadId ? "true" : "false";
       const meta = element("span", "thread-meta");
       const usage = element("span", "thread-token-usage");
       usage.dataset.threadTokenUsage = thread.threadId;
       usage.hidden = true;
-      meta.append(status, usage);
+      const cost = element("span", "thread-cost");
+      cost.dataset.threadCost = thread.threadId;
+      cost.hidden = true;
+      meta.append(status, usage, cost);
       button.append(element("strong", "", button.title), meta);
       const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
       menu.type = "button";
@@ -3466,9 +3643,49 @@ function renderConversationDetails(thread) {
   $("#conversationDetailsName").textContent = thread?.title || "未命名会话";
   navigationFacts($("#conversationDetailsFacts"), [
     ["运行机器", nodeDisplayName(thread?.runtimeNodeId || thread?.sourceNodeId)],
-    ["工作目录", thread?.cwd, true], ["模型", thread?.model || "默认模型"],
+    ["工作目录", thread?.cwd, true], ["最近使用的模型", thread?.model || "历史未记录"],
     ["最近更新", thread?.updatedAt ? new Date(thread.updatedAt).toLocaleString() : null],
   ]);
+}
+
+function conversationCostKey(threadId) {
+  const entry = agent.tokenUsages.get(threadId);
+  return JSON.stringify([threadId, entry?.generation, entry?.itemCount, entry?.usage]);
+}
+
+function renderConversationCost(estimate, placeholder = "正在计算…") {
+  $("#conversationCostAmount").textContent = estimate ? `${estimate.status === "partial" && estimate.amount !== null ? "已估算部分 " : ""}${estimate.amount === null ? "暂无法估算" : "≈ " + formatEstimatedCost(estimate.amount)}` : placeholder;
+  const parts = estimate?.breakdown;
+  $("#conversationCostBreakdown").textContent = estimate?.amount != null && parts
+    ? [`普通输入 ${formatEstimatedCost(parts.input)}`, `缓存输入 ${formatEstimatedCost(parts.cached)}`,
+      ...(parts.write ? [`缓存写入 ${formatEstimatedCost(parts.write)}`] : []), `输出 ${formatEstimatedCost(parts.output)}`].join(" · ") : "";
+  $("#conversationCostNote").textContent = !estimate ? "" : estimate.status === "unavailable"
+    ? "缺少请求用量、模型或对应价格。" : estimate.status === "partial"
+      ? "部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。"
+      : "按历史请求模型估算 Token 费用；服务端临时重路由可能不同，非套餐实际扣费。";
+  $("#conversationCostPricing").textContent = `Standard 公开价${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
+}
+
+async function refreshConversationCost() {
+  const panel = $("#conversationDetails"), threadId = panel.dataset.threadId;
+  if (!panel.open || !threadId || panel._miraCostRequest) return;
+  const key = conversationCostKey(threadId);
+  if (panel._miraCostKey === key) return;
+  const job = { key, revision: panel._miraRevision };
+  panel._miraCostRequest = job;
+  try {
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal&includeCost=1`);
+    if (!panel.open || panel._miraRevision !== job.revision || conversationCostKey(threadId) !== key) return;
+    panel._miraCostKey = key;
+    rememberThreadCost(thread);
+    renderConversationDetails(thread);
+    renderConversationCost(thread.costEstimate ?? { status: "unavailable", amount: null });
+    renderThreadStates();
+  } catch {
+    if (panel.open && panel._miraRevision === job.revision) $("#conversationCostNote").textContent = "费用更新失败，将自动重试。";
+  } finally {
+    if (panel._miraCostRequest === job) panel._miraCostRequest = null;
+  }
 }
 
 function showConversationDetailsPanel() {
@@ -3581,19 +3798,29 @@ async function openConversationDetails(threadId) {
   const panel = $("#conversationDetails");
   const revision = (panel._miraRevision ?? 0) + 1;
   panel._miraRevision = revision;
+  const costJob = { key: conversationCostKey(threadId), revision };
+  panel._miraCostRequest = costJob;
+  panel._miraCostKey = null;
+  if (panel.dataset.threadId !== threadId) renderConversationCost(null);
   panel.dataset.threadId = threadId;
   renderConversationDetails(agent.threads.find(thread => thread.threadId === threadId));
   const checkedAt = Date.now();
   $("#conversationDetailsStatus").textContent = "正在更新…";
   showConversationDetailsPanel();
   try {
-    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal&includeCost=1`);
     if (!panel.open || panel._miraRevision !== revision) return;
     acceptThreadTokenUsage(thread, checkedAt);
+    rememberThreadCost(thread);
     renderConversationDetails(thread);
+    panel._miraCostKey = costJob.key;
+    renderConversationCost(thread.costEstimate ?? { status: "unavailable", amount: null });
+    renderThreadStates();
     $("#conversationDetailsStatus").textContent = "";
   } catch (error) {
     if (panel.open && panel._miraRevision === revision) $("#conversationDetailsStatus").textContent = error.message;
+  } finally {
+    if (panel._miraCostRequest === costJob) panel._miraCostRequest = null;
   }
 }
 
@@ -4079,6 +4306,10 @@ async function restoreAgentThread(threadId, socket) {
   setConversationTitle(currentProjection?.name || result.thread.name || result.thread.preview || currentProjection?.title || "Codex 会话");
   const resumedCwd = result.cwd ?? projectedCwd;
   setConversationMeta(resumedCwd, result.model);
+  if (!agent.modelChoice && result.model) {
+    agent.modelChoice = result.model;
+    if (currentProjection) currentProjection.model = result.model;
+  }
   $("#conversationCwd").value = resumedCwd ?? "";
   if (result.thread.status?.type === "active" && agent.liveRevision === revision && !agent.activeTurns.has(threadId)) agent.activeTurns.set(threadId, null);
   syncActiveTurnUi();
@@ -4124,6 +4355,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (agent.sendPromise) return;
   if (updateRoute) writeBrowserRoute("agent", threadId);
   const epoch = ++agent.selectionEpoch;
+  agent.modelChoice = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
   clearTimeout(agent.reconnectTimer);
@@ -4160,6 +4392,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   setConversationTitle(projected?.title || "Codex 会话");
   setConversationMeta(projected?.cwd, projected?.model);
   $("#conversationCwd").value = projected?.cwd || "";
+  void loadConversationModels();
   syncActiveTurnUi();
   renderAgentThreads();
   setConversationNotice();
@@ -4196,6 +4429,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   if (updateRoute) writeBrowserRoute("agent");
   agent.selectionEpoch++;
   agent.threadId = null;
+  agent.modelChoice = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
   agent.newThreadRequestId = null;
@@ -4208,6 +4442,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#conversationCwd").value = project?.cwd || node?.desiredAppServer?.defaultCwd || "";
   setConversationMeta($("#conversationCwd").value);
+  void loadConversationModels();
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
 }
@@ -4356,6 +4591,7 @@ function addComposerFiles(files) {
 }
 
 async function sendAgentMessage(text, attachments = [], progress = null) {
+  const requestedModel = selectedConversationModel();
   updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
   agent.connectionWanted = true;
   agent.resumeRequestedThreadId = agent.threadId;
@@ -4369,17 +4605,19 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
   }
   if (!agent.threadId) {
     updateReplyProgress(progress, { phase: "正在创建会话…" });
-    const params = {
+    let params = {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
+      ...(requestedModel ? { model: requestedModel } : {}),
     };
     const cwd = $("#conversationCwd").value.trim();
     if (cwd) params.cwd = cwd;
-    const signature = JSON.stringify(params);
-    if (!agent.newThreadRequestId || agent.newThreadRequestSignature !== signature) {
+    if (!agent.newThreadRequestId) {
       agent.newThreadRequestId = crypto.randomUUID();
-      agent.newThreadRequestSignature = signature;
-    }
+      agent.newThreadRequestSignature = JSON.stringify(params);
+    } else params = JSON.parse(agent.newThreadRequestSignature);
+    // A lost creation reply must replay the same operation and body, even if
+    // the user chooses another model for the pending first turn before retrying.
     params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
@@ -4394,6 +4632,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     setConversationTitle("新会话");
     const startedCwd = started.cwd ?? cwd;
     setConversationMeta(startedCwd, started.model);
+    agent.modelChoice = requestedModel || started.model || null;
     $("#conversationCwd").value = startedCwd ?? "";
     const summary = {
       threadId: agent.threadId,
@@ -4432,6 +4671,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       threadId: turnThreadId,
       input: prepared.inputs,
       approvalPolicy: "never",
+      ...(requestedModel ? { model: requestedModel } : {}),
     }, 120_000);
   } catch (error) {
     if (optimistic.dataset.pendingUser === "true") optimistic.remove();
@@ -4440,6 +4680,10 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
   // If the live user-item notification was missed, the canonical user message
   // can still replace this optimistic card by turn + body during reconciliation.
   if (result.turn?.id) optimistic.dataset.turnId = result.turn.id;
+  if (requestedModel) {
+    agent.modelChoice = requestedModel;
+    if (currentAgentThread()) currentAgentThread().model = requestedModel;
+  }
   // turn/start can accept input into an already-running turn, without emitting
   // another turn/started. The RPC acknowledgement ends submission in both cases.
   replyProgress.finish(progress);
@@ -4590,6 +4834,8 @@ conversationDetailsWide.addEventListener("change", () => {
 $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDrawer(!$("#agentThreadDrawer").classList.contains("open")));
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
 installAgentDrawerSwipe();
+installSidebarResize();
+$("#agentThreadList").addEventListener("scroll", scheduleSidebarCosts, { passive: true });
 window.addEventListener("popstate", () => {
   if (["loginView", "setupView"].includes(document.body.dataset.view)) return;
   agent.selectionEpoch++;
@@ -4610,6 +4856,7 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
+  agent.modelChoice = null;
   syncAccountSidebar();
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
@@ -4620,6 +4867,20 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   }
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node?.hostname ?? ""}`, node?.status === "online" ? "online" : "offline");
   syncConversationSendUi();
+  void loadConversationModels();
+});
+
+$("#conversationModelSelect").addEventListener("change", () => {
+  agent.modelChoice = $("#conversationModelSelect").value || null;
+  renderConversationModel();
+});
+$("#conversationModelRefresh").addEventListener("click", async () => {
+  try {
+    const node = dashboardNodes.get($("#agentRuntimeNode").value);
+    if (node?.reportedAppServer?.status !== "running") await startAgentRuntime();
+    await loadConversationModels({ refresh: true });
+    if (agent.modelCatalogError) toast(agent.modelCatalogError);
+  } catch (error) { toast(error.message); }
 });
 
 document.addEventListener("visibilitychange", () => {

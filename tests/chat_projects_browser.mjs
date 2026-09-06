@@ -36,8 +36,11 @@ try {
     if (loseTitleReply) { loseTitleReply = false; return route.abort('failed'); }
     return route.fulfill({ response });
   });
-  await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket=>{ let accountConnection=false; socket.onMessage(async data=>{
-    const request=JSON.parse(data); if (request.id === undefined) return;
+  await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket=>{ let accountConnection=false; let modelConnection = false; socket.onMessage(async data=>{
+    const request=JSON.parse(data);
+    if (request.method === 'initialize') modelConnection = request.params.clientInfo.name === 'mira_web_models';
+    if (modelConnection) { if (request.id !== undefined) socket.send(JSON.stringify({ id: request.id, result: request.method === 'config/read' ? { config: { model: 'gpt-6-astra' } } : request.method === 'model/list' ? { data: [{ model: 'gpt-6-astra', isDefault: true }] } : {} })); return; }
+    if (request.id === undefined) return;
     if(request.method==='initialize') accountConnection=request.params.clientInfo.name==='mira_web_account';
     if(accountConnection) { socket.send(JSON.stringify({id:request.id,result:request.method==='account/read'?{account:null}:{}})); return; }
     messages.push(request);

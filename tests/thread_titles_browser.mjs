@@ -43,9 +43,12 @@ try {
     return route.fallback();
   });
   await context.routeWebSocket(/\/app-server\?storeId=personal$/, socket => {
-    let titleConnection = false, accountConnection = false, tempId;
+    let titleConnection = false, accountConnection = false, tempId; let modelConnection = false;
     socket.onMessage(async data => {
       const request = JSON.parse(data);
+    if (request.method === 'initialize') modelConnection = request.params.clientInfo.name === 'mira_web_models';
+    if (modelConnection) { if (request.id !== undefined) socket.send(JSON.stringify({ id: request.id, result: request.method === 'config/read' ? { config: { model: 'gpt-6-astra' } } : request.method === 'model/list' ? { data: [{ model: 'gpt-6-astra', isDefault: true }] } : {} })); return; }
+
       if (request.method === 'initialize') accountConnection = request.params.clientInfo.name === 'mira_web_account';
       if (accountConnection) { if (request.id !== undefined) socket.send(JSON.stringify({ id: request.id, result: request.method === 'account/read' ? { account: null } : {} })); return; }
       if (request.method === 'initialize') titleConnection = request.params.clientInfo.name === 'mira_web_title';
@@ -139,6 +142,7 @@ try {
   assert.equal(titleJobs.length, 3); node.status = 'online';
   console.log('CHECK automatic generation');
   // First submission failure retains automatic-title eligibility; delayed central projection is retried.
+  await page.locator('.thread-project').filter({ has: page.locator(`[data-thread-row="${id}"]`) }).locator('summary').hover();
   await page.locator('.thread-project').filter({ has: page.locator(`[data-thread-row="${id}"]`) }).locator('[data-project-new]').click();
   await page.locator('#conversationInput').fill('修复新对话首次提交后的自动标题');
   await page.locator('#conversationInput').press('Enter');

@@ -20,9 +20,12 @@ try {
  for (const [i,node] of nodes.entries()) {
   await context.route(`**/v1/nodes/${node.nodeId}`,r=>r.fulfill({json:node}));
   await context.routeWebSocket(new RegExp(`/v1/nodes/${node.nodeId}/app-server`),socket=>{
-   sockets.set(i,socket);
+   let modelConnection = false;
    socket.onMessage(data=>{
     const request=JSON.parse(data); if(request.id===undefined)return;
+    if (request.method === 'initialize') modelConnection = request.params.clientInfo.name === 'mira_web_models';
+    if (modelConnection) { socket.send(JSON.stringify({id:request.id,result:request.method==='config/read'?{config:{model:'gpt-6-astra'}}:request.method==='model/list'?{data:[{model:'gpt-6-astra',isDefault:true}]}:{}}));return; }
+    sockets.set(i,socket);
     calls.push({node:i,...request});
     const reply=result=>socket.send(JSON.stringify({id:request.id,result}));
     if(request.method==='initialize') {assert.equal(request.params.clientInfo.name,'mira_web_account');reply({});}

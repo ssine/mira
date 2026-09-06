@@ -8,6 +8,9 @@ const rows = ids.map((threadId, index) => ({ threadId, title: ["Large conversati
   cwd: "/work", generation: 1, itemCount: 1, updatedAt: new Date().toISOString(),
   activity: { state: "idle", generation: 1, itemCount: 1 }, tokenUsage: index === 2 ? null :
     { inputTokens: index ? 0 : 125000, outputTokens: index ? 0 : 8000, cachedInputTokens: index ? 0 : 100000 } }));
+const estimate = (amount, status = 'complete') => ({amount,status,pricingDate:'2026-09-06',breakdown:{input:amount/2,cached:amount/4,output:amount/4}});
+rows[0].costEstimate = estimate(0.75); rows[0].model = 'gpt-6-astra';
+rows[1].costEstimate = estimate(0); rows[2].costEstimate = {amount:null,status:'unavailable'};
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
@@ -31,7 +34,33 @@ try {
   assert.equal(await page.locator(`[data-thread-token-usage="${ids[1]}"]`).textContent(), "0 in · 0 out");
   assert.equal(await page.locator(`[data-thread-token-usage="${ids[2]}"]`).isVisible(), false);
   const row = page.locator(`[data-thread-row="${ids[0]}"]`);
+  await page.waitForFunction(id => document.querySelector(`[data-thread-cost="${id}"]`)?.textContent === '≈$0.75', ids[0]);
   const height = (await row.boundingBox()).height;
+  const button = row.locator('button[data-thread-id]'), menu = row.locator('.thread-menu-toggle');
+  assert.equal((await button.boundingBox()).width, (await row.boundingBox()).width, 'the menu reserves no column');
+  const beforeHover = await row.locator('strong').boundingBox();
+  await row.hover();
+  assert.equal(await menu.evaluate(element => getComputedStyle(element).position), 'absolute');
+  assert.deepEqual(await row.locator('strong').boundingBox(), beforeHover, 'hover overlay does not reflow the title');
+  assert.ok((await menu.boundingBox()).x > beforeHover.x && (await menu.boundingBox()).x < beforeHover.x + beforeHover.width);
+  const resize = page.locator('#agentSidebarResize');
+  const handle = await resize.boundingBox();
+  await page.mouse.move(handle.x + 3, 300); await page.mouse.down(); await page.mouse.move(handle.x + 123, 300, {steps:8});
+  assert.equal((await page.locator('#agentThreadDrawer').boundingBox()).width, 420, 'sidebar follows mouse while resizing');
+  await page.mouse.up();
+  assert.equal(await page.evaluate(() => localStorage.getItem('mira.sidebar.width')), '420');
+  await page.reload(); await summary.waitFor({state:'visible'});
+  assert.equal((await page.locator('#agentThreadDrawer').boundingBox()).width, 420, 'width survives reload');
+  await resize.focus(); await page.keyboard.press('End');
+  assert.equal((await page.locator('#agentThreadDrawer').boundingBox()).width, 480);
+  await page.keyboard.press('Home');
+  assert.equal((await page.locator('#agentThreadDrawer').boundingBox()).width, 240);
+  assert.equal(await summary.isVisible(), true, 'narrow desktop keeps a compact token summary');
+  assert.match(await summary.evaluate(element => getComputedStyle(element, '::after').content), /125k↑ 8k↓/);
+  await page.keyboard.press('Shift+ArrowRight'); await page.keyboard.press('ArrowRight');
+  assert.equal((await page.locator('#agentThreadDrawer').boundingBox()).width, 300);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+
   const panel = page.locator("#conversationDetails");
   const settled = () => panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
   const openDetails = async id => { await page.locator(`[data-thread-row="${id}"]`).hover(); await page.locator(`[data-thread-menu="${id}"]`).click(); await page.locator("#threadShowDetails").click(); await page.waitForFunction(() => document.querySelector("#conversationDetailsStatus")?.textContent === ""); await settled(); };
@@ -39,20 +68,30 @@ try {
   const facts = page.locator("#conversationTokenUsageFacts");
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["125,000", "100,000", "8,000"]);
   assert.match(await facts.textContent(), /含缓存/);
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '≈ $0.75');
+  assert.match(await page.locator('#conversationDetailsFacts').textContent(), /最近使用的模型gpt-6-astra/);
+  assert.match(await page.locator('#conversationCostPricing').textContent(), /Standard.*2026-09-06/);
   // Metadata can change before the history count advances. Both views update in place.
+  rows[0].costEstimate = estimate(1.5);
   rows[0].tokenUsage = { inputTokens: 250000, cachedInputTokens: 200000, outputTokens: 16000 };
   await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "250k in · 16k out", ids[0]);
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["250,000", "200,000", "16,000"]);
+  await page.waitForFunction(() => document.querySelector('#conversationCostAmount').textContent === '≈ $1.50');
   assert.equal((await row.boundingBox()).height, height, "usage stays on the existing second row");
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
     await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/thread-token-usage-desktop.png` });
   }
   await page.locator("#conversationDetailsClose").click();
+  await openDetails(ids[1]);
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '≈ $0.00');
+  await page.locator('#conversationDetailsClose').click();
   await openDetails(ids[2]);
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '暂无法估算');
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["未提供", "未提供", "未提供"]);
   await page.locator("#conversationDetailsClose").click();
   // Replaced history must clear the old generation, even when counters decrease.
+  rows[0].costEstimate = estimate(0.02, 'partial');
   rows[0].generation = 2; rows[0].tokenUsage = { inputTokens: 1000, cachedInputTokens: 0, outputTokens: 100 };
   await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "1k in · 100 out", ids[0]);
   await page.setViewportSize({ width: 390, height: 844 });
@@ -62,10 +101,11 @@ try {
   await sidebarAction(page, "agentThemeToggle");
   await openDetails(ids[0]);
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["1,000", "0", "100"]);
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '已估算部分 ≈ $0.02');
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/thread-token-usage-mobile.png` });
   await page.locator("#conversationDetailsClose").click();
   await page.setViewportSize({ width: 320, height: 844 });
-  assert.equal(await summary.isVisible(), false, "narrow rows hide the summary while details remain available");
+  assert.equal(await summary.isVisible(), true, "overlay menus free enough width for usage even on narrow phones");
   assert.equal(await page.locator(`[data-thread-activity="${ids[0]}"]`).isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await panel.waitFor({ state: "hidden" });

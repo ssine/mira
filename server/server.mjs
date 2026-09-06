@@ -9,6 +9,7 @@ import { Pool } from "pg";
 import { appendAudit, AuthService } from "./auth.mjs";
 import { CapabilityService } from "./capability-service.mjs";
 import { getCodexTranscript } from "./codex-transcript.mjs";
+import { getThreadCostEstimate } from "./thread-cost-estimate.mjs";
 import {
   defaultStoreId, importCodexSession, listImportedThreads, normalizeImportedThreadHistoryModes,
   scanCodexSessions,
@@ -44,6 +45,7 @@ const staticAssets = new Map([
   ["/app.js", [path.join(publicDirectory, "app.js"), "text/javascript; charset=utf-8"]],
   ["/thread-title.js", [path.join(publicDirectory, "thread-title.js"), "text/javascript; charset=utf-8"]],
   ["/thread-usage.js", [path.join(publicDirectory, "thread-usage.js"), "text/javascript; charset=utf-8"]],
+  ["/thread-model.js", [path.join(publicDirectory, "thread-model.js"), "text/javascript; charset=utf-8"]],
   ["/account-history.js", [path.join(publicDirectory, "account-history.js"), "text/javascript; charset=utf-8"]],
   ["/account-quota.js", [path.join(publicDirectory, "account-quota.js"), "text/javascript; charset=utf-8"]],
   ["/account-status.js", [path.join(publicDirectory, "account-status.js"), "text/javascript; charset=utf-8"]],
@@ -451,7 +453,10 @@ async function route(request, response) {
     const storeId = url.searchParams.get("storeId") ?? defaultStoreId;
     const [thread] = await listImportedThreads(pool, storeId, 1, match[1]);
     if (!thread) errorJson(response, 404, "会话不存在或已不可访问", "not_found");
-    else sendJson(response, 200, thread);
+    else {
+      if (url.searchParams.get("includeCost") === "1") thread.costEstimate = await getThreadCostEstimate(pool, storeId, thread);
+      sendJson(response, 200, thread);
+    }
     return;
   }
   match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})\/transcript$/i);

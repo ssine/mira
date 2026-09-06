@@ -22,9 +22,56 @@ The conversation details panel shows all three exact numbers. The sidebar's exis
 shows a compact `125k in · 8k out` summary when the row has enough width; its hover text includes the
 exact cached-input count. Narrow rows hide only the compact summary. Polling updates text in place,
 keeps selection/status and row height stable, and rejects older generation/item-count responses.
-Unknown input/output does not produce a misleading zero summary.
+Unknown input/output does not produce a misleading zero summary. Sidebar prices use `≈$0.75`
+(`*` marks a partial estimate, with a full explanation on hover). Compact rows use `125k↑ 8k↓`.
+The menu overlays the title with a matching fade, reserving no column. Desktop sidebar width is
+resizable from 240 to 480 px, supports keyboard arrows/Home/End and persists as a local preference;
+mobile retains its existing gesture drawer. Recency labels use only time today, weekday within seven
+calendar days, and date for older conversations (including the year when different).
 
 Validation: `npm run check --prefix server`, `tests/thread_token_usage_e2e.mjs` against a disposable
 Server database, and `tests/thread_token_usage_browser.mjs` cover cumulative snapshots, imported
 history, zero/unknown, raw NUL, subagents, generation replacement, metadata-only updates, projection
 rebuilds, API authentication, responsive layout and live updates of both views.
+
+## Model and API-equivalent cost
+
+List/detail reads now expose `model` from canonical model metadata, with a bounded, batched fallback
+through the latest `turn_context` or `thread_settings_applied` record. Schema 22 adds partial indexes
+for this lookup and for cost events. Neither feature mutates canonical history; generation changes
+invalidate the caches and projection rebuilds preserve their inputs.
+
+The composer reads `config/read` with the project's cwd and every page of `model/list` on a short,
+read-only App Server connection. It shows the effective configured default (or the catalog default
+when no model is configured), including configured models absent from the catalog. Model fields alone
+are cached by Node/cwd for five minutes. Browsing the picker never starts/resumes a thread. The explicit
+refresh control can prepare a stopped runtime. A selection applies to `thread/start` and the next
+`turn/start`; it does not change the Node's config. Node/project changes discard stale results.
+
+`GET /v1/codex/threads/:id?storeId=personal&includeCost=1` opts into `costEstimate`; ordinary list reads
+do not scan cost history. The sidebar requests the same opt-in detail endpoint only for visible rows,
+with at most two concurrent reads, bounded browser caching, and a ten-second refresh floor for an
+advancing thread. Unchanged history is not repeatedly fetched. The detail panel requests this while open and refreshes on usage/history
+changes. Its server projection reads canonical events in pages of 256, coalesces identical requests,
+and incrementally processes appended events in a bounded cache. Separate subagents retain separate
+estimates, following upstream thread/fork history semantics for inherited history.
+
+The estimate uses the dated Standard USD prices in `server/model-pricing.mjs`, sourced from
+https://developers.openai.com/api/docs/pricing and the corresponding model pages. It prices each new
+`last_token_usage` snapshot against its recorded model context/settings, deduplicating repeated
+cumulative snapshots. Ordinary input excludes cache reads/writes; reasoning output is already included
+in output. Long-context multipliers use the individual request's input length, never cumulative thread
+input. Integer nanodollars avoid per-request rounding loss. Missing history, unknown model prices and
+metadata ahead of history produce partial/unavailable estimates, not invented zero costs.
+
+This is equivalent API model-token spend at the stated current Standard price, not a historical invoice
+or ChatGPT plan deduction. Tool fees, service tiers, regional pricing and other billing adjustments are
+excluded. Token-count events do not identify the server-executed model. In runtime 0.153.1-mira.7,
+`ModelReroute` notifications are transient and not persisted, so a temporary server reroute cannot be
+reconstructed from history. `complete` means all recorded usage was priced on this basis, not that the
+result is an actual bill. Manual model changes are retained in context/settings and priced separately.
+
+Additional validation: `thread_cost_test.mjs`, `thread_cost_e2e.mjs`, `thread_models_browser.mjs` and
+`thread_token_usage_browser.mjs` cover pricing, model changes, cache writes, long-context thresholds,
+cache/rebuild/generation behavior, authentication, mixed-model cost display, default/model selection,
+project races and live updates. Browser execution uses simulated Node RPCs and sends no real model calls.
