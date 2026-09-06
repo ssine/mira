@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -70,20 +69,9 @@ func openSSHUsername() (string, error) {
 		}
 		return name, nil
 	}
-	u, err := user.Current()
+	name, err := openSSHSystemUsername()
 	if err != nil {
-		return "", fmt.Errorf("resolve current SSH OS account: %w", err)
-	}
-	name := u.Username
-	if runtime.GOOS == "windows" {
-		name = strings.ToLower(name)
-		// Win32 OpenSSH canonicalizes local accounts without the computer name.
-		if computer, e := os.Hostname(); e == nil {
-			domain, account, qualified := strings.Cut(name, `\`)
-			if qualified && strings.EqualFold(domain, computer) {
-				name = account
-			}
-		}
+		return "", err
 	}
 	if name == "" || len(name) > 256 || strings.ContainsAny(name, "\x00\r\n") {
 		return "", fmt.Errorf("invalid SSH OS account")

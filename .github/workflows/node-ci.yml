@@ -73,7 +73,7 @@ jobs:
       - name: Check release integration JavaScript
         run: >-
           node --test tests/codex_release_test.mjs tests/codex_runtime_ui_test.mjs
-          tests/release_publication_test.mjs
+          tests/release_publication_test.mjs node/openssh/windows/source-transform.test.mjs
 
       - name: Test unified Mira program
         working-directory: node

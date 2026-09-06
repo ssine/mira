@@ -220,6 +220,9 @@ divergent PostgreSQL history.
 Windows installation uses one system service whose service dispatcher hosts the Supervisor. The
 Supervisor launches Node and optional Server workers from the selected immutable image. Keep console
 CLI/OpenSSH roles and foreground Node debugging intact; background workers must not create consoles.
+For embedded SSH, the Windows service maps the well-known LocalSystem SID to `system` and may reuse
+only its current LocalSystem process token; do not broaden this exception to arbitrary account types
+or generate a different user's token for Mira's same-identity SSH sessions.
 The interactive `--tray` Node mode remains a manual diagnostic UI, not installation ownership or a
 second startup path. Local diagnostic logs rotate with bounded retention and never store conversations.
 

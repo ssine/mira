@@ -2,6 +2,7 @@
 // The only supported variant uses full, statically linked crypto and compression.
 import fs from 'node:fs';
 import path from 'node:path';
+import {allowLocalSystemPasswordLookup,reuseLocalSystemProcessToken} from './source-transform.mjs';
 const root=path.resolve(process.argv[2]??'');
 if(!root.includes('mira-openssh-windows.') || !fs.existsSync(path.join(root,'sshd.c')))
   throw Error('Expected an isolated mira-openssh-windows.* source tree');
@@ -19,6 +20,10 @@ fs.writeFileSync(paths,text);
 const doexec=path.join(root,'contrib/win32/win32compat/w32-doexec.c');
 let doexecCode=fs.readFileSync(doexec,'utf8');
 if(!doexecCode.includes('#include <stdlib.h>'))fs.writeFileSync(doexec,doexecCode.replace('#include "includes.h"','#include "includes.h"\n#include <stdlib.h>'));
+const pwd=path.join(root,'contrib/win32/win32compat/pwd.c');
+fs.writeFileSync(pwd,allowLocalSystemPasswordLookup(fs.readFileSync(pwd,'utf8')));
+const usertoken=path.join(root,'contrib/win32/win32compat/win32_usertoken_utils.c');
+fs.writeFileSync(usertoken,reuseLocalSystemProcessToken(fs.readFileSync(usertoken,'utf8')));
 // Without /GL, MSVC cannot infer GNU noreturn attributes that this port erases.
 // Preserve their meaning explicitly instead of suppressing uninitialized warnings.
 for(const name of ['log.h','packet.h','auth.h','sftp.h']){

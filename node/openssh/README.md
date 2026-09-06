@@ -55,7 +55,10 @@ bash node/openssh/build.sh android
   objects, LLD links their COFF with Go. Set `MIRA_LLD`/`MIRA_LLVM_BIN` if needed.
   `MIRA_WINDOWS_BUILD_TOOLS`/`MIRA_WINDOWS_SDK_VERSION` override discovery inside
   PowerShell. GNU MinGW is used for cgo; an existing container toolchain is a local
-  fallback. CI separates Windows C compilation and Linux cross-linking jobs.
+  fallback. A Mira system service maps only the well-known LocalSystem SID to the
+  canonical OpenSSH name `system` and reuses that same process token; it does not
+  grant access to or synthesize tokens for arbitrary Windows accounts. CI separates
+  Windows C compilation and Linux cross-linking jobs.
 - Android: Linux/WSL, pinned NDK, Go and Node.js. One API-26+ ARM64 ELF, linked crypto,
   Android OS libc/libdl/libm/liblog/libz. Non-root and authorized root share one
   image. Host chroot and the extra OpenSSH seccomp sandbox are not used; Android
