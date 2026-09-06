@@ -187,6 +187,21 @@ test("an untagged acceptance draft is found through the release listing", async 
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 });
 
+test("an untagged draft for another commit rejects the retry", async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-release-draft-conflict-"));
+  try {
+    const fixture = await runState(temporary, "none", "draft", {
+      MOCK_RELEASES_JSON: JSON.stringify([[
+        JSON.parse(releaseJSON({ commit: "f".repeat(40), draft: true })),
+      ]]),
+    });
+    assert.notEqual(fixture.result.status, 0);
+    assert.match(fixture.result.stderr, /targets .* expected immutable commit/);
+    const calls = (await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(calls.some((args) => args[0] === "release" && args[1] === "create"), false);
+  } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+});
+
 test("a public release at the same commit is a safe idempotent retry", async () => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-release-retry-"));
   try {
