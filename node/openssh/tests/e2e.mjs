@@ -74,7 +74,11 @@ try{
   // Deliberately exercise the parent permissions that sshd StrictModes rejects.
   // The fixture root stays private; only ephemeral test identities are involved.
   for(const n of [a,b])await fs.chmod(n.dir,0o775);
-  let r=await good(a.identity,['ssh',b.key,'--','printf RELAY_OK; id -u']);assert.equal(r.stdout.toString(),`RELAY_OK${process.getuid()}\n`);
+  let r=await good(a.identity,['ssh',b.key,'--',"printf 'RELAY_OK\\n'; id -u; id -g; id -G"]);
+  const identityLines=r.stdout.toString().trim().split('\n');
+  assert.equal(identityLines[0],'RELAY_OK');assert.equal(Number(identityLines[1]),process.getuid());assert.equal(Number(identityLines[2]),process.getgid());
+  const actualGroups=identityLines[3].trim().split(/\s+/).map(Number).sort((x,y)=>x-y);
+  const expectedGroups=[...new Set(process.getgroups())].sort((x,y)=>x-y);assert.deepEqual(actualGroups,expectedGroups);
   console.log('PASS native OpenSSH, approved reverse relay with group-writable state parents');
   const {rows:keys}=await pool.query('SELECT node_id, credential_id, host_key, client_key FROM mira_node_ssh_keys JOIN mira_node_credentials USING(credential_id) WHERE node_id = ANY($1::uuid[])',[[a.nodeId,b.nodeId]]);
   const aKey=keys.find(k=>k.node_id===a.nodeId),bKey=keys.find(k=>k.node_id===b.nodeId);

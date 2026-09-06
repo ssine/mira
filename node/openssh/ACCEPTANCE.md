@@ -51,8 +51,9 @@ Android arm64: a9489e050c6933a79ee14514c9c1259592de22a1c6cdf94029b9403b106c97ec
 - Hardware FIDO/PKCS#11, every OpenSSH option, Windows multiplexing, arbitrary
   kernels/OS versions, background Android reliability and long-running crash/fault
   soak tests are not implied by these results.
-- The Android build retains OS SELinux and upstream root pre-auth chroot/demotion,
-  but does not enable an additional OpenSSH seccomp sandbox.
+- The Android build retains OS SELinux, but Mira's authenticated same-identity
+  SSH mode does not use a host chroot, pre-auth account demotion or an additional
+  OpenSSH seccomp sandbox.
 - Before publication, choose a new unified SemVer, execute the full release lane
   (including Linux arm64 and signed APK), and accept those exact artifacts. Do not
   overwrite an existing immutable release version with these candidate contents.

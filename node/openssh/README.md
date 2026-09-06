@@ -43,10 +43,13 @@ bash node/openssh/build.sh android
 ```
 
 - Linux: native amd64/arm64 host, Docker and Go. OpenSSL, zlib and musl are static;
-  no ELF interpreter or dynamic library dependency. The normal OS still supplies
-  the shell, accounts, CA certificates and network configuration. Static musl is
-  not glibc NSS/LDAP/PAM plugin compatibility. ARM64 has a native CI build lane;
-  do not infer real hardware acceptance from an amd64 container test.
+  no ELF interpreter or dynamic library dependency. Mira's sshd only receives an
+  authenticated, per-session reverse channel, so this embedded build keeps the
+  OpenSSH process boundary but does not require a host privsep account, chroot,
+  setuid/setgid capabilities or seccomp. The normal OS still supplies the shell, target
+  account, CA certificates and network configuration. Static musl is not glibc
+  NSS/LDAP/PAM plugin compatibility. ARM64 has a native CI build lane; do not infer
+  real hardware acceptance from an amd64 container test.
 - Windows: WSL orchestrates native Visual Studio 2022 C++/SDK plus LLVM 18 tools.
   CMake builds static LibreSSL/zlib/libfido2/libcbor with `/MT`; MSVC builds the C
   objects, LLD links their COFF with Go. Set `MIRA_LLD`/`MIRA_LLVM_BIN` if needed.
@@ -55,7 +58,8 @@ bash node/openssh/build.sh android
   fallback. CI separates Windows C compilation and Linux cross-linking jobs.
 - Android: Linux/WSL, pinned NDK, Go and Node.js. One API-26+ ARM64 ELF, linked crypto,
   Android OS libc/libdl/libm/liblog/libz. Non-root and authorized root share one
-  image. The extra OpenSSH seccomp sandbox is not enabled; Android SELinux stays on.
+  image. Host chroot and the extra OpenSSH seccomp sandbox are not used; Android
+  SELinux stays on.
 
 Set `MIRA_OPENSSH_OUTPUT=/absolute/new/bundle` to copy a finished bundle. Builders
 retain their isolated temporary workspace and logs for diagnosis. They do not install

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -867,13 +868,13 @@ func TestRepairMigratesManagedSystemdTemplateAndRestartsService(t *testing.T) {
 	}
 }
 
-func TestSystemdUnitQuotesOptionalEnvironmentFileAsOneItem(t *testing.T) {
+func TestSystemdUnitEscapesOptionalEnvironmentFileAsOneItem(t *testing.T) {
 	definition, err := systemdUnit("/var/lib/mira state", RoleNode, ScopeSystem)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(definition, `EnvironmentFile="-/var/lib/mira state/mira.env"`) {
-		t.Fatalf("optional EnvironmentFile is not quoted as one item:\n%s", definition)
+	if !strings.Contains(definition, `EnvironmentFile=-/var/lib/mira\x20state/mira.env`) {
+		t.Fatalf("optional EnvironmentFile is not escaped as one item:\n%s", definition)
 	}
 	if !strings.Contains(definition, "Environment=HOME=/root") {
 		t.Fatalf("system service has no deterministic HOME:\n%s", definition)
@@ -884,6 +885,52 @@ func TestSystemdUnitQuotesOptionalEnvironmentFileAsOneItem(t *testing.T) {
 	}
 	if strings.Contains(userDefinition, "Environment=HOME=/root") {
 		t.Fatalf("user service overrides its login HOME:\n%s", userDefinition)
+	}
+}
+
+func TestSystemdEnvironmentFilePathEscapesUnitSyntax(t *testing.T) {
+	got, err := systemdEnvironmentFilePath("/var/lib/mira state\\folder/%n\"quote'\t\x01/目录/mira.env")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `/var/lib/mira\x20state\x5cfolder/%%n\x22quote\x27\x09\x01/目录/mira.env`
+	if got != want {
+		t.Fatalf("escaped path = %q, want %q", got, want)
+	}
+	for _, invalid := range []string{"relative/mira.env", "/var/lib/mira\x00/mira.env", "/var/lib/mira/\xff.env"} {
+		if _, err := systemdEnvironmentFilePath(invalid); err == nil {
+			t.Fatalf("systemdEnvironmentFilePath(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}
+
+func TestSystemdUnitWithSpacedStateDirectoryPassesSystemdAnalyze(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("systemd-analyze is only relevant on Linux")
+	}
+	analyzer, err := exec.LookPath("systemd-analyze")
+	if err != nil {
+		t.Skip("systemd-analyze is not installed")
+	}
+
+	stateDir := filepath.Join(t.TempDir(), "mira state")
+	executable := filepath.Join(stateDir, "current", "mira")
+	if err := os.MkdirAll(filepath.Dir(executable), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	definition, err := systemdUnit(stateDir, RoleNode, ScopeUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unitPath := filepath.Join(t.TempDir(), "mira-space.service")
+	if err := os.WriteFile(unitPath, []byte(definition), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := exec.Command(analyzer, "verify", unitPath).CombinedOutput(); err != nil {
+		t.Fatalf("systemd-analyze verify failed: %v\n%s", err, output)
 	}
 }
 

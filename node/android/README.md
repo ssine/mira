@@ -115,10 +115,11 @@ root launches; it does not use a system sshd or install a root module.
 
 Both modes keep `no_backup/identity.json` app-owned and 0600. Root SSH uses a
 separate root-owned 0700 `no_backup/openssh-root-home`, with ephemeral session
-keys/config and an empty pre-auth chroot beneath it. StrictModes, public-key-only
-authentication, chroot and pre-auth nobody demotion stay enabled. App-mode SSH
-has only the app UID's permissions. This build still lacks an additional OpenSSH
-seccomp sandbox; Android SELinux is not disabled.
+keys/config. Public-key-only authentication, the approved per-session caller key,
+the pinned host key and `AllowUsers` for the Node process account remain enforced.
+App-mode SSH has only the app UID's permissions. Neither mode requires a host
+chroot, a privsep account, UID/GID switching capabilities or an additional
+OpenSSH seccomp sandbox; Android SELinux is not disabled.
 
 Real-device acceptance in `node/openssh/tests/android.mjs` covers app/root/app
 identity continuity, SSH/PTY/SCP/SFTP, native reverse client, existing status/file/

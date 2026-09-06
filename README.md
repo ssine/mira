@@ -5,8 +5,12 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.3 将 Linux/OpenWrt 的内嵌 OpenSSH 改为 Mira 反向授权通道专用的便携模式，不再要求
+`/var/empty`、privsep 系统用户、chroot/setuid/setgid capabilities 或 seccomp，并修复 systemd 可选环境
+文件的转义与 system service `HOME` 配置。
+
 1.0.2 将 Node、Server、Supervisor 和 SSH worker 统一为 canonical `mira` 的显式子命令，移除
-Mira 角色对链接文件名的依赖，并修复 systemd 可选环境文件与 system service `HOME` 配置。
+Mira 角色对链接文件名的依赖。
 
 1.0.1 修复长会话历史被错误报告为不完整的问题，并让 OpenWrt/FriendlyWrt Node 安装器自动接入
 已有的 procd；安装后的更新仍统一由本机 Supervisor 执行。

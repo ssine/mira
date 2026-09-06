@@ -1,0 +1,255 @@
+--- a/sshd.c
++++ b/sshd.c
+@@ -1293,7 +1293,6 @@
+ 	int r, opt, do_dump_cfg = 0, keytype, already_daemon, have_agent = 0;
+ 	int sock_in = -1, sock_out = -1, newsock = -1, rexec_argc = 0;
+ 	int devnull, config_s[2] = { -1 , -1 }, have_connection_info = 0;
+-	int need_chroot = 1;
+ 	char *args, *fp, *line, *logfile = NULL, **rexec_argv = NULL;
+ 	struct stat sb;
+ 	u_int i, j;
+@@ -1327,9 +1326,6 @@
+ 	av = saved_argv;
+ #endif
+ 
+-	if (geteuid() == 0 && setgroups(0, NULL) == -1)
+-		debug("setgroups(): %.200s", strerror(errno));
+-
+ 	/* Ensure that fds 0, 1 and 2 are open or directed to /dev/null */
+ 	sanitise_stdfd();
+ 
+@@ -1717,31 +1713,15 @@
+ 		    sshkey_type(key));
+ 	}
+ 
+-	/* Ensure privsep directory is correctly configured. */
+-	need_chroot = ((getuid() == 0 || geteuid() == 0) ||
+-	    options.kerberos_authentication);
+-	if ((getpwnam(SSH_PRIVSEP_USER)) == NULL && need_chroot) {
++	/* Mira does not require a host privilege-separation account. Kerberos
++	 * retains the upstream account requirement when explicitly enabled. */
++	if (options.kerberos_authentication &&
++	    getpwnam(SSH_PRIVSEP_USER) == NULL) {
+ 		fatal("Privilege separation user %s does not exist",
+ 		    SSH_PRIVSEP_USER);
+ 	}
+ 	endpwent();
+ 
+-	if (need_chroot) {
+-		if ((stat(_PATH_PRIVSEP_CHROOT_DIR, &sb) == -1) ||
+-		    (S_ISDIR(sb.st_mode) == 0))
+-			fatal("Missing privilege separation directory: %s",
+-			    _PATH_PRIVSEP_CHROOT_DIR);
+-#ifdef HAVE_CYGWIN
+-		if (check_ntsec(_PATH_PRIVSEP_CHROOT_DIR) &&
+-		    (sb.st_uid != getuid () ||
+-		    (sb.st_mode & (S_IWGRP|S_IWOTH)) != 0))
+-#else
+-		if (sb.st_uid != 0 || (sb.st_mode & (S_IWGRP|S_IWOTH)) != 0)
+-#endif
+-			fatal("%s must be owned by root and not group or "
+-			    "world-writable.", _PATH_PRIVSEP_CHROOT_DIR);
+-	}
+-
+ 	if (test_flag > 1)
+ 		print_config(&connection_info);
+ 
+@@ -1755,16 +1735,6 @@
+ 	if (test_flag)
+ 		exit(0);
+ 
+-	/*
+-	 * Clear out any supplemental groups we may have inherited.  This
+-	 * prevents inadvertent creation of files with bad modes (in the
+-	 * portable version at least, it's certainly possible for PAM
+-	 * to create a file, and we can't control the code in every
+-	 * module which might be used).
+-	 */
+-	if (setgroups(0, NULL) < 0)
+-		debug("setgroups() failed: %.200s", strerror(errno));
+-
+ 	/* Prepare arguments for sshd-session */
+ 	if (rexec_argc < 0)
+ 		fatal("rexec_argc %d < 0", rexec_argc);
+--- a/sshd-auth.c
++++ b/sshd-auth.c
+@@ -140,7 +140,6 @@
+ /* variables used for privilege separation */
+ struct monitor *pmonitor = NULL;
+ int privsep_is_preauth = 1;
+-static int privsep_chroot = 1;
+ 
+ /* global connection state and authentication contexts */
+ Authctxt *the_authctxt = NULL;
+@@ -176,36 +175,16 @@
+ }
+ 
+ static void
+-privsep_child_demote(void)
++privsep_child_prepare(void)
+ {
+-	gid_t gidset[1];
+-
+ #ifndef HAVE_PLEDGE
+ 	if ((box = ssh_sandbox_init(pmonitor)) == NULL)
+ 		fatal_f("ssh_sandbox_init failed");
+ #endif
+-	/* Demote the child */
+-	if (privsep_chroot) {
+-		/* Change our root directory */
+-		if (chroot(_PATH_PRIVSEP_CHROOT_DIR) == -1)
+-			fatal("chroot(\"%s\"): %s", _PATH_PRIVSEP_CHROOT_DIR,
+-			    strerror(errno));
+-		if (chdir("/") == -1)
+-			fatal("chdir(\"/\"): %s", strerror(errno));
+ 
+-		/*
+-		 * Drop our privileges
+-		 * NB. Can't use setusercontext() after chroot.
+-		 */
+-		debug3("privsep user:group %u:%u", (u_int)privsep_pw->pw_uid,
+-		    (u_int)privsep_pw->pw_gid);
+-		gidset[0] = privsep_pw->pw_gid;
+-		if (setgroups(1, gidset) == -1)
+-			fatal("setgroups: %.100s", strerror(errno));
+-		permanently_set_uid(privsep_pw);
+-	}
+-
+-	/* sandbox ourselves */
++	/* Mira's SSH worker already runs behind an authenticated reverse channel.
++	 * The build selects OpenSSH's null sandbox and keeps only the process
++	 * boundary, with no chroot/setuid/seccomp host requirements. */
+ #ifdef HAVE_PLEDGE
+ 	if (pledge("stdio", NULL) == -1)
+ 		fatal_f("pledge()");
+@@ -625,16 +604,17 @@
+ 
+ 	debug("sshd-auth version %s, %s", SSH_VERSION, SSH_OPENSSL_VERSION);
+ 
+-	/* Store privilege separation user for later use if required. */
+-	privsep_chroot = (getuid() == 0 || geteuid() == 0);
+-	if ((privsep_pw = getpwnam(SSH_PRIVSEP_USER)) == NULL) {
+-		if (privsep_chroot || options.kerberos_authentication)
++	/* Mira does not resolve a host privsep account unless Kerberos needs it. */
++	if (options.kerberos_authentication) {
++		if ((privsep_pw = getpwnam(SSH_PRIVSEP_USER)) == NULL)
+ 			fatal("Privilege separation user %s does not exist",
+ 			    SSH_PRIVSEP_USER);
+-	} else {
+-		privsep_pw = pwcopy(privsep_pw);
+-		freezero(privsep_pw->pw_passwd, strlen(privsep_pw->pw_passwd));
+-		privsep_pw->pw_passwd = xstrdup("*");
++		else {
++			privsep_pw = pwcopy(privsep_pw);
++			freezero(privsep_pw->pw_passwd,
++			    strlen(privsep_pw->pw_passwd));
++			privsep_pw->pw_passwd = xstrdup("*");
++		}
+ 	}
+ 	endpwent();
+ 
+@@ -728,7 +708,7 @@
+ 	ssh_gssapi_prepare_supported_oids();
+ #endif
+ 
+-	privsep_child_demote();
++	privsep_child_prepare();
+ 
+ 	/* perform the key exchange */
+ 	/* authenticate user and start session */
+--- a/sshd-session.c
++++ b/sshd-session.c
+@@ -159,7 +159,6 @@
+ /* variables used for privilege separation */
+ struct monitor *pmonitor = NULL;
+ int privsep_is_preauth = 1;
+-static int privsep_chroot = 1;
+ 
+ /* Unprivileged user */
+ struct passwd *privsep_pw = NULL;
+@@ -1000,16 +999,17 @@
+ 
+ 	debug("sshd-session version %s, %s", SSH_VERSION, SSH_OPENSSL_VERSION);
+ 
+-	/* Store privilege separation user for later use if required. */
+-	privsep_chroot = (getuid() == 0 || geteuid() == 0);
+-	if ((privsep_pw = getpwnam(SSH_PRIVSEP_USER)) == NULL) {
+-		if (privsep_chroot || options.kerberos_authentication)
++	/* Mira does not resolve a host privsep account unless Kerberos needs it. */
++	if (options.kerberos_authentication) {
++		if ((privsep_pw = getpwnam(SSH_PRIVSEP_USER)) == NULL)
+ 			fatal("Privilege separation user %s does not exist",
+ 			    SSH_PRIVSEP_USER);
+-	} else {
+-		privsep_pw = pwcopy(privsep_pw);
+-		freezero(privsep_pw->pw_passwd, strlen(privsep_pw->pw_passwd));
+-		privsep_pw->pw_passwd = xstrdup("*");
++		else {
++			privsep_pw = pwcopy(privsep_pw);
++			freezero(privsep_pw->pw_passwd,
++			    strlen(privsep_pw->pw_passwd));
++			privsep_pw->pw_passwd = xstrdup("*");
++		}
+ 	}
+ 	endpwent();
+ 
+--- a/uidswap.h
++++ b/uidswap.h
+@@ -12,6 +12,7 @@
+  * called by a name other than "ssh" or "Secure Shell".
+  */
+ 
++int	 mira_same_uid(struct passwd *);
+ void	 temporarily_use_uid(struct passwd *);
+ void	 restore_uid(void);
+ void	 permanently_set_uid(struct passwd *);
+--- a/uidswap.c
++++ b/uidswap.c
+@@ -52,6 +52,16 @@
+ static gid_t	*saved_egroups = NULL, *user_groups = NULL;
+ static int	saved_egroupslen = -1, user_groupslen = -1;
+ 
++/* Mira authorizes only the account that already owns the Node process. */
++int
++mira_same_uid(struct passwd *pw)
++{
++	const char *enabled = getenv("MIRA_OPENSSH_SAME_IDENTITY");
++
++	return enabled != NULL && strcmp(enabled, "1") == 0 &&
++	    getuid() == pw->pw_uid && geteuid() == pw->pw_uid;
++}
++
+ /*
+  * Temporarily changes to the given uid.  If the effective user
+  * id is not root, this does nothing.  This call cannot be nested.
+@@ -59,6 +69,12 @@
+ void
+ temporarily_use_uid(struct passwd *pw)
+ {
++	if (mira_same_uid(pw)) {
++		privileged = 0;
++		temporarily_use_uid_effective = 0;
++		return;
++	}
++
+ 	/* Save the current euid, and egroups. */
+ #ifdef SAVED_IDS_WORK_WITH_SETEUID
+ 	saved_euid = geteuid();
+--- a/session.c
++++ b/session.c
+@@ -1317,6 +1317,15 @@
+ {
+ 	char uidstr[32], *chroot_path, *tmp;
+ 
++	/* Mira's private sshd accepts only the Node process account. Preserve
++	 * that process' existing credentials instead of requiring redundant
++	 * setgroups/setgid/setuid capabilities. */
++	if (mira_same_uid(pw) && (options.chroot_directory == NULL ||
++	    strcasecmp(options.chroot_directory, "none") == 0)) {
++		debug3_f("preserving Mira Node process identity");
++		return;
++	}
++
+ 	platform_setusercontext(pw);
+ 
+ 	if (platform_privileged_uidswap()) {

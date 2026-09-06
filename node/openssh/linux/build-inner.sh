@@ -7,7 +7,8 @@ printf '%s  %s\n' d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db
 # Notices and provenance are assembled from verified sources even on a cache hit.
 tar xzf openssl-3.5.5.tar.gz
 tar xzf openssh-10.5p1.tar.gz
-native_key=$({ sha256sum openssl-3.5.5.tar.gz openssh-10.5p1.tar.gz build-inner.sh objects.mk; cat builder-packages.txt; gcc -v 2>&1; uname -m; } | sha256sum | cut -d' ' -f1)
+patch --fuzz=0 -d openssh-10.5p1 -p1 < no-chroot.patch
+native_key=$({ sha256sum openssl-3.5.5.tar.gz openssh-10.5p1.tar.gz build-inner.sh objects.mk no-chroot.patch; cat builder-packages.txt; gcc -v 2>&1; uname -m; } | sha256sum | cut -d' ' -f1)
 native_archive="${MIRA_BUILD_CACHE:-$work}/native-$native_key.tar.gz"
 native_started=$SECONDS
 if [[ -n ${MIRA_BUILD_CACHE:-} && -f $native_archive && -f $native_archive.sha256 ]] && \
@@ -22,7 +23,9 @@ case $(uname -m) in x86_64) ssl_target=linux-x86_64 ;; aarch64) ssl_target=linux
 (cd build && CC=gcc CFLAGS='-O2 -fPIC -fstack-protector-strong' LDFLAGS=-static-pie ../openssh-10.5p1/configure \
   --with-ssl-dir="$work/crypto/install" --prefix=/nonexistent/mira-openssh --without-pam --without-security-key-builtin \
   --disable-lastlog --disable-utmp --disable-wtmp --disable-utmpx --disable-wtmpx --disable-libutil --disable-etc-default-login \
-  --with-privsep-user=nobody > configure.log 2>&1 && make -j8 ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen > build.log 2>&1)
+  --with-privsep-user=nobody --with-sandbox=no > configure.log 2>&1 && \
+  grep -F 'Privsep sandbox style: none' configure.log >/dev/null && \
+  make -j8 ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen > build.log 2>&1)
 while IFS='|' read -r role inputs; do
   (cd build && ld -r -o "$work/combined/$role.raw.o" $inputs -L. -Lopenbsd-compat -lssh -lopenbsd-compat)
   objcopy --redefine-sym "main=openssh_${role//-/_}_main" "combined/$role.raw.o" "combined/$role.renamed.o"

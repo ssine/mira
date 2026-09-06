@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ssine/mira/node/internal/supervisor"
 )
@@ -305,6 +307,43 @@ func systemdQuote(value string) (string, error) {
 	return `"` + value + `"`, nil
 }
 
+// systemdEnvironmentFilePath escapes an absolute path as one unquoted
+// EnvironmentFile= argument. The optional-file prefix must remain outside the
+// path: quoting "-<path>" makes some systemd versions treat the dash as part of
+// the filename. Hex escapes avoid word splitting and quote parsing, while %%
+// survives systemd's separate specifier expansion as one literal percent.
+func systemdEnvironmentFilePath(value string) (string, error) {
+	if !path.IsAbs(value) {
+		return "", fmt.Errorf("systemd environment file path must be absolute")
+	}
+	if strings.IndexByte(value, 0) >= 0 {
+		return "", fmt.Errorf("systemd environment file path contains NUL")
+	}
+	if !utf8.ValidString(value) {
+		return "", fmt.Errorf("systemd environment file path is not valid UTF-8")
+	}
+
+	var escaped strings.Builder
+	escaped.Grow(len(value))
+	for _, character := range value {
+		switch {
+		case character == '%':
+			escaped.WriteString("%%")
+		case character >= '!' && character <= '~' && character != '\\' && character != '\'' && character != '"':
+			escaped.WriteRune(character)
+		case character > unicode.MaxASCII && !unicode.IsControl(character):
+			escaped.WriteRune(character)
+		case character <= unicode.MaxASCII:
+			fmt.Fprintf(&escaped, `\x%02x`, character)
+		case character <= 0xffff:
+			fmt.Fprintf(&escaped, `\u%04x`, character)
+		default:
+			fmt.Fprintf(&escaped, `\U%08x`, character)
+		}
+	}
+	return escaped.String(), nil
+}
+
 func supervisorRoleArgument(role string) string {
 	if role == RoleServer {
 		return " --server"
@@ -321,7 +360,7 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	environmentFile, err := systemdQuote("-" + path.Join(stateDir, "mira.env"))
+	environmentFile, err := systemdEnvironmentFilePath(path.Join(stateDir, "mira.env"))
 	if err != nil {
 		return "", err
 	}
@@ -343,7 +382,7 @@ func systemdUnit(stateDir, role, scope string) (string, error) {
 		service = append(service, "Environment=HOME=/root")
 	}
 	service = append(service,
-		"EnvironmentFile="+environmentFile,
+		"EnvironmentFile=-"+environmentFile,
 		"ExecStart="+executable+" supervisor --state-dir "+state+" --service-owner mira"+supervisorRoleArgument(role),
 		// A successful update deliberately exits the old Supervisor after the
 		// current pointer is committed. The service manager then starts the new

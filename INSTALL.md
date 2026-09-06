@@ -36,7 +36,7 @@ procd 安装只支持 Mira 管理的 Node system service，并要求可执行的
 
 脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用 `mira install` 安装 Supervisor。
 默认状态目录是 `~/.local/share/mira`，命令入口位于 `~/.local/bin`，身份配置位于
-`~/.config/mira`。可用 `--version 1.0.2` 固定首次安装版本，或用
+`~/.config/mira`。可用 `--version 1.0.3` 固定首次安装版本，或用
 `--state-dir /absolute/path` 选择状态目录。
 
 安装器不再接受 `--update`。首次安装后统一使用 `mira update`。

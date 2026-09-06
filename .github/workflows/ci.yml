@@ -70,7 +70,7 @@ jobs:
         env:
           DATABASE_URL: postgresql://mira:ci-only@postgres.example.internal:5432/mira
           MIRA_CODEX_STORE_ENDPOINT: https://mira.example.test
-          MIRA_VERSION: 1.0.2
+          MIRA_VERSION: 1.0.3
         run: |
           docker compose -f compose.yaml config --quiet
           docker compose -f compose.homeserver.yaml config --quiet

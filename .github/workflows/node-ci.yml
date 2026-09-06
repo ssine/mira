@@ -121,6 +121,25 @@ jobs:
           trap 'docker compose -f compose.yaml down -v' EXIT
           node node/openssh/tests/e2e.mjs
 
+          capless_stage=$(mktemp -d /tmp/mira-capless-e2e.XXXXXX)
+          mkdir -p "$capless_stage/node/openssh/tests" "$capless_stage/tests"
+          cp node/openssh/tests/e2e.mjs "$capless_stage/node/openssh/tests/"
+          cp tests/auth_helpers.mjs "$capless_stage/tests/"
+          cp package.json "$capless_stage/"
+          cp -a node_modules "$capless_stage/"
+          cp "$(command -v node)" "$capless_stage/node-runtime"
+          cp "$MIRA_TEST_LINUX_SINGLEFILE" "$capless_stage/mira"
+          chmod -R a+rX "$capless_stage"
+          sudo capsh --drop=all --caps= --no-new-privs -- -c "
+            cd '$capless_stage'
+            test \"\$(awk '/^CapEff:/{print \$2}' /proc/self/status)\" = 0000000000000000
+            test \"\$(awk '/^CapBnd:/{print \$2}' /proc/self/status)\" = 0000000000000000
+            env MIRA_TEST_DATABASE_URL='$MIRA_TEST_DATABASE_URL' \
+              MIRA_TEST_LINUX_SINGLEFILE='$capless_stage/mira' \
+              MIRA_OPENSSH_TEST_PORT=18880 \
+              '$capless_stage/node-runtime' node/openssh/tests/e2e.mjs
+          "
+
   windows-native:
     strategy:
       matrix:

@@ -249,15 +249,14 @@ func serveOpenSSH(ctx context.Context, input io.Reader, output io.Writer, config
 		args = append(args, "-ddd")
 	}
 	command := exec.Command(program, args...)
+	if runtime.GOOS != "windows" {
+		// Mira authorizes only the account that already owns this Node process.
+		// Preserve that identity so a constrained root container does not need
+		// chroot, setuid or setgid capabilities for redundant transitions.
+		command.Env = append(os.Environ(), "MIRA_OPENSSH_SAME_IDENTITY=1")
+	}
 	if runtime.GOOS == "android" {
-		command.Env = append(os.Environ(), "MIRA_OPENSSH_APP_HOME="+state)
-		if os.Geteuid() == 0 {
-			empty := filepath.Join(dir, "empty")
-			if err := os.Mkdir(empty, 0700); err != nil {
-				return err
-			}
-			command.Env = append(command.Env, "MIRA_NODE_OPENSSH_PRIVSEP_DIR="+empty)
-		}
+		command.Env = append(command.Env, "MIRA_OPENSSH_APP_HOME="+state)
 	}
 	command.Stdout, command.Stderr = output, os.Stderr
 	command.WaitDelay = 500 * time.Millisecond

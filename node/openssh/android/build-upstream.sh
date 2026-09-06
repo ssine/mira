@@ -18,14 +18,13 @@ actual=$(openssl dgst -sha256 -binary openssh.tar.gz | openssl base64 -A)
 [[ "$actual" == '1E0oqDnqna+WnMaRUP3lmRCys5Nh2tgaO9bL0ZIY2xE=' ]] || { echo 'OpenSSH checksum mismatch' >&2; exit 1; }
 tar xzf openssh.tar.gz
 patch -d openssh-10.5p1 -p1 < "$component/android/patches/resolver.patch"
-patch -d openssh-10.5p1 -p1 < "$component/android/patches/app-identity.patch"
 patch -d openssh-10.5p1 -p1 < "$component/android/patches/app-home.patch"
-cp "$component/android/root-path.h" openssh-10.5p1/mira-root-path.h
-patch --fuzz=0 -d openssh-10.5p1 -p1 < "$component/android/patches/root-state.patch"
+patch --fuzz=0 -d openssh-10.5p1 -p1 < "$component/common/no-chroot.patch"
 mkdir build
 cd build
 CC="$toolchain/aarch64-linux-android26-clang" AR="$toolchain/llvm-ar" RANLIB="$toolchain/llvm-ranlib" ac_cv_func_bzero=yes CPPFLAGS=-DHAVE_ATTRIBUTE__SENTINEL__=1 LDFLAGS=-Wl,-z,max-page-size=16384 \
- ../openssh-10.5p1/configure --host=aarch64-linux-android --with-ssl-dir="$work/crypto/install" --prefix=/nonexistent/mira-openssh --without-pam --disable-lastlog --disable-utmp --disable-wtmp --disable-utmpx --disable-wtmpx --disable-pututline --disable-pututxline --disable-libutil --disable-etc-default-login --with-default-path=/system/bin --with-privsep-user=nobody > configure.log 2>&1
+ ../openssh-10.5p1/configure --host=aarch64-linux-android --with-ssl-dir="$work/crypto/install" --prefix=/nonexistent/mira-openssh --without-pam --disable-lastlog --disable-utmp --disable-wtmp --disable-utmpx --disable-wtmpx --disable-pututline --disable-pututxline --disable-libutil --disable-etc-default-login --with-default-path=/system/bin --with-privsep-user=nobody --with-sandbox=no > configure.log 2>&1
+grep -F 'Privsep sandbox style: none' configure.log >/dev/null
 flags="-O2 -fPIC -fstack-protector-strong -include $component/android/bionic-shim.h"
 make -j"$jobs" CFLAGS="$flags" CFLAGS_NOPIE="$flags" ssh sshd sshd-session sshd-auth scp sftp sftp-server ssh-keygen > build.log 2>&1
 mkdir licenses

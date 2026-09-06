@@ -9,7 +9,8 @@ snapshot_node "$work"
 mkdir "$work/bin" "$work/combined"
 cp "$cache/openssh-10.5p1.tar.gz" "$cache/openssl-3.5.5.tar.gz" "$work/"
 cp "$component/common/dispatcher-unix.c" "$work/dispatcher.c"
-cp "$component/linux/build-inner.sh" "$component/common/objects.mk" "$component/common/go-init.ld" "$work/"
+cp "$component/linux/build-inner.sh" "$component/common/objects.mk" "$component/common/go-init.ld" \
+  "$component/common/no-chroot.patch" "$work/"
 goroot=$(go -C "$repo/node" env GOROOT)
 modcache=$(go -C "$repo/node" env GOMODCACHE)
 builder=${MIRA_OPENSSH_BUILDER_IMAGE:-mira-openssh-musl-builder}

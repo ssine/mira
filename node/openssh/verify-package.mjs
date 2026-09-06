@@ -15,5 +15,6 @@ if(platform==='windows'){
 if(crypto.createHash('sha256').update(b).digest('hex')!==m.sha256)throw Error('Native package digest mismatch');
 const marker={linux:'MIRA_LINKED_OPENSSH_LINUX_STATIC_V1',windows:'MIRA_LINKED_OPENSSH_WINDOWS_FULL_V1',android:'MIRA_LINKED_OPENSSH_ANDROID_ROOT_V1'}[platform];
 if(!marker||!b.includes(Buffer.from(marker+'\0')))throw Error('Missing linked OpenSSH marker');
+if((platform==='linux'||platform==='android')&&[Buffer.from('/var/empty'),Buffer.from('MIRA_NODE_OPENSSH_PRIVSEP_DIR'),Buffer.from('preparing seccomp filter sandbox')].some(value=>b.includes(value)))throw Error('Unix OpenSSH image has a host privilege-separation or seccomp dependency');
 if(!fs.statSync(path.join(directory,'licenses')).isDirectory())throw Error('Missing dependency notices');
 console.log(`Verified embedded OpenSSH ${platform}/${arch}`);
