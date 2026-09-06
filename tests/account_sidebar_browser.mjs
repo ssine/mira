@@ -81,7 +81,11 @@ try {
  assert.equal(await panel.locator('[data-history-point]').count(),0,'the permanent sample detail row is removed');
  assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'labels appear only during inspection');
  await panel.locator('[aria-label="额度历史时间范围"]').selectOption('24h');
+ assert.equal(await page.evaluate(() => localStorage.getItem('mira.accountHistory.range')),'24h','the selected history range is saved locally');
  await page.waitForFunction(()=>document.querySelector('[data-account-history] .quota-time-tick:last-of-type')?.textContent.includes(':'));
+ await page.reload();await page.locator('#agentView:not(.hidden)').waitFor();await accountDetails(page);
+ assert.equal(await panel.locator('[aria-label="额度历史时间范围"]').inputValue(),'24h','the saved history range is restored after reload');
+ await panel.locator('.quota-chart:not(.hidden)').waitFor();
  const chart = panel.locator('.quota-chart');
  await chart.focus(); await page.keyboard.press('Home');
  assert.match(await panel.locator('.quota-tooltip').textContent(),/剩余 80%/);
@@ -110,6 +114,7 @@ try {
  const initialHistoryCalls=historyCalls.length;
  // Frequent quota notifications and drawer toggles share a five-minute cache.
  await idle(); const initialCalls=calls.length;
+ const initialRateLimitReads=calls.filter(call=>call.method==='account/rateLimits/read').length;
  limits[0].rateLimitsByLimitId.codex.secondary.usedPercent=100;limits[0].rateLimitResetCredits.availableCount=0;
  sockets.get(0).send(JSON.stringify({method:'account/rateLimits/updated',params:{rateLimits:{limitId:'codex'}}}));
  await page.waitForTimeout(400);
@@ -125,7 +130,7 @@ try {
  await page.clock.fastForward(60_100);
  await expectText('[data-account-remaining]','0%');await expectText('[data-account-credits]','0 次');
  await expectText('[data-account-summary-credits]','重置 0 次');
- assert.equal(calls.filter(call=>call.method==='account/rateLimits/read').length,2,'one automatic refresh after five minutes');
+ assert.equal(calls.filter(call=>call.method==='account/rateLimits/read').length,initialRateLimitReads+1,'one automatic refresh after five minutes');
  await accountDetails(page);
  // Missing fields stay unknown, rather than borrowing Spark's separate weekly quota.
  delete limits[0].rateLimitsByLimitId.codex.secondary;limits[0].rateLimitResetCredits=null;

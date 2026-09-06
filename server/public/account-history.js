@@ -1,4 +1,6 @@
 const ns = "http://www.w3.org/2000/svg";
+const rangeStorageKey = "mira.accountHistory.range";
+const supportedRanges = new Set(["24h", "7d", "30d"]);
 const percent = value => `${Number(value.toFixed(1))}%`;
 const timeLabel = value => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 
@@ -12,10 +14,15 @@ export function quotaSegments(points) {
 export class AccountHistory {
   constructor(root) {
     this.root = root;
-    this.range = "7d";
+    const rangeSelect = root.querySelector("select");
+    let savedRange;
+    try { savedRange = localStorage.getItem(rangeStorageKey); } catch { /* optional preference */ }
+    this.range = supportedRanges.has(savedRange) ? savedRange : rangeSelect.value;
+    rangeSelect.value = this.range;
     this.cache = new Map();
-    root.querySelector("select").addEventListener("change", event => {
+    rangeSelect.addEventListener("change", event => {
       this.range = event.target.value;
+      try { localStorage.setItem(rangeStorageKey, this.range); } catch { /* optional preference */ }
       this.select(this.node, this.account, true);
     });
     this.svg = root.querySelector("svg");
