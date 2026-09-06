@@ -62,6 +62,11 @@ An update is owned end-to-end by the old local Supervisor, not by Server, Node, 
 bootstrap scripts. It stops old workers before starting candidates; Server updates accept a short
 outage instead of running two database writers. Failed candidate health checks restore the old workers.
 
+The 1.0 support contract covers one Supervisor state directory at a time and accepts a short worker
+outage during replacement. Cluster-wide rollout orchestration and boot-level recovery when the
+Supervisor executable itself cannot start are explicitly outside the 1.0 contract. Do not imply
+otherwise in user-facing documentation or release notes.
+
 Mira Server does not mount devices or initiate network connections into them. Mira Nodes maintain
 outbound control connections. SSH v1 is an additional end-to-end SSH byte transport over dedicated
 outbound WSS streams, not a replacement for the JSON control/App Server protocols. The Server

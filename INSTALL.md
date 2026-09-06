@@ -3,6 +3,12 @@
 Mira 的 Server、Node、CLI、Supervisor 和 Web 静态资源都在同一个 `mira` 发布镜像中。
 运行时不需要 Node.js。PostgreSQL 是独立服务，Mira 不负责安装、更新或回滚数据库。
 
+## 1.0 支持边界
+
+Mira 1.0 支持单机 Supervisor 管理 Node，以及 Server 主机上的 Node + Server；更新允许几秒中断，
+并在候选 worker 启动或健康检查失败时恢复旧版本。1.0 不承诺集群批量编排，也不承诺 Supervisor
+二进制自身完全无法启动时的启动级自动回退。数据库备份和 PostgreSQL 服务生命周期仍由管理员负责。
+
 ## 角色
 
 - `node`：Supervisor 管理一个 Node worker。
@@ -26,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 `mira install` 安装 Supervisor。默认状态目录是 `~/.local/share/mira`，命令入口位于
 `~/.local/bin`，身份配置位于 `~/.config/mira`。Node 默认使用 user systemd。
 
-可用 `--version 0.13.5` 固定首次安装版本，或用 `--state-dir /absolute/path` 选择状态目录。
+可用 `--version 1.0.0` 固定首次安装版本，或用 `--state-dir /absolute/path` 选择状态目录。
 当前 bootstrap 不会猜测 NAS 厂商的服务管理方式；没有 systemd 的设备应使用容器部署，或等待其
 服务管理器有明确适配后再安装，不能恢复旧的 procd/自定义脚本更新路径。
 

@@ -5,8 +5,10 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-当前版本是可运行的工程 PoC：存储、Node 接入、能力路由、App Server broker、共享 CLI 身份和
-管理员网站已连通。durable scheduler、writer lease、完整恢复演练和服务端编排的集群批量更新仍待完成。
+1.0.0 确立单一原生 Mira 镜像：Server、Node、Supervisor、CLI 和 Web 使用同一个 Go 版本发布，
+PostgreSQL 保持外置。单机更新由旧 Supervisor 完整执行，允许几秒中断，并在候选 worker 启动或
+健康检查失败时恢复旧版本。1.0 不承诺集群批量编排，也不包含 Supervisor 自身无法启动时的启动级
+自动回退；数据库备份和 PostgreSQL 服务生命周期仍由管理员负责。
 
 0.13.4 将远端 ThreadStore 改为按需加载单个 thread 历史，避免 App Server 启动和每次 token 更新时
 反复读取或序列化全库；Windows 与 WSL 同机时会自动避开冲突的回环端口。Codex Desktop 放在 Windows
