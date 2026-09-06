@@ -28,13 +28,16 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
   sh -s -- --role node --server https://mira.example.com
 ```
 
-支持带 systemd 的 Linux amd64/arm64；WSL 需要启用 user systemd。脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用
-`mira install` 安装 Supervisor。默认状态目录是 `~/.local/share/mira`，命令入口位于
-`~/.local/bin`，身份配置位于 `~/.config/mira`。Node 默认使用 user systemd。
+支持 Linux amd64/arm64。普通 Linux 默认使用 systemd，WSL 需要启用 user systemd；OpenWrt 和
+FriendlyWrt Node 会自动识别已有的 procd，并以 root 写入、启用和启动 `/etc/init.d/mira`。
+procd 安装只支持 Mira 管理的 Node system service，并要求可执行的 `/etc/rc.common` 与
+`/sbin/procd`；其他 NAS 服务管理器仍不会被猜测。可用
+`--service-manager auto|systemd|procd` 明确覆盖检测结果。
 
-可用 `--version 1.0.0` 固定首次安装版本，或用 `--state-dir /absolute/path` 选择状态目录。
-当前 bootstrap 不会猜测 NAS 厂商的服务管理方式；没有 systemd 的设备应使用容器部署，或等待其
-服务管理器有明确适配后再安装，不能恢复旧的 procd/自定义脚本更新路径。
+脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用 `mira install` 安装 Supervisor。
+默认状态目录是 `~/.local/share/mira`，命令入口位于 `~/.local/bin`，身份配置位于
+`~/.config/mira`。可用 `--version 1.0.1` 固定首次安装版本，或用
+`--state-dir /absolute/path` 选择状态目录。
 
 安装器不再接受 `--update`。首次安装后统一使用 `mira update`。
 

@@ -50,6 +50,7 @@ func runSystemInstall(ctx context.Context, args []string, stdin io.Reader, stdou
 	stateDir := set.String("state-dir", defaultState, "Mira state directory")
 	role := set.String("role", installation.RoleNode, "node or server")
 	ownerValue := set.String("service-owner", "", "nix or mira")
+	serviceManager := set.String("service-manager", "", "auto, systemd, or procd")
 	serviceScope := set.String("service-scope", "", "user or system")
 	systemdUnit := set.String("systemd-unit", "", "systemd unit path")
 	nixSnippet := set.String("nix-snippet", "", "generated Nix module path")
@@ -74,14 +75,16 @@ func runSystemInstall(ctx context.Context, args []string, stdin io.Reader, stdou
 	}
 	plan, err := installation.BuildPlan(installation.PlanOptions{
 		StateDir: *stateDir, Version: Version, Platform: runtime.GOOS, ServiceOwner: owner, Role: *role,
-		ServiceScope: *serviceScope, SystemdUnitPath: *systemdUnit, NixSnippetPath: *nixSnippet,
+		ServiceManager: installation.ServiceManager(*serviceManager), ServiceScope: *serviceScope,
+		SystemdUnitPath: *systemdUnit, NixSnippetPath: *nixSnippet,
 	}, nil)
 	if err != nil {
 		return nil, err
 	}
 	result := map[string]any{
 		"status": "planned", "stateDir": plan.StateDir, "version": Version, "role": plan.State.Role,
-		"serviceOwner": plan.State.ServiceOwner, "serviceScope": plan.State.ServiceScope, "servicePath": plan.State.ServicePath, "dryRun": *dryRun,
+		"serviceOwner": plan.State.ServiceOwner, "serviceManager": plan.State.ServiceManager,
+		"serviceScope": plan.State.ServiceScope, "servicePath": plan.State.ServicePath, "dryRun": *dryRun,
 	}
 	if *dryRun {
 		if plan.State.ServiceOwner == installation.ServiceOwnerNix {
@@ -89,9 +92,12 @@ func runSystemInstall(ctx context.Context, args []string, stdin io.Reader, stdou
 		}
 		return result, nil
 	}
+	if plan.State.ServiceManager == installation.ServiceManagerProcd && os.Geteuid() != 0 {
+		return nil, fmt.Errorf("procd service installation requires root")
+	}
 	if existing, err := installation.LoadState(nil, plan.StateDir); err == nil {
 		unchanged := existing.Version == plan.State.Version && existing.Role == plan.State.Role &&
-			existing.ServiceOwner == plan.State.ServiceOwner && existing.ServiceScope == plan.State.ServiceScope &&
+			existing.ServiceOwner == plan.State.ServiceOwner && existing.ServiceManager == plan.State.ServiceManager && existing.ServiceScope == plan.State.ServiceScope &&
 			existing.Platform == plan.State.Platform && existing.ServiceName == plan.State.ServiceName &&
 			existing.ServicePath == plan.State.ServicePath && existing.ServiceDefinitionSHA256 == plan.State.ServiceDefinitionSHA256
 		if !unchanged {
@@ -173,11 +179,16 @@ func runRepair(ctx context.Context, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	options := installation.PlanOptions{StateDir: *stateDir, Version: state.Version, Platform: state.Platform, ServiceOwner: state.ServiceOwner, Role: state.Role, ServiceScope: state.ServiceScope}
+	if state.ServiceManager == installation.ServiceManagerProcd && os.Geteuid() != 0 && !*dryRun {
+		return nil, fmt.Errorf("repairing a procd service requires root")
+	}
+	options := installation.PlanOptions{StateDir: *stateDir, Version: state.Version, Platform: state.Platform, ServiceOwner: state.ServiceOwner, ServiceManager: state.ServiceManager, Role: state.Role, ServiceScope: state.ServiceScope}
 	if state.ServiceOwner == installation.ServiceOwnerNix {
 		options.NixSnippetPath = state.ServicePath
-	} else if state.Platform == "linux" {
+	} else if state.Platform == "linux" && state.ServiceManager == installation.ServiceManagerSystemd {
 		options.SystemdUnitPath = state.ServicePath
+	} else if state.Platform == "linux" {
+		options.ProcdInitPath = state.ServicePath
 	} else {
 		options.WindowsServiceName = state.ServiceName
 		executable, executableErr := installationCurrentExecutable(*stateDir)
@@ -194,7 +205,7 @@ func runRepair(ctx context.Context, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "repaired", "applied": report.Applied, "serviceOwner": state.ServiceOwner, "dryRun": *dryRun}, nil
+	return map[string]any{"status": "repaired", "applied": report.Applied, "serviceOwner": state.ServiceOwner, "serviceManager": state.ServiceManager, "dryRun": *dryRun}, nil
 }
 
 func installationCurrentExecutable(stateDir string) (string, error) {
@@ -229,6 +240,9 @@ func runUninstall(ctx context.Context, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if state.ServiceManager == installation.ServiceManagerProcd && os.Geteuid() != 0 && !*dryRun {
+		return nil, fmt.Errorf("uninstalling a procd service requires root")
+	}
 	report, err := installation.Uninstall(ctx, *stateDir, state.ServiceOwner, installation.Dependencies{}, installation.ApplyOptions{DryRun: *dryRun})
 	if errors.Is(err, installation.ErrNixManualRemoval) {
 		return map[string]any{"status": "manual_action_required", "serviceOwner": state.ServiceOwner, "instructions": report.Instructions}, nil
@@ -236,5 +250,5 @@ func runUninstall(ctx context.Context, args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "uninstalled", "applied": report.Applied, "serviceOwner": state.ServiceOwner, "dryRun": *dryRun}, nil
+	return map[string]any{"status": "uninstalled", "applied": report.Applied, "serviceOwner": state.ServiceOwner, "serviceManager": state.ServiceManager, "dryRun": *dryRun}, nil
 }

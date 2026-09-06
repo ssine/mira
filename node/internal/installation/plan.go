@@ -100,9 +100,42 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 	if role != RoleNode && role != RoleServer {
 		return InstallPlan{}, fmt.Errorf("Mira role must be %q or %q", RoleNode, RoleServer)
 	}
+	manager := options.ServiceManager
+	if platform == "linux" {
+		if owner == ServiceOwnerNix {
+			if manager != "" && manager != ServiceManagerAuto && manager != ServiceManagerSystemd {
+				return InstallPlan{}, fmt.Errorf("Nix service ownership requires the systemd service manager")
+			}
+			manager = ServiceManagerSystemd
+		} else if manager == "" || manager == ServiceManagerAuto {
+			manager, err = DetectLinuxServiceManager(files)
+			if err != nil {
+				return InstallPlan{}, err
+			}
+		} else if manager != ServiceManagerSystemd && manager != ServiceManagerProcd {
+			return InstallPlan{}, fmt.Errorf("Linux service manager must be %q or %q", ServiceManagerSystemd, ServiceManagerProcd)
+		}
+		if manager == ServiceManagerProcd {
+			if owner != ServiceOwnerMira {
+				return InstallPlan{}, fmt.Errorf("procd services require Mira service ownership")
+			}
+			if role != RoleNode {
+				return InstallPlan{}, fmt.Errorf("procd service installation currently supports only the Mira Node role")
+			}
+			if err := validateProcdHost(files); err != nil {
+				return InstallPlan{}, err
+			}
+		}
+	} else if manager != "" && manager != ServiceManagerAuto {
+		return InstallPlan{}, fmt.Errorf("--service-manager is only supported on Linux")
+	} else {
+		manager = ""
+	}
 	scope := options.ServiceScope
 	if scope == "" {
-		if platform == "linux" && owner == ServiceOwnerMira && role == RoleNode {
+		if platform == "linux" && manager == ServiceManagerProcd {
+			scope = ScopeSystem
+		} else if platform == "linux" && owner == ServiceOwnerMira && role == RoleNode {
 			scope = ScopeUser
 		} else {
 			scope = ScopeSystem
@@ -114,6 +147,9 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 	if (owner == ServiceOwnerNix || platform == "windows") && scope != ScopeSystem {
 		return InstallPlan{}, fmt.Errorf("%s-owned %s services require system scope", owner, platform)
 	}
+	if manager == ServiceManagerProcd && scope != ScopeSystem {
+		return InstallPlan{}, fmt.Errorf("procd services require system scope")
+	}
 
 	plan := InstallPlan{
 		StateDir:      layout.StateDir,
@@ -122,12 +158,13 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 		DetectedNixOS: nixOS,
 	}
 	state := InstallState{
-		SchemaVersion: installStateSchema,
-		ServiceOwner:  owner,
-		Role:          role,
-		ServiceScope:  scope,
-		Platform:      platform,
-		Version:       options.Version,
+		SchemaVersion:  installStateSchema,
+		ServiceOwner:   owner,
+		ServiceManager: manager,
+		Role:           role,
+		ServiceScope:   scope,
+		Platform:       platform,
+		Version:        options.Version,
 	}
 	if owner == ServiceOwnerNix {
 		path := options.NixSnippetPath
@@ -146,7 +183,7 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 		state.ServiceDefinition = definition
 		plan.NixSnippet = definition
 		plan.Files = []PlannedFile{{Path: state.ServicePath, Content: []byte(definition), Mode: 0644, DirMode: 0700}}
-	} else if platform == "linux" {
+	} else if platform == "linux" && manager == ServiceManagerSystemd {
 		path := options.SystemdUnitPath
 		if path == "" {
 			if scope == ScopeUser {
@@ -181,6 +218,26 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 			{Name: "systemctl", Args: append(append([]string(nil), managerArgs...), "daemon-reload")},
 			{Name: "systemctl", Args: append(append([]string(nil), managerArgs...), "enable", "--now", state.ServiceName)},
 		}
+	} else if platform == "linux" {
+		path := options.ProcdInitPath
+		if path == "" {
+			path = defaultProcdInitPath
+		}
+		if !safeAbsolutePath(path) {
+			return InstallPlan{}, fmt.Errorf("procd init path must be an absolute file path")
+		}
+		definition, err := procdInitScript(layout.StateDir, role)
+		if err != nil {
+			return InstallPlan{}, err
+		}
+		state.ServiceName = filepath.Base(path)
+		if !serviceNamePattern.MatchString(state.ServiceName) {
+			return InstallPlan{}, fmt.Errorf("invalid procd service filename %q", state.ServiceName)
+		}
+		state.ServicePath = filepath.Clean(path)
+		state.ServiceDefinition = definition
+		plan.Files = []PlannedFile{{Path: state.ServicePath, Content: []byte(definition), Mode: 0755, DirMode: 0755}}
+		plan.Commands = procdCommands(state.ServicePath, "start")
 	} else {
 		serviceName := options.WindowsServiceName
 		if serviceName == "" {

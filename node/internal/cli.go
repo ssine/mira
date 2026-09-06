@@ -954,7 +954,7 @@ Shows non-secret identity metadata. The Node credential itself is never printed.
 		"setup": `Usage: mira setup [options]
 
 Configure or enroll this machine. Run this command's platform-specific setup before starting mira-node.`,
-		"install": `Usage: mira install [--role node|server] [--service-owner nix|mira] [--state-dir DIR] [--server-url URL] [--dry-run]
+		"install": `Usage: mira install [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd] [--state-dir DIR] [--server-url URL] [--dry-run]
 
 On NixOS, an interactive install asks who owns the system service. Non-interactive
 installs must pass --service-owner explicitly. Nix and Mira ownership are mutually exclusive.`,

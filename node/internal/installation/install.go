@@ -161,6 +161,9 @@ func validatePlan(plan InstallPlan) error {
 		if len(plan.Files) != 1 || plan.Files[0].Path != plan.State.ServicePath || string(plan.Files[0].Content) != plan.State.ServiceDefinition {
 			return fmt.Errorf("Linux install plan service unit does not match install state")
 		}
+		if plan.State.ServiceManager == ServiceManagerProcd && plan.Files[0].Mode.Perm() != 0755 {
+			return fmt.Errorf("procd install plan service script must be executable")
+		}
 	} else if len(plan.Files) != 0 {
 		return fmt.Errorf("Windows install plan cannot contain service files")
 	}
@@ -173,6 +176,9 @@ func Repair(ctx context.Context, plan InstallPlan, dependencies Dependencies, op
 	dependencies = withDefaults(dependencies)
 	if _, err := requireOwner(dependencies.Files, plan.StateDir, plan.State.ServiceOwner, false); err != nil {
 		return ApplyReport{Plan: plan}, err
+	}
+	if plan.State.ServiceManager == ServiceManagerProcd {
+		plan.Commands = procdCommands(plan.State.ServicePath, "restart")
 	}
 	return installPrepared(ctx, plan, dependencies, options, nil, true)
 }
@@ -227,7 +233,7 @@ func Uninstall(ctx context.Context, stateDir string, owner ServiceOwner, depende
 		if err := dependencies.Files.Remove(state.ServicePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return UninstallReport{Commands: commands}, err
 		}
-		if state.Platform == "linux" {
+		if state.Platform == "linux" && state.ServiceManager == ServiceManagerSystemd {
 			arguments := []string{}
 			if state.ServiceScope == ScopeUser {
 				arguments = append(arguments, "--user")
@@ -250,6 +256,12 @@ func uninstallCommands(state InstallState) []Command {
 		return []Command{
 			{Name: "sc.exe", Args: []string{"stop", state.ServiceName}},
 			{Name: "sc.exe", Args: []string{"delete", state.ServiceName}},
+		}
+	}
+	if state.ServiceManager == ServiceManagerProcd {
+		return []Command{
+			{Name: state.ServicePath, Args: []string{"disable"}},
+			{Name: state.ServicePath, Args: []string{"stop"}},
 		}
 	}
 	arguments := []string{}

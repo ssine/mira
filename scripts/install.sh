@@ -8,6 +8,7 @@ server=""
 version=latest
 role=node
 service_owner=""
+service_manager=""
 service_scope=""
 release_directory=""
 state_dir="${MIRA_STATE_DIR:-$HOME/.local/share/mira}"
@@ -18,6 +19,7 @@ while [ "$#" -gt 0 ]; do
     --version) version=$2; shift 2 ;;
     --role) role=$2; shift 2 ;;
     --service-owner) service_owner=$2; shift 2 ;;
+    --service-manager) service_manager=$2; shift 2 ;;
     --service-scope) service_scope=$2; shift 2 ;;
     --state-dir|--prefix) state_dir=$2; shift 2 ;;
     --release-directory) release_directory=$2; shift 2 ;;
@@ -25,7 +27,7 @@ while [ "$#" -gt 0 ]; do
       printf '%s\n' 'Installer-driven updates were removed. Run: mira update' >&2
       exit 2 ;;
     --help)
-      printf '%s\n' 'Usage: install.sh [--server URL] [--version VERSION] [--role node|server] [--service-owner nix|mira] [--service-scope user|system] [--state-dir DIR] [--release-directory DIR]'
+      printf '%s\n' 'Usage: install.sh [--server URL] [--version VERSION] [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd] [--service-scope user|system] [--state-dir DIR] [--release-directory DIR]'
       exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -39,6 +41,7 @@ case "$(uname -m)" in
 esac
 case "$role" in node|server) ;; *) printf '%s\n' '--role must be node or server' >&2; exit 2 ;; esac
 case "$service_owner" in ""|nix|mira) ;; *) printf '%s\n' '--service-owner must be nix or mira' >&2; exit 2 ;; esac
+case "$service_manager" in ""|auto|systemd|procd) ;; *) printf '%s\n' '--service-manager must be auto, systemd, or procd' >&2; exit 2 ;; esac
 case "$service_scope" in ""|user|system) ;; *) printf '%s\n' '--service-scope must be user or system' >&2; exit 2 ;; esac
 case "$state_dir" in /*) ;; *) printf '%s\n' '--state-dir must be absolute' >&2; exit 2 ;; esac
 
@@ -75,6 +78,7 @@ package_dir="$stage/mira_${version}_linux_${architecture}"
 
 set -- install --state-dir "$state_dir" --role "$role"
 [ -n "$service_owner" ] && set -- "$@" --service-owner "$service_owner"
+[ -n "$service_manager" ] && set -- "$@" --service-manager "$service_manager"
 [ -n "$service_scope" ] && set -- "$@" --service-scope "$service_scope"
 [ -n "$server" ] && set -- "$@" --server-url "$server"
 if [ -z "$service_owner" ] && grep -Eiq '^(ID|ID_LIKE)=.*nixos' /etc/os-release 2>/dev/null && [ -r /dev/tty ]; then

@@ -42,7 +42,19 @@ func Doctor(ctx context.Context, stateDir string, dependencies Dependencies) Doc
 			report.Findings = append(report.Findings, Finding{Code: "service_definition_drift", Message: "installed service definition differs from install state"})
 		}
 	}
-	if state.Platform == "windows" {
+	if state.ServiceManager == ServiceManagerProcd {
+		if info, statErr := dependencies.Files.Stat(state.ServicePath); statErr != nil {
+			report.Findings = append(report.Findings, Finding{Code: "service_status_unreadable", Message: statErr.Error()})
+		} else if info.Mode()&0111 == 0 {
+			report.Findings = append(report.Findings, Finding{Code: "service_not_executable", Message: "Mira procd init script is not executable"})
+		}
+		if _, enabledErr := dependencies.Runner.Run(ctx, state.ServicePath, "enabled"); enabledErr != nil {
+			report.Findings = append(report.Findings, Finding{Code: "service_autostart_disabled", Message: "Mira procd service is not enabled at boot"})
+		}
+		if _, runningErr := dependencies.Runner.Run(ctx, state.ServicePath, "running"); runningErr != nil {
+			report.Findings = append(report.Findings, Finding{Code: "service_inactive", Message: "Mira Supervisor procd service is not running"})
+		}
+	} else if state.Platform == "windows" {
 		status, statusErr := readWindowsServiceStatus(ctx, dependencies, state.ServiceName)
 		if statusErr != nil {
 			report.Findings = append(report.Findings, Finding{Code: "service_status_unreadable", Message: statusErr.Error()})
@@ -139,7 +151,13 @@ func readCurrentVersion(files FileSystem, stateDir, platform string) (string, er
 
 func currentServiceDefinition(ctx context.Context, dependencies Dependencies, state InstallState) (string, error) {
 	if state.Platform == "linux" {
-		if state.ServiceOwner == ServiceOwnerMira {
+		if state.ServiceManager == ServiceManagerProcd {
+			if target, linkErr := dependencies.Files.Readlink(state.ServicePath); linkErr == nil {
+				return "", fmt.Errorf("%w: procd init script is a symbolic link to %s", ErrOwnershipConflict, target)
+			} else if os.IsNotExist(linkErr) {
+				return "", linkErr
+			}
+		} else if state.ServiceOwner == ServiceOwnerMira {
 			arguments := []string{}
 			if state.ServiceScope == ScopeUser {
 				arguments = append(arguments, "--user")

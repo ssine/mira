@@ -39,7 +39,8 @@ async function installRole(role) {
   await fs.mkdir(home, { recursive: true });
   const args = [path.join(root, "scripts/install.sh"), "--version", version,
     "--release-directory", releases, "--state-dir", state,
-    "--role", role, "--service-owner", "mira", "--service-scope", "user"];
+    "--role", role, "--service-owner", "mira", "--service-manager", "systemd",
+    "--service-scope", "user"];
   if (role === "node") args.push("--server", "http://127.0.0.1:9");
   command("sh", args, { env: environment });
 
@@ -48,6 +49,7 @@ async function installRole(role) {
   const installState = JSON.parse(await fs.readFile(path.join(state, "install-state.json"), "utf8"));
   assert.equal(installState.role, role);
   assert.equal(installState.serviceOwner, "mira");
+  assert.equal(installState.serviceManager, "systemd");
   assert.equal(installState.serviceScope, "user");
   const service = await fs.readFile(path.join(home, ".config", "systemd", "user", "mira.service"), "utf8");
   assert.match(service, / supervisor --state-dir /);

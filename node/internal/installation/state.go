@@ -29,6 +29,12 @@ func LoadState(files FileSystem, stateDir string) (InstallState, error) {
 	if err := json.Unmarshal(content, &state); err != nil {
 		return InstallState{}, fmt.Errorf("decode Mira install state: %w", err)
 	}
+	// Schema 1 originally predated an explicit Linux service-manager field.
+	// Such installations were all systemd-owned, so normalize them in memory
+	// before comparisons, repair planning, and the next state write.
+	if state.Platform == "linux" && state.ServiceManager == "" {
+		state.ServiceManager = ServiceManagerSystemd
+	}
 	if err := validateState(state); err != nil {
 		return InstallState{}, err
 	}
@@ -54,11 +60,20 @@ func validateState(state InstallState) error {
 	if state.Platform != "linux" && state.Platform != "windows" {
 		return fmt.Errorf("invalid install state platform %q", state.Platform)
 	}
+	if state.Platform == "linux" && state.ServiceManager != ServiceManagerSystemd && state.ServiceManager != ServiceManagerProcd {
+		return fmt.Errorf("invalid Linux install state service manager %q", state.ServiceManager)
+	}
+	if state.Platform == "windows" && state.ServiceManager != "" {
+		return fmt.Errorf("invalid Windows install state service manager %q", state.ServiceManager)
+	}
 	if state.ServiceOwner == ServiceOwnerNix && state.Platform != "linux" {
 		return fmt.Errorf("Nix service owner is only valid on Linux")
 	}
 	if (state.ServiceOwner == ServiceOwnerNix || state.Platform == "windows") && state.ServiceScope != ScopeSystem {
 		return fmt.Errorf("invalid user-scoped install state")
+	}
+	if state.ServiceManager == ServiceManagerProcd && (state.ServiceOwner != ServiceOwnerMira || state.Role != RoleNode || state.ServiceScope != ScopeSystem) {
+		return fmt.Errorf("invalid procd install state")
 	}
 	if !serviceNamePattern.MatchString(strings.TrimSuffix(state.ServiceName, ".service")) {
 		return fmt.Errorf("invalid install state service name %q", state.ServiceName)

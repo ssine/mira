@@ -17,6 +17,14 @@ const (
 	ServiceOwnerMira = supervisor.ServiceOwnerMira
 )
 
+type ServiceManager string
+
+const (
+	ServiceManagerAuto    ServiceManager = "auto"
+	ServiceManagerSystemd ServiceManager = "systemd"
+	ServiceManagerProcd   ServiceManager = "procd"
+)
+
 var (
 	ErrOwnershipConflict = errors.New("Mira installation ownership conflict")
 	ErrNixManualRemoval  = errors.New("Nix-owned Mira must be removed through its reviewed Nix configuration")
@@ -26,27 +34,30 @@ var (
 const installStateSchema = 1
 
 type InstallState struct {
-	SchemaVersion           int          `json:"schemaVersion"`
-	ServiceOwner            ServiceOwner `json:"serviceOwner"`
-	Role                    string       `json:"role"`
-	ServiceScope            string       `json:"serviceScope"`
-	Platform                string       `json:"platform"`
-	Version                 string       `json:"version"`
-	ServiceName             string       `json:"serviceName"`
-	ServicePath             string       `json:"servicePath,omitempty"`
-	ServiceDefinition       string       `json:"serviceDefinition"`
-	ServiceDefinitionSHA256 string       `json:"serviceDefinitionSha256"`
+	SchemaVersion           int            `json:"schemaVersion"`
+	ServiceOwner            ServiceOwner   `json:"serviceOwner"`
+	ServiceManager          ServiceManager `json:"serviceManager,omitempty"`
+	Role                    string         `json:"role"`
+	ServiceScope            string         `json:"serviceScope"`
+	Platform                string         `json:"platform"`
+	Version                 string         `json:"version"`
+	ServiceName             string         `json:"serviceName"`
+	ServicePath             string         `json:"servicePath,omitempty"`
+	ServiceDefinition       string         `json:"serviceDefinition"`
+	ServiceDefinitionSHA256 string         `json:"serviceDefinitionSha256"`
 }
 
 type PlanOptions struct {
-	StateDir     string
-	Version      string
-	Platform     string
-	ServiceOwner ServiceOwner
-	Role         string
-	ServiceScope string
+	StateDir       string
+	Version        string
+	Platform       string
+	ServiceOwner   ServiceOwner
+	ServiceManager ServiceManager
+	Role           string
+	ServiceScope   string
 
 	SystemdUnitPath    string
+	ProcdInitPath      string
 	NixSnippetPath     string
 	WindowsServiceName string
 	WindowsExecutable  string

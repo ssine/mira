@@ -337,6 +337,8 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   release checksums, refuse unrelated service replacement and avoid silently interrupting sessions.
 - Bootstrap scripts perform first install only. Never restore `scripts/install --update`; all later
   changes go through the running local Supervisor via `mira update`.
+- OpenWrt/FriendlyWrt may auto-select procd only for Mira-owned, system-scoped Node installs. Keep
+  `/etc/init.d/mira` pointed at `current/mira supervisor`; never add an installer-driven update path.
 - Nix and Mira service ownership are mutually exclusive for one state directory. Nix ownership may
   generate a reviewable module but must never run `nixos-rebuild` or mutate an external repository.
 - Windows PTY uses real ConPTY behind a build-tagged adapter. Test native Windows, not just cross

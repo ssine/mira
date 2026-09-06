@@ -21,18 +21,47 @@ import (
 
 type testFileSystem struct {
 	OSFileSystem
-	osRelease []byte
+	osRelease      []byte
+	openWrtRelease bool
+	procdHost      bool
 
 	mu      sync.Mutex
 	writes  []string
 	removes []string
 }
 
+type executableTestFileInfo struct {
+	name string
+}
+
+func (info executableTestFileInfo) Name() string  { return info.name }
+func (executableTestFileInfo) Size() int64        { return 0 }
+func (executableTestFileInfo) Mode() os.FileMode  { return 0755 }
+func (executableTestFileInfo) ModTime() time.Time { return time.Time{} }
+func (executableTestFileInfo) IsDir() bool        { return false }
+func (executableTestFileInfo) Sys() any           { return nil }
+
 func (files *testFileSystem) ReadFile(path string) ([]byte, error) {
 	if path == "/etc/os-release" && files.osRelease != nil {
 		return append([]byte(nil), files.osRelease...), nil
 	}
 	return files.OSFileSystem.ReadFile(path)
+}
+
+func (files *testFileSystem) Stat(path string) (os.FileInfo, error) {
+	available := false
+	switch path {
+	case "/etc/openwrt_release":
+		available = files.openWrtRelease
+	case "/etc/rc.common", "/sbin/procd":
+		available = files.procdHost
+	default:
+		return files.OSFileSystem.Stat(path)
+	}
+	if !available {
+		return nil, &os.PathError{Op: "stat", Path: path, Err: os.ErrNotExist}
+	}
+	return executableTestFileInfo{name: filepath.Base(path)}, nil
 }
 
 func (files *testFileSystem) AtomicWrite(path string, content []byte, mode os.FileMode) error {
@@ -132,6 +161,253 @@ func TestNixOSAllowsExplicitMiraOwnership(t *testing.T) {
 	}
 	if plan.State.ServiceOwner != ServiceOwnerMira || plan.DetectedNixOS != true {
 		t.Fatalf("unexpected explicit Mira-owned plan: %+v", plan)
+	}
+}
+
+func TestOpenWrtAutoSelectsProcdAndSupportsLifecycle(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("procd integration uses Unix filesystem semantics")
+	}
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "state user's")
+	initPath := filepath.Join(root, "init.d", "mira")
+	files := &testFileSystem{
+		osRelease: []byte("ID=openwrt\n"), openWrtRelease: true, procdHost: true,
+	}
+	plan, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+		Role: RoleNode, ProcdInitPath: initPath,
+	}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.State.ServiceManager != ServiceManagerProcd || plan.State.ServiceScope != ScopeSystem || plan.State.ServiceName != "mira" {
+		t.Fatalf("unexpected procd plan: %+v", plan.State)
+	}
+	definition := plan.State.ServiceDefinition
+	for _, expected := range []string{
+		"#!/bin/sh /etc/rc.common", "USE_PROCD=1", "current/mira' supervisor",
+		"--service-owner mira", "procd_set_param respawn 3600 3 0", "procd_set_param term_timeout 30",
+		`state user'"'"'s`,
+	} {
+		if !strings.Contains(definition, expected) {
+			t.Errorf("procd definition omitted %q:\n%s", expected, definition)
+		}
+	}
+	wantedInstall := []Command{
+		{Name: initPath, Args: []string{"enable"}},
+		{Name: initPath, Args: []string{"start"}},
+	}
+	if !reflect.DeepEqual(plan.Commands, wantedInstall) {
+		t.Fatalf("procd install commands=%v want=%v", plan.Commands, wantedInstall)
+	}
+
+	runner := &testRunner{}
+	dependencies := Dependencies{Files: files, Runner: runner}
+	if err := os.MkdirAll(filepath.Join(stateDir, "versions", "1.0.0"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("versions", "1.0.0"), filepath.Join(stateDir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), plan, dependencies, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(initPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0755 {
+		t.Fatalf("procd init mode=%v", info.Mode())
+	}
+	if report := Doctor(context.Background(), stateDir, dependencies); !report.Healthy {
+		t.Fatalf("fresh procd install is unhealthy: %+v", report)
+	}
+
+	if err := os.WriteFile(initPath, []byte("drifted\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(initPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	report := Doctor(context.Background(), stateDir, dependencies)
+	codes := map[string]bool{}
+	for _, finding := range report.Findings {
+		codes[finding.Code] = true
+	}
+	if !codes["service_definition_drift"] || !codes["service_not_executable"] {
+		t.Fatalf("procd doctor missed definition/mode drift: %+v", report)
+	}
+	baseline := len(runner.snapshot())
+	if _, err := Repair(context.Background(), plan, dependencies, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	repairCommands := runner.snapshot()[baseline:]
+	wantedRepair := []Command{
+		{Name: initPath, Args: []string{"enable"}},
+		{Name: initPath, Args: []string{"restart"}},
+	}
+	if !reflect.DeepEqual(repairCommands, wantedRepair) {
+		t.Fatalf("procd repair commands=%v want=%v", repairCommands, wantedRepair)
+	}
+	if info, err := os.Stat(initPath); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0755 {
+		t.Fatalf("repair did not restore executable mode: %v", info.Mode())
+	}
+
+	baseline = len(runner.snapshot())
+	if _, err := Uninstall(context.Background(), stateDir, ServiceOwnerMira, dependencies, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	uninstallCommands := runner.snapshot()[baseline:]
+	wantedUninstall := []Command{
+		{Name: initPath, Args: []string{"disable"}},
+		{Name: initPath, Args: []string{"stop"}},
+	}
+	if !reflect.DeepEqual(uninstallCommands, wantedUninstall) {
+		t.Fatalf("procd uninstall commands=%v want=%v", uninstallCommands, wantedUninstall)
+	}
+	for _, path := range []string{initPath, filepath.Join(stateDir, "install-state.json"), filepath.Join(stateDir, "service-owner")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Errorf("uninstall retained %s: %v", path, err)
+		}
+	}
+}
+
+func TestProcdDetectionOverrideAndConstraints(t *testing.T) {
+	stateDir := t.TempDir()
+	files := &testFileSystem{osRelease: []byte("ID=openwrt\n"), openWrtRelease: true, procdHost: true}
+
+	systemd, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+		Role: RoleNode, ServiceManager: ServiceManagerSystemd, SystemdUnitPath: filepath.Join(t.TempDir(), "mira.service"),
+	}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if systemd.State.ServiceManager != ServiceManagerSystemd || systemd.State.ServiceScope != ScopeUser {
+		t.Fatalf("explicit systemd override was not preserved: %+v", systemd.State)
+	}
+
+	for name, options := range map[string]PlanOptions{
+		"server role": {
+			StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+			Role: RoleServer, ServiceManager: ServiceManagerProcd,
+		},
+		"user scope": {
+			StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+			Role: RoleNode, ServiceManager: ServiceManagerProcd, ServiceScope: ScopeUser,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := BuildPlan(options, files); err == nil {
+				t.Fatalf("invalid procd plan unexpectedly succeeded: %+v", options)
+			}
+		})
+	}
+
+	missingProcd := &testFileSystem{osRelease: []byte("ID=openwrt\n"), openWrtRelease: true}
+	if _, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode,
+	}, missingProcd); err == nil || !strings.Contains(err.Error(), "/etc/rc.common") {
+		t.Fatalf("OpenWrt without procd prerequisites was not rejected: %v", err)
+	}
+}
+
+func TestSchemaOneLinuxStateWithoutManagerInfersSystemd(t *testing.T) {
+	stateDir := t.TempDir()
+	unitPath := filepath.Join(t.TempDir(), "mira.service")
+	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
+	plan, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+		Role: RoleNode, ServiceManager: ServiceManagerSystemd, SystemdUnitPath: unitPath,
+	}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := encodeState(plan.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content = []byte(strings.Replace(string(content), "  \"serviceManager\": \"systemd\",\n", "", 1))
+	if err := os.MkdirAll(stateDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := files.AtomicWrite(filepath.Join(stateDir, "install-state.json"), content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadState(files, stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.ServiceManager != ServiceManagerSystemd {
+		t.Fatalf("legacy manager=%q want systemd", loaded.ServiceManager)
+	}
+}
+
+func TestProcdDoctorReportsDisabledAndInactive(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("procd integration uses Unix filesystem semantics")
+	}
+	stateDir := t.TempDir()
+	initPath := filepath.Join(t.TempDir(), "mira")
+	files := &testFileSystem{osRelease: []byte("ID=openwrt\n"), procdHost: true}
+	plan, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+		Role: RoleNode, ServiceManager: ServiceManagerProcd, ProcdInitPath: initPath,
+	}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &testRunner{}
+	dependencies := Dependencies{Files: files, Runner: runner}
+	if _, err := Install(context.Background(), plan, dependencies, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	runner.handle = func(command Command) (string, error) {
+		if command.Name == initPath && (slices.Contains(command.Args, "enabled") || slices.Contains(command.Args, "running")) {
+			return "", errors.New("not active")
+		}
+		return "", nil
+	}
+	report := Doctor(context.Background(), stateDir, dependencies)
+	codes := map[string]bool{}
+	for _, finding := range report.Findings {
+		codes[finding.Code] = true
+	}
+	if !codes["service_autostart_disabled"] || !codes["service_inactive"] {
+		t.Fatalf("procd status drift not reported: %+v", report)
+	}
+}
+
+func TestProcdInstallRefusesSymlinkService(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("procd integration uses Unix filesystem semantics")
+	}
+	stateDir := t.TempDir()
+	serviceDir := t.TempDir()
+	initPath := filepath.Join(serviceDir, "mira")
+	target := filepath.Join(serviceDir, "other")
+	files := &testFileSystem{osRelease: []byte("ID=openwrt\n"), procdHost: true}
+	plan, err := BuildPlan(PlanOptions{
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
+		Role: RoleNode, ServiceManager: ServiceManagerProcd, ProcdInitPath: initPath,
+	}, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(plan.State.ServiceDefinition), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, initPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), plan, Dependencies{Files: files, Runner: &testRunner{}}, ApplyOptions{}); !errors.Is(err, ErrOwnershipConflict) {
+		t.Fatalf("symlink service collision error=%v", err)
+	}
+	if targetValue, err := os.Readlink(initPath); err != nil || targetValue != target {
+		t.Fatalf("symlink service was replaced: target=%q err=%v", targetValue, err)
 	}
 }
 
