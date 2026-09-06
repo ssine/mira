@@ -364,9 +364,18 @@ function acceptThreadActivity(thread, checkedAt = Date.now()) {
   const projection = agent.threads.find(item => item.threadId === thread.threadId);
   if (projection && Object.hasOwn(thread, "model")) projection.model = thread.model;
   const current = threadActivity(thread.threadId);
-  if (["idle", "interrupted", "failed"].includes(current.state) && current.turnId &&
+  if (current.state === "running" && current.turnId) {
+    // A reload discards the page-local turn map, while PostgreSQL still knows
+    // that this turn is running. Rehydrate it from the canonical projection so
+    // the composer cannot offer another send in place of the stop control.
+    const previousTurnId = agent.activeTurns.get(thread.threadId);
+    if (previousTurnId && previousTurnId !== current.turnId) agent.turnThreads.delete(previousTurnId);
+    agent.activeTurns.set(thread.threadId, current.turnId);
+    agent.turnThreads.set(current.turnId, thread.threadId);
+  } else if (["idle", "interrupted", "failed"].includes(current.state) && current.turnId &&
     agent.activeTurns.get(thread.threadId) === current.turnId) {
     agent.activeTurns.delete(thread.threadId);
+    agent.turnThreads.delete(current.turnId);
     agent.turnTimings.set(current.turnId, { ...agent.turnTimings.get(current.turnId), completedAt: Date.now() });
   }
 }
