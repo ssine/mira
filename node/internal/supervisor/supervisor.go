@@ -473,7 +473,10 @@ func (supervisor *Supervisor) prepareCandidate(ctx context.Context, version, des
 	if err := supervisor.config.Validator.Validate(ctx, staged); err != nil {
 		return Candidate{}, fmt.Errorf("validate Mira %s: %w", version, err)
 	}
-	relative, err := filepath.Rel(staging, staged.Executable)
+	// EvalSymlinks may canonicalize a Windows runner path (for example drive or
+	// directory casing). Compute the relocation from the equally canonicalized
+	// candidate directory instead of mixing it with the original temp path.
+	relative, err := filepath.Rel(staged.Directory, staged.Executable)
 	if err != nil || relative == "." || filepath.IsAbs(relative) || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
 		return Candidate{}, fmt.Errorf("candidate executable cannot be relocated safely")
 	}
