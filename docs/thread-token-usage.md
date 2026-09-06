@@ -44,9 +44,14 @@ invalidate the caches and projection rebuilds preserve their inputs.
 The composer reads `config/read` with the project's cwd and every page of `model/list` on a short,
 read-only App Server connection. It shows the effective configured default (or the catalog default
 when no model is configured), including configured models absent from the catalog. Model fields alone
-are cached by Node/cwd for five minutes. Browsing the picker never starts/resumes a thread. The explicit
-refresh control can prepare a stopped runtime. A selection applies to `thread/start` and the next
-`turn/start`; it does not change the Node's config. Node/project changes discard stale results.
+are cached by Node/cwd for five minutes. Browsing the picker never starts/resumes a thread. Its first
+row is reserved for the full-width message input; attachment, model, advertised reasoning effort and
+send/stop controls share a compact second row. Model and effort options use styled, keyboard-accessible
+popover menus instead of platform-native selects. A model selection applies to `thread/start` and the
+next `turn/start`; effort uses the new thread's config and `turn/start.effort`, which also updates later
+turns. Neither changes the Node's saved config. Each compatible Node card owns the low-frequency
+"刷新模型" action, which invalidates that Node's browser catalog and can prepare its stopped runtime.
+Node/project changes discard stale responses.
 
 `GET /v1/codex/threads/:id?storeId=personal&includeCost=1` opts into `costEstimate`; ordinary list reads
 do not scan cost history. The sidebar requests the same opt-in detail endpoint only for visible rows,

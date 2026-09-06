@@ -168,18 +168,30 @@
               <div id="conversationDropZone" class="conversation-drop-zone">
                 <div id="conversationAttachments" class="conversation-attachments hidden" aria-live="polite"></div>
                 <div class="composer-input-row">
-                  <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
                   <textarea id="conversationInput" rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
+                </div>
+                <div class="composer-toolbar">
+                  <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
+                  <div class="composer-choice composer-model-choice">
+                    <button id="conversationModelSelect" class="composer-choice-toggle" type="button" aria-label="本轮模型" aria-haspopup="listbox" aria-expanded="false" aria-controls="conversationModelMenu" disabled>
+                      <span id="conversationModelLabel" class="composer-choice-label">正在读取模型…</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6.5 3 3 3-3"></path></svg>
+                    </button>
+                    <div id="conversationModelMenu" class="composer-choice-menu composer-model-menu" popover="auto" role="listbox" aria-label="选择模型"></div>
+                  </div>
+                  <div class="composer-choice composer-effort-choice">
+                    <button id="conversationEffortSelect" class="composer-choice-toggle" type="button" aria-label="思考强度" aria-haspopup="listbox" aria-expanded="false" aria-controls="conversationEffortMenu" disabled>
+                      <span id="conversationEffortLabel" class="composer-choice-label">思考强度</span>
+                      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6.5 3 3 3-3"></path></svg>
+                    </button>
+                    <div id="conversationEffortMenu" class="composer-choice-menu composer-effort-menu" popover="auto" role="listbox" aria-label="选择思考强度"></div>
+                  </div>
                   <div class="composer-submit-slot">
                     <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>
                     <button id="agentInterrupt" class="composer-icon composer-stop hidden" type="button" aria-label="停止 Agent" title="停止 Agent"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="5" y="5" width="10" height="10" rx="1"></rect></svg></button>
                   </div>
                 </div>
-                <div class="composer-model-row">
-                  <select id="conversationModelSelect" aria-label="本轮模型" title="选择本轮使用的模型" disabled><option value="">正在读取模型…</option></select>
-                  <button id="conversationModelRefresh" type="button" class="chat-icon-button" aria-label="刷新可用模型" title="刷新可用模型">↻</button>
-                  <span id="conversationModelStatus" class="visually-hidden" role="status"></span>
-                </div>
+                <span id="conversationModelStatus" class="visually-hidden" role="status"></span>
               </div>
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
               <span id="conversationHint" class="visually-hidden" role="status" aria-live="polite">可粘贴或拖入图片与文件，上传支持取消</span>

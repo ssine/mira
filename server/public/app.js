@@ -9,7 +9,7 @@ import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.j
 import { AccountSidebar } from "/account-status.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages, mergeImages } from "/trace-images.js";
-import { readModelCatalog } from "/thread-model.js";
+import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -221,6 +221,8 @@ const agent = {
   modelCatalogKey: null,
   modelCatalogJob: null,
   modelCatalogError: "",
+  effortChoice: null,
+  threadReasoningEffort: null,
 };
 
 const transcriptPageSize = 60;
@@ -939,6 +941,12 @@ function renderNodes(nodes) {
     const actions = element("div", "node-actions");
     if (node.approvalStatus === "approved") {
       actions.append(actionButton("打开工作台", "workspace", node.nodeId, "approve"));
+      if (node.capabilities?.appServer === true) {
+        const refreshModels = actionButton("刷新模型", "refresh-models", node.nodeId, "secondary");
+        refreshModels.disabled = node.status !== "online";
+        refreshModels.title = node.status === "online" ? "刷新此节点的 Codex 模型目录" : "节点离线，无法刷新模型";
+        actions.append(refreshModels);
+      }
       actions.append(actionButton("撤销设备", "revoke", node.nodeId, "danger"));
     }
     card.append(top, metadata, capabilities, actions);
@@ -973,6 +981,56 @@ async function loadDashboard() {
   renderEnrollments(pending);
   renderNodes(allNodes);
   renderAudit(audit.data ?? []);
+}
+
+async function refreshNodeModels(nodeId) {
+  let node = await api(`/v1/nodes/${nodeId}`);
+  if (node.status !== "online" || node.capabilities?.appServer !== true) throw new Error("此节点当前无法读取 Codex 模型");
+  dashboardNodes.set(node.nodeId, node);
+  if (node.reportedAppServer?.status !== "running") {
+    await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+    const deadline = Date.now() + (node.capabilities?.codexRuntimeDownload ? 21 * 60_000 : 30_000);
+    let lastError = "", errorSince = 0;
+    while (Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, node.reportedAppServer?.runtimePreparing ? 2_000 : 500));
+      node = await api(`/v1/nodes/${nodeId}`);
+      dashboardNodes.set(node.nodeId, node);
+      if (node.reportedAppServer?.status === "running") break;
+      const currentError = node.reportedAppServer?.runtimePreparing ? "" : node.reportedAppServer?.lastError ?? "";
+      if (currentError !== lastError) { lastError = currentError; errorSince = currentError ? Date.now() : 0; }
+      else if (currentError && Date.now() - errorSince > 5_000) throw new Error(currentError);
+    }
+    if (node.reportedAppServer?.status !== "running") throw new Error("App Server 启动超时");
+  }
+  const selectedHere = $("#agentRuntimeNode").value === nodeId;
+  const cwd = selectedHere ? $("#conversationCwd").value.trim() : node.desiredAppServer?.defaultCwd ?? "";
+  const key = JSON.stringify([nodeId, cwd]);
+  invalidateModelCatalog(nodeId);
+  const composerJob = selectedHere && conversationModelKey() === key ? { key } : null;
+  if (composerJob) {
+    agent.modelCatalog = null;
+    agent.modelCatalogError = "";
+    agent.modelCatalogKey = key;
+    agent.modelCatalogJob = composerJob;
+    renderConversationModel();
+  }
+  try {
+    const request = readModelCatalog(nodeId, cwd, { refresh: true });
+    if (composerJob) composerJob.promise = request;
+    const catalog = await request;
+    if (composerJob && conversationModelKey() === key && agent.modelCatalogJob === composerJob) {
+      agent.modelCatalog = catalog;
+      agent.modelCatalogLoadedAt = Date.now();
+      agent.modelCatalogError = "";
+    }
+    toast(`${node.hostname} 的模型目录已刷新 · ${catalog.models.length} 个模型`);
+  } catch (error) {
+    if (composerJob && conversationModelKey() === key && agent.modelCatalogJob === composerJob) agent.modelCatalogError = error.message;
+    throw error;
+  } finally {
+    if (agent.modelCatalogJob === composerJob) agent.modelCatalogJob = null;
+    renderConversationModel();
+  }
 }
 
 async function decide(id, action) {
@@ -2090,28 +2148,167 @@ function selectedConversationModel() {
     (agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog?.defaultModel : null) || null;
 }
 
+const reasoningEffortLabels = {
+  minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", ultra: "极高",
+};
+
+function modelCatalogForConversation() {
+  return agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog : null;
+}
+
+function conversationModelDefinition(model = selectedConversationModel()) {
+  return modelCatalogForConversation()?.models.find(item => item.model === model) ?? null;
+}
+
+function conversationEffortOptions() {
+  const definition = conversationModelDefinition();
+  const options = [...(definition?.supportedReasoningEfforts ?? [])];
+  const known = new Set(options.map(option => option.reasoningEffort));
+  for (const value of [agent.effortChoice, agent.threadReasoningEffort,
+    modelCatalogForConversation()?.configuredReasoningEffort, definition?.defaultReasoningEffort]) {
+    if (typeof value === "string" && value && !known.has(value)) {
+      options.push({ reasoningEffort: value, description: "节点或当前会话使用的强度" });
+      known.add(value);
+    }
+  }
+  return options;
+}
+
+function selectedConversationEffort() {
+  const catalog = modelCatalogForConversation(), definition = conversationModelDefinition();
+  const supported = new Set(conversationEffortOptions().map(option => option.reasoningEffort));
+  for (const value of [agent.effortChoice, agent.threadReasoningEffort,
+    selectedConversationModel() === catalog?.defaultModel ? catalog?.configuredReasoningEffort : null,
+    definition?.defaultReasoningEffort]) {
+    if (typeof value === "string" && value && supported.has(value)) return value;
+  }
+  return null;
+}
+
+function effortLabel(value) {
+  return reasoningEffortLabels[value] ?? value;
+}
+
+function renderModelChoices(menu, models, selected, defaultModel) {
+  menu.replaceChildren();
+  for (const model of models) {
+    const option = element("button", "composer-choice-option");
+    option.type = "button";
+    option.role = "option";
+    option.dataset.modelChoice = model.model;
+    option.setAttribute("aria-selected", String(model.model === selected));
+    const detail = [model.model !== model.displayName ? model.model : "", model.description,
+      model.model === defaultModel ? "默认" : ""].filter(Boolean).join(" · ");
+    option.append(element("strong", "", model.displayName || model.model));
+    if (detail) option.append(element("small", "", detail));
+    option.addEventListener("click", () => {
+      const previousEffort = selectedConversationEffort();
+      agent.modelChoice = model.model;
+      const next = conversationModelDefinition(model.model)?.supportedReasoningEfforts ?? [];
+      agent.effortChoice = next.some(item => item.reasoningEffort === previousEffort) ? previousEffort : null;
+      menu.hidePopover();
+      renderConversationModel();
+    });
+    menu.append(option);
+  }
+}
+
+function renderEffortChoices(menu, efforts, selected) {
+  menu.replaceChildren();
+  for (const effort of efforts) {
+    const option = element("button", "composer-choice-option");
+    option.type = "button";
+    option.role = "option";
+    option.dataset.effortChoice = effort.reasoningEffort;
+    option.setAttribute("aria-selected", String(effort.reasoningEffort === selected));
+    option.append(element("strong", "", effortLabel(effort.reasoningEffort)));
+    if (effort.description) option.append(element("small", "", effort.description));
+    option.addEventListener("click", () => {
+      agent.effortChoice = effort.reasoningEffort;
+      menu.hidePopover();
+      renderConversationModel();
+    });
+    menu.append(option);
+  }
+}
+
 function renderConversationModel() {
-  const select = $("#conversationModelSelect");
-  const catalog = agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog : null;
+  const select = $("#conversationModelSelect"), modelMenu = $("#conversationModelMenu");
+  const effortSelect = $("#conversationEffortSelect"), effortMenu = $("#conversationEffortMenu");
+  const catalog = modelCatalogForConversation();
   const model = selectedConversationModel();
-  const options = [...new Set([model, ...(catalog?.models ?? []).map(item => item.model)].filter(Boolean))];
+  const models = [...(catalog?.models ?? [])];
+  if (model && !models.some(item => item.model === model)) models.unshift({ model, displayName: model, description: "当前会话使用的模型", supportedReasoningEfforts: [] });
   const waiting = Boolean(agent.modelCatalogJob?.key === conversationModelKey());
-  const placeholder = waiting ? "正在读取模型…" : agent.threadId ? "模型未记录 · 点击刷新" : "节点默认 · 点击读取";
-  const signature = JSON.stringify([options, model, catalog?.defaultModel, placeholder, agent.threadId]);
+  const placeholder = waiting ? "正在读取模型…" : agent.threadId ? "模型未记录" : "节点默认模型";
+  const efforts = conversationEffortOptions(), effort = selectedConversationEffort();
+  const signature = JSON.stringify([models, model, catalog?.defaultModel, placeholder, efforts, effort]);
   if (select.dataset.signature !== signature) {
-    select.replaceChildren();
-    if (!model) select.append(new Option(placeholder, ""));
-    for (const name of options) select.append(new Option(`${name}${!agent.threadId && name === catalog?.defaultModel ? " · 默认" : ""}`, name));
+    renderModelChoices(modelMenu, models, model, catalog?.defaultModel);
+    renderEffortChoices(effortMenu, efforts, effort);
     select.value = model || "";
+    effortSelect.value = effort || "";
     select.dataset.signature = signature;
   }
   const busy = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise || agent.activeTurns.has(agent.threadId));
   select.disabled = busy || !catalog?.models.length;
   const error = agent.modelCatalogError;
-  select.title = error || (agent.threadId ? "选择下一轮使用的模型" : "默认值来自此运行节点与项目目录的 Codex 配置");
-  $("#conversationModelRefresh").disabled = busy || waiting || !$("#agentRuntimeNode").value;
-  $("#conversationModelRefresh").title = error || "刷新可用模型";
-  $("#conversationModelStatus").textContent = error || (waiting ? "正在读取模型" : model ? `本轮模型：${model}` : placeholder);
+  $("#conversationModelLabel").textContent = conversationModelDefinition()?.displayName || model || placeholder;
+  select.title = error || (agent.threadId ? "选择下一轮使用的模型" : "来自运行节点与项目目录的 Codex 配置");
+  effortSelect.disabled = busy || !efforts.length;
+  $("#conversationEffortLabel").textContent = effort ? `思考 · ${effortLabel(effort)}` : "思考强度";
+  effortSelect.title = effort ? `思考强度：${effortLabel(effort)}` : "当前模型未提供思考强度";
+  if (select.disabled && modelMenu.matches(":popover-open")) modelMenu.hidePopover();
+  if (effortSelect.disabled && effortMenu.matches(":popover-open")) effortMenu.hidePopover();
+  $("#conversationModelStatus").textContent = error || (waiting ? "正在读取模型" : model
+    ? `本轮模型：${model}${effort ? `；思考强度：${effortLabel(effort)}` : ""}` : placeholder);
+}
+
+function positionComposerChoiceMenu(menu, toggle) {
+  const viewport = window.visualViewport;
+  const viewportLeft = viewport?.offsetLeft ?? 0, viewportTop = viewport?.offsetTop ?? 0;
+  const viewportWidth = viewport?.width ?? innerWidth, viewportHeight = viewport?.height ?? innerHeight;
+  menu.style.visibility = "hidden";
+  menu.showPopover();
+  const trigger = toggle.getBoundingClientRect(), bounds = menu.getBoundingClientRect();
+  const left = Math.max(viewportLeft + 8, Math.min(trigger.left, viewportLeft + viewportWidth - bounds.width - 8));
+  const above = trigger.top - bounds.height - 6;
+  const below = trigger.bottom + 6;
+  const top = above >= viewportTop + 8 ? above : Math.min(below, viewportTop + viewportHeight - bounds.height - 8);
+  menu.style.left = `${left}px`;
+  menu.style.top = `${Math.max(viewportTop + 8, top)}px`;
+  menu.style.visibility = "";
+}
+
+function installComposerChoiceMenu(toggle, menu) {
+  toggle.addEventListener("click", () => {
+    if (menu.matches(":popover-open")) menu.hidePopover();
+    else positionComposerChoiceMenu(menu, toggle);
+  });
+  toggle.addEventListener("keydown", event => {
+    if (!["ArrowDown", "ArrowUp"].includes(event.key)) return;
+    event.preventDefault();
+    if (!menu.matches(":popover-open")) positionComposerChoiceMenu(menu, toggle);
+    const options = [...menu.querySelectorAll(".composer-choice-option:not(:disabled)")];
+    (event.key === "ArrowUp" ? options.at(-1) : options.find(option => option.getAttribute("aria-selected") === "true") ?? options[0])?.focus();
+  });
+  menu.addEventListener("toggle", event => toggle.setAttribute("aria-expanded", String(event.newState === "open")));
+  menu.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      menu.hidePopover();
+      toggle.focus();
+      return;
+    }
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const options = [...menu.querySelectorAll(".composer-choice-option:not(:disabled)")];
+    const index = options.indexOf(document.activeElement);
+    const next = event.key === "Home" ? 0 : event.key === "End" ? options.length - 1
+      : (index + (event.key === "ArrowUp" ? -1 : 1) + options.length) % options.length;
+    options[next]?.focus();
+    event.preventDefault();
+  });
 }
 
 async function loadConversationModels({ refresh = false } = {}) {
@@ -4311,6 +4508,7 @@ async function restoreAgentThread(threadId, socket) {
     agent.modelChoice = result.model;
     if (currentProjection) currentProjection.model = result.model;
   }
+  agent.threadReasoningEffort = typeof result.reasoningEffort === "string" ? result.reasoningEffort : null;
   $("#conversationCwd").value = resumedCwd ?? "";
   if (result.thread.status?.type === "active" && agent.liveRevision === revision && !agent.activeTurns.has(threadId)) agent.activeTurns.set(threadId, null);
   syncActiveTurnUi();
@@ -4357,6 +4555,8 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (updateRoute) writeBrowserRoute("agent", threadId);
   const epoch = ++agent.selectionEpoch;
   agent.modelChoice = null;
+  agent.effortChoice = null;
+  agent.threadReasoningEffort = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
   clearTimeout(agent.reconnectTimer);
@@ -4431,6 +4631,8 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   agent.selectionEpoch++;
   agent.threadId = null;
   agent.modelChoice = null;
+  agent.effortChoice = null;
+  agent.threadReasoningEffort = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
   agent.newThreadRequestId = null;
@@ -4593,6 +4795,7 @@ function addComposerFiles(files) {
 
 async function sendAgentMessage(text, attachments = [], progress = null) {
   const requestedModel = selectedConversationModel();
+  const requestedEffort = selectedConversationEffort();
   updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
   agent.connectionWanted = true;
   agent.resumeRequestedThreadId = agent.threadId;
@@ -4610,6 +4813,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       ...(requestedModel ? { model: requestedModel } : {}),
+      ...(requestedEffort ? { config: { model_reasoning_effort: requestedEffort } } : {}),
     };
     const cwd = $("#conversationCwd").value.trim();
     if (cwd) params.cwd = cwd;
@@ -4634,6 +4838,8 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     const startedCwd = started.cwd ?? cwd;
     setConversationMeta(startedCwd, started.model);
     agent.modelChoice = requestedModel || started.model || null;
+    agent.threadReasoningEffort = typeof started.reasoningEffort === "string" ? started.reasoningEffort : null;
+    agent.effortChoice = requestedEffort || agent.threadReasoningEffort;
     $("#conversationCwd").value = startedCwd ?? "";
     const summary = {
       threadId: agent.threadId,
@@ -4673,6 +4879,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       input: prepared.inputs,
       approvalPolicy: "never",
       ...(requestedModel ? { model: requestedModel } : {}),
+      ...(requestedEffort ? { effort: requestedEffort } : {}),
     }, 120_000);
   } catch (error) {
     if (optimistic.dataset.pendingUser === "true") optimistic.remove();
@@ -4684,6 +4891,10 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
   if (requestedModel) {
     agent.modelChoice = requestedModel;
     if (currentAgentThread()) currentAgentThread().model = requestedModel;
+  }
+  if (requestedEffort) {
+    agent.effortChoice = requestedEffort;
+    agent.threadReasoningEffort = requestedEffort;
   }
   // turn/start can accept input into an already-running turn, without emitting
   // another turn/started. The RPC acknowledgement ends submission in both cases.
@@ -4858,6 +5069,8 @@ $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch(
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
   agent.modelChoice = null;
+  agent.effortChoice = null;
+  agent.threadReasoningEffort = null;
   syncAccountSidebar();
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
@@ -4871,17 +5084,12 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   void loadConversationModels();
 });
 
-$("#conversationModelSelect").addEventListener("change", () => {
-  agent.modelChoice = $("#conversationModelSelect").value || null;
-  renderConversationModel();
-});
-$("#conversationModelRefresh").addEventListener("click", async () => {
-  try {
-    const node = dashboardNodes.get($("#agentRuntimeNode").value);
-    if (node?.reportedAppServer?.status !== "running") await startAgentRuntime();
-    await loadConversationModels({ refresh: true });
-    if (agent.modelCatalogError) toast(agent.modelCatalogError);
-  } catch (error) { toast(error.message); }
+installComposerChoiceMenu($("#conversationModelSelect"), $("#conversationModelMenu"));
+installComposerChoiceMenu($("#conversationEffortSelect"), $("#conversationEffortMenu"));
+window.addEventListener("resize", () => {
+  for (const menu of [$("#conversationModelMenu"), $("#conversationEffortMenu")]) {
+    if (menu.matches(":popover-open")) menu.hidePopover();
+  }
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -5330,6 +5538,7 @@ document.addEventListener("click", (event) => {
   let task;
   if (button.dataset.action === "revoke") task = revoke(button.dataset.id);
   else if (button.dataset.action === "workspace") task = openWorkspace(button.dataset.id);
+  else if (button.dataset.action === "refresh-models") task = refreshNodeModels(button.dataset.id);
   else task = decide(button.dataset.id, button.dataset.action);
   task.catch((error) => toast(error.message)).finally(() => { button.disabled = false; });
 });
