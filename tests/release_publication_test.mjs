@@ -42,7 +42,11 @@ process.stdout.write(status || "404");
 import fs from "node:fs";
 const args = process.argv.slice(2);
 if (process.env.MOCK_GH_LOG) fs.appendFileSync(process.env.MOCK_GH_LOG, JSON.stringify(args) + "\\n");
-if (args[0] === "api") {
+if (args[0] === "api" && args.at(-1).includes("/releases?per_page=100")) {
+  const created = process.env.MOCK_CREATED_RELEASE_FILE && fs.existsSync(process.env.MOCK_CREATED_RELEASE_FILE);
+  const body = created ? process.env.MOCK_RELEASES_JSON_AFTER_CREATE : process.env.MOCK_RELEASES_JSON;
+  process.stdout.write((body || "[[]]").replaceAll("__COMMIT__", process.env.MOCK_COMMIT || ""));
+} else if (args[0] === "api") {
   process.stdout.write((process.env.MOCK_RECORDED_DIGEST || "") + "\\n");
 } else if (args[0] === "release" && args[1] === "create") {
   fs.writeFileSync(process.env.MOCK_CREATED_RELEASE_FILE, "created\\n");
@@ -123,7 +127,9 @@ function releaseEnvironment(fakeBin, temporary, overrides = {}) {
     MOCK_GH_LOG: path.join(temporary, "gh.log"),
     MOCK_RELEASE_STATUS: "404",
     MOCK_RELEASE_JSON: "{}",
-    MOCK_RELEASE_STATUS_AFTER_CREATE: "200",
+    MOCK_RELEASE_STATUS_AFTER_CREATE: "404",
+    MOCK_RELEASES_JSON: "[[]]",
+    MOCK_RELEASES_JSON_AFTER_CREATE: "[[]]",
     MOCK_LATEST_STATUS: "404",
     MOCK_LATEST_JSON: "{}",
     ...overrides,
@@ -153,13 +159,31 @@ test("initial publication creates a commit-bound draft and tag", async () => {
   const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-release-initial-"));
   try {
     const fixture = await runState(temporary, "none", "publish", {
-      MOCK_RELEASE_JSON_AFTER_CREATE: releaseJSON({ commit: "__COMMIT__", draft: true }),
+      MOCK_RELEASES_JSON_AFTER_CREATE: JSON.stringify([[
+        JSON.parse(releaseJSON({ commit: "__COMMIT__", draft: true })),
+      ]]),
     });
     assert.equal(fixture.result.status, 0, fixture.result.stderr);
     const fields = outputFields(await fs.readFile(fixture.output, "utf8"));
     assert.equal(fields.release_state, "draft");
     assert.equal(fields.recorded_digest, "");
     assert.equal(command("git", ["--git-dir", fixture.remote, "rev-parse", `refs/tags/v${version}`]), fixture.head);
+  } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+});
+
+test("an untagged acceptance draft is found through the release listing", async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-release-draft-retry-"));
+  try {
+    const fixture = await runState(temporary, "none", "draft", {
+      MOCK_RELEASES_JSON: JSON.stringify([[
+        JSON.parse(releaseJSON({ commit: "__COMMIT__", draft: true })),
+      ]]),
+    });
+    assert.equal(fixture.result.status, 0, fixture.result.stderr);
+    const fields = outputFields(await fs.readFile(fixture.output, "utf8"));
+    assert.equal(fields.release_state, "draft");
+    const calls = (await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(calls.some((args) => args[0] === "release" && args[1] === "create"), false);
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 });
 
@@ -188,7 +212,8 @@ test("a conflicting remote version tag fails before creating a release", async (
     const fixture = await runState(temporary, "conflict", "publish");
     assert.notEqual(fixture.result.status, 0);
     assert.match(fixture.result.stderr, /Remote tag .* points to .* expected/);
-    assert.equal(await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8").catch(() => ""), "");
+    const calls = (await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(calls.some((args) => args[0] === "release" && args[1] === "create"), false);
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 });
 
@@ -203,7 +228,22 @@ test("an older release cannot move latest backward", async () => {
     });
     assert.notEqual(fixture.result.status, 0);
     assert.match(fixture.result.stderr, new RegExp(`Refusing to move latest backward from v${newer.replaceAll(".", "\\.")}`));
-    assert.equal(await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8").catch(() => ""), "");
+    const calls = (await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(calls.some((args) => args[0] === "release" && args[1] === "create"), false);
+  } finally { await fs.rm(temporary, { recursive: true, force: true }); }
+});
+
+test("duplicate releases for one tag fail closed", async () => {
+  const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-release-duplicate-"));
+  try {
+    const release = JSON.parse(releaseJSON({ commit: "__COMMIT__", draft: true }));
+    const fixture = await runState(temporary, "none", "draft", {
+      MOCK_RELEASES_JSON: JSON.stringify([[release, { ...release, id: 2 }]]),
+    });
+    assert.notEqual(fixture.result.status, 0);
+    assert.match(fixture.result.stderr, /Multiple GitHub releases use tag/);
+    const calls = (await fs.readFile(fixture.env.MOCK_GH_LOG, "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(calls.some((args) => args[0] === "release" && args[1] === "create"), false);
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 });
 

@@ -33,7 +33,33 @@ github_json() {
 }
 
 release_json() {
-  github_json "releases/tags/$1" "release $1" "$2"
+  local tag=$1 output=$2 status releases matches count
+  status=$(github_json "releases/tags/$tag" "release $tag" "$output")
+  if [[ "$status" == 200 ]]; then
+    echo 200
+    return
+  fi
+
+  # GitHub's release-by-tag endpoint omits drafts whose git tag has not been
+  # created yet. Acceptance drafts are intentionally created before the tag,
+  # so fall back to the authenticated release listing and require one exact
+  # match. This also makes a failed acceptance run safe to retry.
+  releases="${output}.releases"
+  matches="${output}.matches"
+  gh api --paginate --slurp "repos/$repo/releases?per_page=100" >"$releases"
+  jq --arg tag "$tag" '[.[][] | select(.tag_name == $tag)]' "$releases" >"$matches"
+  count=$(jq 'length' "$matches")
+  case "$count" in
+    0) echo 404 ;;
+    1)
+      jq '.[0]' "$matches" >"$output"
+      echo 200
+      ;;
+    *)
+      echo "Multiple GitHub releases use tag $tag" >&2
+      exit 1
+      ;;
+  esac
 }
 
 decimal_less() {
