@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { storageRowsMigration } from "./storage-rows-migration.mjs";
 import { threadReadStateMigration } from "./thread-read-state-migration.mjs";
 
+import { accountHistoryMigration } from "./account-history-migration.mjs";
+
 const migrations = [
   {
     version: 1,
@@ -547,6 +549,7 @@ const migrations = [
       WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|task_complete|turn_complete|turn_aborted|error)"';`,
   },
   { version: 19, name: "shared-web-thread-read-positions", sql: threadReadStateMigration },
+  { version: 20, name: "account-quota-history", sql: accountHistoryMigration },
 ];
 
 export async function initializeDatabase(pool, { throughVersion = Infinity } = {}) {

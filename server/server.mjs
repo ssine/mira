@@ -14,6 +14,7 @@ import {
   scanCodexSessions,
 } from "./codex-session-import.mjs";
 import { currentSchemaVersion, initializeDatabase } from "./db.mjs";
+import { accountHistory, startAccountSampler, historyRanges } from "./account-history.mjs";
 import { dispatchDynamicTool, dynamicToolSpecs } from "./dynamic-tools.mjs";
 import { NodeChannel } from "./node-channel.mjs";
 import { SSHRelay } from "./ssh-relay.mjs";
@@ -42,6 +43,8 @@ const staticAssets = new Map([
   ["/", [path.join(publicDirectory, "index.html"), "text/html; charset=utf-8"]],
   ["/app.js", [path.join(publicDirectory, "app.js"), "text/javascript; charset=utf-8"]],
   ["/thread-title.js", [path.join(publicDirectory, "thread-title.js"), "text/javascript; charset=utf-8"]],
+  ["/account-history.js", [path.join(publicDirectory, "account-history.js"), "text/javascript; charset=utf-8"]],
+  ["/account-quota.js", [path.join(publicDirectory, "account-quota.js"), "text/javascript; charset=utf-8"]],
   ["/account-status.js", [path.join(publicDirectory, "account-status.js"), "text/javascript; charset=utf-8"]],
   ["/trace-activity.js", [path.join(publicDirectory, "trace-activity.js"), "text/javascript; charset=utf-8"]],
   ["/trace-images.js", [path.join(publicDirectory, "trace-images.js"), "text/javascript; charset=utf-8"]],
@@ -405,6 +408,16 @@ async function route(request, response) {
     sendJson(response, result.status, result.body);
     return;
   }
+  match = url.pathname.match(/^\/v1\/nodes\/([0-9a-f-]{36})\/account-history$/i);
+  if (request.method === "GET" && match) {
+    if (!await authorize(request, response, "admin")) return;
+    const range = url.searchParams.get("range") ?? "7d";
+    if (!Object.hasOwn(historyRanges, range)) { errorJson(response, 400, "invalid history range", "invalid_request"); return; }
+    const node = await getNode(pool, match[1]);
+    if (!node) { errorJson(response, 404, "Node not found", "not_found"); return; }
+    sendJson(response, 200, await accountHistory(pool, node, range));
+    return;
+  }
   match = url.pathname.match(/^\/v1\/codex\/threads\/([0-9a-f-]{36})\/fork-title$/i);
   if (request.method === "POST" && match) {
     const principal = await authorize(request, response, "admin");
@@ -708,6 +721,7 @@ nodeChannel.sshRelay = sshRelay;
 const capabilityService = new CapabilityService({ pool, nodeChannel });
 nodeChannel.setCapabilityService(capabilityService);
 const stopThreadErasureWorker = startThreadErasureWorker(pool);
+const stopAccountSampler = startAccountSampler(pool, nodeChannel);
 
 server.listen(listenPort, listenHost, () => {
   console.log(`Mira Server listening on http://${listenHost}:${listenPort}; imported ${importedLegacyStoreCount} legacy store(s); normalized ${normalizedImportedThreadCount} imported thread(s)`);
@@ -722,9 +736,10 @@ async function shutdown(signal) {
   stopping = true;
   console.log(`received ${signal}; shutting down`);
   const erasureStopped = stopThreadErasureWorker();
+  const accountSamplerStopped = stopAccountSampler();
   nodeChannel.close();
   server.close(async () => {
-    await erasureStopped;
+    await Promise.all([erasureStopped, accountSamplerStopped]);
     await pool.end();
     process.exit(0);
   });

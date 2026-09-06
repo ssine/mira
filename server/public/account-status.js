@@ -1,15 +1,6 @@
-const weeklyMinutes = 7 * 24 * 60;
-
-export function weeklyQuota(result) {
-  const snapshot = result?.rateLimitsByLimitId?.codex ?? result?.rateLimits;
-  const codex = snapshot && (!snapshot.limitId || snapshot.limitId === "codex") ? snapshot : null;
-  const window = [codex?.primary, codex?.secondary].find(value => value?.windowDurationMins === weeklyMinutes);
-  const remaining = Number.isFinite(window?.usedPercent) ? Math.max(0, Math.min(100, 100 - window.usedPercent)) : null;
-  const seconds = window?.resetsAt;
-  const resetsAt = Number.isFinite(seconds) && seconds > 0 && seconds < 8.64e12 ? seconds * 1000 : null;
-  const count = result?.rateLimitResetCredits?.availableCount;
-  return { remaining, resetsAt, resetCount: Number.isSafeInteger(count) && count >= 0 ? count : null };
-}
+import { weeklyQuota } from "./account-quota.js";
+import { AccountHistory } from "./account-history.js";
+export { weeklyQuota } from "./account-quota.js";
 
 export function resetTime(timestamp, now = Date.now()) {
   if (!Number.isFinite(timestamp)) return "未提供";
@@ -24,6 +15,7 @@ export class AccountSidebar {
     this.intervalMs = intervalMs;
     this.timeoutMs = timeoutMs;
     this.cache = new Map();
+    this.history = new AccountHistory(root.querySelector("[data-account-history]"));
     root.querySelector("[data-account-refresh]").addEventListener("click", () => void this.refresh());
     this.render();
   }
@@ -52,6 +44,7 @@ export class AccountSidebar {
   clear() {
     this.stop();
     this.cache.clear();
+    this.history.clear();
     this.key = this.cacheKey = this.node = this.account = this.limits = null;
     this.available = false;
     this.message = "";
@@ -230,5 +223,6 @@ export class AccountSidebar {
     const minutes = cached ? Math.max(0, Math.floor((Date.now() - cached.updatedAt) / 60_000)) : null;
     find("[data-account-updated]").textContent = `${minutes === null ? "" : minutes === 0 ? "刚刚更新 · " : `${minutes} 分钟前更新 · `}每 5 分钟刷新`;
     this.root.setAttribute("aria-busy", String(Boolean(this.operation)));
+    this.history.select(this.node, this.account, Boolean(this.key));
   }
 }

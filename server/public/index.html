@@ -133,6 +133,13 @@
                 <meter class="hidden" min="0" max="100" value="0" aria-label="周额度剩余百分比"></meter>
                 <p data-account-status class="sidebar-account-status hidden" role="status"></p>
                 <p data-account-updated class="sidebar-account-updated"></p>
+                <section class="account-history" data-account-history aria-label="周额度历史">
+                  <div class="account-history-heading"><strong>额度历史</strong><select aria-label="额度历史时间范围"><option value="24h">最近 24 小时</option><option value="7d" selected>最近 7 天</option><option value="30d">最近 30 天</option></select></div>
+                  <p data-history-empty class="account-history-empty">采样后会显示在这里</p>
+                  <svg class="quota-chart hidden" viewBox="0 0 600 210" role="img" tabindex="0" aria-label="周额度剩余历史"></svg>
+                  <p data-history-point class="account-history-point" aria-live="polite"></p>
+                  <p data-history-note class="sidebar-account-updated">每 5 分钟记录 · 空档表示未采集到额度</p>
+                </section>
                 </div>
               </section>
             </footer>

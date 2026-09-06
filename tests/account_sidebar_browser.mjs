@@ -10,7 +10,7 @@ const nodes = nodeIds.map((nodeId, i) => ({ nodeId, hostname: `Account node ${i 
 const accounts = [{ type:'chatgpt', email:'first@example.test', planType:'pro' }, { type:'chatgpt', email:'second@example.test', planType:'plus' }, null];
 const reset = Math.floor(Date.now() / 1000) + 86400;
 const limits = [0,1,2].map(i => ({ rateLimitsByLimitId: { codex: { limitId:'codex', primary: { usedPercent:1, windowDurationMins:300 }, secondary:{usedPercent:52 + i, windowDurationMins:10080,resetsAt:reset} }, codex_bengalfox: { limitId:'codex_bengalfox', primary:{usedPercent:0,windowDurationMins:10080,resetsAt:reset} } }, rateLimitResetCredits:{availableCount:1,credits:[]} }));
-const sockets = new Map(), calls = [], errors = [];
+const sockets = new Map(), calls = [], errors = [], historyCalls = [];
 let holdFirst = false, heldReply, failLimits = false;
 const threads = threadIds.map((threadId,i) => ({ threadId, title:`Conversation ${i + 1}`, runtimeNodeId:nodeIds[i], cwd:i === 1 ? 'C:\\work' : '/work', generation:1 }));
 const browser = await chromium.launch({headless:true,...(process.env.MIRA_BROWSER_EXECUTABLE ? {executablePath:process.env.MIRA_BROWSER_EXECUTABLE}:{})});
@@ -37,6 +37,16 @@ try {
    });
   });
  }
+ await context.route('**/v1/nodes/*/account-history?*', async route => {
+  const url = new URL(route.request().url()), range = url.searchParams.get('range');
+  const index = nodeIds.findIndex(id => url.pathname.includes(id));
+  historyCalls.push({index, range});
+  const to = Date.now(), duration = {'24h':86400_000,'7d':7*86400_000,'30d':30*86400_000}[range];
+  const points = Array.from({length:289}, (_, i) => ({at:to-86400_000+i*300_000,
+    remaining:i>=90&&i<100?null:i<160?Math.max(0,80-i*.5):100-(i-160)*.4,
+    resetsAt:reset*1000,resetCount:i<160?1:0}));
+  await route.fulfill({json:{account:accounts[index],range,from:to-duration,to,intervalMs:300_000,points}});
+ });
  await context.route('**/v1/codex/threads?*',r=>r.fulfill({json:{data:threads}}));
  for(const thread of threads) {
   await context.route(`**/v1/codex/threads/${thread.threadId}?*`,r=>r.fulfill({json:thread}));
@@ -61,6 +71,22 @@ try {
  assert.equal(await panel.locator('meter').getAttribute('aria-label'),'周额度剩余百分比');
  assert.equal(await panel.locator('meter').evaluate(e=>e.value),48);
  assert.ok(calls.every(r=>['initialize','account/read','account/rateLimits/read'].includes(r.method)));
+ await panel.locator('.quota-chart:not(.hidden)').waitFor();
+ assert.equal(await panel.locator('.quota-line').count(),2,'failed samples create a visible break');
+ await panel.locator('[aria-label="额度历史时间范围"]').selectOption('24h');
+ await page.waitForFunction(()=>document.querySelector('[data-account-history] svg text:last-of-type')?.textContent.includes(':'));
+ const chart = panel.locator('.quota-chart');
+ await chart.focus(); await page.keyboard.press('Home');
+ assert.match(await panel.locator('[data-history-point]').textContent(),/剩余 80%/);
+ await page.keyboard.press('End');
+ assert.match(await panel.locator('[data-history-point]').textContent(),/重置机会 0 次/);
+ const graph = await chart.boundingBox();
+ await page.mouse.move(graph.x+graph.width*.5,graph.y+graph.height*.5);
+ assert.match(await panel.locator('[data-history-point]').textContent(),/剩余/);
+ await panel.locator('[aria-label="额度历史时间范围"]').selectOption('30d');
+ await page.waitForFunction(()=>document.querySelector('[data-account-history] svg text:last-of-type')?.textContent.includes('/'));
+ await panel.locator('[aria-label="额度历史时间范围"]').selectOption('24h');
+ const initialHistoryCalls=historyCalls.length;
  // Frequent quota notifications and drawer toggles share a five-minute cache.
  await idle(); const initialCalls=calls.length;
  limits[0].rateLimitsByLimitId.codex.secondary.usedPercent=100;limits[0].rateLimitResetCredits.availableCount=0;
@@ -74,6 +100,7 @@ try {
  }
  await page.clock.fastForward(4*60_000);
  assert.equal(calls.length,initialCalls,'reopening the sidebar does not reconnect or request account data');
+ assert.equal(historyCalls.length,initialHistoryCalls,'history ranges reuse a five-minute cache across drawer toggles');
  await page.clock.fastForward(60_100);
  await expectText('[data-account-remaining]','0%');await expectText('[data-account-credits]','0 次');
  await expectText('[data-account-summary-credits]','重置 0 次');
@@ -126,6 +153,11 @@ try {
  await accountDetails(page);
  await panel.locator('[data-account-refresh]').scrollIntoViewIfNeeded();
  assert.equal(await panel.locator('[data-account-refresh]').isVisible(),true);
+ await panel.locator('.quota-chart:not(.hidden)').waitFor();
+ assert.ok((await panel.locator('.quota-chart').boundingBox()).height<=180,'chart has a bounded mobile height');
+ const mobileChart=await panel.locator('.quota-chart').boundingBox();
+ await page.mouse.click(mobileChart.x+mobileChart.width*.6,mobileChart.y+mobileChart.height*.5);
+ assert.match(await panel.locator('[data-history-point]').textContent(),/剩余/);
  await sidebarAction(page, "agentThemeToggle");
  assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
  if(process.env.MIRA_WEB_SCREENSHOT_DIR) {
@@ -138,6 +170,7 @@ try {
  }
  await sidebarAction(page, "agentLogout");await page.locator('#loginView:not(.hidden)').waitFor();
  assert.equal((await panel.textContent()).includes('first@example.test'),false,'logout clears account data');
+ assert.equal(await panel.locator('.quota-line').count(),0,'logout clears quota history');
  assert.equal(await panel.locator('[data-account-refresh]').isDisabled(),true);
  const beforeLogin=calls.filter(call=>call.node===0&&call.method==='account/read').length;
  await page.locator('#password').fill(process.env.MIRA_TEST_ADMIN_PASSWORD??'mira-local-admin-password');

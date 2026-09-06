@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { AccountReader } from "./account-reader.mjs";
 import { WebSocket, WebSocketServer } from "ws";
 
 import {
@@ -137,6 +138,7 @@ function proxyActorKey(caller) {
 
 export class NodeChannel {
   constructor({ server, pool, authService }) {
+    this.accountReader = new AccountReader((nodeId, message) => this.trySendToNode(nodeId, message));
     this.pool = pool;
     this.authService = authService;
     this.capabilityService = null;
@@ -261,6 +263,7 @@ export class NodeChannel {
   }
 
   rejectNodeWork(nodeId) {
+    this.accountReader.close(nodeId);
     this.sshRelay?.disconnectNode(nodeId);
     for (const [requestId, pending] of this.pending) {
       if (pending.nodeId === nodeId) {
@@ -293,6 +296,7 @@ export class NodeChannel {
       ws.close(1007, "invalid JSON");
       return;
     }
+    if (this.accountReader.handle(nodeId, message)) return;
     if (message.type === "response" && typeof message.requestId === "string") {
       const pending = this.pending.get(message.requestId);
       if (!pending || pending.nodeId !== nodeId) return;
@@ -689,6 +693,7 @@ export class NodeChannel {
   }
 
   disconnectNode(nodeId, reason = "revoked") {
+    this.accountReader.close(nodeId);
     this.sshRelay?.disconnectNode(nodeId);
     const ws = this.nodes.get(nodeId);
     if (ws?.readyState === WebSocket.OPEN) ws.close(1008, reason);
@@ -709,6 +714,7 @@ export class NodeChannel {
   }
 
   close() {
+    this.accountReader.close();
     this.sshRelay?.close();
     for (const ws of this.nodes.values()) ws.close(1001, "server shutting down");
     for (const proxy of this.proxies.values()) {
