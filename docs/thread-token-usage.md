@@ -65,6 +65,10 @@ starts pricing after the child-owned `thread_settings_applied` boundary appended
 The inherited prefix therefore contributes context/token totals but no estimated spend to the child.
 The boundary is durable in the child and does not depend on the source thread continuing to exist.
 An older or imported fork without that boundary reports unavailable instead of pricing copied history.
+Transcript reads opt into the same cached projection and attach estimates only to assistant turns on
+the requested page. The final assistant message in each completed turn shows that turn's compact
+estimated cost beside its total elapsed time. Zero, partial and unavailable estimates remain distinct;
+the tooltip states that the value uses Standard API prices rather than ChatGPT plan deductions.
 
 The estimate uses the dated Standard USD prices in `server/model-pricing.mjs`, sourced from
 https://developers.openai.com/api/docs/pricing and the corresponding model pages. It prices each new
@@ -81,8 +85,9 @@ excluded. Token-count events do not identify the server-executed model. In runti
 reconstructed from history. `complete` means all recorded usage was priced on this basis, not that the
 result is an actual bill. Manual model changes are retained in context/settings and priced separately.
 
-The details panel shows a direct dollar amount and the sidebar separates its compact amount from the
-token summary with a middle dot; neither display adds an approximation sign.
+The details panel shows a direct dollar amount, the sidebar separates its compact amount from the
+token summary with a middle dot, and completed-turn footers show the per-turn amount; none adds an
+approximation sign.
 
 Additional validation: `thread_cost_test.mjs`, `thread_cost_e2e.mjs`, `thread_models_browser.mjs` and
 `thread_token_usage_browser.mjs` cover pricing, model changes, cache writes, long-context thresholds,

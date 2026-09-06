@@ -9,7 +9,7 @@ import { Pool } from "pg";
 import { appendAudit, AuthService } from "./auth.mjs";
 import { CapabilityService } from "./capability-service.mjs";
 import { getCodexTranscript } from "./codex-transcript.mjs";
-import { getThreadCostEstimate } from "./thread-cost-estimate.mjs";
+import { getThreadCostEstimate, getThreadTurnCostEstimates } from "./thread-cost-estimate.mjs";
 import {
   defaultStoreId, importCodexSession, listImportedThreads, normalizeImportedThreadHistoryModes,
   scanCodexSessions,
@@ -474,6 +474,16 @@ async function route(request, response) {
       errorJson(response, 400, "invalid store id or transcript cursor", "invalid_request"); return;
     }
     const result = await getCodexTranscript(pool, storeId, match[1], { cursor, limit, tail });
+    if (result.status === 200 && url.searchParams.get("includeCost") === "1") {
+      const [thread] = await listImportedThreads(pool, storeId, 1, match[1]);
+      if (thread) {
+        const turnIds = [...new Set((result.body.trace ?? []).filter(item => item.kind === "assistant" && item.turnId).map(item => item.turnId))];
+        const costs = turnIds.length ? await getThreadTurnCostEstimates(pool, storeId, thread, turnIds) : {};
+        for (const item of result.body.trace ?? []) {
+          if (item.kind === "assistant" && item.turnId && Object.hasOwn(costs, item.turnId)) item.turnCostEstimate = costs[item.turnId];
+        }
+      }
+    }
     sendJson(response, result.status, result.body);
     return;
   }

@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import pg from "../server/node_modules/pg/lib/index.js";
 import { putSnapshot, getSnapshot, getStoreHead, commitDelta, rebuildSnapshot } from "../server/thread-store.mjs";
 import { listImportedThreads } from "../server/codex-session-import.mjs";
-import { getThreadCostEstimate } from "../server/thread-cost-estimate.mjs";
+import { getThreadCostEstimate, getThreadTurnCostEstimates } from "../server/thread-cost-estimate.mjs";
 
 if (!process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL) throw new Error("a disposable database is required");
 const pool = new pg.Pool({ connectionString: process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL });
@@ -12,11 +12,14 @@ const fork = crypto.randomUUID(), missingBoundary = crypto.randomUUID();
 const headers = () => ({ "x-codex-operation-id": crypto.randomUUID() });
 const usage = (input, cached, output) => ({ input_tokens: input, cached_input_tokens: cached, output_tokens: output });
 const event = (total, last = total) => ({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: total, last_token_usage: last }, future: "raw\u0000field" } });
-const context = model => ({ type: "turn_context", payload: { model } });
+const context = (model, turnId = null) => ({ type: "turn_context", payload: { model, ...(turnId ? {turn_id: turnId} : {}) } });
+const message = (turnId, text) => ({type:"event_msg",payload:{type:"agent_message",turn_id:turnId,message:text}});
 const settings = (threadId, model) => ({ type: "event_msg", payload: { type: "thread_settings_applied",
   thread_id: threadId, thread_settings: { model } } });
 const first = event(usage(100000, 80000, 1000));
-const history = [context("gpt-6-astra"), ...Array.from({ length: 520 }, () => first), context("gpt-5.6-sol"), event(usage(150000, 120000, 1500), usage(50000, 40000, 500)), { type: "future_tool", payload: { type: "token_count", info: first.payload.info } }];
+const history = [context("gpt-6-astra", "turn-a"), ...Array.from({ length: 520 }, () => first), message("turn-a", "First priced turn"),
+  context("gpt-5.6-sol", "turn-b"), event(usage(150000, 120000, 1500), usage(50000, 40000, 500)),
+  message("turn-b", "Second priced turn"), { type: "future_tool", payload: { type: "token_count", info: first.payload.info } }];
 let queryCount = 0;
 const countedPool = { query: (...args) => { queryCount++; return pool.query(...args); } };
 const read = async threadId => (await listImportedThreads(pool, store, 1, threadId))[0];
@@ -28,7 +31,8 @@ try {
       [fork]: { token_usage: usage(200000, 160000, 2000) },
       [missingBoundary]: { token_usage: usage(150000, 120000, 1500) } },
     histories: { [id]: history, [child]: [context("gpt-5.6-luna"), first],
-      [fork]: [...history, settings(fork, "gpt-5.6-sol"), event(usage(200000, 160000, 2000), usage(50000, 40000, 500))],
+      [fork]: [...history, settings(fork, "gpt-5.6-sol"), context("gpt-5.6-sol", "fork-turn"),
+        event(usage(200000, 160000, 2000), usage(50000, 40000, 500))],
       [missingBoundary]: history },
   } }, headers())).status, 200);
   let thread = await read(id);
@@ -39,12 +43,17 @@ try {
   assert.deepEqual(estimates[0], estimates[1]);
   assert.equal(estimates[0].amount, 0.396); assert.equal(estimates[0].pricedRequests, 2);
   assert.equal(estimates[0].status, "complete");
+  const turnCosts = await getThreadTurnCostEstimates(countedPool, store, thread);
+  assert.equal(turnCosts["turn-a"].amount, 0.33); assert.equal(turnCosts["turn-b"].amount, 0.066);
+  assert.equal(queryCount, 3, "thread and turn estimates share one cached cost projection");
   assert.equal((await getThreadCostEstimate(pool, store, await read(child))).amount, 0.0068, "subagent cost stays independent");
   const forkThread = await read(fork);
   assert.equal(forkThread.forkedFromId, id, "fork identity is exposed without treating it as a subagent");
   const forkCost = await getThreadCostEstimate(pool, store, forkThread);
   assert.equal(forkCost.amount, 0.066, "copied parent requests are excluded from fork cost");
   assert.equal(forkCost.scope, "fork"); assert.deepEqual(forkCost.models, ["gpt-5.6-sol"]);
+  assert.deepEqual(Object.keys(await getThreadTurnCostEstimates(pool, store, forkThread)), ["fork-turn"],
+    "fork turn costs exclude copied parent turns");
   const missingForkCost = await getThreadCostEstimate(pool, store, await read(missingBoundary));
   assert.equal(missingForkCost.amount, null); assert.equal(missingForkCost.status, "unavailable");
   assert.deepEqual(missingForkCost.reasons, ["fork_boundary_missing"]);
@@ -72,6 +81,9 @@ try {
   assert.equal((await (await fetch(endpoint, { headers: { cookie } })).json()).costEstimate, undefined, "ordinary reads don't scan cost history");
   const response = await fetch(endpoint + "&includeCost=1", { headers: { cookie } });
   assert.equal(response.status, 200); assert.deepEqual((await response.json()).costEstimate, updated);
+  const transcript = await (await fetch(`${origin}/v1/codex/threads/${id}/transcript?storeId=${store}&tail=1&includeCost=1`, {headers:{cookie}})).json();
+  const pricedTurn = transcript.trace.find(item => item.turnId === "turn-b" && item.kind === "assistant");
+  assert.equal(pricedTurn.turnCostEstimate.amount, 0.132, "transcript pages attach only their assistant turn's estimate");
   const previous = await getSnapshot(pool, store);
   previous.snapshot.histories[id] = [context("gpt-6-astra"), event(usage(0, 0, 0))];
   previous.snapshot.metadata_updates[id].token_usage = usage(0, 0, 0);

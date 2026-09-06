@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { priceUsage, usageCounts } from "../server/model-pricing.mjs";
-import { applyCostRecord, costEstimate, newCostProjection } from "../server/thread-cost-estimate.mjs";
+import { applyCostRecord, costEstimate, newCostProjection, turnCostEstimates } from "../server/thread-cost-estimate.mjs";
 import { formatEstimatedCost, compactCost, threadTimestamp } from "../server/public/thread-usage.js";
 
 const usage = (input, cached, output, write = 0) => ({ input_tokens: input, cached_input_tokens: cached, output_tokens: output, cache_write_input_tokens: write });
-const context = model => ({ type: "turn_context", payload: { model } });
-const event = (total, last = total) => ({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: total, last_token_usage: last } } });
+const context = (model, turnId = null) => ({ type: "turn_context", payload: { model, ...(turnId ? {turn_id: turnId} : {}) } });
+const event = (total, last = total, turnId = null) => ({ type: "event_msg", payload: { type: "token_count",
+  ...(turnId ? {turn_id: turnId} : {}), info: { total_token_usage: total, last_token_usage: last } } });
 const dollars = price => Number(price.input + price.cached + price.write + price.output) / 1e9;
 
 test("Standard estimate prices uncached input, cache reads/writes and output separately", () => {
@@ -40,6 +41,49 @@ test("model changes and repeated cumulative snapshots never double-count", () =>
   const estimate = costEstimate(state, {});
   assert.equal(estimate.amount, 0.396); assert.equal(estimate.status, "complete");
   assert.equal(estimate.pricedRequests, 2); assert.deepEqual(estimate.models, ["gpt-6-astra", "gpt-5.6-sol"]);
+});
+
+test("turn estimates attribute each request to its durable turn and actual model", () => {
+  const state = newCostProjection();
+  applyCostRecord(state, context("gpt-6-astra", "turn-a"));
+  applyCostRecord(state, event(usage(100000, 80000, 1000)));
+  applyCostRecord(state, context("gpt-5.6-sol", "turn-b"));
+  applyCostRecord(state, event(usage(150000, 120000, 1500), usage(50000, 40000, 500)));
+  applyCostRecord(state, event(usage(150000, 120000, 1500), usage(50000, 40000, 500)), "ignored-thread-id");
+  const turns = turnCostEstimates(state);
+  assert.equal(turns["turn-a"].amount, 0.33);
+  assert.deepEqual(turns["turn-a"].models, ["gpt-6-astra"]);
+  assert.equal(turns["turn-b"].amount, 0.066);
+  assert.deepEqual(turns["turn-b"].models, ["gpt-5.6-sol"]);
+  assert.equal(turns["turn-b"].pricedRequests, 1, "repeated usage snapshots are not charged twice");
+});
+
+test("turn estimates preserve honest zero, partial and unavailable states", () => {
+  const state = newCostProjection();
+  applyCostRecord(state, context("gpt-6-astra", "zero"));
+  applyCostRecord(state, event(usage(0, 0, 0)));
+  applyCostRecord(state, context("unknown-model", "unknown"));
+  applyCostRecord(state, event(usage(100, 80, 10), usage(100, 80, 10)));
+  applyCostRecord(state, context("gpt-6-astra", "partial"));
+  applyCostRecord(state, event(usage(300, 240, 30), usage(100, 80, 10)));
+  const turns = turnCostEstimates(state);
+  assert.equal(turns.zero.amount, 0); assert.equal(turns.zero.status, "complete");
+  assert.equal(turns.unknown.amount, null); assert.equal(turns.unknown.status, "unavailable");
+  assert.deepEqual(turns.unknown.reasons, ["unknown_model"]);
+  assert.equal(turns.partial.amount, 0.00078); assert.equal(turns.partial.status, "partial");
+  assert.deepEqual(turns.partial.reasons, ["missing_request_usage"]);
+});
+
+test("cached per-turn projections retain a bounded recent window", () => {
+  const state = newCostProjection();
+  for (let index = 0; index < 520; index++) {
+    applyCostRecord(state, context("gpt-6-astra", `turn-${index}`));
+    applyCostRecord(state, event(usage(0, 0, 0)));
+  }
+  const turns = turnCostEstimates(state);
+  assert.equal(Object.keys(turns).length, 512);
+  assert.equal(turns["turn-0"], undefined);
+  assert.equal(turns["turn-519"].amount, 0);
 });
 
 test("missing history/model/usage remains partial or unavailable; zero is explicit", () => {

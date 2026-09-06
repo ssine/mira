@@ -103,9 +103,15 @@ try {
   const unreadBackground = await idleRow.evaluate(row => getComputedStyle(row).backgroundColor);
   assert.ok(await idleRow.locator("strong").evaluate(node => Number(getComputedStyle(node).fontWeight) > 500));
   assert.equal(acknowledgments.some(position => position.threadId === idleId), false, "background conversations stay unread");
+  await idleRow.hover();
+  assert.equal(await idleRow.evaluate(row => getComputedStyle(row).backgroundColor), unreadBackground,
+    "hover keeps the status background instead of replacing it with a highlight");
+  assert.match(await idleRow.evaluate(row => getComputedStyle(row).boxShadow), /0px 0px 0px 1px/,
+    "hover uses a one-pixel candidate border");
   await page.locator(`[data-thread-id="${idleId}"]`).click();
   assert.equal(await idleRow.evaluate(row => getComputedStyle(row).backgroundColor), unreadBackground, "selection keeps the status color");
-  assert.notEqual(await idleRow.evaluate(row => getComputedStyle(row).boxShadow), "none", "selection adds an independent outline");
+  assert.match(await idleRow.evaluate(row => getComputedStyle(row).boxShadow), /0px 0px 0px 2px/,
+    "selection adds a heavier independent border");
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
     await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/thread-states-desktop.png` });

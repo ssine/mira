@@ -2525,17 +2525,20 @@ function setTraceMetadata(card, options = {}) {
   if (Object.hasOwn(options, "elapsedMs")) card._miraElapsedMs = options.elapsedMs;
   if (Object.hasOwn(options, "timingScope")) card._miraTimingScope = options.timingScope;
   if (Object.hasOwn(options, "elapsedApproximate")) card._miraElapsedApproximate = options.elapsedApproximate;
-  for (const field of ["turnCompletedAt", "turnElapsedMs", "turnElapsedApproximate"]) {
+  for (const field of ["turnCompletedAt", "turnElapsedMs", "turnElapsedApproximate", "turnCostEstimate"]) {
     if (options[field] != null) card[`_mira${field[0].toUpperCase()}${field.slice(1)}`] = options[field];
   }
   const completed = footer.querySelector(".trace-completed");
   const elapsed = footer.querySelector(".trace-elapsed");
+  const cost = footer.querySelector(".trace-cost");
   const clock = card._miraTimingScope === "turn" ? "" : traceClock(card._miraCompletedAt);
   completed.textContent = clock;
   completed.title = card._miraTimingScope === "recorded" ? "消息记录时间" : "消息时间";
   completed.hidden = !clock;
   elapsed.textContent = "";
   elapsed.hidden = true;
+  cost.textContent = "";
+  cost.hidden = true;
 }
 
 function refreshTurnFooters(turnId = null) {
@@ -2556,12 +2559,23 @@ function refreshTurnFooters(turnId = null) {
     const elapsedMs = stored?._miraTurnElapsedMs ?? (live?.completedAt ? live.elapsedMs : null) ?? legacy?._miraElapsedMs;
     const completedAt = stored?._miraTurnCompletedAt ?? live?.completedAt ?? legacy?._miraCompletedAt;
     const approximate = stored?._miraTurnElapsedApproximate ?? live?.elapsedApproximate ?? legacy?._miraElapsedApproximate;
+    const costEstimate = cards.findLast((card) => card._miraTurnCostEstimate)?._miraTurnCostEstimate;
     // Retain the aggregate through a disconnect or a refresh before storage catches up.
-    setTraceMetadata(last, { turnCompletedAt: completedAt, turnElapsedMs: elapsedMs, turnElapsedApproximate: approximate });
+    setTraceMetadata(last, { turnCompletedAt: completedAt, turnElapsedMs: elapsedMs,
+      turnElapsedApproximate: approximate, ...(costEstimate ? { turnCostEstimate: costEstimate } : {}) });
     const elapsed = last.querySelector(".trace-elapsed");
     const duration = formatActivityDuration(elapsedMs);
     elapsed.textContent = duration ? `本轮总耗时${approximate ? "约" : ""} ${duration}` : "";
     elapsed.hidden = !duration;
+    const cost = last.querySelector(".trace-cost");
+    const finished = Boolean(completedAt || duration);
+    cost.textContent = finished ? `本轮费用 ${compactCost(costEstimate)}` : "";
+    cost.hidden = !finished;
+    cost.title = costEstimate?.status === "partial"
+      ? `部分请求已计价：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
+      : costEstimate?.status === "complete"
+        ? `API 估算：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
+        : "暂无法估算本轮费用：缺少请求用量、模型或对应价格";
     const clock = last.querySelector(".trace-completed");
     if (clock.hidden && traceClock(completedAt)) {
       clock.textContent = traceClock(completedAt);
@@ -2724,7 +2738,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       card.append(details);
     } else if (kind === "assistant") {
       const footer = element("footer", "trace-footer");
-      footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), copy);
+      footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), element("span", "trace-cost"), copy);
       card.append(element("div", "trace-body"), footer);
     } else if (["user", "compaction", "image"].includes(kind)) {
       card.append(element("div", "trace-body"));
@@ -3183,7 +3197,8 @@ function renderTranscript(fallbackThread, options = {}) {
   const knownTurnTimings = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
     .filter((card) => card.dataset.turnId && Number.isFinite(card._miraTurnElapsedMs))
     .map((card) => [card.dataset.turnId, { turnCompletedAt: card._miraTurnCompletedAt,
-      turnElapsedMs: card._miraTurnElapsedMs, turnElapsedApproximate: card._miraTurnElapsedApproximate }]));
+      turnElapsedMs: card._miraTurnElapsedMs, turnElapsedApproximate: card._miraTurnElapsedApproximate,
+      turnCostEstimate: card._miraTurnCostEstimate }]));
   const expandedItems = new Set([...$("#conversationTrace").querySelectorAll(".trace-detail[open]")]
     .map((details) => details.closest(".trace-card").dataset.traceKey));
   const expandedGroups = new Set([...$("#conversationTrace").querySelectorAll(".tool-group[open] .trace-card")]
@@ -3199,7 +3214,8 @@ function renderTranscript(fallbackThread, options = {}) {
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
       ...(Number.isFinite(item.turnElapsedMs) ? {
-        turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs, turnElapsedApproximate: item.turnElapsedApproximate,
+        turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs,
+        turnElapsedApproximate: item.turnElapsedApproximate, turnCostEstimate: item.turnCostEstimate,
       } : knownTurnTimings.get(item.turnId)),
       ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
     });
@@ -3287,7 +3303,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const epoch = agent.selectionEpoch;
   const request = ++agent.transcriptRequest;
   const liveRevision = agent.liveRevision;
-  const query = new URLSearchParams({ storeId: "personal", tail: "1", limit: String(options.limit ?? transcriptPageSize) });
+  const query = new URLSearchParams({ storeId: "personal", tail: "1", includeCost: "1", limit: String(options.limit ?? transcriptPageSize) });
   if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
   const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal: options.signal });
   if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || request !== agent.transcriptRequest) return transcript;

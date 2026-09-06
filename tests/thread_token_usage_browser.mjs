@@ -16,9 +16,12 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data: rows } }));
   await context.route(/\/v1\/codex\/threads\/[^?]+\?/, route => {
-    const path = new URL(route.request().url()).pathname, row = rows.find(row => path.includes(row.threadId));
+    const url = new URL(route.request().url()), path = url.pathname, row = rows.find(row => path.includes(row.threadId));
+    if (path.endsWith("/transcript")) assert.equal(url.searchParams.get("includeCost"), "1", "transcript requests opt into per-turn costs");
     return route.fulfill({ json: path.endsWith("/transcript") ? { generation: row.generation, itemCount: row.itemCount,
-      trace: [{ key: "message", kind: "assistant", body: "A persisted conversation.", sourceItemSeq: 1 }], nextCursor: null } : row });
+      trace: [{ key: "message", kind: "assistant", body: "A persisted conversation.", sourceItemSeq: 1,
+        turnId: `turn-${row.threadId}`, turnCompletedAt: new Date().toISOString(), turnElapsedMs: 6250,
+        turnCostEstimate: estimate(0.21) }], nextCursor: null } : row });
   });
   const page = await context.newPage(), errors = [];
   page.setDefaultTimeout(15_000); page.on("pageerror", error => errors.push(error.message));
@@ -27,6 +30,10 @@ try {
   await page.locator('#loginForm button[type="submit"]').click();
   await page.locator("#dashboardView:not(.hidden)").waitFor();
   await page.goto(`${origin}/?thread=${ids[0]}`);
+  await page.locator(".trace-cost").waitFor({ state: "visible" });
+  assert.equal(await page.locator(".trace-elapsed").textContent(), "本轮总耗时 6.3 秒");
+  assert.equal(await page.locator(".trace-cost").textContent(), "本轮费用 $0.21");
+  assert.match(await page.locator(".trace-cost").getAttribute("title"), /Standard 公开价，非套餐实际扣费/);
   const summary = page.locator(`[data-thread-token-usage="${ids[0]}"]`);
   await summary.waitFor({ state: "visible" });
   assert.equal(await summary.textContent(), "125k in · 8k out");
