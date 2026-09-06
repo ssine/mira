@@ -413,9 +413,9 @@ func CostEstimate(state *CostProjection, thread Thread) map[string]any {
 func (service *Service) applyCostRows(ctx context.Context, storeID string, thread Thread, state *CostProjection, after int64) error {
 	cursor := after
 	for cursor < thread.ItemCount {
-		rows, err := service.pool.Query(ctx, `SELECT item_seq::text,payload FROM codex_thread_events
-		 WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4 AND item_seq<=$5 AND `+costPredicate+`
-		 ORDER BY item_seq LIMIT 256`, storeID, thread.ThreadID, thread.Generation, cursor, thread.ItemCount)
+		rows, err := service.pool.Query(ctx, `SELECT events.item_seq::text,events.payload FROM codex_thread_events AS events
+		 WHERE events.store_id=$1 AND events.thread_id=$2 AND events.generation=$3 AND events.item_seq>$4 AND events.item_seq<=$5 AND `+costPredicate+`
+		 ORDER BY events.item_seq LIMIT 256`, storeID, thread.ThreadID, thread.Generation, cursor, thread.ItemCount)
 		if err != nil {
 			return err
 		}

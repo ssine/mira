@@ -30,11 +30,11 @@ func TestPostgresReadViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO codex_store_events(store_id,operation_id,event_seq,previous_event_seq,result_version,appended_item_count)
-		VALUES('personal',$1,1,0,1,6)`, operationID); err != nil {
+		VALUES('personal',$1,1,0,1,100)`, operationID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `INSERT INTO codex_thread_projections(store_id,thread_id,active_generation,item_count,title,state,through_event_seq)
-		VALUES('personal',$1,1,6,'Integration thread',$2::jsonb,1)`, threadID,
+		VALUES('personal',$1,1,100,'Integration thread',$2::jsonb,1)`, threadID,
 		`{"metadata":{"created_at":"2026-09-05T10:00:00.000Z","updated_at":"2026-09-05T10:00:06.000Z"}}`); err != nil {
 		t.Fatal(err)
 	}
@@ -45,6 +45,12 @@ func TestPostgresReadViews(t *testing.T) {
 		record("event_msg", map[string]any{"type": "agent_message", "turn_id": "turn", "message": "Done"}),
 		usageRecord(usage(100000, 80000, 1000), usage(100000, 80000, 1000), "turn"),
 		record("event_msg", map[string]any{"type": "task_complete", "turn_id": "turn", "completed_at": float64(1788602406)}),
+	}
+	// Keep more than nine rows in the fixture. PostgreSQL resolves an unqualified
+	// ORDER BY item_seq to the selected item_seq::text output column, which sorts
+	// 100 before 99 and used to make every existing long transcript look corrupt.
+	for len(items) < 100 {
+		items = append(items, record("unrecognized_fixture_record", map[string]any{"index": len(items) + 1}))
 	}
 	for index, item := range items {
 		payload, err := json.Marshal(item)

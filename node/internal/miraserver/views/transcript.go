@@ -154,8 +154,9 @@ func parseTailCursor(value *string) (generation, end, snapshot int64, valid bool
 }
 
 func (service *Service) queryTranscriptRows(ctx context.Context, storeID, threadID string, generation, end int64, limit int) ([]transcriptRow, error) {
-	rows, err := service.pool.Query(ctx, `SELECT item_seq::text,payload,created_at FROM codex_thread_events
-		WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq<$4 ORDER BY item_seq DESC LIMIT $5`, storeID, threadID, generation, end, limit)
+	rows, err := service.pool.Query(ctx, `SELECT events.item_seq::text,events.payload,events.created_at FROM codex_thread_events AS events
+		WHERE events.store_id=$1 AND events.thread_id=$2 AND events.generation=$3 AND events.item_seq<$4
+		ORDER BY events.item_seq DESC LIMIT $5`, storeID, threadID, generation, end, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -192,10 +193,10 @@ func (service *Service) contextBefore(ctx context.Context, storeID, threadID str
 		var seq string
 		var raw []byte
 		var created time.Time
-		err := service.pool.QueryRow(ctx, `SELECT item_seq::text,payload,created_at FROM codex_thread_events
-			WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq<$4
-			AND payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|turn_context)"'
-			ORDER BY item_seq DESC LIMIT 1`, storeID, threadID, generation, before).Scan(&seq, &raw, &created)
+		err := service.pool.QueryRow(ctx, `SELECT events.item_seq::text,events.payload,events.created_at FROM codex_thread_events AS events
+			WHERE events.store_id=$1 AND events.thread_id=$2 AND events.generation=$3 AND events.item_seq<$4
+			AND events.payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_started|turn_started|turn_context)"'
+			ORDER BY events.item_seq DESC LIMIT 1`, storeID, threadID, generation, before).Scan(&seq, &raw, &created)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
@@ -500,7 +501,10 @@ func (service *Service) getTranscriptTail(ctx context.Context, storeID, threadID
 		for after < snapshotCount {
 			var sequenceText string
 			var raw []byte
-			err := service.pool.QueryRow(ctx, `SELECT item_seq::text,payload FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4 AND item_seq<=$5 AND payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_complete|turn_complete|turn_aborted)"' ORDER BY item_seq LIMIT 1`, storeID, threadID, generation, after, snapshotCount).Scan(&sequenceText, &raw)
+			err := service.pool.QueryRow(ctx, `SELECT events.item_seq::text,events.payload FROM codex_thread_events AS events
+				WHERE events.store_id=$1 AND events.thread_id=$2 AND events.generation=$3 AND events.item_seq>$4 AND events.item_seq<=$5
+				AND events.payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(task_complete|turn_complete|turn_aborted)"'
+				ORDER BY events.item_seq LIMIT 1`, storeID, threadID, generation, after, snapshotCount).Scan(&sequenceText, &raw)
 			if errors.Is(err, pgx.ErrNoRows) {
 				break
 			}
