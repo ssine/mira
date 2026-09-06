@@ -2059,10 +2059,12 @@ function resolveNodeFileReference(value) {
     try {
       const url = new URL(reference);
       reference = decodeURIComponent(url.pathname);
-      if (/^\/[A-Za-z]:\//.test(reference)) reference = reference.slice(1);
       if (url.hostname && url.hostname !== "localhost") reference = `\\\\${url.hostname}${reference.replaceAll("/", "\\")}`;
     } catch { return null; }
   }
+  // Markdown links can contain a URL-style Windows drive path without file:.
+  // Node file operations need the native absolute form, e.g. C:/Reports/file.json.
+  if (/^\/[A-Za-z]:[\\/]/.test(reference)) reference = reference.slice(1);
   const lineMatch = reference.match(/:(\d+)(?::(\d+))?$/);
   const line = lineMatch ? Number(lineMatch[1]) : null;
   const column = lineMatch?.[2] ? Number(lineMatch[2]) : null;

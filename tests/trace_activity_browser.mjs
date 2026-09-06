@@ -693,12 +693,20 @@ try {
       "[排查与修复记录](C:/Users/Test/Documents/Edge-upload-diagnostics/diagnosis.md)",
       String.raw`[Backslashes](C:\Reports\diagnosis.md:12:3)`,
       "[File URI](file:///C:/Reports/diagnosis.md)",
+      "[Windows URL path](/C:/Reports/summary.json:12:3)",
+      "[Encoded Windows URL path](/C:/Reports/%E6%8E%92%E6%9F%A5%20%E8%AE%B0%E5%BD%95.json)",
+      String.raw`[Windows URL backslashes](/C:\Reports\summary.json)`,
       "[Spaces](<C:/Reports/排查 记录.md>)",
       "[Encoded](C:/Reports/%E6%8E%92%E6%9F%A5%20%E8%AE%B0%E5%BD%95.md)",
       "[POSIX](/tmp/diagnosis.md:7)",
+      "[POSIX colon](/tmp/C:/summary.json)",
+      String.raw`[UNC](\\\\server\share\summary.json)`,
+      "[UNC URI](file://server/share/summary.json)",
       "[Relative](./reports/diagnosis.md)",
       "[Reference][report]\n\n[report]: C:/Reports/reference.md",
       "![Local image](C:/Reports/screenshot.png)",
+      "![Windows URL image](/C:/Reports/screenshot.png)",
+      "`/C:/Reports/summary.json:4`",
       "[Website](https://example.com/report)",
       "[Unsafe](javascript:alert%281%29)",
       '<img src="missing.png" onerror="window.fileReferenceXss = true"><script>window.fileReferenceXss = true</script>',
@@ -713,13 +721,20 @@ try {
     ["C:/Users/Test/Documents/Edge-upload-diagnostics/diagnosis.md"],
     ["C:\\Reports\\diagnosis.md", "12", "3"],
     ["C:/Reports/diagnosis.md"],
+    ["C:/Reports/summary.json", "12", "3"],
+    ["C:/Reports/排查 记录.json"],
+    ["C:\\Reports\\summary.json"],
     ["C:/Reports/排查 记录.md"],
     ["C:/Reports/排查 记录.md"],
     ["/tmp/diagnosis.md", "7"],
+    ["/tmp/C:/summary.json"],
+    ["\\\\server\\share\\summary.json"],
+    ["\\\\server\\share\\summary.json"],
     ["C:/workspace/./reports/diagnosis.md"],
     ["C:/Reports/reference.md"],
   ].map(([path, line = null, column = null]) => ({ path, line, column, href: "#" })));
-  assert.equal(await page.locator('.node-file-image-link[data-node-file-path="C:/Reports/screenshot.png"]').count(), 1);
+  assert.equal(await page.locator('.node-file-image-link[data-node-file-path="C:/Reports/screenshot.png"]').count(), 2);
+  assert.equal(await page.locator('.node-file-code-link[data-node-file-path="C:/Reports/summary.json"][data-node-file-line="4"]').count(), 1);
   assert.equal(await page.getByRole("link", { name: "Website", exact: true }).getAttribute("href"), "https://example.com/report");
   assert.equal(await page.getByText("Unsafe", { exact: true }).getAttribute("href"), null);
   assert.equal(await page.locator(".trace-body script, .trace-body [onerror]").count(), 0);
@@ -730,6 +745,14 @@ try {
     ["stat", "read"].map((action) => ({ nodeId: "test-node", capability: "file", action,
       path: "C:/Users/Test/Documents/Edge-upload-diagnostics/diagnosis.md" })));
   assert.equal(await page.locator("#nodeFileDownload").getAttribute("download"), "diagnosis.md");
+  await page.locator("#nodeFileClose").click();
+  await page.evaluate(() => { window.fileReferenceCalls = []; });
+  await page.locator('a.node-file-link[data-node-file-path="C:/Reports/summary.json"][data-node-file-line="12"]').click();
+  await page.waitForFunction(() => document.querySelector("#nodeFileText").textContent === "# Report\n");
+  assert.deepEqual(await page.evaluate(() => window.fileReferenceCalls.map(({ action, path }) => ({ action, path }))),
+    ["stat", "read"].map((action) => ({ action, path: "C:/Reports/summary.json" })));
+  assert.equal(await page.locator("#nodeFileDownload").getAttribute("download"), "summary.json");
+  assert.equal(await page.locator("#nodeFilePath").textContent(), "C:/Reports/summary.json");
   await page.locator("#nodeFileClose").click();
   await page.evaluate(() => { window.traceHarness.agent.threadRuntimeNodeId = null; document.querySelector("#conversationCwd").value = "/project"; });
   await page.evaluate(() => { window.traceHarness.agent.threadId = "progress-thread"; window.traceHarness.clear(); });
