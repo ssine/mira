@@ -433,7 +433,7 @@ tbody tr:hover { background: var(--hover); }
 .agent-thread.active { border-left-color: var(--accent); }
 .agent-thread-row[data-unread="true"] strong { font-weight: 650; }
 .agent-thread { container: thread-row / inline-size; }
-.thread-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.thread-meta { display: flex; align-items: baseline; gap: .3em; min-width: 0; }
 .thread-meta .thread-state-label { flex: 1; min-width: 0; }
 .thread-token-usage, .thread-cost { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .thread-token-usage[hidden], .thread-cost[hidden] { display: none; }

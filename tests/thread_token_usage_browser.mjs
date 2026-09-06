@@ -35,6 +35,21 @@ try {
   assert.equal(await page.locator(`[data-thread-token-usage="${ids[2]}"]`).isVisible(), false);
   const row = page.locator(`[data-thread-row="${ids[0]}"]`);
   await page.waitForFunction(id => document.querySelector(`[data-thread-cost="${id}"]`)?.textContent === '· $0.75', ids[0]);
+  const separatorSpacing = await page.evaluate(id => {
+    const usage = document.querySelector(`[data-thread-token-usage="${id}"]`);
+    const cost = document.querySelector(`[data-thread-cost="${id}"]`);
+    const text = usage.firstChild, dot = text.textContent.indexOf('·');
+    const rect = (node, start, end) => {
+      const range = document.createRange(); range.setStart(node, start); range.setEnd(node, end);
+      return range.getBoundingClientRect();
+    };
+    const innerBefore = rect(text, dot - 2, dot - 1), innerDot = rect(text, dot, dot + 1);
+    const usageEnd = rect(text, text.textContent.length - 1, text.textContent.length);
+    const costDot = rect(cost.firstChild, 0, 1);
+    return { inner: innerDot.left - innerBefore.right, outer: costDot.left - usageEnd.right };
+  }, ids[0]);
+  assert.ok(Math.abs(separatorSpacing.outer - separatorSpacing.inner) < 1,
+    `price separator spacing ${separatorSpacing.outer}px matches token separator spacing ${separatorSpacing.inner}px`);
   const height = (await row.boundingBox()).height;
   const button = row.locator('button[data-thread-id]'), menu = row.locator('.thread-menu-toggle');
   assert.equal((await button.boundingBox()).width, (await row.boundingBox()).width, 'the menu reserves no column');
