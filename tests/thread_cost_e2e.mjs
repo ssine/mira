@@ -8,10 +8,13 @@ import { getThreadCostEstimate } from "../server/thread-cost-estimate.mjs";
 if (!process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL) throw new Error("a disposable database is required");
 const pool = new pg.Pool({ connectionString: process.env.MIRA_THREAD_MANAGEMENT_TEST_DATABASE_URL });
 const store = `costs-${crypto.randomUUID()}`, id = crypto.randomUUID(), child = crypto.randomUUID();
+const fork = crypto.randomUUID(), missingBoundary = crypto.randomUUID();
 const headers = () => ({ "x-codex-operation-id": crypto.randomUUID() });
 const usage = (input, cached, output) => ({ input_tokens: input, cached_input_tokens: cached, output_tokens: output });
 const event = (total, last = total) => ({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: total, last_token_usage: last }, future: "raw\u0000field" } });
 const context = model => ({ type: "turn_context", payload: { model } });
+const settings = (threadId, model) => ({ type: "event_msg", payload: { type: "thread_settings_applied",
+  thread_id: threadId, thread_settings: { model } } });
 const first = event(usage(100000, 80000, 1000));
 const history = [context("gpt-6-astra"), ...Array.from({ length: 520 }, () => first), context("gpt-5.6-sol"), event(usage(150000, 120000, 1500), usage(50000, 40000, 500)), { type: "future_tool", payload: { type: "token_count", info: first.payload.info } }];
 let queryCount = 0;
@@ -19,9 +22,14 @@ const countedPool = { query: (...args) => { queryCount++; return pool.query(...a
 const read = async threadId => (await listImportedThreads(pool, store, 1, threadId))[0];
 try {
   assert.equal((await putSnapshot(pool, store, { expectedVersion: 0, snapshot: {
-    created_threads: { [child]: { source: "subagent", parent_thread_id: id } },
-    metadata_updates: { [id]: { token_usage: usage(150000, 120000, 1500) } },
-    histories: { [id]: history, [child]: [context("gpt-5.6-luna"), first] },
+    created_threads: { [child]: { source: "subagent", parent_thread_id: id },
+      [fork]: { source: "cli", forked_from_id: id }, [missingBoundary]: { source: "cli", forked_from_id: id } },
+    metadata_updates: { [id]: { token_usage: usage(150000, 120000, 1500) },
+      [fork]: { token_usage: usage(200000, 160000, 2000) },
+      [missingBoundary]: { token_usage: usage(150000, 120000, 1500) } },
+    histories: { [id]: history, [child]: [context("gpt-5.6-luna"), first],
+      [fork]: [...history, settings(fork, "gpt-5.6-sol"), event(usage(200000, 160000, 2000), usage(50000, 40000, 500))],
+      [missingBoundary]: history },
   } }, headers())).status, 200);
   let thread = await read(id);
   assert.equal(thread.model, "gpt-5.6-sol", "latest recorded model is exposed in details and lists");
@@ -32,6 +40,14 @@ try {
   assert.equal(estimates[0].amount, 0.396); assert.equal(estimates[0].pricedRequests, 2);
   assert.equal(estimates[0].status, "complete");
   assert.equal((await getThreadCostEstimate(pool, store, await read(child))).amount, 0.0068, "subagent cost stays independent");
+  const forkThread = await read(fork);
+  assert.equal(forkThread.forkedFromId, id, "fork identity is exposed without treating it as a subagent");
+  const forkCost = await getThreadCostEstimate(pool, store, forkThread);
+  assert.equal(forkCost.amount, 0.066, "copied parent requests are excluded from fork cost");
+  assert.equal(forkCost.scope, "fork"); assert.deepEqual(forkCost.models, ["gpt-5.6-sol"]);
+  const missingForkCost = await getThreadCostEstimate(pool, store, await read(missingBoundary));
+  assert.equal(missingForkCost.amount, null); assert.equal(missingForkCost.status, "unavailable");
+  assert.deepEqual(missingForkCost.reasons, ["fork_boundary_missing"]);
   const cachedQueries = queryCount;
   await getThreadCostEstimate(countedPool, store, thread); assert.equal(queryCount, cachedQueries);
   assert.deepEqual(await getStoreHead(pool, store), before, "calculating costs never writes history");
@@ -62,5 +78,5 @@ try {
   assert.equal((await putSnapshot(pool, store, { expectedVersion: previous.version, snapshot: previous.snapshot }, headers())).status, 200);
   assert.equal((await read(id)).model, "gpt-6-astra");
   assert.equal((await getThreadCostEstimate(countedPool, store, await read(id))).amount, 0, "new generations discard the previous cost projection");
-  console.log("PASS: paginated/deduplicated costs, model changes, raw NUL, subagents, shared/incremental cache, metadata lag, rebuild/generations and opt-in authenticated API");
+  console.log("PASS: paginated/deduplicated costs, model changes, copied-fork boundary, raw NUL, subagents, shared/incremental cache, metadata lag, rebuild/generations and opt-in authenticated API");
 } finally { await pool.end(); }

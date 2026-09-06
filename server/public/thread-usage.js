@@ -37,7 +37,7 @@ export function compactCost(estimate) {
   if (value == null) return "—";
   const amount = value > 0 && value < 0.001 ? "<$0.001"
     : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: value < 0.01 ? 3 : 2 }).format(value);
-  return `${value > 0 && value < 0.001 ? "" : "≈"}${amount}${estimate.status === "partial" ? "*" : ""}`;
+  return `${amount}${estimate.status === "partial" ? "*" : ""}`;
 }
 
 export function threadTimestamp(value, now = new Date()) {

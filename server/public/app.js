@@ -400,9 +400,9 @@ function renderThreadStates() {
     if (price) {
       price.hidden = !sameGeneration;
       if (sameGeneration) {
-        price.textContent = compactCost(entry.estimate);
+        price.textContent = `· ${compactCost(entry.estimate)}`;
         price.title = entry.estimate.amount == null ? "缺少模型、用量或价格，暂无法估算"
-          : `${entry.estimate.status === "partial" ? "部分请求已计价（*）" : "API 估算"}：${formatEstimatedCost(entry.estimate.amount)} USD · Standard 公开价，非套餐扣费`;
+          : `${entry.estimate.status === "partial" ? "部分请求已计价（*）" : "API 估算"}：${formatEstimatedCost(entry.estimate.amount)} USD${entry.estimate.scope === "fork" ? " · 仅分支创建后" : ""} · Standard 公开价，非套餐扣费`;
       }
     }
   }
@@ -3654,15 +3654,16 @@ function conversationCostKey(threadId) {
 }
 
 function renderConversationCost(estimate, placeholder = "正在计算…") {
-  $("#conversationCostAmount").textContent = estimate ? `${estimate.status === "partial" && estimate.amount !== null ? "已估算部分 " : ""}${estimate.amount === null ? "暂无法估算" : "≈ " + formatEstimatedCost(estimate.amount)}` : placeholder;
+  $("#conversationCostAmount").textContent = estimate ? `${estimate.status === "partial" && estimate.amount !== null ? "已估算部分 " : ""}${estimate.amount === null ? "暂无法估算" : formatEstimatedCost(estimate.amount)}` : placeholder;
   const parts = estimate?.breakdown;
   $("#conversationCostBreakdown").textContent = estimate?.amount != null && parts
     ? [`普通输入 ${formatEstimatedCost(parts.input)}`, `缓存输入 ${formatEstimatedCost(parts.cached)}`,
       ...(parts.write ? [`缓存写入 ${formatEstimatedCost(parts.write)}`] : []), `输出 ${formatEstimatedCost(parts.output)}`].join(" · ") : "";
+  const scope = estimate?.scope === "fork" ? "只计算创建分支后的请求。" : "";
   $("#conversationCostNote").textContent = !estimate ? "" : estimate.status === "unavailable"
     ? "缺少请求用量、模型或对应价格。" : estimate.status === "partial"
-      ? "部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。"
-      : "按历史请求模型估算 Token 费用；服务端临时重路由可能不同，非套餐实际扣费。";
+      ? `${scope}部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。`
+      : `${scope}按历史请求模型估算 Token 费用；服务端临时重路由可能不同，非套餐实际扣费。`;
   $("#conversationCostPricing").textContent = `Standard 公开价${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
 }
 

@@ -34,7 +34,7 @@ try {
   assert.equal(await page.locator(`[data-thread-token-usage="${ids[1]}"]`).textContent(), "0 in · 0 out");
   assert.equal(await page.locator(`[data-thread-token-usage="${ids[2]}"]`).isVisible(), false);
   const row = page.locator(`[data-thread-row="${ids[0]}"]`);
-  await page.waitForFunction(id => document.querySelector(`[data-thread-cost="${id}"]`)?.textContent === '≈$0.75', ids[0]);
+  await page.waitForFunction(id => document.querySelector(`[data-thread-cost="${id}"]`)?.textContent === '· $0.75', ids[0]);
   const height = (await row.boundingBox()).height;
   const button = row.locator('button[data-thread-id]'), menu = row.locator('.thread-menu-toggle');
   assert.equal((await button.boundingBox()).width, (await row.boundingBox()).width, 'the menu reserves no column');
@@ -68,7 +68,7 @@ try {
   const facts = page.locator("#conversationTokenUsageFacts");
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["125,000", "100,000", "8,000"]);
   assert.match(await facts.textContent(), /含缓存/);
-  assert.equal(await page.locator('#conversationCostAmount').textContent(), '≈ $0.75');
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '$0.75');
   assert.match(await page.locator('#conversationDetailsFacts').textContent(), /最近使用的模型gpt-6-astra/);
   assert.match(await page.locator('#conversationCostPricing').textContent(), /Standard.*2026-09-06/);
   // Metadata can change before the history count advances. Both views update in place.
@@ -76,7 +76,7 @@ try {
   rows[0].tokenUsage = { inputTokens: 250000, cachedInputTokens: 200000, outputTokens: 16000 };
   await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "250k in · 16k out", ids[0]);
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["250,000", "200,000", "16,000"]);
-  await page.waitForFunction(() => document.querySelector('#conversationCostAmount').textContent === '≈ $1.50');
+  await page.waitForFunction(() => document.querySelector('#conversationCostAmount').textContent === '$1.50');
   assert.equal((await row.boundingBox()).height, height, "usage stays on the existing second row");
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
@@ -84,7 +84,7 @@ try {
   }
   await page.locator("#conversationDetailsClose").click();
   await openDetails(ids[1]);
-  assert.equal(await page.locator('#conversationCostAmount').textContent(), '≈ $0.00');
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '$0.00');
   await page.locator('#conversationDetailsClose').click();
   await openDetails(ids[2]);
   assert.equal(await page.locator('#conversationCostAmount').textContent(), '暂无法估算');
@@ -101,7 +101,7 @@ try {
   await sidebarAction(page, "agentThemeToggle");
   await openDetails(ids[0]);
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["1,000", "0", "100"]);
-  assert.equal(await page.locator('#conversationCostAmount').textContent(), '已估算部分 ≈ $0.02');
+  assert.equal(await page.locator('#conversationCostAmount').textContent(), '已估算部分 $0.02');
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/thread-token-usage-mobile.png` });
   await page.locator("#conversationDetailsClose").click();
   await page.setViewportSize({ width: 320, height: 844 });

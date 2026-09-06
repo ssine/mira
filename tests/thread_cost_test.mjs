@@ -75,10 +75,35 @@ test("persisted settings capture model switches before the next context item", (
   assert.equal(costEstimate(state, {}).amount, 0.396);
 });
 
+test("a fork prices only requests after its child-owned settings boundary", () => {
+  const threadId = "20000000-0000-4000-8000-000000000002";
+  const sourceId = "20000000-0000-4000-8000-000000000001";
+  const state = newCostProjection(true);
+  applyCostRecord(state, context("gpt-6-astra"), threadId);
+  applyCostRecord(state, event(usage(100000, 80000, 1000)), threadId);
+  applyCostRecord(state, {type:"event_msg",payload:{type:"thread_settings_applied",thread_id:sourceId,
+    thread_settings:{model:"gpt-6-astra"}}}, threadId);
+  applyCostRecord(state, event(usage(150000, 120000, 1500), usage(50000, 40000, 500)), threadId);
+  assert.equal(state.scopeStarted, false, "copied source settings do not start fork billing");
+  applyCostRecord(state, {type:"event_msg",payload:{type:"thread_settings_applied",thread_id:threadId,
+    thread_settings:{model:"gpt-5.6-sol"}}}, threadId);
+  const emptyFork = costEstimate(state, {tokenUsage:{inputTokens:150000,cachedInputTokens:120000,outputTokens:1500}});
+  assert.equal(emptyFork.amount, 0); assert.equal(emptyFork.status, "complete"); assert.equal(emptyFork.scope, "fork");
+  applyCostRecord(state, event(usage(200000, 160000, 2000), usage(50000, 40000, 500)), threadId);
+  assert.deepEqual(costEstimate(state, {}).models, ["gpt-5.6-sol"]);
+  assert.equal(costEstimate(state, {}).amount, 0.066);
+  const missing = newCostProjection(true);
+  applyCostRecord(missing, context("gpt-6-astra"), threadId);
+  applyCostRecord(missing, event(usage(100000, 80000, 1000)), threadId);
+  const unavailable = costEstimate(missing, {});
+  assert.equal(unavailable.amount, null); assert.equal(unavailable.status, "unavailable");
+  assert.deepEqual(unavailable.reasons, ["fork_boundary_missing"]); assert.equal(unavailable.scope, "fork");
+});
+
 
 test("sidebar prices and calendar timestamps stay compact", () => {
-  assert.equal(compactCost({amount:114.82,status:"complete"}), "≈$114.82");
-  assert.equal(compactCost({amount:0.007,status:"partial"}), "≈$0.007*");
+  assert.equal(compactCost({amount:114.82,status:"complete"}), "$114.82");
+  assert.equal(compactCost({amount:0.007,status:"partial"}), "$0.007*");
   assert.equal(compactCost({amount:0.0001,status:"partial"}), "<$0.001*");
   assert.equal(compactCost({amount:null,status:"unavailable"}), "—");
   const now = new Date(2026,8,9,15,0);

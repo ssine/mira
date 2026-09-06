@@ -22,7 +22,7 @@ The conversation details panel shows all three exact numbers. The sidebar's exis
 shows a compact `125k in · 8k out` summary when the row has enough width; its hover text includes the
 exact cached-input count. Narrow rows hide only the compact summary. Polling updates text in place,
 keeps selection/status and row height stable, and rejects older generation/item-count responses.
-Unknown input/output does not produce a misleading zero summary. Sidebar prices use `≈$0.75`
+Unknown input/output does not produce a misleading zero summary. Sidebar prices use `· $0.75`
 (`*` marks a partial estimate, with a full explanation on hover). Compact rows use `125k↑ 8k↓`.
 The menu overlays the title with a matching fade, reserving no column. Desktop sidebar width is
 resizable from 240 to 480 px, supports keyboard arrows/Home/End and persists as a local preference;
@@ -54,7 +54,12 @@ with at most two concurrent reads, bounded browser caching, and a ten-second ref
 advancing thread. Unchanged history is not repeatedly fetched. The detail panel requests this while open and refreshes on usage/history
 changes. Its server projection reads canonical events in pages of 256, coalesces identical requests,
 and incrementally processes appended events in a bounded cache. Separate subagents retain separate
-estimates, following upstream thread/fork history semantics for inherited history.
+estimates. A fork remains its own thread but contains a copied history prefix so Codex can continue
+with the same context. Its cost projection reads inherited cumulative counters only as a baseline and
+starts pricing after the child-owned `thread_settings_applied` boundary appended by `thread/fork`.
+The inherited prefix therefore contributes context/token totals but no estimated spend to the child.
+The boundary is durable in the child and does not depend on the source thread continuing to exist.
+An older or imported fork without that boundary reports unavailable instead of pricing copied history.
 
 The estimate uses the dated Standard USD prices in `server/model-pricing.mjs`, sourced from
 https://developers.openai.com/api/docs/pricing and the corresponding model pages. It prices each new
@@ -70,6 +75,9 @@ excluded. Token-count events do not identify the server-executed model. In runti
 `ModelReroute` notifications are transient and not persisted, so a temporary server reroute cannot be
 reconstructed from history. `complete` means all recorded usage was priced on this basis, not that the
 result is an actual bill. Manual model changes are retained in context/settings and priced separately.
+
+The details panel shows a direct dollar amount and the sidebar separates its compact amount from the
+token summary with a middle dot; neither display adds an approximation sign.
 
 Additional validation: `thread_cost_test.mjs`, `thread_cost_e2e.mjs`, `thread_models_browser.mjs` and
 `thread_token_usage_browser.mjs` cover pricing, model changes, cache writes, long-context thresholds,

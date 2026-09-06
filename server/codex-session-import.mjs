@@ -357,6 +357,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
             projections.cwd, projections.item_count::text,
             projections.state #> '{metadata,token_usage}' AS token_usage,
             projections.state #> '{metadata,model}' AS model,
+            projections.state #>> '{createdThread,forked_from_id}' AS forked_from_id,
             COALESCE(projections.state #>> '{createdThread,metadata,timestamp}',
                      projections.state #>> '{metadata,created_at}') AS created_at,
             projections.active_generation::text, activity.updated_at,
@@ -397,6 +398,7 @@ export async function listImportedThreads(pool, storeId = defaultStoreId, limit 
   return addThreadModels(pool, id, await addThreadTokenUsage(pool, id, await addThreadReadStates(pool, id, await addThreadActivities(pool, id, result.rows.map((row) => ({
     threadId: row.thread_id, parentThreadId: row.parent_thread_id,
     sourceKind: row.source_kind, title: row.title, name: row.name, archived: row.archived, cwd: row.cwd,
+    forkedFromId: row.forked_from_id,
     itemCount: Number(row.item_count), generation: Number(row.active_generation), tokenUsage: row.token_usage, model: row.model,
     createdAt: row.created_at ?? null,
     updatedAt: row.updated_at?.toISOString() ?? null, importId: row.import_id,
