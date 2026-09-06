@@ -2569,7 +2569,7 @@ function refreshTurnFooters(turnId = null) {
     elapsed.hidden = !duration;
     const cost = last.querySelector(".trace-cost");
     const finished = Boolean(completedAt || duration);
-    cost.textContent = finished ? `本轮费用 ${compactCost(costEstimate)}` : "";
+    cost.textContent = finished ? `费用 ${compactCost(costEstimate)}` : "";
     cost.hidden = !finished;
     cost.title = costEstimate?.status === "partial"
       ? `部分请求已计价：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`

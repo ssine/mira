@@ -858,7 +858,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .project-heading-actions .chat-icon-button { width: 28px; min-width: 28px; height: 28px; min-height: 28px; }
 .thread-project-threads { margin: 4px 8px 6px; }
 .thread-project-threads .agent-thread-row { position: relative; margin-block: 2px; border-radius: var(--radius-control); }
-.thread-project-threads .agent-thread { min-height: 48px; padding-left: 4px; border-radius: var(--radius-control); }
+.thread-project-threads .agent-thread { min-height: 48px; padding-left: 8px; border-radius: var(--radius-control); }
 .thread-project-threads .agent-thread span { font-size: 10px; }
 .thread-project-empty { margin: 0; padding: 10px 9px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .thread-menu-toggle { position: absolute; z-index: 1; right: 3px; top: 1px; width: 30px; height: 27px; margin: 0; border: 0; border-radius: 0 var(--radius-control) 0 0; background: var(--thread-row-background); }

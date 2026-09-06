@@ -32,7 +32,7 @@ try {
   await page.goto(`${origin}/?thread=${ids[0]}`);
   await page.locator(".trace-cost").waitFor({ state: "visible" });
   assert.equal(await page.locator(".trace-elapsed").textContent(), "本轮总耗时 6.3 秒");
-  assert.equal(await page.locator(".trace-cost").textContent(), "本轮费用 $0.21");
+  assert.equal(await page.locator(".trace-cost").textContent(), "费用 $0.21");
   assert.match(await page.locator(".trace-cost").getAttribute("title"), /Standard 公开价，非套餐实际扣费/);
   const summary = page.locator(`[data-thread-token-usage="${ids[0]}"]`);
   await summary.waitFor({ state: "visible" });
@@ -59,6 +59,7 @@ try {
     `price separator spacing ${separatorSpacing.outer}px matches token separator spacing ${separatorSpacing.inner}px`);
   const height = (await row.boundingBox()).height;
   const button = row.locator('button[data-thread-id]'), menu = row.locator('.thread-menu-toggle');
+  assert.equal(await button.evaluate(element => getComputedStyle(element).paddingLeft), '8px', 'thread content has breathing room beside the border');
   assert.equal((await button.boundingBox()).width, (await row.boundingBox()).width, 'the menu reserves no column');
   const beforeHover = await row.locator('strong').boundingBox();
   await row.hover();
