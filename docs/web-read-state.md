@@ -8,12 +8,15 @@ within a generation. Replaced histories require a new acknowledgment; permanent
 deletion removes the position under the same thread lock.
 
 Migration 19 establishes an already-read baseline for existing histories.
-Subsequent messages, completed tool results and terminal turn/error events count
-as updates. Title changes, token counts, heartbeats and retry notifications do
-not. The latest qualifying position is derived from canonical records, cached by
-generation/item count, and can be rebuilt without changing history. The index
-only selects candidates: JavaScript validates their structure to retain support
-for JSON records containing escaped NUL and unknown future event types.
+Only subsequent non-empty assistant prose counts as an unread update, including
+native `agent_message`, materialized `AgentMessage` and assistant response-item
+formats. User prompts, tool calls/results, reasoning records, images, lifecycle
+events, errors, title changes, token counts and retry notifications do not. The
+latest qualifying position is derived from canonical records, cached by
+generation/item count, and can be rebuilt without changing history. Migration
+19's broader immutable index only selects candidates: JavaScript validates their
+structure in bounded batches to retain support for JSON records containing
+escaped NUL and unknown future event types.
 
 `GET /v1/codex/threads` and the individual thread route include
 `readState: { generation, latestItemSeq, readItemCount, unread }`.

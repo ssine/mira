@@ -2,14 +2,24 @@ import { lockScope } from "./storage-rows.mjs";
 import { threadUpdatePredicate } from "./thread-read-state-migration.mjs";
 
 const updates = new WeakMap();
-function visibleUpdate(record) {
+function hasReadableText(value) {
+  if (typeof value === "string") return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim().length > 0;
+  if (Array.isArray(value)) return value.some(hasReadableText);
+  if (!value || typeof value !== "object") return false;
+  return ["text", "inputText", "input_text", "outputText", "output_text", "message", "content"]
+    .some(key => hasReadableText(value[key]));
+}
+
+export function visibleAssistantUpdate(record) {
   const payload = record?.payload;
   if (record?.type === "event_msg") {
-    return ["user_message", "agent_message", "item_completed", "view_image_tool_call", "task_complete", "turn_complete", "turn_aborted"].includes(payload?.type) ||
-      (payload?.type === "error" && payload.will_retry !== true && payload.willRetry !== true);
+    if (payload?.type === "agent_message") return hasReadableText(payload.message ?? payload.content);
+    const item = payload?.type === "item_completed" ? payload.item : null;
+    return String(item?.type ?? "").replaceAll("_", "").toLowerCase() === "agentmessage" &&
+      hasReadableText(item.content ?? item.text ?? item.message);
   }
-  return record?.type === "response_item" && ((payload?.type === "message" && ["user", "assistant"].includes(payload.role)) ||
-    ["function_call_output", "custom_tool_call_output"].includes(payload?.type));
+  return record?.type === "response_item" && payload?.type === "message" && payload.role === "assistant" &&
+    hasReadableText(payload.content ?? payload.output_text ?? payload.text);
 }
 
 async function latestThreadUpdates(pool, storeId, threads) {
@@ -24,14 +34,14 @@ async function latestThreadUpdates(pool, storeId, threads) {
         SELECT item_seq,payload FROM codex_thread_events
         WHERE store_id=$1 AND thread_id=selected.thread_id AND generation=selected.generation
           AND item_seq<selected.before AND ${threadUpdatePredicate}
-        ORDER BY item_seq DESC LIMIT 1
+        ORDER BY item_seq DESC LIMIT 32
       ) events ON TRUE ORDER BY selected.thread_id,events.item_seq DESC`,
     [storeId, pending.map(t => t.threadId), pending.map(t => t.generation), pending.map(t => t.before)]);
     const grouped = Map.groupBy(result.rows.filter(row => row.item_seq != null), row => row.thread_id);
     const next = [];
     for (const thread of pending) {
       const rows = grouped.get(thread.threadId) ?? [];
-      const latest = rows.find(row => visibleUpdate(row.payload));
+      const latest = rows.find(row => visibleAssistantUpdate(row.payload));
       if (latest || !rows.length) cache.set(key(thread), Number(latest?.item_seq ?? 0));
       else next.push({ ...thread, before: Number(rows.at(-1).item_seq) });
     }
