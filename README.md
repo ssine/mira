@@ -5,6 +5,9 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.4 修复 Windows LocalSystem 服务的内嵌 SSH 同身份映射，并确保 Mira 管理的 systemd/procd
+服务在 `repair` 重启前先持久化安装状态；即使自身 SSH 会话被重启中断，后续检查也不会误报漂移。
+
 1.0.3 将 Linux/OpenWrt 的内嵌 OpenSSH 改为 Mira 反向授权通道专用的便携模式，不再要求
 `/var/empty`、privsep 系统用户、chroot/setuid/setgid capabilities 或 seccomp，并修复 systemd 可选环境
 文件的转义与 system service `HOME` 配置。
