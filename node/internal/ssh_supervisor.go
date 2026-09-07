@@ -40,8 +40,12 @@ func (client *controlClient) startSSH(ctx context.Context, message controlMessag
 }
 
 func (client *controlClient) runSSHWorker(ctx context.Context, message controlMessage) error {
-	conn, err := dialSSHTransport(ctx, client.configuration.ServerURL, client.token, message.SessionID, "target")
+	server := client.endpoints.endpoint(ctx)
+	conn, err := dialSSHTransport(ctx, server, client.token, message.SessionID, "target")
 	if err != nil {
+		if ctx.Err() == nil {
+			client.failServerEndpoint(server)
+		}
 		return err
 	}
 	defer conn.Close()

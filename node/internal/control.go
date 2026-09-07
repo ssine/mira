@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"sync"
 	"time"
 
@@ -19,6 +18,7 @@ import (
 type controlClient struct {
 	desktop       *desktopStatus
 	configuration config
+	endpoints     *serverEndpointSelector
 	runtime       *capabilityRuntime
 	appServer     *appServerManager
 	http          *http.Client
@@ -78,14 +78,17 @@ type controlMessage struct {
 func newControlClient(configuration config, runtimeValue *capabilityRuntime) *controlClient {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: platformCertificatePool()}
-	return &controlClient{
+	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
+	client := &controlClient{
 		configuration: configuration, runtime: runtimeValue,
 		token:      configuration.Token,
 		appServer:  newAppServerManager(configuration),
-		http:       &http.Client{Transport: transport, Timeout: 30 * time.Second},
+		http:       httpClient,
 		tunnels:    make(map[string]*websocket.Conn),
 		sshWorkers: make(map[string]context.CancelFunc),
 	}
+	client.endpoints = newServerEndpointSelector(configuration.ServerURL, httpClient)
+	return client
 }
 
 func (client *controlClient) requestJSON(ctx context.Context, method string, route string, token string, body any, result any) error {
@@ -97,18 +100,17 @@ func (client *controlClient) requestJSON(ctx context.Context, method string, rou
 			return err
 		}
 	}
-	request, err := http.NewRequestWithContext(ctx, method, client.configuration.ServerURL+route, bytes.NewReader(encoded))
-	if err != nil {
-		return err
+	server := client.endpoints.endpoint(ctx)
+	response, err := client.doJSONRequest(ctx, method, server, route, token, encoded, body != nil)
+	if (err != nil || serverEndpointUnavailable(response)) && ctx.Err() == nil {
+		next := client.failServerEndpoint(server)
+		if next != server {
+			if response != nil {
+				response.Body.Close()
+			}
+			response, err = client.doJSONRequest(ctx, method, next, route, token, encoded, body != nil)
+		}
 	}
-	if token != "" {
-		request.Header.Set("Authorization", "Bearer "+token)
-	}
-	request.Header.Set("X-Mira-Client-Type", "node")
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	response, err := client.http.Do(request)
 	if err != nil {
 		return err
 	}
@@ -126,6 +128,38 @@ func (client *controlClient) requestJSON(ctx context.Context, method string, rou
 		}
 	}
 	return nil
+}
+
+func (client *controlClient) doJSONRequest(ctx context.Context, method, server, route, token string, encoded []byte, hasBody bool) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, method, server+route, bytes.NewReader(encoded))
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		request.Header.Set("Authorization", "Bearer "+token)
+	}
+	request.Header.Set("X-Mira-Client-Type", "node")
+	if hasBody {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	return client.http.Do(request)
+}
+
+func serverEndpointUnavailable(response *http.Response) bool {
+	if response == nil {
+		return false
+	}
+	return response.StatusCode == http.StatusBadGateway ||
+		response.StatusCode == http.StatusServiceUnavailable ||
+		response.StatusCode == http.StatusGatewayTimeout
+}
+
+func (client *controlClient) failServerEndpoint(failed string) string {
+	next := client.endpoints.fail(failed)
+	if next != failed {
+		Log("Mira Server endpoint failed over", map[string]any{"failedEndpoint": failed, "endpoint": next})
+	}
+	return next
 }
 
 func (client *controlClient) postJSON(ctx context.Context, route string, body any, result any) error {
@@ -322,27 +356,15 @@ func (client *controlClient) reconcile(ctx context.Context) error {
 	return client.appServer.reconcile(ctx, client.desired)
 }
 
-func (client *controlClient) websocketURL() (string, error) {
-	parsed, err := url.Parse(client.configuration.ServerURL)
-	if err != nil {
-		return "", err
-	}
-	switch parsed.Scheme {
-	case "http":
-		parsed.Scheme = "ws"
-	case "https":
-		parsed.Scheme = "wss"
-	default:
-		return "", fmt.Errorf("unsupported control server scheme: %s", parsed.Scheme)
-	}
-	parsed.Path = "/v1/nodes/" + client.nodeID + "/connect"
-	parsed.RawQuery = ""
-	return parsed.String(), nil
+func (client *controlClient) websocketURL(ctx context.Context) (string, string, error) {
+	server := client.endpoints.endpoint(ctx)
+	endpoint, err := serverWebSocketURL(server, "/v1/nodes/"+client.nodeID+"/connect")
+	return endpoint, server, err
 }
 
 func (client *controlClient) serve(ctx context.Context) error {
 	defer client.desktop.update("reconnecting", "")
-	endpoint, err := client.websocketURL()
+	endpoint, server, err := client.websocketURL(ctx)
 	if err != nil {
 		return err
 	}
@@ -358,6 +380,9 @@ func (client *controlClient) serve(ctx context.Context) error {
 	}
 	connection, response, err := dialer.DialContext(ctx, endpoint, nil)
 	if err != nil {
+		if ctx.Err() == nil && (response == nil || response.StatusCode == http.StatusBadGateway || response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusGatewayTimeout) {
+			client.failServerEndpoint(server)
+		}
 		if response != nil {
 			return fmt.Errorf("connect control websocket: %w (HTTP %d)", err, response.StatusCode)
 		}
@@ -388,6 +413,9 @@ func (client *controlClient) serve(ctx context.Context) error {
 	if err := client.writeControl(map[string]any{
 		"type": "hello", "nodeId": client.nodeID, "nodeVersion": Version, "protocolVersion": ProtocolVersion,
 	}); err != nil {
+		if ctx.Err() == nil {
+			client.failServerEndpoint(server)
+		}
 		return err
 	}
 	Log("connected reverse capability channel", map[string]any{"nodeId": client.nodeID})
@@ -399,6 +427,9 @@ func (client *controlClient) serve(ctx context.Context) error {
 	for {
 		var message controlMessage
 		if err := connection.ReadJSON(&message); err != nil {
+			if ctx.Err() == nil {
+				client.failServerEndpoint(server)
+			}
 			return err
 		}
 		client.handleMessage(loopCtx, message)

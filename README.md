@@ -5,6 +5,9 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.6 支持 Server 通过 `/.well-known/mira` 发布直连入口；Node 会在发送凭据前完成健康探测，
+优先使用可用的低延迟入口，并在连接失败时自动回退，同时保持原始 Server URL 与身份绑定不变。
+
 1.0.5 统一 Windows SSH 非交互命令的 UTF-8 文本输出，并允许 Agent 的文件操作和受管进程
 显式选择活动登录用户或 LocalSystem；安装命令固定 Release 下载地址，不再查询 GitHub API。
 
@@ -88,13 +91,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.5
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.6
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.5'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.6'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
@@ -276,6 +279,11 @@ CLI、SSH/SCP/SFTP 和动态工具；labels 不会隐式选择单台设备。使
 executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
 SSH relay 默认允许全局 128 路、每个相关 Node 32 路并发连接；可用
 `MIRA_SSH_MAX_SESSIONS` 和 `MIRA_SSH_MAX_SESSIONS_PER_NODE` 调整，但始终保留有界保护。
+
+部署可以在配置的 Server URL 下通过 `/.well-known/mira` 发布按 priority 排序的备用入口。Node 在发送
+凭据前先匿名探测候选入口的 `/healthz`，选择可用的最高优先级入口，并在连接失败时回退；配置和 identity
+仍保留原始 Server URL，不会因为动态入口变化而重新注册。协议与降级防护见
+[`protocol/endpoint-discovery-v1.md`](protocol/endpoint-discovery-v1.md)。
 
 Windows 文件、系统进程数/列表、进程启动/终止、CPU/内存/磁盘/网络、真实 ConPTY 输入/VT/
 resize/Ctrl-C，以及 Codex 自动发现和 App Server 启停已在 Windows 11 实机验证。普通官方 Codex
