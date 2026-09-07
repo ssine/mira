@@ -238,6 +238,18 @@ func TestCapabilityValidationBounds(t *testing.T) {
 	if _, err := validateCapabilityParams("file", map[string]any{"action": "read", "path": "a\x00b"}); err == nil {
 		t.Fatal("NUL path accepted")
 	}
+	if _, err := validateCapabilityParams("process", map[string]any{"action": "start", "executionContext": "user", "userSessionId": json.Number("7")}); err != nil {
+		t.Fatalf("valid Windows user execution context rejected: %v", err)
+	}
+	if _, err := validateCapabilityParams("process", map[string]any{"action": "start", "executionContext": "administrator"}); err == nil {
+		t.Fatal("unknown execution context accepted")
+	}
+	if _, err := validateCapabilityParams("process", map[string]any{"action": "poll", "executionContext": "system"}); err == nil {
+		t.Fatal("process poll accepted an execution context")
+	}
+	if _, err := validateCapabilityParams("file", map[string]any{"action": "roots", "executionContext": "system", "userSessionId": json.Number("7")}); err == nil {
+		t.Fatal("system execution context accepted a user session ID")
+	}
 }
 
 func TestValidSSHKey(t *testing.T) {

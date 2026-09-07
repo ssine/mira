@@ -445,10 +445,18 @@ func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Re
 	useStdin := set.Bool("stdin", false, "read stdin")
 	overwrite := set.Bool("overwrite", false, "overwrite")
 	recursive := set.Bool("recursive", false, "recursive")
+	executionContext := set.String("execution-context", "", "Windows execution identity: user or system")
+	userSessionID := set.Uint("user-session-id", 0, "specific active Windows user session")
 	if err := set.Parse(args[1:]); err != nil {
 		return nil, err
 	}
 	params := map[string]any{"action": action}
+	if *executionContext != "" {
+		params["executionContext"] = *executionContext
+	}
+	if *userSessionID > 0 {
+		params["userSessionId"] = *userSessionID
+	}
 	if *filePath != "" {
 		params["path"] = *filePath
 	}
@@ -529,6 +537,8 @@ func (client *cliClient) runProcess(ctx context.Context, args []string, stdout i
 	node, cwd, processID, cursor := commandFlags(set)
 	system := set.Bool("system", false, "list system processes")
 	signal := set.String("signal", "", "signal")
+	executionContext := set.String("execution-context", "", "Windows execution identity: user or system")
+	userSessionID := set.Uint("user-session-id", 0, "specific active Windows user session")
 	var env stringList
 	set.Var(&env, "env", "KEY=VALUE")
 	if err := set.Parse(args[1:]); err != nil {
@@ -552,6 +562,12 @@ func (client *cliClient) runProcess(ctx context.Context, args []string, stdout i
 	}
 	if *signal != "" {
 		params["signal"] = *signal
+	}
+	if *executionContext != "" {
+		params["executionContext"] = *executionContext
+	}
+	if *userSessionID > 0 {
+		params["userSessionId"] = *userSessionID
 	}
 	if action == "start" || action == "run" {
 		commandArgs := set.Args()
@@ -935,10 +951,12 @@ The selector may be a Node UUID, exact nodeKey, user-defined alias, or a unique 
 		"file": `Usage: mira file <roots|stat|list|read|write|mkdir|move|remove> --node <selector> [options]
 
 Common options: --path, --destination, --offset, --length, --recursive, --overwrite.
-Use --output for local file reads. Writes require exactly one of --input or --stdin.`,
+Use --output for local file reads. Writes require exactly one of --input or --stdin.
+Windows defaults to --execution-context user; pass system for the LocalSystem service identity.`,
 		"process": `Usage: mira process <count|list|start|run|poll|signal> --node <selector> [options] [-- executable args...]
 
 Options include --cwd, --process-id, --cursor, --signal, --system and repeated --env KEY=VALUE.
+Windows starts default to --execution-context user; pass system for the LocalSystem service identity.
 run waits and streams output; start returns a managed process ID.`,
 		"pty": `Usage: mira pty <list|open|poll|write|resize|close> --node <selector> [options] [-- executable args...]
 
@@ -972,7 +990,10 @@ continues an accepted update if this CLI, SSH session, Node, or Server exits.`,
 
 Runs the compatible pinned Codex runtime with Mira's PostgreSQL ThreadStore.`,
 		"codex-runtime": `Usage: mira codex-runtime <status|prepare> [--json]`,
-		"ssh":           `Usage: mira ssh [OpenSSH options] <node-id|nodeKey|alias> [-- command...]`,
+		"ssh": `Usage: mira ssh [OpenSSH options] <node-id|nodeKey|alias> [-- command...]
+
+Direct non-PTY commands on a Windows cmd.exe target are normalized to UTF-8.
+Pass -o SetEnv=MIRA_SSH_TEXT=0 when the command intentionally emits raw bytes.`,
 		"scp": `Usage: mira scp [OpenSSH options] <source> <destination>
 
 Remote operands use <node-selector>::<absolute-path>.`,

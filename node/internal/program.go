@@ -16,6 +16,13 @@ func RunSystemRole(ctx context.Context, args []string, stdin io.Reader, stdout, 
 	if !isSystemRole(args) {
 		return false, 0
 	}
+	if args[0] == "ssh-command-worker" {
+		code, err := RunSSHCommandWorker(ctx, args[1:], stdin, stdout, stderr)
+		if err != nil && err != context.Canceled {
+			fmt.Fprintln(stderr, err)
+		}
+		return true, code
+	}
 	var err error
 	switch args[0] {
 	case "node-worker":
@@ -42,7 +49,7 @@ func isSystemRole(args []string) bool {
 	if len(args) == 0 {
 		return false
 	}
-	if args[0] == "node-worker" || args[0] == "server-worker" || args[0] == "supervisor" || args[0] == "supervisor-check" || args[0] == "ssh-worker" || args[0] == "--internal-ssh-worker" {
+	if args[0] == "node-worker" || args[0] == "server-worker" || args[0] == "supervisor" || args[0] == "supervisor-check" || args[0] == "ssh-worker" || args[0] == "--internal-ssh-worker" || args[0] == "ssh-command-worker" {
 		return true
 	}
 	return len(args) >= 2 && args[0] == "server" && args[1] == "admin"

@@ -97,7 +97,7 @@ func (runtime *capabilityRuntime) execute(
 		if err := json.Unmarshal(params, &value); err != nil {
 			return nil, fmt.Errorf("decode file params: %w", err)
 		}
-		return runtime.file(value)
+		return runtime.fileWithExecutionContext(value)
 	case "process":
 		var value processParams
 		if err := json.Unmarshal(params, &value); err != nil {

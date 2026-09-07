@@ -277,6 +277,14 @@ for (const [name, tool] of tools) {
   assert(tool.inputSchema.additionalProperties === false, `${name} input schema allows unknown properties`);
   assert(tool.inputSchema.properties?.action, `${name} input schema omitted action`);
 }
+for (const name of ["file", "process"]) {
+  const executionContexts = tools.get(name).inputSchema.properties.executionContext?.enum;
+  assert(
+    JSON.stringify(executionContexts) === JSON.stringify(["user", "system"]),
+    `${name} tool omitted explicit Windows execution identities`,
+  );
+  assert(tools.get(name).inputSchema.properties.userSessionId, `${name} tool omitted Windows user session selection`);
+}
 const expectedActions = {
   status: ["list", "get"],
   file: ["roots", "stat", "list", "read", "write", "mkdir", "move", "remove"],

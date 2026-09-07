@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"sort"
 	"strings"
@@ -21,15 +20,17 @@ const (
 )
 
 type processParams struct {
-	Action    string            `json:"action"`
-	ProcessID string            `json:"processId"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args"`
-	CWD       string            `json:"cwd"`
-	Env       map[string]string `json:"env"`
-	Cursor    int64             `json:"cursor"`
-	Signal    string            `json:"signal"`
-	System    bool              `json:"system"`
+	Action           string            `json:"action"`
+	ProcessID        string            `json:"processId"`
+	Command          string            `json:"command"`
+	Args             []string          `json:"args"`
+	CWD              string            `json:"cwd"`
+	Env              map[string]string `json:"env"`
+	Cursor           int64             `json:"cursor"`
+	Signal           string            `json:"signal"`
+	System           bool              `json:"system"`
+	ExecutionContext string            `json:"executionContext"`
+	UserSessionID    *uint32           `json:"userSessionId"`
 }
 
 type outputChunk struct {
@@ -139,16 +140,19 @@ func (buffer *outputBuffer) read(cursor int64) map[string]any {
 }
 
 type managedProcess struct {
-	mu        sync.Mutex
-	command   *exec.Cmd
-	name      string
-	args      []string
-	cwd       string
-	startedAt time.Time
-	running   bool
-	exitCode  *int
-	signal    string
-	output    outputBuffer
+	mu               sync.Mutex
+	command          *exec.Cmd
+	name             string
+	args             []string
+	cwd              string
+	startedAt        time.Time
+	running          bool
+	exitCode         *int
+	signal           string
+	executionContext string
+	osIdentity       string
+	userSessionID    *uint32
+	output           outputBuffer
 }
 
 func randomID() (string, error) {
@@ -236,6 +240,9 @@ func (runtime *capabilityRuntime) cleanProcessSlots() error {
 }
 
 func validateProcessParams(params processParams) error {
+	if err := validateExecutionRequest(executionRequest{Context: params.ExecutionContext, UserSessionID: params.UserSessionID}); err != nil {
+		return err
+	}
 	if params.Command == "" || len(params.Command) > 4096 || strings.ContainsRune(params.Command, 0) {
 		return fmt.Errorf("command must contain between 1 and 4096 bytes")
 	}
@@ -265,23 +272,39 @@ func (runtime *capabilityRuntime) startProcess(params processParams) (any, error
 	if err := runtime.cleanProcessSlots(); err != nil {
 		return nil, err
 	}
+	identity, err := acquireExecutionIdentity(executionRequest{Context: params.ExecutionContext, UserSessionID: params.UserSessionID})
+	if err != nil {
+		return nil, err
+	}
+	defer identity.close()
 	cwd := params.CWD
 	if cwd == "" {
 		cwd = runtime.roots[0]
 	}
-	resolvedCWD, err := runtime.authorize(cwd, true)
+	resolvedValue, err := identity.runImpersonated(func() (any, error) {
+		return runtime.authorize(cwd, true)
+	})
 	if err != nil {
 		return nil, err
 	}
-	command := backgroundCommand(exec.Command(params.Command, params.Args...))
-	command.Dir = resolvedCWD
-	command.Env = os.Environ()
-	for name, value := range params.Env {
-		command.Env = append(command.Env, name+"="+value)
+	resolvedCWD, ok := resolvedValue.(string)
+	if !ok {
+		return nil, fmt.Errorf("resolve process working directory")
+	}
+	commandValue, err := identity.runImpersonated(func() (any, error) {
+		return newExecutionCommand(identity, params.Command, params.Args, resolvedCWD, params.Env)
+	})
+	if err != nil {
+		return nil, err
+	}
+	command, ok := commandValue.(*exec.Cmd)
+	if !ok {
+		return nil, fmt.Errorf("prepare process command")
 	}
 	process := &managedProcess{
 		command: command, name: params.Command, args: append([]string(nil), params.Args...),
 		cwd: resolvedCWD, startedAt: time.Now().UTC(), running: true,
+		executionContext: identity.Context, osIdentity: identity.OSIdentity, userSessionID: identity.UserSessionID,
 	}
 	command.Stdout = streamWriter{buffer: &process.output, stream: "stdout"}
 	command.Stderr = streamWriter{buffer: &process.output, stream: "stderr"}
@@ -329,12 +352,20 @@ func (process *managedProcess) view(id string, cursor int64) map[string]any {
 	args := append([]string(nil), process.args...)
 	cwd := process.cwd
 	startedAt := process.startedAt
+	executionContext := process.executionContext
+	osIdentity := process.osIdentity
+	userSessionID := process.userSessionID
 	process.mu.Unlock()
-	return map[string]any{
+	result := map[string]any{
 		"processId": id, "pid": pid, "command": name, "args": args, "cwd": cwd,
 		"startedAt": startedAt.Format(time.RFC3339Nano), "exitCode": exitCode,
 		"signal": signal, "running": running, "output": process.output.read(cursor),
+		"executionContext": executionContext, "osIdentity": osIdentity,
 	}
+	if userSessionID != nil {
+		result["userSessionId"] = *userSessionID
+	}
+	return result
 }
 
 func (runtime *capabilityRuntime) managedProcess(id string) (*managedProcess, error) {
@@ -383,16 +414,24 @@ func (runtime *capabilityRuntime) signalProcess(params processParams) (any, erro
 	process.mu.Lock()
 	running := process.running
 	pid := process.command.Process.Pid
+	executionContext := process.executionContext
+	osIdentity := process.osIdentity
+	userSessionID := process.userSessionID
 	process.mu.Unlock()
+	result := map[string]any{
+		"processId": params.ProcessID, "pid": pid, "signal": signalName,
+		"executionContext": executionContext, "osIdentity": osIdentity,
+	}
+	if userSessionID != nil {
+		result["userSessionId"] = *userSessionID
+	}
 	if !running {
-		return map[string]any{
-			"processId": params.ProcessID, "pid": pid, "signal": signalName, "accepted": false,
-		}, nil
+		result["accepted"] = false
+		return result, nil
 	}
 	if err := terminateProcess(process.command.Process, signalName); err != nil {
 		return nil, err
 	}
-	return map[string]any{
-		"processId": params.ProcessID, "pid": pid, "signal": signalName, "accepted": true,
-	}, nil
+	result["accepted"] = true
+	return result, nil
 }

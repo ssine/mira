@@ -116,6 +116,12 @@ Nodes in a single SCP command; run from the source Node or stage locally.
 The default shell/home come from the native OS account and OpenSSH platform port.
 This is independent of managed Codex `defaultCwd`. `-t/-T`, exit status and terminal
 mode/resize handling are native OpenSSH behavior. `--json` is not a stream format.
+For a direct, non-PTY command using Windows' default `cmd.exe`, the Mira SSH client asks
+the target to normalize text at the endpoint. Cmd built-ins are captured as Unicode,
+valid UTF-8 child output passes through and legacy OEM output is converted to UTF-8,
+with per-line buffering bounded at 64 KiB. A caller whose command intentionally emits
+raw bytes can opt out with `-o SetEnv=MIRA_SSH_TEXT=0`. PTY sessions, explicit remote
+SCP commands and SFTP subsystems bypass the adapter, so SCP/SFTP payloads stay byte-exact.
 `mira-node cli ...` is the same embedded CLI entry point, also available inside the
 Android image; no Termux or second Go binary is required.
 

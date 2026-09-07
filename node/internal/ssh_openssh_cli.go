@@ -212,6 +212,13 @@ func (client *cliClient) runOpenSSHClient(ctx context.Context, command string, a
 	}
 	proxy := strings.ReplaceAll(strings.Join(proxyArgs, " "), "%", "%%")
 	settings := []string{"Host *", "HostName mira-target", "IdentitiesOnly yes", "IdentityAgent none", "BatchMode yes", "PreferredAuthentications publickey", "PasswordAuthentication no", "KbdInteractiveAuthentication no", "StrictHostKeyChecking yes", "CheckHostIP no", "UpdateHostKeys no", "HostKeyAlgorithms ssh-ed25519", "GlobalKnownHostsFile none"}
+	if command == "ssh" {
+		// Windows cmd.exe writes redirected built-in output in UTF-16 or its OEM
+		// code page. Ask a Mira target to normalize command text at the endpoint;
+		// SCP/SFTP remain byte-exact. A caller that needs a raw SSH command stream
+		// can override this with -o SetEnv=MIRA_SSH_TEXT=0.
+		settings = append(settings, "SetEnv MIRA_SSH_TEXT=1")
+	}
 	if strings.ContainsAny(proxy, "\x00\r\n") {
 		return fmt.Errorf("invalid proxy path")
 	}

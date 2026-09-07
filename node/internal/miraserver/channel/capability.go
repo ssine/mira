@@ -137,6 +137,14 @@ func (service *CapabilityService) Invoke(ctx context.Context, actor *foundation.
 	if action, ok := validated["action"].(string); ok {
 		metadata["action"] = action
 	}
+	if executionContext, ok := validated["executionContext"].(string); ok {
+		metadata["executionContext"] = executionContext
+	} else if capability == "file" || (capability == "process" && metadata["action"] == "start") {
+		metadata["executionContext"] = "default"
+	}
+	if userSessionID, ok := integerValue(validated["userSessionId"]); ok {
+		metadata["userSessionId"] = userSessionID
+	}
 	for name, value := range options.AuditMetadata {
 		metadata[name] = value
 	}
@@ -234,6 +242,9 @@ func validateCapabilityParams(capability string, params map[string]any) (map[str
 		if err == nil {
 			err = validateInteger(params, "length", 1, 4*1024*1024)
 		}
+		if err == nil {
+			err = validateExecutionContext(params, true)
+		}
 	}
 	if (capability == "process" || capability == "pty") && err == nil {
 		for _, field := range []struct {
@@ -273,6 +284,9 @@ func validateCapabilityParams(capability string, params map[string]any) (map[str
 				}
 			}
 		}
+		if capability == "process" && err == nil {
+			err = validateExecutionContext(params, action == "start")
+		}
 	}
 	if capability == "screen" && err == nil {
 		for _, name := range []string{"x", "y", "startX", "startY", "endX", "endY"} {
@@ -305,6 +319,29 @@ func validateCapabilityParams(capability string, params map[string]any) (map[str
 		}
 	}
 	return params, err
+}
+
+func validateExecutionContext(params map[string]any, allowed bool) error {
+	contextValue, hasContext := params["executionContext"]
+	_, hasSession := params["userSessionId"]
+	if !allowed && (hasContext || hasSession) {
+		return channelError("executionContext is valid only when starting a process", 400, "invalid_request")
+	}
+	if hasContext {
+		contextName, ok := contextValue.(string)
+		if !ok || (contextName != "user" && contextName != "system") {
+			return channelError("executionContext must be user or system", 400, "invalid_request")
+		}
+		if hasSession && contextName != "user" {
+			return channelError("userSessionId requires executionContext user", 400, "invalid_request")
+		}
+	}
+	if hasSession {
+		if err := validateInteger(params, "userSessionId", 0, math.MaxUint32); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const maxSafeInteger = 9_007_199_254_740_991

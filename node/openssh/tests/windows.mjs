@@ -47,6 +47,21 @@ export default async function(ctx){
       console.log('PASS full Windows crypto: RSA/ECDSA keygen, AES-GCM + compression in both directions');
     }
     let r=await good(source.identity,['ssh',key,'--','echo WINDOWS_OPENSSH_OK']);assert(r.stdout.includes('WINDOWS_OPENSSH_OK'));
+    r=await good(source.identity,['ssh',key,'--','echo WINDOWS_UTF8_中文']);
+    assert(r.stdout.includes('WINDOWS_UTF8_中文'),`unexpected Windows UTF-8 stdout: ${r.stdout.toString('hex')}; stderr: ${r.stderr}`);
+    const rawBytes=Buffer.from([0,255,10,128]);
+    const rawCommand=Buffer.from(`[Console]::OpenStandardOutput().Write([byte[]](0,255,10,128),0,4)`,'utf16le').toString('base64');
+    r=await good(source.identity,['ssh','-o','SetEnv=MIRA_SSH_TEXT=0',key,'--',`powershell.exe -NoProfile -NonInteractive -EncodedCommand ${rawCommand}`]);assert.deepEqual(r.stdout,rawBytes);
+    console.log('PASS Windows non-PTY command shell emits UTF-8 text');
+    const invoke=async(capability,params)=>(await adminRequest(url,admin,`/v1/nodes/${device.nodeId}/invoke`,{method:'POST',body:JSON.stringify({capability,params})})).result;
+    let managed=await invoke('process',{action:'start',command:'cmd.exe',args:['/d','/c','whoami'],executionContext:'user'});
+    assert.equal(managed.executionContext,'user');assert(managed.osIdentity);assert(Number.isInteger(managed.userSessionId));
+    managed=await wait(async()=>{const view=await invoke('process',{action:'poll',processId:managed.processId,cursor:0});return view.running?null:view},'Windows user-context process');
+    const identityOutput=managed.output.chunks.map(chunk=>chunk.text).join('').trim().toLowerCase();
+    assert(identityOutput.includes(managed.osIdentity.toLowerCase()),`user process identity ${identityOutput} differs from ${managed.osIdentity}`);
+    await assert.rejects(()=>invoke('process',{action:'start',command:'whoami.exe',executionContext:'system'}),/system execution context is unavailable/);
+    const roots=await invoke('file',{action:'roots',executionContext:'user'});assert.equal(roots.executionContext,'user');assert(roots.osIdentity);
+    console.log('PASS Windows Agent capabilities select and report the interactive user identity');
     r=await good(source.identity,['ssh','-tt',key,'--','echo WINDOWS_PTY_OK']);assert(r.stdout.includes('WINDOWS_PTY_OK'));
     r=await cli(source.identity,['ssh',key,'--','exit /b 19']);assert.equal(r.code,19,r.stderr);
     const win=await windowsCLI(['ssh',nodes[1].key,'--','printf WINDOWS_TO_LINUX_OK']);assert.equal(win.code,0,win.stderr);assert.equal(win.stdout.toString(),'WINDOWS_TO_LINUX_OK');

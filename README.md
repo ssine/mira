@@ -226,6 +226,15 @@ Unix `0600` 权限；Windows 使用受保护的当前用户 / SYSTEM / Administr
 可用盘符。最终能否读取仍由 `mira` Node worker 的 OS 用户权限决定。如需把某台 Node 收紧到特定工作区，
 可显式设置 `MIRA_NODE_ALLOWED_ROOTS='["/path/to/workspace"]'`。
 
+Windows 系统服务默认以 LocalSystem 运行，但 Agent 的 `file` 操作和 `process/start` 可显式选择
+`executionContext: "user" | "system"`。未指定时 Windows 优先使用当前活动的交互用户，从而继承该用户
+的 Profile、环境和网络登录凭据；需要系统服务权限时必须选 `system`。节点状态的 `execution`
+字段会列出实际 OS 身份和可用的 `userSessionId`。多个用户会话同时活跃且无法唯一选择时，
+Mira 会拒绝猜测；用户令牌只在单次操作/启动期间使用，不持久化。受限根目录检查仍然适用；访问
+NAS 时建议让用户上下文的受管进程使用 UNC 路径。这个选择不改变 SSH、PTY 或 App Server 的 OS 身份；
+`mira ssh` 仍始终代表 Node 服务身份。用户上下文的受管进程仍是可捕获输出的非交互后台进程，
+不会进入用户桌面；需要桌面 UI 时使用相应的屏幕/UI 能力，而不是依赖这个执行上下文。
+
 构建桌面程序：
 
 ```bash
@@ -249,6 +258,8 @@ mira codex                         # 本机 Mira Codex；personal PostgreSQL sto
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
 mira process count --node homeserver --json
 mira process run --node homeserver -- /usr/bin/git status --short
+mira process run --node windows --execution-context user -- cmd.exe /d /c whoami
+mira process run --node windows --execution-context system -- sc.exe query Mira
 mira pty open --node wsl-main -- /bin/bash
 mira screen screenshot --node android-phone --output /tmp/phone.png
 mira app-server start --node wsl-main

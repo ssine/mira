@@ -2,7 +2,7 @@
 // The only supported variant uses full, statically linked crypto and compression.
 import fs from 'node:fs';
 import path from 'node:path';
-import {allowLocalSystemPasswordLookup,reuseLocalSystemProcessToken} from './source-transform.mjs';
+import {allowLocalSystemPasswordLookup,forceUTF8CommandShell,reuseLocalSystemProcessToken} from './source-transform.mjs';
 const root=path.resolve(process.argv[2]??'');
 if(!root.includes('mira-openssh-windows.') || !fs.existsSync(path.join(root,'sshd.c')))
   throw Error('Expected an isolated mira-openssh-windows.* source tree');
@@ -19,7 +19,9 @@ fs.writeFileSync(paths,text);
 // this file implicitly declares malloc/getenv as int and truncates x64 pointers.
 const doexec=path.join(root,'contrib/win32/win32compat/w32-doexec.c');
 let doexecCode=fs.readFileSync(doexec,'utf8');
-if(!doexecCode.includes('#include <stdlib.h>'))fs.writeFileSync(doexec,doexecCode.replace('#include "includes.h"','#include "includes.h"\n#include <stdlib.h>'));
+if(!doexecCode.includes('#include <stdlib.h>'))doexecCode=doexecCode.replace('#include "includes.h"','#include "includes.h"\n#include <stdlib.h>');
+if(!doexecCode.includes('#include "sshbuf.h"'))doexecCode=doexecCode.replace('#include "packet.h"','#include "packet.h"\n#include "sshbuf.h"');
+fs.writeFileSync(doexec,forceUTF8CommandShell(doexecCode));
 const pwd=path.join(root,'contrib/win32/win32compat/pwd.c');
 fs.writeFileSync(pwd,allowLocalSystemPasswordLookup(fs.readFileSync(pwd,'utf8')));
 const usertoken=path.join(root,'contrib/win32/win32compat/win32_usertoken_utils.c');

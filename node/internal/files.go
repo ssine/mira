@@ -13,16 +13,18 @@ import (
 const maxFileBytes = 4 * 1024 * 1024
 
 type fileParams struct {
-	Action      string `json:"action"`
-	Path        string `json:"path"`
-	Destination string `json:"destination"`
-	Content     string `json:"content"`
-	Encoding    string `json:"encoding"`
-	Offset      int64  `json:"offset"`
-	Length      *int64 `json:"length"`
-	Recursive   bool   `json:"recursive"`
-	Overwrite   *bool  `json:"overwrite"`
-	Append      bool   `json:"append"`
+	Action           string  `json:"action"`
+	Path             string  `json:"path"`
+	Destination      string  `json:"destination"`
+	Content          string  `json:"content"`
+	Encoding         string  `json:"encoding"`
+	Offset           int64   `json:"offset"`
+	Length           *int64  `json:"length"`
+	Recursive        bool    `json:"recursive"`
+	Overwrite        *bool   `json:"overwrite"`
+	Append           bool    `json:"append"`
+	ExecutionContext string  `json:"executionContext"`
+	UserSessionID    *uint32 `json:"userSessionId"`
 }
 
 func pathContained(root string, candidate string) bool {
@@ -150,6 +152,21 @@ func (runtime *capabilityRuntime) file(params fileParams) (any, error) {
 	default:
 		return nil, fmt.Errorf("unsupported file action: %s", params.Action)
 	}
+}
+
+func (runtime *capabilityRuntime) fileWithExecutionContext(params fileParams) (any, error) {
+	identity, err := acquireExecutionIdentity(executionRequest{Context: params.ExecutionContext, UserSessionID: params.UserSessionID})
+	if err != nil {
+		return nil, err
+	}
+	defer identity.close()
+	result, err := identity.runImpersonated(func() (any, error) {
+		return runtime.file(params)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return attachExecutionMetadata(result, identity), nil
 }
 
 func (runtime *capabilityRuntime) listFiles(target string) (any, error) {

@@ -1168,12 +1168,15 @@ function dynamicToolActions(tool) {
 
 const debugFieldSets = {
   file: {
-    roots: [], stat: ["path"], list: ["path"], read: ["path", "offset", "length"],
-    write: ["path", "content", "encoding", "overwrite"], mkdir: ["path"],
-    move: ["path", "destination", "overwrite"], remove: ["path", "recursive"],
+    roots: ["executionContext", "userSessionId"], stat: ["path", "executionContext", "userSessionId"],
+    list: ["path", "executionContext", "userSessionId"], read: ["path", "offset", "length", "executionContext", "userSessionId"],
+    write: ["path", "content", "encoding", "overwrite", "executionContext", "userSessionId"],
+    mkdir: ["path", "executionContext", "userSessionId"],
+    move: ["path", "destination", "overwrite", "executionContext", "userSessionId"],
+    remove: ["path", "recursive", "executionContext", "userSessionId"],
   },
   process: {
-    count: [], list: ["cursor", "system"], start: ["command", "args", "cwd", "env"],
+    count: [], list: ["cursor", "system"], start: ["command", "args", "cwd", "env", "executionContext", "userSessionId"],
     poll: ["processId", "cursor"], signal: ["processId", "signal"],
   },
   pty: {
@@ -1210,6 +1213,8 @@ const debugFieldDefinitions = {
   args: { label: "命令参数", type: "lines", placeholder: "每行一个参数" },
   cwd: { label: "工作目录", type: "text", placeholder: "绝对路径" },
   env: { label: "环境变量", type: "json", placeholder: "{\n  \"NAME\": \"value\"\n}" },
+  executionContext: { label: "Windows 执行身份", type: "select", options: ["user", "system"] },
+  userSessionId: { label: "Windows 用户会话 ID", type: "number", minimum: 0, maximum: 4294967295 },
   cursor: { label: "输出游标", type: "number", minimum: 0 },
   signal: { label: "信号", type: "select", options: ["SIGINT", "SIGTERM", "SIGKILL"] },
   system: { label: "列出系统进程", type: "checkbox" },
@@ -1300,6 +1305,7 @@ function renderDebugPresetFields(tool, action, preset) {
     return;
   }
   for (const name of fields) {
+    if ((name === "executionContext" || name === "userSessionId") && workspace.node?.platform !== "windows") continue;
     const definition = debugFieldDefinitions[name];
     if (!definition) continue;
     const label = element("label", `debug-preset-field${definition.type === "textarea" || definition.type === "lines" || definition.type === "json" ? " wide" : ""}`);

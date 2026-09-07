@@ -223,6 +223,17 @@ CLI/OpenSSH roles and foreground Node debugging intact; background workers must 
 For embedded SSH, the Windows service maps the well-known LocalSystem SID to `system` and may reuse
 only its current LocalSystem process token; do not broaden this exception to arbitrary account types
 or generate a different user's token for Mira's same-identity SSH sessions.
+Windows `file` and managed `process/start` capabilities are a separate, explicit execution-context
+boundary. An installed LocalSystem Node defaults these operations to an active interactive `user`
+token and accepts `system` only as an explicit request; a user-run Node cannot synthesize LocalSystem.
+Acquire an interactive token from the selected active WTS session for one operation/process start,
+use its profile environment, report the resolved OS identity/session in results, and never persist
+the token or accept a username/password. Prefer the active console session, require `userSessionId`
+when multiple active sessions are ambiguous, and fail when no user is logged in rather than silently
+falling back to LocalSystem. A captured background process must duplicate that token into the Node
+process session before inheriting bounded stdio handles; retain and report the originating interactive
+session ID, and do not turn this into interactive desktop access. Keep allowed-root checks in force.
+This does not change SSH, PTY, App Server, Supervisor, or Node worker identity.
 The interactive `--tray` Node mode remains a manual diagnostic UI, not installation ownership or a
 second startup path. Local diagnostic logs rotate with bounded retention and never store conversations.
 

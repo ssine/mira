@@ -5,7 +5,7 @@ import "testing"
 func TestSystemRolesRequireAnExplicitFirstArgument(t *testing.T) {
 	for _, arguments := range [][]string{
 		{"node-worker"}, {"server-worker"}, {"server", "admin"},
-		{"supervisor"}, {"supervisor-check"}, {"ssh-worker"}, {"--internal-ssh-worker"},
+		{"supervisor"}, {"supervisor-check"}, {"ssh-worker"}, {"--internal-ssh-worker"}, {"ssh-command-worker"},
 	} {
 		if !isSystemRole(arguments) {
 			t.Fatalf("explicit system role was not recognized: %v", arguments)

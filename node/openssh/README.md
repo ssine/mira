@@ -57,7 +57,12 @@ bash node/openssh/build.sh android
   PowerShell. GNU MinGW is used for cgo; an existing container toolchain is a local
   fallback. A Mira system service maps only the well-known LocalSystem SID to the
   canonical OpenSSH name `system` and reuses that same process token; it does not
-  grant access to or synthesize tokens for arbitrary Windows accounts. CI separates
+  grant access to or synthesize tokens for arbitrary Windows accounts. Mira-to-Mira
+  SSH opts direct, non-PTY commands through the default `cmd.exe` into bounded text
+  normalization: cmd built-ins are captured as Unicode, UTF-8 child output passes
+  through, and legacy OEM output is converted to UTF-8. Use
+  `mira ssh -o SetEnv=MIRA_SSH_TEXT=0 ...` when command output is intentionally raw.
+  PTY sessions and SCP/SFTP binary streams remain untouched. CI separates
   Windows C compilation and Linux cross-linking jobs.
 - Android: Linux/WSL, pinned NDK, Go and Node.js. One API-26+ ARM64 ELF, linked crypto,
   Android OS libc/libdl/libm/liblog/libz. Non-root and authorized root share one

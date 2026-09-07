@@ -4,6 +4,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,11 +49,19 @@ func TestWindowsNativeCapabilities(t *testing.T) {
 	if status["memory"].(map[string]any)["totalBytes"].(int64) <= 0 {
 		t.Fatal("Windows memory status is empty")
 	}
+	execution, ok := status["execution"].(map[string]any)
+	if !ok || execution["default"] != executionContextUser {
+		t.Fatalf("Windows execution identities are missing: %#v", status["execution"])
+	}
 	filePath := filepath.Join(directory, "你好.txt")
-	if _, err := runtimeValue.file(fileParams{Action: "write", Path: filePath, Content: "Mira Windows 文件\n"}); err != nil {
+	written, err := runtimeValue.fileWithExecutionContext(fileParams{Action: "write", Path: filePath, Content: "Mira Windows 文件\n", ExecutionContext: executionContextUser})
+	if err != nil {
 		t.Fatal(err)
 	}
-	read, err := runtimeValue.file(fileParams{Action: "read", Path: filePath})
+	if written.(map[string]any)["executionContext"] != executionContextUser || written.(map[string]any)["osIdentity"] == "" {
+		t.Fatalf("Windows file result omitted its execution identity: %#v", written)
+	}
+	read, err := runtimeValue.fileWithExecutionContext(fileParams{Action: "read", Path: filePath, ExecutionContext: executionContextUser})
 	if err != nil || read.(map[string]any)["content"] != "Mira Windows 文件\n" {
 		t.Fatalf("Windows file round trip failed: %#v %v", read, err)
 	}
@@ -62,11 +71,14 @@ func TestWindowsNativeCapabilities(t *testing.T) {
 	if _, err := runtimeValue.process(ctx, processParams{Action: "list", System: true}); err != nil {
 		t.Fatal(err)
 	}
-	started, err := runtimeValue.startProcess(processParams{Command: "cmd.exe", Args: []string{"/d", "/c", "echo MIRA_PROCESS_NATIVE"}, CWD: directory})
+	started, err := runtimeValue.startProcess(processParams{Command: "cmd.exe", Args: []string{"/d", "/c", "echo MIRA_PROCESS_NATIVE"}, CWD: directory, ExecutionContext: executionContextUser})
 	if err != nil {
 		t.Fatal(err)
 	}
 	id := started.(map[string]any)["processId"].(string)
+	if started.(map[string]any)["executionContext"] != executionContextUser || started.(map[string]any)["osIdentity"] == "" {
+		t.Fatalf("Windows process result omitted its execution identity: %#v", started)
+	}
 	process, err := runtimeValue.managedProcess(id)
 	if err != nil {
 		t.Fatal(err)
@@ -83,6 +95,72 @@ func TestWindowsNativeCapabilities(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("Windows process did not exit")
+}
+
+func TestWindowsLocalSystemInteractiveUserContext(t *testing.T) {
+	if os.Getenv("MIRA_TEST_WINDOWS_SYSTEM_USER_CONTEXT") != "1" {
+		t.Skip("set MIRA_TEST_WINDOWS_SYSTEM_USER_CONTEXT=1 under the installed LocalSystem service")
+	}
+	_, isSystem, err := windowsTokenIdentity(windows.GetCurrentProcessToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isSystem {
+		t.Fatal("test process is not LocalSystem")
+	}
+	identity, err := acquireExecutionIdentity(executionRequest{Context: executionContextUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	userTemp := windowsEnvironmentValue(identity.environment, "TEMP")
+	expectedIdentity := identity.OSIdentity
+	expectedSessionID := *identity.UserSessionID
+	identity.close()
+	if userTemp == "" {
+		t.Fatal("interactive user environment omitted TEMP")
+	}
+
+	runtimeValue, err := newCapabilityRuntime(config{AllowedRoots: defaultAllowedRoots()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeValue.close()
+	filePath := filepath.Join(userTemp, fmt.Sprintf("mira-user-context-%d.txt", os.Getpid()))
+	defer os.Remove(filePath)
+	written, err := runtimeValue.fileWithExecutionContext(fileParams{
+		Action: "write", Path: filePath, Content: "interactive user\n", ExecutionContext: executionContextUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.(map[string]any)["osIdentity"] != expectedIdentity || written.(map[string]any)["userSessionId"] != expectedSessionID {
+		t.Fatalf("file operation selected the wrong interactive user: %#v", written)
+	}
+
+	started, err := runtimeValue.startProcess(processParams{
+		Command: "cmd.exe", Args: []string{"/d", "/c", "whoami"}, CWD: userTemp, ExecutionContext: executionContextUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := started.(map[string]any)["processId"].(string)
+	process, err := runtimeValue.managedProcess(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		view := process.view(id, 0)
+		if !view["running"].(bool) {
+			actualIdentity := strings.TrimSpace(outputTextForTest(view["output"].(map[string]any)))
+			if !strings.EqualFold(actualIdentity, expectedIdentity) {
+				t.Fatalf("process ran as %q, expected %q", actualIdentity, expectedIdentity)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("interactive-user process did not exit")
 }
 
 // Native OpenSSH SFTP drive paths are exercised by openssh/tests/windows.mjs.
