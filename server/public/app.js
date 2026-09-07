@@ -5759,11 +5759,14 @@ async function bootstrap() {
     $("#healthDot").classList.add("ok");
     $("#healthText").textContent = `Server ${health.version ?? ""} 在线 · PostgreSQL`;
     const origin = window.location.origin;
+    const releaseVersion = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(health.version ?? "") ? health.version : "";
+    const linuxVersionArgument = releaseVersion ? ` --version '${releaseVersion}'` : "";
+    const windowsVersionArgument = releaseVersion ? ` -Version '${releaseVersion}'` : "";
     $("#installServer").textContent = origin;
-    $("#installLinux").textContent = `curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --server '${origin}'`;
-    $("#installWindows").textContent = `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1))) -Server '${origin}'`;
-    if (/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(health.version ?? "")) {
-      $("#installAndroid").href = `https://github.com/ssine/mira/releases/download/v${health.version}/mira_${health.version}_android_arm64.apk`;
+    $("#installLinux").textContent = `curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server '${origin}'${linuxVersionArgument}`;
+    $("#installWindows").textContent = `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server '${origin}'${windowsVersionArgument}"`;
+    if (releaseVersion) {
+      $("#installAndroid").href = `https://github.com/ssine/mira/releases/download/v${releaseVersion}/mira_${releaseVersion}_android_arm64.apk`;
     }
     if (!health.adminConfigured) { show("setupView"); return; }
     try {

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -25,6 +26,28 @@ func TestReleaseVersionComparison(t *testing.T) {
 		if releaseVersionPattern.MatchString(value) {
 			t.Fatalf("accepted invalid release %q", value)
 		}
+	}
+}
+
+func TestReleaseVersionFromChecksumManifest(t *testing.T) {
+	hash := strings.Repeat("a", 64)
+	manifest := strings.Join([]string{
+		"not a checksum line",
+		hash + "  install.ps1",
+		hash + "  mira_1.2.3_linux_amd64.tar.gz",
+		hash + " *mira_1.2.3_windows_amd64.zip",
+		hash + "  mira_1.2.3_android_arm64.apk",
+	}, "\n")
+	version, err := releaseVersionFromChecksumManifest(manifest)
+	if err != nil || version != "1.2.3" {
+		t.Fatalf("releaseVersionFromChecksumManifest() = %q, %v", version, err)
+	}
+	if _, err := releaseVersionFromChecksumManifest(hash + "  install.ps1\n"); err == nil {
+		t.Fatal("accepted a manifest without Mira release assets")
+	}
+	conflicting := manifest + "\n" + hash + "  mira_1.2.4_linux_arm64.tar.gz\n"
+	if _, err := releaseVersionFromChecksumManifest(conflicting); err == nil {
+		t.Fatal("accepted conflicting release versions")
 	}
 }
 

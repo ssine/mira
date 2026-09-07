@@ -15,9 +15,17 @@ if (minor >= 1000 || patch >= 1000 || major * 1_000_000 + minor * 1000 + patch >
 
 const goVersion = fs.readFileSync(path.join(root, "node/internal/version.go"), "utf8");
 const nodeDockerfile = fs.readFileSync(path.join(root, "node/Dockerfile"), "utf8");
+const installationDocuments = ["README.md", "INSTALL.md"].map((name) => [
+  name, fs.readFileSync(path.join(root, name), "utf8"),
+]);
 
 if (!goVersion.includes(`Version   = "${version}"`)) throw new Error("Go default version does not match VERSION");
 if (!nodeDockerfile.includes(`ARG MIRA_VERSION=${version}`)) throw new Error("Node Docker default version does not match VERSION");
+for (const [name, content] of installationDocuments) {
+  if (!content.includes(`--version ${version}`) || !content.includes(`-Version '${version}'`)) {
+    throw new Error(`${name} one-line installers do not match VERSION`);
+  }
+}
 if (!/^\d+\.\d+\.\d+$/.test(codexVersion)) throw new Error("CODEX_VERSION is not a semantic version");
 
 process.stdout.write(`Mira version ${version} and Codex baseline ${codexVersion} are consistent.\n`);

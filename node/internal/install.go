@@ -19,6 +19,8 @@ import (
 )
 
 var releaseVersionPattern = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
+var releaseChecksumPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+var releaseAssetPattern = regexp.MustCompile(`^mira_((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))_(linux_(amd64|arm64)\.tar\.gz|windows_amd64\.zip|android_arm64\.apk)$`)
 
 // Compare stable SemVer without integer overflow, including multi-digit components.
 func compareReleaseVersions(left, right string) int {
@@ -160,12 +162,34 @@ func localStatus(ctx context.Context, options cliOptions) (any, error) {
 	return view, nil
 }
 
+func releaseVersionFromChecksumManifest(content string) (string, error) {
+	version := ""
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || !releaseChecksumPattern.MatchString(fields[0]) {
+			continue
+		}
+		asset := strings.TrimPrefix(fields[1], "*")
+		match := releaseAssetPattern.FindStringSubmatch(asset)
+		if match == nil {
+			continue
+		}
+		if version != "" && version != match[1] {
+			return "", fmt.Errorf("latest release checksum contains conflicting Mira versions")
+		}
+		version = match[1]
+	}
+	if version == "" {
+		return "", fmt.Errorf("latest release checksum contains no Mira release assets")
+	}
+	return version, nil
+}
+
 func latestRelease(ctx context.Context) (string, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/repos/ssine/mira/releases/latest", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://github.com/ssine/mira/releases/latest/download/SHA256SUMS", nil)
 	if err != nil {
 		return "", err
 	}
-	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "mira/"+Version)
 	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
 	if err != nil {
@@ -173,19 +197,17 @@ func latestRelease(ctx context.Context) (string, error) {
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub release lookup returned HTTP %d", response.StatusCode)
+		return "", fmt.Errorf("GitHub latest release checksum returned HTTP %d", response.StatusCode)
 	}
-	var release struct {
-		Tag string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1024*1024)).Decode(&release); err != nil {
+	const maximumManifestSize = 1024 * 1024
+	content, err := io.ReadAll(io.LimitReader(response.Body, maximumManifestSize+1))
+	if err != nil {
 		return "", err
 	}
-	version := strings.TrimPrefix(release.Tag, "v")
-	if !releaseVersionPattern.MatchString(version) {
-		return "", fmt.Errorf("GitHub returned an invalid release version")
+	if len(content) > maximumManifestSize {
+		return "", fmt.Errorf("GitHub latest release checksum is too large")
 	}
-	return version, nil
+	return releaseVersionFromChecksumManifest(string(content))
 }
 
 func runUpdate(ctx context.Context, options cliOptions, args []string, stdin io.Reader, stdout, stderr io.Writer) (any, error) {

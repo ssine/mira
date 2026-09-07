@@ -15,8 +15,8 @@ const fakeBin = path.join(temporary, "fake-bin");
 
 assert.equal(windowsInstaller.includes("api.github.com"), false,
   "the public Windows bootstrap must not consume the unauthenticated GitHub API quota");
-assert.match(windowsInstaller, /github\.com\/ssine\/mira\/releases\/latest/,
-  "the public Windows bootstrap must resolve the latest release through GitHub's redirect");
+assert.match(windowsInstaller, /github\.com\/ssine\/mira\/releases\/latest\/download/,
+  "the public Windows bootstrap must resolve the latest release from its checksum manifest");
 
 function command(program, args, options = {}) {
   return execFileSync(program, args, { cwd: root, encoding: "utf8", ...options });

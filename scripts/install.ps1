@@ -19,23 +19,13 @@ if (-not [IO.Path]::IsPathRooted($StateDirectory)) { throw "StateDirectory must 
 $stage = Join-Path ([IO.Path]::GetTempPath()) ("mira-install-" + [Guid]::NewGuid().ToString("N"))
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
-    if ($Version -eq "latest") {
-        # Resolve GitHub's public latest-release redirect instead of consuming the
-        # low unauthenticated REST API quota shared by the caller's public IP.
-        $release = Invoke-WebRequest "https://github.com/ssine/mira/releases/latest" -Method Head -UseBasicParsing
-        $releaseUri = $release.BaseResponse.ResponseUri
-        if (-not $releaseUri -and $release.BaseResponse.RequestMessage) {
-            $releaseUri = $release.BaseResponse.RequestMessage.RequestUri
-        }
-        if (-not $releaseUri -or $releaseUri.AbsolutePath -notmatch '/releases/tag/v?([^/]+)$') {
-            throw "Could not determine the latest Mira release"
-        }
-        $Version = $Matches[1]
+    $latest = $Version -eq "latest"
+    if ($latest) { $baseUrl = "https://github.com/ssine/mira/releases/latest/download" }
+    else {
+        $Version = $Version.TrimStart("v")
+        if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw "Invalid semantic version" }
+        $baseUrl = "https://github.com/ssine/mira/releases/download/v$Version"
     }
-    $Version = $Version.TrimStart("v")
-    if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw "Invalid semantic version" }
-    $asset = "mira_${Version}_windows_amd64.zip"
-    $baseUrl = "https://github.com/ssine/mira/releases/download/v$Version"
 
     function Download-Asset([string]$Name) {
         $destination = Join-Path $stage $Name
@@ -43,6 +33,14 @@ try {
         else { Invoke-WebRequest "$baseUrl/$Name" -UseBasicParsing -OutFile $destination }
     }
     Download-Asset "SHA256SUMS"
+    if ($latest) {
+        $assetPattern = '^([a-fA-F0-9]{64})\s+\*?(mira_((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))_windows_amd64\.zip)$'
+        $assetLine = Get-Content (Join-Path $stage "SHA256SUMS") | Where-Object { $_ -match $assetPattern } | Select-Object -First 1
+        if (-not $assetLine) { throw "Latest release checksum has no Windows amd64 asset" }
+        $assetMatch = [regex]::Match($assetLine, $assetPattern)
+        $asset = $assetMatch.Groups[2].Value
+        $Version = $assetMatch.Groups[3].Value
+    } else { $asset = "mira_${Version}_windows_amd64.zip" }
     Download-Asset $asset
     $pattern = '^([a-fA-F0-9]{64})\s+\*?' + [regex]::Escape($asset) + '$'
     $line = Get-Content (Join-Path $stage "SHA256SUMS") | Where-Object { $_ -match $pattern } | Select-Object -First 1

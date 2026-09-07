@@ -149,6 +149,9 @@ for (const wiring of ["themeStorageKey", "function terminalTheme()", "function t
 for (const control of ["installLinux", "installWindows", "installServer", "installAndroid"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted installer ${control}`);
 }
+for (const wiring of ["const releaseVersion =", "const linuxVersionArgument =", "const windowsVersionArgument =", "-ExecutionPolicy Bypass"]) {
+  assert(assets["/app.js"].includes(wiring), `website omitted version-pinned installer behavior: ${wiring}`);
+}
 assert(assets["/app.js"].includes("/v1/dynamic-tools"), "website does not load the dynamic tool catalog");
 assert(assets["/app.js"].includes("/v1/dynamic-tools/call"), "website does not expose the dynamic tool debugger call");
 for (const wiring of [
