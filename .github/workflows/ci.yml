@@ -55,6 +55,7 @@ jobs:
           node --test \
             tests/account_status_test.mjs \
             tests/conversation_progress_test.mjs \
+            tests/thread_list_test.mjs \
             tests/thread_title_test.mjs \
             tests/thread_token_usage_test.mjs \
             tests/trace_copy_test.mjs

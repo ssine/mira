@@ -10,6 +10,7 @@ import { AccountSidebar } from "/account-status.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages, mergeImages } from "/trace-images.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
+import { compareThreadsByRecency, splitProjectThreads } from "/thread-list.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -166,6 +167,7 @@ const agent = {
   activityCheckedAt: 0,
   interruptRequests: new Set(),
   projectOpen: new Map(),
+  projectHistoryOpen: new Map(),
   draftProject: null,
   menuThreadId: null,
   rename: null,
@@ -3877,11 +3879,45 @@ function projectForThread(thread) {
   return { key: JSON.stringify([nodeId, cwd ? path : ""]), nodeId, cwd };
 }
 
+function renderAgentThreadRow(thread) {
+  const row = element("div", "agent-thread-row");
+  row.dataset.threadRow = thread.threadId;
+  const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
+  button.type = "button";
+  button.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
+  button.dataset.threadId = thread.threadId;
+  if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
+  button.title = thread.title || "未命名会话";
+  const status = element("span", "thread-state-label");
+  status.dataset.threadActivity = thread.threadId;
+  status.dataset.recency = agent.titleJobs.has(thread.threadId)
+    ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${threadTimestamp(thread.updatedAt)}`;
+  status.dataset.updatedAt = thread.updatedAt || "";
+  status.dataset.subagent = thread.parentThreadId ? "true" : "false";
+  const meta = element("span", "thread-meta");
+  const usage = element("span", "thread-token-usage");
+  usage.dataset.threadTokenUsage = thread.threadId;
+  usage.hidden = true;
+  const cost = element("span", "thread-cost");
+  cost.dataset.threadCost = thread.threadId;
+  cost.hidden = true;
+  meta.append(status, usage, cost);
+  button.append(element("strong", "", button.title), meta);
+  const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
+  menu.type = "button";
+  menu.dataset.threadMenu = thread.threadId;
+  menu.title = `对话选项：${button.title}`;
+  menu.setAttribute("aria-label", menu.title);
+  menu.setAttribute("aria-haspopup", "menu");
+  row.append(button, menu);
+  return row;
+}
+
 function renderAgentThreads() {
   const list = clear($("#agentThreadList"));
   const groups = new Map();
-  const threads = agent.threads.filter(thread => Boolean(thread.archived) === agent.showArchived).sort((a, b) =>
-    (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0) || b.threadId.localeCompare(a.threadId));
+  const threads = agent.threads.filter(thread => Boolean(thread.archived) === agent.showArchived).sort(compareThreadsByRecency);
+  const renderedAt = Date.now();
   for (const thread of threads) {
     const project = projectForThread(thread);
     if (!groups.has(project.key)) groups.set(project.key, { ...project, threads: [] });
@@ -3934,38 +3970,30 @@ function renderAgentThreads() {
     conversations.setAttribute("role", "group");
     conversations.setAttribute("aria-label", `${name} · ${location} 的对话`);
     if (!group.threads.length) conversations.append(element("p", "thread-project-empty", "发送第一条消息，开始项目对话"));
-    for (const thread of group.threads) {
-      const row = element("div", "agent-thread-row");
-      row.dataset.threadRow = thread.threadId;
-      const button = element("button", `agent-thread${thread.threadId === agent.threadId ? " active" : ""}`);
-      button.type = "button";
-      button.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
-      button.dataset.threadId = thread.threadId;
-      if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
-      button.title = thread.title || "未命名会话";
-      const status = element("span", "thread-state-label");
-      status.dataset.threadActivity = thread.threadId;
-      status.dataset.recency = agent.titleJobs.has(thread.threadId)
-        ? "正在生成标题…" : `${thread.parentThreadId ? "子对话 · " : ""}${threadTimestamp(thread.updatedAt)}`;
-      status.dataset.updatedAt = thread.updatedAt || "";
-      status.dataset.subagent = thread.parentThreadId ? "true" : "false";
-      const meta = element("span", "thread-meta");
-      const usage = element("span", "thread-token-usage");
-      usage.dataset.threadTokenUsage = thread.threadId;
-      usage.hidden = true;
-      const cost = element("span", "thread-cost");
-      cost.dataset.threadCost = thread.threadId;
-      cost.hidden = true;
-      meta.append(status, usage, cost);
-      button.append(element("strong", "", button.title), meta);
-      const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
-      menu.type = "button";
-      menu.dataset.threadMenu = thread.threadId;
-      menu.title = `对话选项：${button.title}`;
-      menu.setAttribute("aria-label", menu.title);
-      menu.setAttribute("aria-haspopup", "menu");
-      row.append(button, menu);
-      conversations.append(row);
+    const { visible, hidden } = splitProjectThreads(group.threads, renderedAt);
+    for (const thread of visible) conversations.append(renderAgentThreadRow(thread));
+    if (hidden.length) {
+      const historyKey = JSON.stringify([agent.showArchived, group.key]);
+      const history = element("details", "thread-project-history");
+      history.open = agent.projectHistoryOpen.get(historyKey) ?? false;
+      const historySummary = element("summary", "thread-project-history-summary");
+      const historyLabel = element("span", "thread-project-history-label");
+      const updateHistoryLabel = () => {
+        historyLabel.textContent = history.open ? `收起 ${hidden.length} 个较早对话` : `展开 ${hidden.length} 个隐藏对话`;
+        historySummary.title = historyLabel.textContent;
+        historySummary.setAttribute("aria-label", historyLabel.textContent);
+      };
+      updateHistoryLabel();
+      historySummary.append(historyLabel);
+      const historyThreads = element("div", "thread-project-history-threads");
+      for (const thread of hidden) historyThreads.append(renderAgentThreadRow(thread));
+      history.addEventListener("toggle", () => {
+        agent.projectHistoryOpen.set(historyKey, history.open);
+        updateHistoryLabel();
+        scheduleSidebarCosts();
+      });
+      history.append(historySummary, historyThreads);
+      conversations.append(history);
     }
     project.append(conversations);
     list.append(project);

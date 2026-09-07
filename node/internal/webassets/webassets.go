@@ -35,6 +35,7 @@ var specs = map[string]assetSpec{
 	"/":                          {"web/index.html", "text/html; charset=utf-8"},
 	"/app.js":                    {"web/app.js", "text/javascript; charset=utf-8"},
 	"/thread-title.js":           {"web/thread-title.js", "text/javascript; charset=utf-8"},
+	"/thread-list.js":            {"web/thread-list.js", "text/javascript; charset=utf-8"},
 	"/thread-usage.js":           {"web/thread-usage.js", "text/javascript; charset=utf-8"},
 	"/thread-model.js":           {"web/thread-model.js", "text/javascript; charset=utf-8"},
 	"/account-history.js":        {"web/account-history.js", "text/javascript; charset=utf-8"},
