@@ -78,6 +78,25 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 后续桌面端执行 `mira update`；首次安装脚本不再承担更新。Android 在 APP 内检查更新。身份和配置随升级保留。
 具体命令、平台要求、服务启动方式及回退说明见 [INSTALL.md](./INSTALL.md)。
 
+### 一行安装并申请注册 Node
+
+把下面的 `https://mira.example.com` 替换为你的 Mira Server 地址。
+
+Linux（也适用于 WSL，支持 amd64/arm64）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com
+```
+
+Windows x64（在管理员 PowerShell 中运行）：
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1))) -Role node -Server https://mira.example.com
+```
+
+命令会下载并校验最新 Release、安装并启动 Node，然后向 Server 提交注册申请。回到管理员网站，
+核对 Node 显示的六位验证码并批准后即可完成注册；安装命令不会绕过审批。
+
 ## 架构
 
 ```text
