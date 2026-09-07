@@ -91,11 +91,13 @@ curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1))) -Role node -Server https://mira.example.com
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com'"
 ```
 
 命令会下载并校验最新 Release、安装并启动 Node，然后向 Server 提交注册申请。回到管理员网站，
 核对 Node 显示的六位验证码并批准后即可完成注册；安装命令不会绕过审批。
+Windows 命令中的 `Bypass` 只作用于这一个新 PowerShell 进程，不会永久修改系统执行策略；如果组织的
+`MachinePolicy` 或 `UserPolicy` 仍然禁止执行，请联系管理员放行，不要尝试绕过组织策略。
 
 ## 架构
 

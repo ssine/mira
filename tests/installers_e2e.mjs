@@ -8,9 +8,15 @@ import { fileURLToPath } from "node:url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const version = (await fs.readFile(path.join(root, "VERSION"), "utf8")).trim();
+const windowsInstaller = await fs.readFile(path.join(root, "scripts", "install.ps1"), "utf8");
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), "mira-installers-e2e-"));
 const releases = path.join(temporary, "releases");
 const fakeBin = path.join(temporary, "fake-bin");
+
+assert.equal(windowsInstaller.includes("api.github.com"), false,
+  "the public Windows bootstrap must not consume the unauthenticated GitHub API quota");
+assert.match(windowsInstaller, /github\.com\/ssine\/mira\/releases\/latest/,
+  "the public Windows bootstrap must resolve the latest release through GitHub's redirect");
 
 function command(program, args, options = {}) {
   return execFileSync(program, args, { cwd: root, encoding: "utf8", ...options });
@@ -103,6 +109,7 @@ try {
     idempotentBootstrap: true,
     legacyInstallerUpdateRejected: true,
     checksumFailureRejected: true,
+    windowsLatestReleaseRedirect: true,
     supervisorUpdateCoveredByGoTests: true,
   }));
 } finally {

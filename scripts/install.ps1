@@ -20,8 +20,17 @@ $stage = Join-Path ([IO.Path]::GetTempPath()) ("mira-install-" + [Guid]::NewGuid
 try {
     New-Item -ItemType Directory -Path $stage | Out-Null
     if ($Version -eq "latest") {
-        $release = Invoke-RestMethod "https://api.github.com/repos/ssine/mira/releases/latest"
-        $Version = $release.tag_name
+        # Resolve GitHub's public latest-release redirect instead of consuming the
+        # low unauthenticated REST API quota shared by the caller's public IP.
+        $release = Invoke-WebRequest "https://github.com/ssine/mira/releases/latest" -Method Head -UseBasicParsing
+        $releaseUri = $release.BaseResponse.ResponseUri
+        if (-not $releaseUri -and $release.BaseResponse.RequestMessage) {
+            $releaseUri = $release.BaseResponse.RequestMessage.RequestUri
+        }
+        if (-not $releaseUri -or $releaseUri.AbsolutePath -notmatch '/releases/tag/v?([^/]+)$') {
+            throw "Could not determine the latest Mira release"
+        }
+        $Version = $Matches[1]
     }
     $Version = $Version.TrimStart("v")
     if ($Version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw "Invalid semantic version" }

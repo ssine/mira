@@ -113,13 +113,14 @@ Node 只用于隔离测试，不能代表宿主机文件和进程权限。
 在管理员 PowerShell 中运行（Windows x64）：
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1))) `
-  -Role node -Server https://mira.example.com
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com'"
 ```
 
 Windows 使用系统服务运行 Supervisor。默认状态目录为 `%USERPROFILE%\.mira`；`-StateDirectory`
 可覆盖，`-NoPath` 不修改用户 PATH。Server 角色还需由管理员在安装前配置系统级
 `DATABASE_URL`、监听地址和公网 endpoint。
+这里的 `Bypass` 只作用于这一个新 PowerShell 进程，不会永久修改系统执行策略。组织通过
+`MachinePolicy` 或 `UserPolicy` 强制的限制仍然有效，需要由组织管理员放行。
 
 Windows 与 WSL 是两台独立 Node，各自拥有身份。不要复制 identity 文件，也不要同时运行两个
 指向同一状态目录的 Supervisor。
