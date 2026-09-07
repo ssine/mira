@@ -25,7 +25,7 @@ Mira 1.0 支持单机 Supervisor 管理 Node，以及 Server 主机上的 Node +
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | \
-  sh -s -- --role node --server https://mira.example.com --version 1.0.4
+  sh -s -- --role node --server https://mira.example.com --version 1.0.5
 ```
 
 支持 Linux amd64/arm64。普通 Linux 默认使用 systemd，WSL 需要启用 user systemd；OpenWrt 和
@@ -36,7 +36,7 @@ procd 安装只支持 Mira 管理的 Node system service，并要求可执行的
 
 脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用 `mira install` 安装 Supervisor。
 默认状态目录是 `~/.local/share/mira`，命令入口位于 `~/.local/bin`，身份配置位于
-`~/.config/mira`。可用 `--version 1.0.4` 固定首次安装版本，或用
+`~/.config/mira`。可用 `--version 1.0.5` 固定首次安装版本，或用
 `--state-dir /absolute/path` 选择状态目录。
 
 安装器不再接受 `--update`。首次安装后统一使用 `mira update`。
@@ -113,7 +113,7 @@ Node 只用于隔离测试，不能代表宿主机文件和进程权限。
 在管理员 PowerShell 中运行（Windows x64）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.4'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.5'"
 ```
 
 Windows 使用系统服务运行 Supervisor。默认状态目录为 `%USERPROFILE%\.mira`；`-StateDirectory`
