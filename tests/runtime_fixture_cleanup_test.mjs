@@ -47,18 +47,3 @@ test("rejects unrelated database names before touching any pool", async () => {
     }, name), /only an owned runtime fixture database/);
   }
 });
-
-test("accepts the independently randomized OpenSSH fixture namespace", async () => {
-  const calls = [];
-  await closeRuntimeFixtureDatabase({ end: async () => calls.push("end") }, {
-    query: async (sql) => {
-      calls.push(sql);
-      return { rowCount: 0 };
-    },
-  }, "mira_openssh_123_1234abcd");
-  assert.deepEqual(calls, [
-    "end",
-    "SELECT pid FROM pg_stat_activity WHERE datname = $1",
-    "DROP DATABASE mira_openssh_123_1234abcd",
-  ]);
-});

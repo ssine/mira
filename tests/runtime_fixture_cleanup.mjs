@@ -9,7 +9,7 @@ export async function closeRuntimeFixtureDatabase(pool, admin, database, {
   timeoutMs = 30_000,
   pollIntervalMs = 25,
 } = {}) {
-  assert.match(database, /^mira_(?:retry|openssh)_[0-9]+_[a-f0-9]{8}$/, "only an owned runtime fixture database may be removed");
+  assert.match(database, /^mira_retry_[0-9]+_[a-f0-9]{8}$/, "only an owned runtime fixture database may be removed");
   await pool?.end();
   const deadline = performance.now() + timeoutMs;
   while (true) {

@@ -10,7 +10,6 @@ import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 import net from 'node:net';
 import {loginAdmin,approvePendingNode,adminRequest} from '../../../tests/auth_helpers.mjs';
-import {closeRuntimeFixtureDatabase} from '../../../tests/runtime_fixture_cleanup.mjs';
 
 const repo=path.resolve(import.meta.dirname,'../../..');
 const targetWithoutPasswd=process.env.MIRA_OPENSSH_TEST_NO_PASSWD_TARGET==='1';
@@ -31,6 +30,16 @@ const processes=[],logs=[];
 const noPasswdUID=2147483000;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function wait(fn,label){for(let i=0;i<150;i++){const value=await fn();if(value)return value;await sleep(200)}throw Error(`timeout: ${label}`)}
+async function closeFixtureDatabase(databasePool,adminPool,name){
+  assert.match(name,/^mira_openssh_[0-9]+_[a-f0-9]{8}$/);
+  await databasePool?.end();
+  const deadline=Date.now()+30000;
+  while((await adminPool.query('SELECT pid FROM pg_stat_activity WHERE datname = $1',[name])).rowCount!==0){
+    if(Date.now()>=deadline)throw Error('OpenSSH fixture database connections did not drain');
+    await sleep(25);
+  }
+  await adminPool.query(`DROP DATABASE ${name}`);
+}
 function launch(executable,args,env={}){const p=spawn(executable,args,{cwd:repo,env:{...process.env,...env},stdio:['ignore','pipe','pipe']});for(const s of [p.stdout,p.stderr])s.on('data',b=>{logs.push(b.toString());if(logs.length>150)logs.shift()});processes.push(p);return p;}
 function clientPrivateKey(token){
   const match=/^mira_node_([0-9a-f-]+)_([A-Za-z0-9_-]{43})$/.exec(token);assert(match);
@@ -165,5 +174,5 @@ try{
 }catch(e){console.error(logs.join('').slice(-10000));throw e}
 finally{
   for(const p of processes.reverse()){if(p.exitCode!==null)continue;p.kill('SIGTERM');await Promise.race([new Promise(r=>p.once('close',r)),sleep(2500)]);if(p.exitCode===null)p.kill('SIGKILL')}
-  if(created)await closeRuntimeFixtureDatabase(pool,rootPool,database);else await pool?.end();await rootPool.end();await fs.rm(fixture,{recursive:true,force:true});
+  if(created)await closeFixtureDatabase(pool,rootPool,database);else await pool?.end();await rootPool.end();await fs.rm(fixture,{recursive:true,force:true});
 }
