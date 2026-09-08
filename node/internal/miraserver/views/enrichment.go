@@ -134,16 +134,17 @@ func validModel(value *string) *string {
 	return value
 }
 
-func (service *Service) addModels(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
+func (service *Service) addModelSettings(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
 	pending := []Thread{}
 	before := map[string]int64{}
 	for _, thread := range threads {
-		if validModel(thread.Model) == nil {
+		if validModel(thread.Model) == nil || thread.ReasoningEffort == nil {
 			pending = append(pending, thread)
 			before[thread.ThreadID] = thread.ItemCount + 1
 		}
 	}
 	found := map[string]*string{}
+	efforts := map[string]*string{}
 	for len(pending) > 0 {
 		ids := make([]string, len(pending))
 		generations := make([]int64, len(pending))
@@ -165,6 +166,7 @@ func (service *Service) addModels(ctx context.Context, storeID string, threads [
 		type candidate struct {
 			sequence *int64
 			model    *string
+			effort   *string
 		}
 		candidates := map[string]candidate{}
 		for rows.Next() {
@@ -186,7 +188,7 @@ func (service *Service) addModels(ctx context.Context, storeID string, threads [
 			}
 			record, _ := decodeObject(raw)
 			model := modelFromRecord(record)
-			candidates[id] = candidate{parsedSequence, model}
+			candidates[id] = candidate{parsedSequence, model, reasoningEffortFromRecord(record)}
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -196,9 +198,15 @@ func (service *Service) addModels(ctx context.Context, storeID string, threads [
 		next := []Thread{}
 		for _, thread := range pending {
 			candidate := candidates[thread.ThreadID]
-			if candidate.model != nil || candidate.sequence == nil {
+			if found[thread.ThreadID] == nil {
 				found[thread.ThreadID] = candidate.model
-			} else {
+			}
+			if efforts[thread.ThreadID] == nil {
+				efforts[thread.ThreadID] = candidate.effort
+			}
+			modelResolved := validModel(thread.Model) != nil || found[thread.ThreadID] != nil
+			effortResolved := thread.ReasoningEffort != nil || efforts[thread.ThreadID] != nil
+			if candidate.sequence != nil && (!modelResolved || !effortResolved) {
 				before[thread.ThreadID] = *candidate.sequence
 				next = append(next, thread)
 			}
@@ -209,8 +217,30 @@ func (service *Service) addModels(ctx context.Context, storeID string, threads [
 		if validModel(threads[index].Model) == nil {
 			threads[index].Model = found[threads[index].ThreadID]
 		}
+		if threads[index].ReasoningEffort == nil {
+			threads[index].ReasoningEffort = efforts[threads[index].ThreadID]
+		}
 	}
 	return threads, nil
+}
+
+// Reasoning effort is a rebuildable read projection, never a Node/UI preference.
+// Read both upstream record formats and retain future non-empty effort values.
+func reasoningEffortFromRecord(record map[string]any) *string {
+	payload := object(record["payload"])
+	var value string
+	switch stringValue(record["type"]) {
+	case "turn_context":
+		value = stringValue(payload["effort"])
+	case "event_msg":
+		if stringValue(payload["type"]) == "thread_settings_applied" {
+			value = stringValue(object(payload["thread_settings"])["reasoning_effort"])
+		}
+	}
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return &value
 }
 
 func modelFromRecord(record map[string]any) *string {

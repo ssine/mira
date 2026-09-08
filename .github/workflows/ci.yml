@@ -58,6 +58,7 @@ jobs:
             tests/thread_list_test.mjs \
             tests/thread_title_test.mjs \
             tests/thread_token_usage_test.mjs \
+            tests/thread_reasoning_effort_test.mjs \
             tests/trace_copy_test.mjs
 
       - name: Test native Go Server and embedded Web assets

@@ -73,6 +73,46 @@ func TestPostgresReadViews(t *testing.T) {
 	if threads[0].TokenUsage["inputTokens"] != int64(100000) {
 		t.Fatalf("usage: %#v", threads[0].TokenUsage)
 	}
+	t.Run("reasoning effort follows canonical settings in the active generation", func(t *testing.T) {
+		// A metadata model must not prevent effort enrichment. Records are
+		// deliberately beyond ordinal 9 to exercise numeric reverse ordering.
+		if _, err := pool.Exec(ctx, `UPDATE codex_thread_projections SET state=jsonb_set(state,'{metadata,model}','"gpt-6-astra"') WHERE thread_id=$1`, threadID); err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Exec(ctx, `UPDATE codex_thread_projections SET state=state #- '{metadata,model}' WHERE thread_id=$1`, threadID)
+		for _, entry := range []struct {
+			seq  int
+			item map[string]any
+		}{
+			{90, record("turn_context", map[string]any{"effort": "ultra"})},
+			{98, record("turn_context", map[string]any{"effort": "medium"})},
+			{99, record("event_msg", map[string]any{"type": "thread_settings_applied", "thread_settings": map[string]any{"reasoning_effort": "xhigh"}})},
+			{100, record("turn_context", map[string]any{"model": "gpt-6-astra"})},
+		} {
+			raw, _ := json.Marshal(entry.item)
+			if _, err := pool.Exec(ctx, `UPDATE codex_thread_events SET payload=$1::json WHERE thread_id=$2 AND generation=1 AND item_seq=$3`, string(raw), threadID, entry.seq); err != nil {
+				t.Fatal(err)
+			}
+			defer pool.Exec(ctx, `UPDATE codex_thread_events SET payload='{"type":"unrecognized_fixture_record"}'::json WHERE thread_id=$1 AND generation=1 AND item_seq=$2`, threadID, entry.seq)
+		}
+		for _, id := range []*string{nil, &threadID} {
+			got, err := service.ListThreads(ctx, "personal", 10, id, nil)
+			if err != nil || len(got) != 1 {
+				t.Fatalf("threads: %#v %v", got, err)
+			}
+			if got[0].ReasoningEffort == nil || *got[0].ReasoningEffort != "xhigh" {
+				t.Fatalf("effort: %v", got[0].ReasoningEffort)
+			}
+		}
+		if _, err := pool.Exec(ctx, `UPDATE codex_thread_projections SET active_generation=2 WHERE thread_id=$1`, threadID); err != nil {
+			t.Fatal(err)
+		}
+		defer pool.Exec(ctx, `UPDATE codex_thread_projections SET active_generation=1 WHERE thread_id=$1`, threadID)
+		got, err := service.ListThreads(ctx, "personal", 10, &threadID, nil)
+		if err != nil || len(got) != 1 || got[0].ReasoningEffort != nil {
+			t.Fatalf("old generation effort leaked: %#v %v", got, err)
+		}
+	})
 	cost, err := service.GetThreadCost(ctx, "personal", threads[0])
 	if err != nil {
 		t.Fatal(err)

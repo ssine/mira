@@ -4910,6 +4910,9 @@ async function restoreAgentThread(threadId, socket) {
   const params = { threadId, excludeTurns: true };
   const revision = agent.liveRevision;
   if (projectedCwd) params.cwd = projectedCwd;
+  if (typeof projectedThread?.reasoningEffort === "string" && projectedThread.reasoningEffort) {
+    params.config = { model_reasoning_effort: projectedThread.reasoningEffort };
+  }
   const result = await rpc("thread/resume", params, 120_000);
   if (agent.socket !== socket) throw new Error("恢复会话时 App Server 通道已变更，请重新发送");
   agent.loadedThreadIds.add(result.thread.id);
@@ -4924,7 +4927,10 @@ async function restoreAgentThread(threadId, socket) {
     agent.modelChoice = result.model;
     if (currentProjection) currentProjection.model = result.model;
   }
-  agent.threadReasoningEffort = typeof result.reasoningEffort === "string" ? result.reasoningEffort : null;
+  // The read projection carries the last applied setting even when a fresh
+  // App Server resumes with its Node default.
+  agent.threadReasoningEffort = currentProjection?.reasoningEffort ??
+    (typeof result.reasoningEffort === "string" ? result.reasoningEffort : null);
   $("#conversationCwd").value = resumedCwd ?? "";
   if (result.thread.status?.type === "active" && agent.liveRevision === revision && !agent.activeTurns.has(threadId)) agent.activeTurns.set(threadId, null);
   syncActiveTurnUi();
@@ -5002,6 +5008,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
     }
   }
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
+  agent.threadReasoningEffort = typeof projected?.reasoningEffort === "string" ? projected.reasoningEffort : null;
   agent.projectOpen.set(projectForThread(projected).key, true);
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
   if (preferredNode && [...$("#agentRuntimeNode").options].some((option) => option.value === preferredNode)) {
@@ -5340,6 +5347,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       cwd: startedCwd,
       runtimeNodeId: agent.threadRuntimeNodeId,
       model: started.model,
+      reasoningEffort: requestedEffort || agent.threadReasoningEffort,
       updatedAt: new Date().toISOString(),
       archived: false,
     };
@@ -5388,6 +5396,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
   if (requestedEffort) {
     agent.effortChoice = requestedEffort;
     agent.threadReasoningEffort = requestedEffort;
+    if (currentAgentThread()) currentAgentThread().reasoningEffort = requestedEffort;
   }
   // turn/start can accept input into an already-running turn, without emitting
   // another turn/started. The RPC acknowledgement ends submission in both cases.

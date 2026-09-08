@@ -9,7 +9,7 @@ import (
 )
 
 // ListThreads returns Web thread summaries enriched from canonical lifecycle,
-// read-position, token-usage, and model records.
+// read-position, token-usage, model, and reasoning-effort records.
 func (service *Service) ListThreads(ctx context.Context, storeID string, limit int, threadID *string, archived *bool) ([]Thread, error) {
 	if !safeStorePattern.MatchString(storeID) {
 		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "invalid store id"}
@@ -120,9 +120,9 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
 	if err != nil {
 		return nil, fmt.Errorf("add thread token usage: %w", err)
 	}
-	threads, err = service.addModels(ctx, storeID, threads)
+	threads, err = service.addModelSettings(ctx, storeID, threads)
 	if err != nil {
-		return nil, fmt.Errorf("add thread models: %w", err)
+		return nil, fmt.Errorf("add thread model settings: %w", err)
 	}
 	return threads, nil
 }

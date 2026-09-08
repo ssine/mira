@@ -41,6 +41,7 @@ type Thread struct {
 	Generation         int64          `json:"generation"`
 	TokenUsage         map[string]any `json:"tokenUsage"`
 	Model              *string        `json:"model"`
+	ReasoningEffort    *string        `json:"reasoningEffort"`
 	CreatedAt          *string        `json:"createdAt"`
 	UpdatedAt          *string        `json:"updatedAt"`
 	ImportID           *string        `json:"importId"`
