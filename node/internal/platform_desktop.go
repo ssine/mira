@@ -88,7 +88,7 @@ func (runtimeValue *capabilityRuntime) machineStatus(ctx context.Context) (map[s
 	ptySessions := len(runtimeValue.ptys)
 	runtimeValue.ptyMu.Unlock()
 	processCount, _ := systemProcessCount()
-	return map[string]any{
+	status := map[string]any{
 		"sampledAt": time.Now().UTC().Format(time.RFC3339Nano), "hostname": identity.Hostname,
 		"platform": runtime.GOOS, "release": platformRelease(),
 		"architecture": runtime.GOARCH, "uptimeSeconds": uptime, "cpuCount": runtime.NumCPU(),
@@ -97,7 +97,11 @@ func (runtimeValue *capabilityRuntime) machineStatus(ctx context.Context) (map[s
 		"processCount": processCount, "managedProcesses": managedProcesses, "ptySessions": ptySessions, "sessionLimit": maxProcessCount,
 		"ptyBackend": ptyBackendName(), "miraCliPath": localMiraCLIPath(), "ssh": openSSHRuntime(),
 		"execution": executionContextStatus(),
-	}, nil
+	}
+	if processIdentity := runtimeValue.processIdentityStatus(ctx); processIdentity != nil {
+		status["processIdentity"] = processIdentity
+	}
+	return status, nil
 }
 
 func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) map[string]any {

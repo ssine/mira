@@ -5,10 +5,22 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/ssh"
 )
+
+func environmentValue(environment []string, name string) string {
+	prefix := name + "="
+	for _, item := range environment {
+		if strings.HasPrefix(item, prefix) {
+			return strings.TrimPrefix(item, prefix)
+		}
+	}
+	return ""
+}
 
 func TestOpenSSHRequiresLinkedImage(t *testing.T) {
 	previous := BundledOpenSSH
@@ -56,6 +68,36 @@ func TestOpenSSHUsesExistingNodeIdentity(t *testing.T) {
 	b, _ := sshPrivateKeyPEM(token, "host")
 	if bytes.Equal(a, b) {
 		t.Fatal("host and client keys must be purpose-separated")
+	}
+}
+
+func TestOpenSSHSameIdentityEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Win32 OpenSSH uses its native process-token identity path")
+	}
+	home := filepath.Join(string(filepath.Separator), "mira-test-home")
+	shell := filepath.Join(string(filepath.Separator), "mira-test-shell")
+	t.Setenv("HOME", home)
+	t.Setenv("SHELL", "/ignored-shell")
+	t.Setenv("MIRA_NODE_OPENSSH_SHELL", shell)
+	t.Setenv("MIRA_OPENSSH_USERNAME", "stale-user")
+	environment, err := openSSHSameIdentityEnvironment("node-user", home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := environmentValue(environment, "MIRA_OPENSSH_USERNAME"); got != "node-user" {
+		t.Fatalf("username=%q", got)
+	}
+	if got := environmentValue(environment, "MIRA_OPENSSH_HOME"); got != home {
+		t.Fatalf("home=%q", got)
+	}
+	if got := environmentValue(environment, "MIRA_OPENSSH_SHELL"); got != shell {
+		t.Fatalf("shell=%q", got)
+	}
+
+	t.Setenv("HOME", "relative-home")
+	if _, err := openSSHSameIdentityEnvironment("node-user", home); err == nil && runtime.GOOS != "android" {
+		t.Fatal("relative worker HOME accepted")
 	}
 }
 

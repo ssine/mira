@@ -1135,6 +1135,19 @@ function setWorkspaceNotice(message = "", kind = "") {
   const notice = $("#workspaceNotice");
   notice.textContent = message;
   notice.className = `workspace-notice${message ? "" : " hidden"}${kind ? ` ${kind}` : ""}`;
+  delete notice.dataset.source;
+}
+
+function renderProcessIdentityNotice(status) {
+  const notice = $("#workspaceNotice");
+  const identity = status?.processIdentity;
+  if (workspace.node?.status !== "online") return;
+  if (identity?.directoryGroupsDiffer === true) {
+    setWorkspaceNotice("检测到 Node 当前有效组与系统目录中的用户组不一致；新建 SSH 会话和进程仍使用 Node/Supervisor 启动时的组。请在方便中断连接时重启：\nsystemd 系统服务：sudo systemctl restart mira.service\nOpenWrt：/etc/init.d/mira restart\nsystemd 用户服务：先完整注销并重新登录，再运行 systemctl --user restart mira.service\n手动运行：停止旧 Supervisor，在新登录会话中重新执行原启动命令。", "warning");
+    notice.dataset.source = "identity-groups";
+  } else if (notice.dataset.source === "identity-groups") {
+    setWorkspaceNotice();
+  }
 }
 
 function renderWorkspaceHeader() {
@@ -1560,9 +1573,15 @@ function renderStatus(status) {
   addFact(facts, "CPU", [status.cpu?.model, logicalCount ? `${logicalCount} 核` : null].filter(Boolean).join(" · ") || "—");
   addFact(facts, "PTY 后端", status.ptyBackend ?? (capabilityEnabled(workspace.node, "pty") ? "已启用" : "不可用"));
   addFact(facts, "Root 能力", String(status.rootEnabled ?? workspace.node.capabilities?.rootAvailable ?? false));
+  if (status.processIdentity) {
+    addFact(facts, "进程身份", `UID ${status.processIdentity.uid ?? "—"} · GID ${status.processIdentity.gid ?? "—"}`);
+    addFact(facts, "当前有效组", Array.isArray(status.processIdentity.effectiveGids) ? status.processIdentity.effectiveGids.join(" · ") : "—");
+    if (status.processIdentity.directoryGroupCheck === "ok") addFact(facts, "系统目录组", status.processIdentity.directoryGids.join(" · "));
+  }
   addFact(facts, "允许根目录", Array.isArray(status.allowedRoots) ? status.allowedRoots.join(" · ") : "—");
   renderResources(status);
   renderNetworks(status);
+  renderProcessIdentityNotice(status);
 }
 
 function renderProcessCount(result, fallback = {}) {

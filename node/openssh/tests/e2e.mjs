@@ -24,9 +24,16 @@ const binaries=path.join(fixture,'bin');await fs.mkdir(binaries);
 const openSSHDir=binaries;
 const nodeBinary=path.join(binaries,'mira'),cliBinary=nodeBinary;
 const processes=[],logs=[];
+const noPasswdUID=2147483000;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function wait(fn,label){for(let i=0;i<150;i++){const value=await fn();if(value)return value;await sleep(200)}throw Error(`timeout: ${label}`)}
 function launch(executable,args,env={}){const p=spawn(executable,args,{cwd:repo,env:{...process.env,...env},stdio:['ignore','pipe','pipe']});for(const s of [p.stdout,p.stderr])s.on('data',b=>{logs.push(b.toString());if(logs.length>150)logs.shift()});processes.push(p);return p;}
+function clientPrivateKey(token){
+  const match=/^mira_node_([0-9a-f-]+)_([A-Za-z0-9_-]{43})$/.exec(token);assert(match);
+  const seed=Buffer.from(crypto.hkdfSync('sha256',Buffer.from(match[2],'base64url'),Buffer.from(match[1]),Buffer.from('mira/ssh/v1/client'),32));
+  const der=Buffer.concat([Buffer.from('302e020100300506032b657004220420','hex'),seed]);
+  return crypto.createPrivateKey({key:der,format:'der',type:'pkcs8'}).export({format:'pem',type:'pkcs8'});
+}
 function cli(identity,args,{input='',timeout=20000,executable=cliBinary}={}){return new Promise((resolve,reject)=>{
   const p=spawn(executable,args,{env:{...process.env,MIRA_IDENTITY_FILE:identity,MIRA_NODE_OPENSSH_DIR:''}});
   const out=[],err=[];const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error(`CLI timeout: ${args[0]}`))},timeout);
@@ -47,14 +54,17 @@ async function verifyForward(identity,nodeKey,directory){
   }finally{await cli(identity,['ssh','-S',control,'-O','exit',nodeKey]);await new Promise(r=>echo.close(r))}
 }
 let admin;
-async function enroll(name,env={}){
+async function enroll(name,env={},withoutPasswd=false){
   const dir=path.join(fixture,name);await fs.mkdir(dir,{mode:0o700});
   const identity=path.join(dir,'identity.json'),key=`openssh-${process.pid}-${name}`;
-  launch(nodeBinary,['node-worker'],{MIRA_SERVER_URL:url,MIRA_NODE_KEY:key,MIRA_IDENTITY_FILE:identity,MIRA_NODE_TOKEN:'',CONTROL_SERVER_TOKEN:'',MIRA_NODE_OPENSSH_DIR:'',MIRA_NODE_ALLOWED_ROOTS:'["/"]',APP_SERVER_AUTO_START:'false',CODEX_BINARY:path.join(fixture,'no-codex'),MIRA_NODE_HEARTBEAT_SECONDS:'1',...env});
+  const nodeArgs=['node-worker'];
+  const executable=withoutPasswd?'unshare':nodeBinary;
+  const args=withoutPasswd?['--user',`--map-user=${noPasswdUID}`,`--map-group=${noPasswdUID}`,'--',nodeBinary,...nodeArgs]:nodeArgs;
+  launch(executable,args,{MIRA_SERVER_URL:url,MIRA_NODE_KEY:key,MIRA_IDENTITY_FILE:identity,MIRA_NODE_TOKEN:'',CONTROL_SERVER_TOKEN:'',MIRA_NODE_OPENSSH_DIR:'',MIRA_NODE_ALLOWED_ROOTS:'["/"]',APP_SERVER_AUTO_START:'false',CODEX_BINARY:path.join(fixture,'no-codex'),MIRA_NODE_HEARTBEAT_SECONDS:'1',...env});
   await approvePendingNode(url,admin,key);
   const state=await wait(async()=>{try{const s=JSON.parse(await fs.readFile(identity));return s.nodeId?s:null}catch{return null}},'identity approval');
   await wait(async()=>{const s=await adminRequest(url,admin,`/v1/nodes/${state.nodeId}`);return s.channelStatus?.connected},'reverse channel');
-  return {dir,identity,key,nodeId:state.nodeId};
+  return {dir,identity,key,nodeId:state.nodeId,token:state.token};
 }
 try{
   await rootPool.query(`CREATE DATABASE ${database}`);created=true;
@@ -70,16 +80,23 @@ try{
   launch(nodeBinary,['server-worker'],serverEnvironment);
   await wait(async()=>{try{return(await fetch(url+'/healthz')).ok}catch{return false}},'test Server');
   admin=await loginAdmin(url,'admin',password);
-  const a=await enroll('source'),b=await enroll('target');
+  const targetWithoutPasswd=process.env.MIRA_OPENSSH_TEST_NO_PASSWD_TARGET==='1';
+  if(targetWithoutPasswd)assert(!(await fs.readFile('/etc/passwd','utf8')).split('\n').some(line=>Number(line.split(':')[2])===noPasswdUID));
+  const targetHome=path.join(fixture,'target-home');await fs.mkdir(targetHome,{mode:0o700});
+  const targetEnvironment={HOME:targetHome,SHELL:'/bin/sh',...(targetWithoutPasswd?{USER:'tarschen'}:{})};
+  const a=await enroll('source'),b=await enroll('target',targetEnvironment,targetWithoutPasswd);
   // Deliberately exercise the parent permissions that sshd StrictModes rejects.
   // The fixture root stays private; only ephemeral test identities are involved.
   for(const n of [a,b])await fs.chmod(n.dir,0o775);
-  let r=await good(a.identity,['ssh',b.key,'--',"printf 'RELAY_OK\\n'; id -u; id -g; id -G"]);
+  let r=await good(a.identity,['ssh',b.key,'--',"printf 'RELAY_OK\\n'; id -u; id -g; id -G; printf '%s\\n' \"$HOME\" \"$SHELL\""]);
   const identityLines=r.stdout.toString().trim().split('\n');
-  assert.equal(identityLines[0],'RELAY_OK');assert.equal(Number(identityLines[1]),process.getuid());assert.equal(Number(identityLines[2]),process.getgid());
-  const actualGroups=identityLines[3].trim().split(/\s+/).map(Number).sort((x,y)=>x-y);
-  const expectedGroups=[...new Set(process.getgroups())].sort((x,y)=>x-y);assert.deepEqual(actualGroups,expectedGroups);
-  console.log('PASS native OpenSSH, approved reverse relay with group-writable state parents');
+  const expectedUID=targetWithoutPasswd?noPasswdUID:process.getuid(),expectedGID=targetWithoutPasswd?noPasswdUID:process.getgid();
+  assert.equal(identityLines[0],'RELAY_OK');assert.equal(Number(identityLines[1]),expectedUID);assert.equal(Number(identityLines[2]),expectedGID);
+  const actualGroups=[...new Set(identityLines[3].trim().split(/\s+/).map(Number))].sort((x,y)=>x-y);
+  const namespaceGroups=()=>execFileSync('unshare',['--user',`--map-user=${noPasswdUID}`,`--map-group=${noPasswdUID}`,'--','id','-G'],{encoding:'utf8'}).trim().split(/\s+/).map(Number);
+  const expectedGroups=[...new Set(targetWithoutPasswd?namespaceGroups():process.getgroups())].sort((x,y)=>x-y);assert.deepEqual(actualGroups,expectedGroups);
+  assert.equal(identityLines[4],targetHome);assert.equal(identityLines[5],'/bin/sh');
+  console.log(`PASS native OpenSSH, approved reverse relay with group-writable state parents${targetWithoutPasswd?' and no passwd entry':''}`);
   const {rows:keys}=await pool.query('SELECT node_id, credential_id, host_key, client_key FROM mira_node_ssh_keys JOIN mira_node_credentials USING(credential_id) WHERE node_id = ANY($1::uuid[])',[[a.nodeId,b.nodeId]]);
   const aKey=keys.find(k=>k.node_id===a.nodeId),bKey=keys.find(k=>k.node_id===b.nodeId);
   assert(aKey&&bKey);
@@ -90,7 +107,12 @@ try{
   await fs.writeFile(knownHosts,`${b.nodeId} ${bKey.host_key}\n`);
   r=await cli(a.identity,['-F','/dev/null','-i',wrongKey,'-o',`ProxyCommand=${cliBinary} ssh-proxy ${b.nodeId}`,
     '-o',`UserKnownHostsFile=${knownHosts}`,'-o',`HostKeyAlias=${b.nodeId}`,'-o','StrictHostKeyChecking=yes',
-    '-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','BatchMode=yes',`${os.userInfo().username}@mira-target`,'printf UNAUTHORIZED'],{executable:path.join(binaries,'ssh')});
+    '-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','BatchMode=yes',`${process.env.USER??os.userInfo().username}@mira-target`,'printf UNAUTHORIZED'],{executable:path.join(binaries,'ssh')});
+  assert.notEqual(r.code,0);assert.match(r.stderr,/Permission denied \(publickey\)/);assert(!r.stdout.includes('UNAUTHORIZED'));
+  const correctKey=path.join(a.dir,'caller-key');await fs.writeFile(correctKey,clientPrivateKey(a.token),{mode:0o600});
+  r=await cli(a.identity,['-F','/dev/null','-i',correctKey,'-o',`ProxyCommand=${cliBinary} ssh-proxy ${b.nodeId}`,
+    '-o',`UserKnownHostsFile=${knownHosts}`,'-o',`HostKeyAlias=${b.nodeId}`,'-o','StrictHostKeyChecking=yes',
+    '-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','BatchMode=yes','not-the-node-user@mira-target','printf UNAUTHORIZED'],{executable:path.join(binaries,'ssh')});
   assert.notEqual(r.code,0);assert.match(r.stderr,/Permission denied \(publickey\)/);assert(!r.stdout.includes('UNAUTHORIZED'));
   try{
     await pool.query('UPDATE mira_node_ssh_keys SET host_key=$1 WHERE credential_id=$2',[aKey.host_key,bKey.credential_id]);
@@ -98,7 +120,7 @@ try{
     assert.notEqual(r.code,0);assert.match(r.stderr,/Host key verification failed/);assert(!r.stdout.includes('UNAUTHORIZED'));
   }finally{await pool.query('UPDATE mira_node_ssh_keys SET host_key=$1 WHERE credential_id=$2',[bKey.host_key,bKey.credential_id])}
   await good(a.identity,['ssh',b.key,'--','true']);
-  console.log('PASS wrong caller key and wrong pinned host key are rejected');
+  console.log('PASS wrong caller key, SSH username and pinned host key are rejected');
   r=await cli(a.identity,['ssh',b.key,'--','printf OUT; printf ERR >&2; exit 23']);assert.equal(r.code,23);assert.equal(r.stdout.toString(),'OUT');assert(r.stderr.includes('ERR'));
   const data=crypto.randomBytes(2*1024*1024);r=await good(a.identity,['ssh',b.key,'--','cat'],{input:data});assert.deepEqual(r.stdout,data);
   r=await good(a.identity,['ssh','-tt',b.key,'--','test -t 0 && printf PTY_OK']);assert(r.stdout.includes('PTY_OK'));

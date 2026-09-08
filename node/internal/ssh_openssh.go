@@ -90,6 +90,43 @@ func openSSHRuntime() map[string]any {
 	return map[string]any{"backend": "openssh", "username": name}
 }
 
+func openSSHSameIdentityEnvironment(name, state string) ([]string, error) {
+	if runtime.GOOS == "windows" {
+		return os.Environ(), nil
+	}
+	home := os.Getenv("HOME")
+	if runtime.GOOS == "android" {
+		// Android libc reports /data as the account home. Keep the existing
+		// app/root-private state directory as the effective SSH home instead.
+		home = state
+	}
+	shell := firstEnv("MIRA_NODE_OPENSSH_SHELL", "SHELL")
+	if shell == "" {
+		if runtime.GOOS == "android" {
+			shell = "/system/bin/sh"
+		} else {
+			shell = "/bin/sh"
+		}
+	}
+	for label, value := range map[string]string{"HOME": home, "shell": shell} {
+		if !filepath.IsAbs(value) || strings.ContainsAny(value, "\x00\r\n") {
+			return nil, fmt.Errorf("OpenSSH same-identity %s must be an absolute path", label)
+		}
+	}
+	overrides := map[string]string{
+		"MIRA_OPENSSH_SAME_IDENTITY": "1",
+		"MIRA_OPENSSH_USERNAME":      name,
+		"MIRA_OPENSSH_HOME":          filepath.Clean(home),
+		"MIRA_OPENSSH_SHELL":         filepath.Clean(shell),
+	}
+	if runtime.GOOS == "android" {
+		// Retain compatibility with the Android pwcopy hardening used by other
+		// OpenSSH code paths; target-user authentication uses the values above.
+		overrides["MIRA_OPENSSH_APP_HOME"] = filepath.Clean(home)
+	}
+	return mergeExecutionEnvironment(os.Environ(), overrides, false), nil
+}
+
 func sshConfigString(s string) (string, error) {
 	if strings.ContainsAny(s, "\x00\r\n\"") {
 		return "", fmt.Errorf("invalid SSH config value")
@@ -232,20 +269,19 @@ func serveOpenSSH(ctx context.Context, input io.Reader, output io.Writer, config
 	if runtime.GOOS == "windows" {
 		return runOpenSSHLoopback(ctx, program, path, input, output)
 	}
+	workerEnvironment, err := openSSHSameIdentityEnvironment(name, state)
+	if err != nil {
+		return err
+	}
 	args := []string{"-i", "-e", "-f", path}
 	if os.Getenv("MIRA_OPENSSH_DEBUG") == "1" {
 		args = append(args, "-ddd")
 	}
 	command := exec.Command(program, args...)
-	if runtime.GOOS != "windows" {
-		// Mira authorizes only the account that already owns this Node process.
-		// Preserve that identity so a constrained root container does not need
-		// chroot, setuid or setgid capabilities for redundant transitions.
-		command.Env = append(os.Environ(), "MIRA_OPENSSH_SAME_IDENTITY=1")
-	}
-	if runtime.GOOS == "android" {
-		command.Env = append(command.Env, "MIRA_OPENSSH_APP_HOME="+state)
-	}
+	// Mira authorizes only the account that already owns this Node process.
+	// The embedded auth monitor constructs its passwd record from these
+	// worker-confirmed values and never performs another OS account login.
+	command.Env = workerEnvironment
 	command.Stdout, command.Stderr = output, os.Stderr
 	command.WaitDelay = 500 * time.Millisecond
 	pipe, err := command.StdinPipe()

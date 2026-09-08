@@ -146,6 +146,9 @@ for (const wiring of ["function showNodeMetadataDialog(", "function nodeMetadata
 for (const wiring of ["themeStorageKey", "function terminalTheme()", "function toggleTheme()", "function navigateGlobal("]) {
   assert(assets["/app.js"].includes(wiring), `website omitted shell behavior: ${wiring}`);
 }
+for (const wiring of ["directoryGroupsDiffer", "sudo systemctl restart mira.service", "/etc/init.d/mira restart", "systemctl --user restart mira.service"]) {
+  assert(assets["/app.js"].includes(wiring), `website omitted stale group identity guidance: ${wiring}`);
+}
 for (const control of ["installLinux", "installWindows", "installServer", "installAndroid"]) {
   assert(assets["/"].includes(`id="${control}"`), `website omitted installer ${control}`);
 }

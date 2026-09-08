@@ -248,7 +248,8 @@ tbody tr:hover { background: var(--hover); }
 .workspace-tab:hover { color: var(--text); }
 .workspace-tab.active { color: var(--text); font-weight: 600; }
 .workspace-tab.active::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: var(--accent); content: ""; }
-.workspace-notice { margin: 0 0 14px; padding: 9px 12px; border-left: 2px solid var(--accent); background: var(--surface); color: var(--muted); font-size: 11px; }
+.workspace-notice { margin: 0 0 14px; padding: 9px 12px; border-left: 2px solid var(--accent); background: var(--surface); color: var(--muted); font-size: 11px; white-space: pre-line; }
+.workspace-notice.warning { border-left-color: var(--warning); color: var(--warning); }
 .workspace-notice.error { border-left-color: var(--danger); color: var(--danger); }
 .workspace-panel { animation: surface-in var(--motion-enter) var(--ease-out); }
 .workspace-metrics { margin-bottom: 18px; }

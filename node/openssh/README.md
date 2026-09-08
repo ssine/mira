@@ -46,9 +46,12 @@ bash node/openssh/build.sh android
   no ELF interpreter or dynamic library dependency. Mira's sshd only receives an
   authenticated, per-session reverse channel, so this embedded build keeps the
   OpenSSH process boundary but does not require a host privsep account, chroot,
-  setuid/setgid capabilities or seccomp. The normal OS still supplies the shell, target
-  account, CA certificates and network configuration. Static musl is not glibc
-  NSS/LDAP/PAM plugin compatibility. ARM64 has a native CI build lane; do not infer
+  setuid/setgid capabilities or seccomp. The auth monitor synthesizes the target
+  passwd record from the Node worker's current UID/GID, confirmed username, HOME
+  and shell; it does not repeat an NSS/passwd/shadow/PAM account login. The normal
+  OS still supplies the shell executable, CA certificates and network configuration.
+  Static musl does not need glibc NSS/LDAP/PAM plugin compatibility for Mira SSH.
+  ARM64 has a native CI build lane; do not infer
   real hardware acceptance from an amd64 container test.
 - Windows: WSL orchestrates native Visual Studio 2022 C++/SDK plus LLVM 18 tools.
   CMake builds static LibreSSL/zlib/libfido2/libcbor with `/MT`; MSVC builds the C

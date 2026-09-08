@@ -113,7 +113,18 @@ identity/account/host-key/config/ProxyCommand/endpoint settings. Combined flags
 cannot bypass these restrictions. Transfers cannot address two different Mira
 Nodes in a single SCP command; run from the source Node or stage locally.
 
-The default shell/home come from the native OS account and OpenSSH platform port.
+On Unix and Android, the authenticated account record is constructed without a
+second NSS/passwd/shadow/PAM login: UID, GID and supplementary groups remain the
+Node worker process identity, username is the worker-confirmed display name, home
+comes from the worker environment (the private Node state on Android), and shell
+comes from `MIRA_NODE_OPENSSH_SHELL`, then `$SHELL`, with `/bin/sh` on Linux and
+`/system/bin/sh` on Android as fallbacks. The SSH request username must exactly
+match that display name. Windows retains its native same-process-token account path.
+Linux Node status compares the process' effective group IDs with the directory-backed
+group list in a bounded child process, cached for ten minutes. Lookup failure does not
+affect heartbeats or SSH. The administrator console warns on a confirmed mismatch and
+shows the appropriate Supervisor restart commands; existing sessions keep their old
+credentials until they exit.
 This is independent of managed Codex `defaultCwd`. `-t/-T`, exit status and terminal
 mode/resize handling are native OpenSSH behavior. `--json` is not a stream format.
 For a direct, non-PTY command using Windows' default `cmd.exe`, the Mira SSH client asks

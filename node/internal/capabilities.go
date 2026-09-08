@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 type capabilityRuntime struct {
@@ -21,6 +22,10 @@ type capabilityRuntime struct {
 	resourceMu    sync.Mutex
 	lastCPU       cpuSample
 	hasLastCPU    bool
+	identityMu    sync.Mutex
+	identityAt    time.Time
+	identityBusy  bool
+	identityState map[string]any
 }
 
 type boundedCommandBuffer struct {
