@@ -56,6 +56,7 @@ type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, name, args...)
+	configureServiceEnvironment(command)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		return string(output), fmt.Errorf("%s: %w", name, err)
