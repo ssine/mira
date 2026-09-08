@@ -24,4 +24,10 @@ for (const span of [day, week, 30 * day]) {
  assert.equal(line.to, Math.min(week, span));
  assert.ok(Math.abs((line.remainingFrom - line.remainingTo) / (line.to - line.from) - 100 / week) < 1e-12);
 }
+assert.equal(lines([p(0, 100), p(day, 80, week + 1000), p(2 * day, 60, week - 1000), p(3 * day, 40, week + 3000)]).length, 1, 'deadline jitter does not restart references');
+const plateau = lines([p(0, 100), p(day, 20), p(2 * day, 100, 9 * day), p(3 * day, 100, 10 * day), p(4 * day, 90, 10 * day + 1000)]);
+assert.equal(plateau.length, 2, 'advancing full-quota deadline is still one refill');
+assert.equal(plateau[1].from, 2 * day);
+assert.equal(plateau[1].to, 9 * day, 'full plateau must retain the first refill anchor');
+assert.equal(lines([p(0, 100), p(day, 80), p(2 * day, 60, 9 * day)]).length, 1, 'deadline correction without refill or expiry cannot start a cycle');
 console.log('quota reference tests passed');

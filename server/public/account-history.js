@@ -22,9 +22,15 @@ export function quotaReferences(points, from, to) {
     if (!Number.isFinite(point.at) || !Number.isFinite(point.remaining)) continue;
     const inferred = Number.isFinite(point.resetsAt) ? point.resetsAt - weekMs : null;
     const refill = previous && point.remaining > previous.remaining;
-    const changedWindow = previous && Number.isFinite(previous.resetsAt) &&
-      Number.isFinite(point.resetsAt) && point.resetsAt !== previous.resetsAt;
-    if (!previous || refill || changedWindow) {
+    // resetsAt is an estimate: it jitters by seconds and may advance on every
+    // sample while the quota stays full. A changed timestamp is not a refill.
+    // Use it alone only when the previous deadline was actually crossed and a
+    // new cycle starts inside this sampling gap (e.g. a missed weekly reset).
+    const crossedWindow = previous && Number.isFinite(previous.resetsAt) &&
+      Number.isFinite(inferred) && previous.at < previous.resetsAt &&
+      point.at >= previous.resetsAt && inferred > previous.at && inferred <= point.at &&
+      !(previous.remaining === 100 && point.remaining === 100);
+    if (!previous || refill || crossedWindow) {
       // Prefer an observed refill over a deadline that may still describe the
       // old weekly window. A boundary inside the sampling gap is more precise.
       let start = inferred;
