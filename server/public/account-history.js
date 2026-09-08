@@ -68,7 +68,7 @@ export class AccountHistory {
     rangeSelect.addEventListener("change", event => {
       this.range = event.target.value;
       try { localStorage.setItem(rangeStorageKey, this.range); } catch { /* optional preference */ }
-      this.select(this.node, this.account, true);
+      this.select(this.node, this.account, true, true);
     });
     this.svg = root.querySelector("svg");
     this.svg.addEventListener("pointermove", event => {
@@ -102,7 +102,7 @@ export class AccountHistory {
     this.cache.clear(); this.render();
   }
 
-  select(node, account, active) {
+  select(node, account, active, refresh = false) {
     this.node = node; this.account = account;
     const key = active && node?.nodeId ? JSON.stringify([node.nodeId, node.reportedAppServer?.codexHome,
       node.reportedAppServer?.codexPath, account?.type, account?.email, this.range]) : null;
@@ -112,7 +112,7 @@ export class AccountHistory {
       this.message = "";
       this.render();
     }
-    if (!key || this.controller || (this.cache.get(key)?.expiresAt ?? 0) > Date.now()) return;
+    if (!key || this.controller || (!refresh && (this.cache.get(key)?.expiresAt ?? 0) > Date.now())) return;
     void this.load(key);
   }
 
@@ -124,12 +124,13 @@ export class AccountHistory {
       const response = await fetch(`/v1/nodes/${encodeURIComponent(this.node.nodeId)}/account-history?range=${this.range}`, { signal: controller.signal });
       if (!response.ok) throw new Error("history unavailable");
       const data = await response.json();
-      if (this.key !== key) return;
+      if (this.key !== key || this.controller !== controller) return;
       this.data = data; this.message = "";
-      this.cache.set(key, { data, expiresAt: Date.now() + 5 * 60_000 });
+      const hasPoints = data.points?.some(point => Number.isFinite(point.remaining));
+      this.cache.set(key, { data, expiresAt: Date.now() + (hasPoints ? 5 * 60_000 : 30_000) });
       if (this.cache.size > 24) this.cache.delete(this.cache.keys().next().value);
     } catch {
-      if (this.key !== key) return;
+      if (this.key !== key || this.controller !== controller) return;
       this.message = "历史记录暂不可用";
       this.cache.set(key, { data: this.data, expiresAt: Date.now() + 30_000 });
     } finally {

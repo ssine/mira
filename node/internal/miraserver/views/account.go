@@ -43,7 +43,8 @@ func RuntimeKey(node *nodes.Node) string {
 }
 
 // AccountHistory returns the bounded five-minute quota series for the Node's
-// current Codex identity. Samples for another identity remain visible as gaps.
+// latest Codex account. Runtime paths change during upgrades and must not hide
+// previous samples for the same account. Other accounts remain visible as gaps.
 func (service *Service) AccountHistory(ctx context.Context, node *nodes.Node, rangeName string, current ...time.Time) (map[string]any, error) {
 	if rangeName == "" {
 		rangeName = "7d"
@@ -60,12 +61,11 @@ func (service *Service) AccountHistory(ctx context.Context, node *nodes.Node, ra
 		now = current[0]
 	}
 	from := now.Add(-duration)
-	key := RuntimeKey(node)
 
 	var accountType, email, planType *string
 	err := service.pool.QueryRow(ctx, `SELECT account_type,email,plan_type
-		FROM mira_account_quota_samples WHERE node_id=$1 AND runtime_key=$2 AND status='ok'
-		ORDER BY sampled_at DESC LIMIT 1`, node.NodeID, key).Scan(&accountType, &email, &planType)
+		FROM mira_account_quota_samples WHERE node_id=$1 AND status='ok'
+		ORDER BY sampled_at DESC LIMIT 1`, node.NodeID).Scan(&accountType, &email, &planType)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
@@ -75,8 +75,8 @@ func (service *Service) AccountHistory(ctx context.Context, node *nodes.Node, ra
 	}
 
 	rows, err := service.pool.Query(ctx, `SELECT sampled_at,status,account_type,email,remaining,resets_at,reset_count::text
-		FROM mira_account_quota_samples WHERE node_id=$1 AND runtime_key=$2 AND sampled_at >= $3 AND sampled_at <= $4
-		ORDER BY sampled_at LIMIT 8642`, node.NodeID, key, from, now)
+		FROM mira_account_quota_samples WHERE node_id=$1 AND sampled_at >= $2 AND sampled_at <= $3
+		ORDER BY sampled_at LIMIT 8642`, node.NodeID, from, now)
 	if err != nil {
 		return nil, err
 	}
