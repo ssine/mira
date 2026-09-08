@@ -131,6 +131,9 @@ try {
   await readingPosition(); await swipe(170, 300, 100, 125); await closed();
   await readingPosition(); await swipe(170, 300, 30, 0); await closed();
   await readingPosition(); await swipe(260, 300, -150, 5); await closed();
+  assert.equal(await details.getAttribute('open'),'','opposite swipe opens the right panel only');
+  await page.locator('#conversationDetailsClose').tap();
+  await page.waitForFunction(()=>!document.querySelector('#conversationDetails').open);
   await readingPosition(); await swipe(170, 300, 130, 0, { cancel: true }); await closed();
   await readingPosition(); await swipe(170, 300, 130, 0, { hold: 550 }); await closed();
   await page.evaluate(() => getSelection().removeAllRanges());
