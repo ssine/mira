@@ -4483,7 +4483,7 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
   }
 }
 
-async function forkWithNode(node, params) {
+async function forkWithNode(node, params, onProgress = () => {}) {
   if (node.status !== "online") throw new Error("运行机器离线，连接后才能创建分支。");
   if (node.reportedAppServer?.status !== "running") {
     await api(`/v1/codex/runtimes/${node.nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
@@ -4502,6 +4502,11 @@ async function forkWithNode(node, params) {
   let next = 0;
   socket.addEventListener("message", (event) => {
     let message; try { message = JSON.parse(event.data); } catch { return; }
+    if (message.method === "mira/thread/fork/progress") {
+      const request = pending.get(message.params?.requestId);
+      if (request?.method === "thread/fork") { request.touch(); onProgress(message.params); }
+      return;
+    }
     if (!Object.hasOwn(message, "result") && !Object.hasOwn(message, "error")) return;
     const request = pending.get(message.id);
     if (!request) return;
@@ -4510,9 +4515,11 @@ async function forkWithNode(node, params) {
   socket.addEventListener("close", () => { for (const request of pending.values()) request.reject(new Error("分支连接已断开，请重试。")); });
   const call = (method, values) => new Promise((resolve, reject) => {
     const id = ++next;
-    const timer = setTimeout(() => finish(reject, new Error("创建分支超时，请重试。")), 120_000);
+    let timer;
+    const touch = () => { clearTimeout(timer); timer = setTimeout(() => finish(reject, new Error("分支连接长时间没有响应，请重试。")), 120_000); };
+    touch();
     const finish = (callback, result) => { clearTimeout(timer); pending.delete(id); callback(result); };
-    pending.set(id, { resolve: (result) => finish(resolve, result), reject: (error) => finish(reject, error) });
+    pending.set(id, { method, touch, resolve: (result) => finish(resolve, result), reject: (error) => finish(reject, error) });
     socket.send(JSON.stringify({ id, method, params: values }));
   });
   try {
@@ -4532,7 +4539,36 @@ async function forkThreadFromMenu() {
   const sourceId = agent.menuThreadId;
   const epoch = agent.selectionEpoch;
   $("#threadOptionsMenu").hidePopover();
-  setConversationNotice("正在创建对话分支…");
+  setConversationNotice();
+  const progressBox = $("#forkProgress"), progressText = $("#forkProgressText"), progressBar = $("#forkProgressBar"), cancelButton = $("#forkProgressCancel");
+  progressBox.classList.remove("hidden"); progressBar.removeAttribute("value");
+  progressText.textContent = "正在读取原会话、准备分支…";
+  cancelButton.hidden = true;
+  let latestProgress = null, cancelled = false, cancelling = false;
+  const updateProgress = (progress) => {
+    if (progress.phase === "heartbeat") return;
+    latestProgress = progress;
+    if (cancelling || cancelled) return;
+    const total = Number(progress.totalBytes), completed = Number(progress.completedBytes);
+    if (progress.phase === "uploading" && total > 0) {
+      progressBar.max = total; progressBar.value = completed;
+      progressText.textContent = `正在复制分支历史：${Math.floor(completed / total * 100)}% · ${(completed / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MiB`;
+    } else {
+      progressBar.removeAttribute("value");
+      progressText.textContent = progress.phase === "verifying" ? "历史已传输，正在校验…" : progress.phase === "committing" ? "历史已校验，正在保存并启动分支…" : "正在准备并启动分支…";
+    }
+    cancelButton.hidden = progress.phase !== "uploading" || !progress.uploadId;
+  };
+  cancelButton.onclick = async () => {
+    if (!latestProgress?.uploadId || cancelling || cancelled) return;
+    cancelling = true; cancelButton.disabled = true;
+    progressText.textContent = "正在取消历史复制…";
+    try {
+      await api(`/v2/stores/personal/history-uploads/${encodeURIComponent(latestProgress.uploadId)}`, { method: "DELETE" });
+      cancelled = true;
+    } catch (error) { setConversationNotice(error.message, "error"); }
+    finally { cancelling = false; cancelButton.disabled = false; }
+  };
   const operation = (async () => {
     const source = await api(`/v1/codex/threads/${encodeURIComponent(sourceId)}?storeId=personal`);
     const nodeId = source.runtimeNodeId || source.sourceNodeId;
@@ -4545,7 +4581,19 @@ async function forkThreadFromMenu() {
         approvalPolicy: "never", sandbox: "danger-full-access", ...(source.cwd ? { cwd: source.cwd } : {}) };
       agent.forkRequests.set(sourceId, request);
     }
-    const result = await forkWithNode(node, request);
+    let result;
+    try { result = await forkWithNode(node, request, updateProgress); }
+    catch (error) {
+      if (cancelled && latestProgress?.threadId) {
+        const path = `/v1/codex/threads/${encodeURIComponent(latestProgress.threadId)}?storeId=personal`;
+        const partial = await api(path);
+        await api(path, { method: "DELETE", body: JSON.stringify({ generation: partial.generation, itemCount: partial.itemCount, operationId: crypto.randomUUID() }) });
+        agent.forkRequests.delete(sourceId);
+        throw new Error("分支复制已取消。");
+      }
+      throw error;
+    }
+    progressText.textContent = "分支历史已保存，正在打开…"; cancelButton.hidden = true;
     let titleRequest = agent.forkTitleRequests.get(request.miraRequestId);
     if (!titleRequest) {
       const fork = await api(`/v1/codex/threads/${encodeURIComponent(result.thread.id)}?storeId=personal`);
@@ -4568,7 +4616,7 @@ async function forkThreadFromMenu() {
   syncConversationSendUi();
   try { await operation; }
   catch (error) { setConversationNotice(error.message, "error"); }
-  finally { if (agent.forkPromise === operation) agent.forkPromise = null; syncConversationSendUi(); }
+  finally { if (agent.forkPromise === operation) agent.forkPromise = null; progressBox.classList.add("hidden"); cancelButton.onclick = null; syncConversationSendUi(); }
 }
 
 async function showProjectDialog() {

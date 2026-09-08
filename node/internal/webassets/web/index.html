@@ -154,6 +154,11 @@
               <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="14" height="13" rx="1.5"></rect><path d="M12 4v12"></path></svg>
             </button>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
+            <div id="forkProgress" class="workspace-notice hidden" role="status" aria-live="polite">
+              <span id="forkProgressText"></span>
+              <progress id="forkProgressBar" aria-label="分支历史复制进度"></progress>
+              <button id="forkProgressCancel" type="button" class="secondary" hidden>取消复制</button>
+            </div>
             <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             </div>

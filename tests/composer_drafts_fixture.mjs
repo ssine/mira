@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 const { WebSocketServer } = await import("ws").catch(() => import("../server/node_modules/ws/wrapper.mjs"));
 
-export async function startDraftFixture({ port = 0 } = {}) {
+export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001";
   const ids = ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000b2"];
   const node = { nodeId, hostname: "Draft fixture", platform: "linux", status: "online", approvalStatus: "approved", capabilities: { appServer: true, files: true }, reportedAppServer: { status: "running" }, desiredAppServer: { defaultCwd: "/work" } };
@@ -12,12 +12,39 @@ export async function startDraftFixture({ port = 0 } = {}) {
   let rows = ids.map(id => summary(id));
   let fail = false, delay = 0, uploadDelay = 0;
   const uploads = [];
+  let forkPending = null;
+  const forkChild = "00000000-0000-4000-8000-0000000000f1", forkUpload = "00000000-0000-4000-8000-0000000000f2";
+  const forkEvents = [];
+
   const assetSource = await fs.readFile(new URL("../node/internal/webassets/webassets.go", import.meta.url), "utf8");
   const csp = assetSource.match(/const contentSecurityPolicy = "([^"]+)"/)[1];
   const server = http.createServer(async (request, response) => {
     const url = new URL(request.url, "http://localhost"), path = url.pathname;
     const json = value => { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); };
     let body = ""; for await (const chunk of request) body += chunk;
+    if (forkTest && path === "/__test/fork") {
+      if (request.method === "GET") return json({ pending: Boolean(forkPending), events: forkEvents });
+      const command = JSON.parse(body);
+      if (!forkPending) { response.statusCode = 409; return json({ error: "no pending fork" }); }
+      const { socket, request: rpc } = forkPending;
+      if (command.action === "success") {
+        if (!rows.some(row => row.threadId === forkChild)) rows.push(summary(forkChild));
+        socket.send(JSON.stringify({ id: rpc.id, result: { thread: { id: forkChild } } })); forkPending = null;
+      } else {
+        socket.send(JSON.stringify({ method: "mira/thread/fork/progress", params: {
+          requestId: command.wrongRequest ? "unrelated" : rpc.id, threadId: forkChild, uploadId: forkUpload,
+          phase: command.phase ?? "uploading", completedBytes: command.completedBytes ?? 41943040, totalBytes: 104857600,
+        } }));
+      }
+      return json({});
+    }
+    if (forkTest && path === `/v2/stores/personal/history-uploads/${forkUpload}` && request.method === "DELETE") {
+      forkEvents.push("cancel");
+      if (!rows.some(row => row.threadId === forkChild)) rows.push(summary(forkChild));
+      json({ status: "cancelled" });
+      setTimeout(() => { if (forkPending) { forkPending.socket.send(JSON.stringify({ id: forkPending.request.id, error: { message: "upload cancelled" } })); forkPending = null; } }, 100);
+      return;
+    }
     if (path === "/__test/control") { ({ fail = false, delay = 0, uploadDelay = 0 } = JSON.parse(body)); return json({}); }
     if (path === "/__test/uploads") return json(uploads);
     if (path === "/healthz") return json({ version: "1.0.4", adminConfigured: true });
@@ -31,7 +58,7 @@ export async function startDraftFixture({ port = 0 } = {}) {
     }
     if (path === "/v1/codex/threads") return json({ data: rows });
     const row = rows.find(row => path.includes(row.threadId));
-    if (request.method === "DELETE" && row) { rows = rows.filter(value => value !== row); return json({}); }
+    if (request.method === "DELETE" && row) { forkEvents.push(`delete:${row.threadId}`); rows = rows.filter(value => value !== row); return json({}); }
     if (path.endsWith("/transcript")) return json({ generation: 1, itemCount: 1, trace: [{ key: "history", kind: "assistant", body: "Persisted fixture history", turnId: "previous" }] });
     if (row) return json(row);
     if (path.startsWith("/v1/")) return json({ data: [] });
@@ -58,8 +85,10 @@ export async function startDraftFixture({ port = 0 } = {}) {
     if (socket.client === "mira_web_title") return error("Title generation disabled in fixture");
     if (request.method === "config/read") return reply({ config: { model: "fixture" } });
     if (request.method === "model/list") return reply({ data: [{ model: "fixture", displayName: "Fixture", isDefault: true, supportedReasoningEfforts: [] }], nextCursor: null });
+    if (request.method === "thread/resume") { forkEvents.push(`resume:${request.params.threadId}`); }
     if (request.method === "thread/resume") return reply({ thread: { id: request.params.threadId, status: { type: "idle" } }, cwd: "/work", model: "fixture" });
     if (request.method === "thread/loaded/list") return reply({ data: rows.map(row => row.threadId) });
+    if (forkTest && request.method === "thread/fork") { forkPending = { socket, request }; return; }
     if (request.method === "thread/start") {
       const row = summary("00000000-0000-4000-8000-0000000000c3", request.params.cwd);
       if (!rows.some(value => value.threadId === row.threadId)) rows.push(row);
@@ -77,6 +106,6 @@ export async function startDraftFixture({ port = 0 } = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const fixture = await startDraftFixture({ port: Number(process.argv[2] ?? 0) });
+  const fixture = await startDraftFixture({ port: Number(process.argv[2] ?? 0), forkTest: process.argv.includes("--fork") });
   console.log(fixture.origin);
 }
