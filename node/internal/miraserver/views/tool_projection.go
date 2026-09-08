@@ -112,79 +112,6 @@ func imageDataURL(value any) string {
 	return ""
 }
 
-func OutputImages(value any, depth int) []map[string]any {
-	if depth > 8 || value == nil {
-		return nil
-	}
-	if text, ok := value.(string); ok {
-		trimmed := strings.TrimSpace(text)
-		if trimmed == "" || trimmed[0] != '[' && trimmed[0] != '{' {
-			return nil
-		}
-		var parsed any
-		if decodeJSON([]byte(trimmed), &parsed) != nil {
-			return nil
-		}
-		return OutputImages(parsed, depth+1)
-	}
-	if values := array(value); values != nil {
-		result := []map[string]any{}
-		for _, entry := range values {
-			result = append(result, OutputImages(entry, depth+1)...)
-		}
-		return result
-	}
-	valueObject := object(value)
-	if valueObject == nil {
-		return nil
-	}
-	imageURL := imageDataURL(first(valueObject["image_url"], valueObject["imageUrl"]))
-	if imageURL == "" && stringValue(valueObject["type"]) == "image" {
-		if data, ok := valueObject["data"].(string); ok {
-			imageURL = imageDataURL("data:" + stringValue(valueObject["mimeType"]) + ";base64," + data)
-		}
-	}
-	if imageURL != "" {
-		return []map[string]any{{"url": imageURL}}
-	}
-	for _, key := range []string{"content", "contentItems", "content_items", "output", "body", "result"} {
-		if valueObject[key] != nil {
-			return OutputImages(valueObject[key], depth+1)
-		}
-	}
-	return nil
-}
-
-func MergeImages(previous, next []map[string]any) []map[string]any {
-	if len(previous) == 0 {
-		return next
-	}
-	if len(next) == 0 {
-		return previous
-	}
-	if len(previous) == 1 && len(next) == 1 {
-		if stringValue(previous[0]["path"]) != "" && stringValue(next[0]["url"]) != "" {
-			return []map[string]any{{"path": previous[0]["path"], "url": next[0]["url"]}}
-		}
-		if stringValue(previous[0]["url"]) != "" && stringValue(next[0]["path"]) != "" {
-			return []map[string]any{{"path": next[0]["path"], "url": previous[0]["url"]}}
-		}
-	}
-	result := []map[string]any{}
-	seen := map[string]bool{}
-	for _, image := range append(append([]map[string]any{}, previous...), next...) {
-		key := "p:" + stringValue(image["path"])
-		if image["url"] != nil {
-			key = "u:" + stringValue(image["url"])
-		}
-		if !seen[key] {
-			result = append(result, image)
-			seen[key] = true
-		}
-	}
-	return result
-}
-
 func sanitizeImages(value any, key string) any {
 	if imageDataURL(value) != "" {
 		return "[图片单独显示]"
@@ -442,15 +369,11 @@ func ToolItemView(item map[string]any) map[string]any {
 	exitCode := first(item["exitCode"], item["exit_code"])
 	activity := map[string]any{"status": activityStatus(item["status"], exitCode), "durationMs": durationMS(item), "exitCode": exitCode, "actions": []map[string]any{}}
 	var title, body string
-	var images []map[string]any
 	switch typeName {
 	case "imageview":
 		path := ImagePath(item["path"])
-		if path != "" {
-			images = []map[string]any{{"path": path}}
-		}
 		activity["actions"] = []map[string]any{{"kind": "tool", "label": "查看图片"}}
-		return map[string]any{"kind": "tool", "title": "查看图片", "body": path, "markdown": false, "images": images, "activity": activity}
+		return map[string]any{"kind": "tool", "title": "查看图片", "body": path, "markdown": false, "activity": activity}
 	case "commandexecution":
 		title = "Shell"
 		if commands := array(item["command"]); commands != nil {
@@ -527,11 +450,7 @@ func ToolItemView(item map[string]any) map[string]any {
 	default:
 		return nil
 	}
-	images = OutputImages(first(item["result"], item["contentItems"], item["content_items"], item["output"]), 0)
-	result := map[string]any{"kind": "tool", "title": title, "body": body, "activity": activity, "markdown": false}
-	if len(images) > 0 {
-		result["images"] = images
-	}
+	result := map[string]any{"kind": "tool", "title": title, "body": body, "markdown": false, "activity": activity}
 	return result
 }
 

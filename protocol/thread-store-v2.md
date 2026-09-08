@@ -253,10 +253,25 @@ GET /v1/codex/threads/{threadId}/transcript?storeId=personal&limit=60&cursor={ne
 退避重连，在前台恢复、网络恢复和 BFCache 恢复时检查通道，补读最近历史；重连不重放 `turn/start`。
 
 Server 在同一个 store head 上读取 active generation，并从权威 rollout items 重建有序的
-`user`、`assistant`、`reasoning`、`tool` 和 `system` 轨迹。投影会配对原始
+`user`、`assistant`、`reasoning`、`tool`、`image` 和 `system` 轨迹。投影会配对原始
 `custom_tool_call` / `custom_tool_call_output`，也能读取 paginated rollout 的
 `item_completed` materialized items。每条轨迹保留稳定 key、turn ID、源 item 序号、状态以及
 是否应按 Markdown 展示。
+
+`image` 是独立轨迹项，只来自 `response_item` 中用户/助手消息或工具输出的显式
+`input_image` 内容项；不从工具参数、事件通知、JSON 文本或本地路径补图。
+图片 key 使用原始记录序号和内容项位置，按历史顺序展示；相同图片再次进入历史仍保留各自位置。
+`toolDetails=0` 只省略工具正文，不改变图片集合或顺序。列表返回 `image.href`，图片进入视口时读取：
+
+```http
+GET /v1/codex/threads/{threadId}/transcript/image?storeId=personal&generation={generation}&itemSeq={sequence}&index={contentIndex}
+```
+
+接口使用管理员只读认证，检查 active generation 和删除状态，仅查询指定原始记录，返回
+`{ "url": "data:image/...;base64,..." }`，不调用 Node 文件能力。过期 generation、已删除会话、
+不存在的记录或非图片位置返回 404，非法参数返回 400；响应禁止缓存。
+原始图片数据仍保存在权威历史 JSON 中，不增加持久化副本或改写旧记录。
+`tail=1` 的页边界不能拆开同一原始记录的图片，因此含多图的边界页可能超过 `limit`。
 
 默认响应最新 60 条轨迹，并返回 `nextCursor` 和 `totalTraceItems`。网页只保留最近一页作为首次
 载荷；用户请求更早历史时把 `nextCursor` 原样传回，Server 从当前位置向前返回下一页。每页保持

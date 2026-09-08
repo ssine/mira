@@ -94,4 +94,75 @@ func TestPostgresReadViews(t *testing.T) {
 	if legacy.Status != 200 || len(array(legacy.Body["trace"])) != 2 {
 		t.Fatalf("legacy: %#v", legacy)
 	}
+	t.Run("history images paginate and resolve independently", func(t *testing.T) {
+		content := []any{map[string]any{"type": "input_text", "text": "images"}}
+		for i := 0; i < 15; i++ {
+			content = append(content, map[string]any{"type": "input_image", "image_url": "data:image/png;base64,AAAA"})
+		}
+		raw, _ := json.Marshal(record("response_item", map[string]any{"type": "message", "role": "user", "content": content}))
+		if _, err := pool.Exec(ctx, `UPDATE codex_thread_events SET payload=$1::json WHERE store_id='personal' AND thread_id=$2 AND item_seq=95`, string(raw), threadID); err != nil {
+			t.Fatal(err)
+		}
+		loaded := false
+		page, err := service.GetTranscript(ctx, "personal", threadID, TranscriptOptions{Tail: true, Limit: 10, ToolDetails: &loaded})
+		if err != nil || page.Status != 200 {
+			t.Fatalf("page: %#v %v", page, err)
+		}
+		images := 0
+		for _, value := range array(page.Body["trace"]) {
+			if object(value)["kind"] == "image" {
+				images++
+			}
+		}
+		if images != 15 {
+			t.Fatalf("page boundary lost images: %d %#v", images, page)
+		}
+		encoded, _ := json.Marshal(page.Body)
+		if contains(string(encoded), "base64") {
+			t.Fatal("summary contains image bytes")
+		}
+		cursor := stringValue(page.Body["nextCursor"])
+		older, err := service.GetTranscript(ctx, "personal", threadID, TranscriptOptions{Tail: true, Limit: 10, Cursor: &cursor})
+		if err != nil || older.Status != 200 {
+			t.Fatalf("older: %#v %v", older, err)
+		}
+		for _, value := range array(older.Body["trace"]) {
+			if object(value)["kind"] == "image" {
+				t.Fatal("older page repeated images")
+			}
+		}
+		image, err := service.GetTranscriptImage(ctx, "personal", threadID, 1, 95, 15)
+		if err != nil || image.Status != 200 || image.Body["url"] != "data:image/png;base64,AAAA" {
+			t.Fatalf("image: %#v %v", image, err)
+		}
+		for _, args := range [][3]int64{{2, 95, 1}, {1, 95, 0}, {1, 95, 16}, {1, 94, 1}} {
+			result, err := service.GetTranscriptImage(ctx, "personal", threadID, args[0], args[1], args[2])
+			if err != nil || result.Status != 404 {
+				t.Fatalf("invalid reference: %#v %v", result, err)
+			}
+		}
+		other, err := service.GetTranscriptImage(ctx, "other", threadID, 1, 95, 1)
+		if err != nil || other.Status != 404 {
+			t.Fatal("image crossed store boundary")
+		}
+		if _, err := pool.Exec(ctx, `UPDATE codex_thread_projections SET active_generation=2 WHERE store_id='personal' AND thread_id=$1`, threadID); err != nil {
+			t.Fatal(err)
+		}
+		stale, err := service.GetTranscriptImage(ctx, "personal", threadID, 1, 95, 1)
+		if err != nil || stale.Status != 404 {
+			t.Fatal("old generation image remained accessible")
+		}
+		if _, err := pool.Exec(ctx, `UPDATE codex_thread_projections SET active_generation=1 WHERE store_id='personal' AND thread_id=$1`, threadID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO mira_thread_actions(store_id,thread_id,action,operation_id,generation) VALUES('personal',$1,'delete','d079b7da-4072-4c02-b012-1eb9001fc211',1)`, threadID); err != nil {
+			t.Fatal(err)
+		}
+		deleted, err := service.GetTranscriptImage(ctx, "personal", threadID, 1, 95, 1)
+		if err != nil || deleted.Status != 404 {
+			t.Fatal("deleted thread image remained accessible")
+		}
+
+	})
+
 }

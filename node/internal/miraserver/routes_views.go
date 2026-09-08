@@ -21,6 +21,7 @@ var (
 	threadReadPattern       = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/read$`)
 	threadForkTitlePattern  = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/fork-title$`)
 	threadCostsPattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/costs$`)
+	threadImagePattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript/image$`)
 	threadTranscriptPattern = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript$`)
 	accountHistoryPattern   = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/account-history$`)
 )
@@ -93,6 +94,9 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 	}
 	if match := pathMatch(threadTranscriptPattern, path); request.Method == http.MethodGet && match != nil {
 		return true, server.threadTranscript(ctx, response, request, match[1])
+	}
+	if match := pathMatch(threadImagePattern, path); request.Method == http.MethodGet && match != nil {
+		return true, server.threadImage(ctx, response, request, match[1])
 	}
 	return false, nil
 }
@@ -301,4 +305,32 @@ func writeTimedTranscriptJSON(response http.ResponseWriter, status int, value an
 		return fmt.Errorf("write JSON response: %w", err)
 	}
 	return nil
+}
+
+func (server *Server) threadImage(ctx context.Context, response http.ResponseWriter, request *http.Request, threadID string) error {
+	if ok, err := server.authorizeAdminRead(ctx, response, request); err != nil || !ok {
+		return err
+	}
+	storeID, err := viewStoreID(request)
+	if err != nil {
+		return err
+	}
+	values := make([]int64, 3)
+	for index, name := range []string{"generation", "itemSeq", "index"} {
+		raw := request.URL.Query()[name]
+		if len(raw) != 1 {
+			return &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid image reference"}
+		}
+		value, err := strconv.ParseInt(raw[0], 10, 64)
+		if err != nil || value < 0 || value > 9_007_199_254_740_991 {
+			return &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid image reference"}
+		}
+		values[index] = value
+	}
+	result, err := server.views.GetTranscriptImage(ctx, storeID, threadID, values[0], values[1], values[2])
+	if err != nil {
+		return err
+	}
+	response.Header().Set("Cache-Control", "no-store")
+	return writeJSON(response, result.Status, result.Body)
 }

@@ -156,6 +156,11 @@ thread to the matching approved App Server Node when one is known.
 Web submission feedback is ephemeral UI state scoped to thread and turn: show it immediately and
 remove it on the first non-empty assistant prose, failure, completion or disconnect. Empty reasoning
 and ordinary lifecycle events must not become transcript cards.
+Inline conversation images come only from typed image content in canonical model-facing response
+items. Render them independently of tool details, ordered and keyed by raw record sequence and
+content position, and lazily load their saved data from PostgreSQL in the active generation.
+Do not reconstruct historical images from tool arguments, event notifications or current Node files.
+Expanded tool detail updates must preserve existing bodies and the user's reading position.
 
 ## Protocol and upgrade policy
 

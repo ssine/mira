@@ -117,6 +117,7 @@ func (service *Service) getTranscriptLegacy(ctx context.Context, storeID, thread
 	}
 	projectionStarted := time.Now()
 	projected := ProjectCodexTranscript(items, ProjectionOptions{})
+	referenceTranscriptImages(projected, storeID, threadID, generation)
 	var cursor *int
 	if options.Cursor != nil {
 		value, parseErr := strconv.Atoi(*options.Cursor)
@@ -358,17 +359,7 @@ func transcriptToolDetails(trace []map[string]any, cursor string, limit int, loa
 		if fragment := object(copy["toolFragment"]); fragment != nil {
 			copy["toolFragment"] = map[string]any{"materialized": fragment["materialized"] == true, "hasInput": fragment["input"] != nil, "hasOutput": fragment["output"] != nil}
 		}
-		images := []map[string]any{}
-		for _, image := range mapImages(copy["images"]) {
-			if path := stringValue(image["path"]); path != "" {
-				images = append(images, map[string]any{"path": path})
-			}
-		}
-		if len(images) > 0 {
-			copy["images"] = images
-		} else {
-			delete(copy, "images")
-		}
+		delete(copy, "images")
 		result[index] = copy
 	}
 	return result
@@ -538,6 +529,12 @@ func (service *Service) getTranscriptTail(ctx context.Context, storeID, threadID
 	if startIndex < 0 {
 		startIndex = 0
 	}
+	// A cursor points between raw records: never split one record's images
+	// across pages, or the omitted prefix would be skipped by the next cursor.
+	for startIndex > 0 && startIndex < len(projected) && projected[startIndex-1]["sourceItemSeq"] == projected[startIndex]["sourceItemSeq"] {
+		startIndex--
+	}
+	referenceTranscriptImages(projected, storeID, threadID, generation)
 	loaded := options.ToolDetails == nil || *options.ToolDetails
 	trace := transcriptToolDetails(projected[startIndex:], pageCursor, limit, loaded)
 	before := start

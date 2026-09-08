@@ -37,10 +37,13 @@ func TestResponseToolViewOnlyInterpretsKnownTools(t *testing.T) {
 
 func TestImageProjectionRejectsExternalURLs(t *testing.T) {
 	data := "data:image/png;base64,AAAA"
-	images := OutputImages(map[string]any{"content": []any{map[string]any{"image_url": data}, map[string]any{"image_url": "https://example.test/image.png"}}}, 0)
-	if !reflect.DeepEqual(images, []map[string]any{{"url": data}}) {
+	images := historyImages(record("response_item", map[string]any{"type": "function_call_output", "output": []any{
+		map[string]any{"type": "input_image", "image_url": data}, map[string]any{"type": "input_image", "image_url": "https://example.test/image.png"},
+	}}))
+	if !reflect.DeepEqual(images, []historyImage{{0, data}}) {
 		t.Fatalf("images: %#v", images)
 	}
+
 	for _, candidate := range []string{"relative.png", "https://example.test/x.png", "file://user:pass@localhost/tmp/x.png"} {
 		if ImagePath(candidate) != "" {
 			t.Fatalf("unsafe path accepted: %s", candidate)

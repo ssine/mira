@@ -1,6 +1,6 @@
 // Shared, rebuildable presentation metadata for App Server items and stored
 // rollout items. Never interpret arbitrary shell/JavaScript as an activity.
-import { outputImages, imageJsonReplacer, imagePath } from "./trace-images.js";
+import { imageJsonReplacer, imagePath } from "./trace-images.js";
 
 export function itemType(item) {
   return String(item?.type ?? "").replaceAll("_", "").toLowerCase();
@@ -144,7 +144,7 @@ export function toolItemView(item) {
   if (type === "imageview") {
     const path = imagePath(item.path);
     return { kind: "tool", title: "查看图片", body: path, markdown: false,
-      images: path ? [{ path }] : [], activity: { ...activity, actions: [{ kind: "tool", label: "查看图片" }] } };
+      activity: { ...activity, actions: [{ kind: "tool", label: "查看图片" }] } };
   } else if (type === "commandexecution") {
     title = "Shell";
     const command = Array.isArray(item.command) ? item.command.join(" ") : text(item.command);
@@ -168,8 +168,7 @@ export function toolItemView(item) {
       error: item.error, success: item.success }, imageJsonReplacer, 2);
     if (item.success === false || item.error) activity.status = "failed";
   } else return null;
-  const images = outputImages(item.result ?? item.contentItems ?? item.content_items ?? item.output);
-  return { kind: "tool", title, body, activity, markdown: false, ...(images.length ? { images } : {}) };
+  return { kind: "tool", title, body, activity, markdown: false };
 }
 
 // Legacy model-facing calls may have no materialized counterpart. Only use

@@ -3,6 +3,7 @@ package views
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -144,9 +145,6 @@ func projectedMaterializedItem(item map[string]any, itemSeq int64, index int, tu
 		base["kind"], base["title"], base["markdown"], base["body"] = "compaction", "上下文自动压缩", false, "较早的上下文已自动压缩。"
 	case "websearch", "imageview", "imagegeneration", "subagentactivity", "functioncalloutput":
 		base["kind"], base["title"], base["markdown"], base["body"] = "tool", normalizedToolTitle(item), false, boundedText(printable(item))
-		if typeName == "functioncalloutput" {
-			base["images"] = OutputImages(item["output"], 0)
-		}
 	default:
 		return nil
 	}
@@ -349,7 +347,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 	push := func(entry map[string]any) {}
 	push = func(entry map[string]any) {
 		entry = withTiming(entry)
-		if entry == nil || stringValue(entry["body"]) == "" && stringValue(entry["kind"]) != "tool" {
+		if entry == nil || stringValue(entry["body"]) == "" && !includes([]string{"tool", "image"}, stringValue(entry["kind"])) {
 			return
 		}
 		if includes([]string{"user", "assistant", "reasoning"}, stringValue(entry["kind"])) {
@@ -431,7 +429,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			key := callKey(materializedTurnID, stringValue(item["id"]))
 			if !(materializedTools[key] != nil && responseCalls[key]) {
 				entry := projectedMaterializedItem(item, itemSeq, index, materializedTurnID)
-				if entry != nil && (options.Fragments || len(mapImages(entry["images"])) > 0) && stringValue(entry["kind"]) == "tool" && entry["itemId"] != nil {
+				if entry != nil && options.Fragments && stringValue(entry["kind"]) == "tool" && entry["itemId"] != nil {
 					entry["key"] = "history-tool-" + func() string {
 						if materializedTurnID == "" {
 							return "unscoped"
@@ -458,6 +456,11 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 		}
 		if recordType != "response_item" {
 			continue
+		}
+		for _, image := range historyImages(record) {
+			push(map[string]any{"key": fmt.Sprintf("history-%d-image-%d", itemSeq, image.index),
+				"kind": "image", "title": "图片", "body": "", "turnId": nullableString(recordTurnID),
+				"sourceItemSeq": itemSeq, "imageIndex": image.index, "image": map[string]any{"url": image.url}})
 		}
 		if tool := responseToolCall(payload, itemSeq, index, recordTurnID); tool != nil {
 			key := callKey(recordTurnID, tool.callID)
@@ -489,10 +492,6 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			}
 			if tool.isOutput {
 				state.output, state.hasOutput = tool.output, true
-				images := MergeImages(mapImages(state.entry["images"]), OutputImages(tool.output, 0))
-				if len(images) > 0 {
-					state.entry["images"] = images
-				}
 				if state.materialized == nil {
 					state.entry["status"] = "完成"
 				}
@@ -546,6 +545,16 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			result = append(result, entry)
 		}
 	}
+	// Tool calls can be paired across distant records. Image positions always
+	// belong to the actual model-facing content record, never to the call.
+	sort.SliceStable(result, func(i, j int) bool {
+		left, _ := safeInteger(result[i]["sourceItemSeq"])
+		right, _ := safeInteger(result[j]["sourceItemSeq"])
+		if left != right {
+			return left < right
+		}
+		return result[i]["kind"] != "image" && result[j]["kind"] == "image"
+	})
 	return result
 }
 
@@ -555,18 +564,7 @@ func nullableString(value string) any {
 	}
 	return value
 }
-func mapImages(value any) []map[string]any {
-	if typed, ok := value.([]map[string]any); ok {
-		return typed
-	}
-	result := []map[string]any{}
-	for _, raw := range array(value) {
-		if image := object(raw); image != nil {
-			result = append(result, image)
-		}
-	}
-	return result
-}
+
 func toolBody(input any, hasInput bool, output any, hasOutput bool) string {
 	parts := []string{}
 	if hasInput {

@@ -9,7 +9,7 @@ func record(recordType string, payload map[string]any) map[string]any {
 	return map[string]any{"type": recordType, "payload": payload}
 }
 
-func TestProjectTranscriptPairsImageSnapshot(t *testing.T) {
+func TestProjectTranscriptSeparatesImageSnapshot(t *testing.T) {
 	dataURL := "data:image/png;base64,iVBORw0KGgo="
 	records := []map[string]any{
 		record("event_msg", map[string]any{"type": "task_started", "turn_id": "image-turn"}),
@@ -18,17 +18,18 @@ func TestProjectTranscriptPairsImageSnapshot(t *testing.T) {
 		record("response_item", map[string]any{"type": "function_call_output", "call_id": "image-1", "output": []any{map[string]any{"type": "input_image", "image_url": dataURL}}}),
 	}
 	trace := ProjectCodexTranscript(records, ProjectionOptions{Fragments: true})
-	if len(trace) != 1 || trace[0]["kind"] != "tool" || trace[0]["title"] != "查看图片" {
+	if len(trace) != 2 || trace[0]["kind"] != "tool" || trace[0]["title"] != "查看图片" {
 		t.Fatalf("unexpected trace: %#v", trace)
 	}
-	if !reflect.DeepEqual(mapImages(trace[0]["images"]), []map[string]any{{"path": "/tmp/chart.png", "url": dataURL}}) {
-		t.Fatalf("images: %#v", trace[0]["images"])
+	if trace[0]["images"] != nil || trace[1]["kind"] != "image" || trace[1]["sourceItemSeq"] != int64(4) || !reflect.DeepEqual(trace[1]["image"], map[string]any{"url": dataURL}) {
+		t.Fatalf("image must belong to its canonical output record: %#v", trace)
 	}
+
 	if body := stringValue(trace[0]["body"]); contains(body, "base64") {
 		t.Fatalf("image leaked into body")
 	}
 	tail := ProjectCodexTranscript(records[3:], ProjectionOptions{InitialTurnID: "image-turn", ItemOffset: 3, Fragments: true})
-	if len(tail) != 1 || tail[0]["key"] != trace[0]["key"] {
+	if len(tail) != 2 || tail[0]["key"] != trace[0]["key"] || tail[1]["key"] != trace[1]["key"] {
 		t.Fatalf("tail: %#v", tail)
 	}
 }

@@ -31,33 +31,6 @@ async function imageBlob(url, signal) {
   return new Blob(chunks, { type: url.slice(5, url.indexOf(";")) });
 }
 
-export function outputImages(value, depth = 0) {
-  if (depth > 8 || value == null) return [];
-  if (typeof value === "string") {
-    if (!/^[\[{]/.test(value.trim())) return [];
-    try { return outputImages(JSON.parse(value), depth + 1); } catch { return []; }
-  }
-  if (Array.isArray(value)) return value.flatMap((part) => outputImages(part, depth + 1));
-  if (typeof value !== "object") return [];
-  const url = imageDataUrl(value.image_url ?? value.imageUrl) ??
-    (value.type === "image" && typeof value.data === "string" ? imageDataUrl(`data:${value.mimeType};base64,${value.data}`) : null);
-  if (url) return [{ url }];
-  for (const key of ["content", "contentItems", "content_items", "output", "body", "result"]) {
-    if (value[key] != null) return outputImages(value[key], depth + 1);
-  }
-  return [];
-}
-
-export function mergeImages(previous = [], next = []) {
-  if (!previous.length) return next;
-  if (!next.length) return previous;
-  // A native imageView path and its returned snapshot describe the same image.
-  if (previous.length === 1 && next.length === 1 && previous[0].path && next[0].url) return [{ ...previous[0], ...next[0] }];
-  if (previous.length === 1 && next.length === 1 && previous[0].url && next[0].path) return [{ ...next[0], ...previous[0] }];
-  return [...previous, ...next].filter((image, index, all) =>
-    all.findIndex((other) => image.url ? other.url === image.url : other.path === image.path) === index);
-}
-
 export function imageJsonReplacer(key, value) {
   if (imageDataUrl(value)) return "[图片单独显示]";
   if (typeof value === "string" && ["result", "output", "content"].includes(key) && /^[\[{]/.test(value.trim())) {
@@ -70,11 +43,11 @@ export function imageJsonReplacer(key, value) {
 }
 
 // Images outside collapsed tool groups load as they approach the viewport.
-// Bound simultaneous Node reads and release blobs when a conversation is removed.
+// Bound simultaneous history reads and release blobs when a conversation is removed.
 export class TraceImages {
-  constructor(root, readFile, followImage, preview) {
+  constructor(root, readHistory, followImage, preview) {
     this.root = root;
-    this.readFile = readFile;
+    this.readHistory = readHistory;
     this.followImage = followImage;
     this.preview = preview;
     this.entries = new Map();
@@ -99,24 +72,10 @@ export class TraceImages {
     this.entries.delete(body);
   }
 
-  mount(body, source, nodeIds) {
+  mount(body, source) {
     const previous = this.entries.get(body);
-    if (previous) {
-      // A late path-only notification must not downgrade a saved snapshot.
-      const unchanged = source.url ? previous.source.url === source.url : previous.source.path === source.path;
-      source = { ...source, path: source.path || previous.source.path };
-      if (unchanged) {
-        previous.source = { ...previous.source, ...source, url: source.url || previous.source.url };
-        this.label(previous);
-        return;
-      }
-      previous.controller.abort();
-      const entry = { ...previous, source, nodeIds: [...nodeIds], controller: new AbortController(), pending: false };
-      this.entries.set(body, entry);
-      this.label(entry);
-      this.observer.observe(body);
-      return;
-    }
+    if (previous?.source.href === source.href && previous?.source.url === source.url) return;
+    if (previous) this.remove(body, previous);
     const figure = document.createElement("figure");
     const link = document.createElement("button");
     link.type = "button";
@@ -139,23 +98,22 @@ export class TraceImages {
     retry.hidden = true;
     figure.append(link, status, retry, caption);
     body.replaceChildren(figure);
-    const entry = { source, nodeIds: [...nodeIds], body, img, link, caption, status, retry, controller: new AbortController() };
+    const entry = { source, body, img, link, caption, status, retry, controller: new AbortController() };
     this.entries.set(body, entry);
     this.label(entry);
     link.addEventListener("click", () => {
       const current = this.entries.get(body);
-      if (current?.blob) this.preview(current.blob, current.source.path);
+      if (current?.blob) this.preview(current.blob);
     });
     retry.addEventListener("click", () => this.enqueue(this.entries.get(body)));
     this.observer.observe(body);
   }
 
   label(entry) {
-    const label = entry.source.path?.split(/[\\/]/).at(-1) || "工具返回的图片";
+    const label = "对话中的图片";
     entry.img.alt = label;
     entry.link.setAttribute("aria-label", `预览 ${label}`);
-    entry.caption.textContent = entry.source.path || label;
-    entry.caption.title = entry.source.path || label;
+    entry.caption.textContent = label;
   }
 
   enqueue(entry) {
@@ -181,9 +139,9 @@ export class TraceImages {
     status.textContent = "正在加载图片…";
     let objectUrl;
     try {
-      const url = imageDataUrl(source.url);
-      const blob = url ? await imageBlob(url, controller.signal)
-        : await this.readFile(source.path, entry.nodeIds, controller, (text) => { status.textContent = text; });
+      const url = imageDataUrl(source.url ?? (await this.readHistory(source.href, controller.signal)).url);
+      if (!url) throw new Error("历史记录没有可显示的图片数据");
+      const blob = await imageBlob(url, controller.signal);
       controller.signal.throwIfAborted();
       objectUrl = URL.createObjectURL(blob);
       const nextImage = img.cloneNode(false);
@@ -191,8 +149,7 @@ export class TraceImages {
       await nextImage.decode();
       controller.signal.throwIfAborted();
       const follow = this.followImage();
-      // Decode off-DOM and commit in one step: keep the visible image while a
-      // path preview is upgraded to its immutable snapshot.
+      // Commit only after decoding; request completion order never moves cards.
       nextImage.alt = entry.img.alt;
       nextImage.hidden = false;
       entry.img.replaceWith(nextImage);

@@ -9,7 +9,7 @@ import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { AccountSidebar } from "/account-status.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
-import { TraceImages, mergeImages } from "/trace-images.js";
+import { TraceImages } from "/trace-images.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
 import { compareThreadsByRecency, splitProjectThreads } from "/thread-list.js";
 
@@ -249,7 +249,7 @@ const accountSidebar = new AccountSidebar($("#agentAccount"));
 const conversationDetailsWide = window.matchMedia("(min-width: 1100px)");
 let conversationDetailsCloseTimer = null;
 let resetConversationDetailsDrag = () => {};
-const traceImages = new TraceImages($("#conversationTrace"), readTraceImage, () => {
+const traceImages = new TraceImages($("#conversationTrace"), (href, signal) => api(href, { signal }), () => {
   const follow = traceNearBottom($("#conversationTrace"));
   return () => { if (follow) scrollTraceToBottom($("#conversationTrace")); };
 }, openTraceImagePreview);
@@ -2839,9 +2839,9 @@ function ensureToolGroup(trace, turnId = "", before = null) {
 
 function upsertTrace(key, kind, title, body = undefined, status = "", options = {}) {
   const trace = $("#conversationTrace");
-  const follow = options.forceScroll === true || traceNearBottom(trace);
+  const follow = options.autoScroll !== false && (options.forceScroll === true || traceNearBottom(trace));
   trace.querySelector(".conversation-empty")?.remove();
-  let card = key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null;
+  let card = (key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null) ?? options.reuseCard;
   if (!card) {
     card = element("article", `trace-card ${kind}`);
     if (key) card.dataset.traceKey = key;
@@ -2869,7 +2869,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       head.append(element("span", "trace-kind", title), actions);
       card.append(head, element("div", "trace-body"));
     }
-    setTraceBody(card, body, kind);
+    if (kind !== "image") setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
     if (kind === "tool" && options.collapseTools !== false) {
       ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
@@ -2881,8 +2881,12 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.dataset.traceKind = kind;
     if (card.querySelector(".trace-kind")) card.querySelector(".trace-kind").textContent = title;
     if (card.querySelector(".trace-status")) card.querySelector(".trace-status").textContent = status;
-    if (body !== undefined) setTraceBody(card, body, kind);
+    if (kind !== "image" && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
+  }
+  if (!trace.contains(card)) {
+    if (kind === "tool" && options.collapseTools !== false) ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
+    else trace.append(card);
   }
   card.dataset.traceTitle = title;
   card.dataset.traceStatus = status;
@@ -2909,14 +2913,9 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.querySelector(".trace-status").textContent = "";
   }
   updateToolGroup(card.closest(".tool-group"));
-  for (const [index, source] of (options.images ?? []).entries()) {
-    const imageKey = `${key}:image:${index}`;
-    const existingImage = trace.querySelector(`[data-trace-key="${CSS.escape(imageKey)}"]`) ?? options.imageCards?.get(imageKey);
-    const preview = existingImage ?? upsertTrace(imageKey, "image", "图片", source.path || "图片", "", {
-      turnId: options.turnId, autoScroll: false,
-    });
-    if (!trace.contains(preview)) trace.append(preview);
-    traceImages.mount(preview.querySelector(".trace-body"), source, conversationNodeCandidates());
+  if (kind === "image" && options.image) traceImages.mount(card.querySelector(".trace-body"), options.image);
+  if (options.toolDetail && card.querySelector(".trace-detail")?.open) {
+    queueMicrotask(() => { if (card.isConnected) void loadToolDetails(card); });
   }
   if (kind === "assistant" && !options.deferTurnFooter) refreshTurnFooters(options.turnId);
   if (options.autoScroll !== false && follow) scrollTraceToBottom(trace);
@@ -2975,22 +2974,6 @@ async function readNodeFile(nodeId, path, stat, controller, progress = (text) =>
     if (result.eof) break;
   }
   return new Blob(chunks, { type: nodeFileMimeType(path) });
-}
-
-async function readTraceImage(path, candidates, controller, progress) {
-  if (!path) throw new Error("未提供图片路径");
-  if (!candidates.length) throw new Error("会话没有可用的运行节点");
-  let failure;
-  for (const nodeId of candidates) {
-    controller.signal.throwIfAborted();
-    try {
-      const stat = await invokeNode(nodeId, "file", { action: "stat", path }, 30_000, controller.signal);
-      controller.signal.throwIfAborted();
-      if (stat.type !== "file") throw new Error("图片文件不存在");
-      return await readNodeFile(nodeId, path, stat, controller, progress);
-    } catch (error) { controller.signal.throwIfAborted(); failure = error; }
-  }
-  throw failure;
 }
 
 function openTraceImagePreview(blob, path) {
@@ -3260,7 +3243,6 @@ function mergeTranscriptItems(current, updates) {
       };
       merged.set(item.key, {
         ...previous, ...item, ...(materialized ?? {}),
-        images: mergeImages(previous.images, item.images),
         sourceItemSeq: Math.min(previous.sourceItemSeq, item.sourceItemSeq),
         toolDetail: pageMap.size ? { pages: [...pageMap.values()] } : undefined,
         ...(!materialized ? {
@@ -3275,7 +3257,8 @@ function mergeTranscriptItems(current, updates) {
   }
   const narratives = new Map();
   return [...merged.values()].sort((left, right) =>
-    (left.sourceItemSeq ?? Number.MAX_SAFE_INTEGER) - (right.sourceItemSeq ?? Number.MAX_SAFE_INTEGER))
+    (left.sourceItemSeq ?? Number.MAX_SAFE_INTEGER) - (right.sourceItemSeq ?? Number.MAX_SAFE_INTEGER) ||
+    (left.kind === "image") - (right.kind === "image") || (left.imageIndex ?? 0) - (right.imageIndex ?? 0))
     .filter((item) => {
       if (!["user", "assistant", "reasoning"].includes(item.kind)) return true;
       const signature = JSON.stringify([item.turnId, item.kind, item.phase, item.body]);
@@ -3291,8 +3274,13 @@ async function loadToolDetails(card) {
   const epoch = agent.selectionEpoch;
   const generation = agent.transcriptGeneration;
   const pages = (card._miraToolDetail?.pages ?? []).filter((page) => !page.loaded);
-  if (!threadId || !pages.length) return;
-  setTraceBody(card, "正在加载工具详情…", "tool");
+  if (!threadId || !pages.length || card._miraDetailLoading) return;
+  card._miraDetailLoading = true;
+  const details = card.querySelector(".trace-detail");
+  let status = details.querySelector(".trace-detail-status");
+  if (!status) { status = element("div", "trace-detail-status trace-image-status"); status.setAttribute("role", "status"); details.append(status); }
+  status.textContent = "正在加载工具详情…";
+  details.setAttribute("aria-busy", "true");
   const key = JSON.stringify([threadId, generation, pages.map((page) => page.cursor)]);
   let job = agent.toolDetailRequests.get(key);
   if (!job) {
@@ -3307,13 +3295,31 @@ async function loadToolDetails(card) {
     const results = await job;
     if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || agent.transcriptGeneration !== generation) return;
     if (results.some((result) => result.generation !== generation)) throw new Error("会话历史已更新，请重新展开详情");
-    agent.transcriptItems = mergeTranscriptItems(agent.transcriptItems, results.flatMap((result) => result.trace ?? []));
-    const scroll = traceScroller();
-    renderTranscript(null, { anchorBottom: false, preserveViewport: { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight } });
+    const updates = results.flatMap((result) => result.trace ?? []);
+    const updatedKeys = new Set(updates.map(item => item.key));
+    agent.transcriptItems = mergeTranscriptItems(agent.transcriptItems, updates);
+    // Only hydrate existing tool cards. Rebuilding the entire conversation here
+    // used to collapse long expanded bodies and save the resulting scrollTop=0.
+    const viewport = captureTraceViewport();
+    const trace = $("#conversationTrace");
+    for (const item of agent.transcriptItems) {
+      if (item.kind !== "tool" || !updatedKeys.has(item.key)) continue;
+      const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
+      const current = trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
+      if (!current) continue;
+      upsertTrace(key, "tool", item.title, item.body, item.status, {
+        autoScroll: false, turnId: item.turnId, activity: item.activity, toolDetail: item.toolDetail,
+      });
+    }
+    status.remove();
+    restoreTraceViewport(viewport);
   } catch (error) {
     if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
     const current = card.isConnected ? card : $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(card.dataset.traceKey)}"]`);
-    if (current) setTraceBody(current, `工具详情加载失败，收起后可重试：${error.message}`, "tool");
+    if (current) status.textContent = `工具详情加载失败，收起后可重试：${error.message}`;
+  } finally {
+    card._miraDetailLoading = false;
+    details.removeAttribute("aria-busy");
   }
 }
 
@@ -3386,12 +3392,29 @@ function scheduleOlderTranscriptLoad() {
   });
 }
 
+// Capture at mutation time, so scrolling while an HTTP request is in flight
+// remains the user's choice. Prefer a visible card over a raw pixel offset.
+function captureTraceViewport() {
+  const scroll = traceScroller();
+  const top = scroll.getBoundingClientRect().top;
+  const card = [...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")]
+    .find(card => card.getBoundingClientRect().bottom > top && card.getBoundingClientRect().height > 0);
+  return { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight,
+    anchorKey: card?.dataset.traceKey, anchorTop: card?.getBoundingClientRect().top };
+}
+
+function restoreTraceViewport(viewport) {
+  const scroll = traceScroller();
+  const anchor = viewport.anchorKey && $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(viewport.anchorKey)}"]`);
+  scroll.scrollTop = anchor ? scroll.scrollTop + anchor.getBoundingClientRect().top - viewport.anchorTop
+    : viewport.mode === "prepend" ? viewport.top + scroll.scrollHeight - viewport.height : viewport.top;
+}
+
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
   const previousCards = [...existingTrace.querySelectorAll(".trace-card")];
-  // Reattach decoded images synchronously so the image observer retains their
-  // DOM, pending reads and object URLs across canonical event reconciliation.
-  const imageCards = new Map(previousCards.filter((card) => card.dataset.traceKind === "image")
+  // Keep expanded tool bodies and decoded images intact across reconciliation.
+  const reusableCards = new Map(previousCards.filter((card) => ["tool", "image"].includes(card.dataset.traceKind))
     .map((card) => [card.dataset.traceKey, card]));
   const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
     ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction), .trace-card[data-pending-user="true"]')]
@@ -3418,7 +3441,7 @@ function renderTranscript(fallbackThread, options = {}) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, images: item.images, imageCards, turnId: item.turnId,
+      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, reuseCard: reusableCards.get(key), turnId: item.turnId,
       transcriptKey: item.key, toolDetail: item.toolDetail,
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
@@ -3488,17 +3511,11 @@ function renderTranscript(fallbackThread, options = {}) {
   refreshTurnFooters();
   const last = trace.lastElementChild;
   const scroll = traceScroller();
+  if (options.preserveViewport) restoreTraceViewport(options.preserveViewport);
   const scrollTop = scroll.scrollTop;
   requestAnimationFrame(() => {
     if (trace.lastElementChild !== last || scroll.scrollTop !== scrollTop) return;
-    if (options.preserveViewport) {
-      const viewport = options.preserveViewport;
-      const anchor = viewport.anchorKey && trace.querySelector(`[data-trace-key="${CSS.escape(viewport.anchorKey)}"]`);
-      scroll.scrollTop = viewport.mode === "prepend"
-        ? anchor ? scroll.scrollTop + anchor.getBoundingClientRect().top - viewport.anchorTop
-          : viewport.top + scroll.scrollHeight - viewport.height
-        : viewport.top;
-    } else if (options.anchorBottom !== false) {
+    if (!options.preserveViewport && options.anchorBottom !== false) {
       scrollTraceToBottom(trace);
       requestAnimationFrame(() => {
         if (trace.lastElementChild === last && traceNearBottom(trace)) scrollTraceToBottom(trace);
@@ -3533,7 +3550,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const preserveViewport = options.prepend
     ? { mode: "prepend", top: scroll.scrollTop, height: scroll.scrollHeight }
     : options.preserveLoaded && options.anchorBottom === false
-      ? { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight }
+      ? captureTraceViewport()
       : null;
   if (options.prepend) {
     const top = $(".conversation-head").getBoundingClientRect().bottom;
