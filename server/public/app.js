@@ -4240,6 +4240,7 @@ function installConversationDetailsGestures() {
     if (!keep) closeConversationDetailsPanel();
   }, { passive: false });
   surface.addEventListener("touchcancel", cancelOpening, { passive: true });
+  surface.addEventListener("pointerdown", () => { suppressClickUntil = 0; }, { capture: true });
   surface.addEventListener("click", event => {
     if (event.detail && performance.now() < suppressClickUntil) { event.preventDefault(); event.stopImmediatePropagation(); }
   }, { capture: true });

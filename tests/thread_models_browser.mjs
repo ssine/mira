@@ -148,7 +148,6 @@ try {
   await page.waitForFunction(()=>document.querySelector('#conversationModelSelect').value==='custom-provider-model');
   await picker.click();assert.equal(await page.locator('#conversationModelMenu .composer-choice-option').count(),4,'configured models outside the catalog remain selectable');await picker.click();
   await page.setViewportSize({width:390,height:844});
-  if (await page.locator('#agentThreadDrawer').getAttribute('aria-hidden')==='false') await page.locator('#agentThreadDrawerToggle').click({force:true});
   await page.waitForFunction(()=>document.querySelector('#agentThreadDrawer').getAttribute('aria-hidden')==='true');
   await page.locator('#agentThreadDrawer').evaluate(element=>Promise.all(element.getAnimations().map(animation=>animation.finished.catch(()=>{}))));
   assert.equal(await picker.isVisible(),false,'mobile hides the model picker');
