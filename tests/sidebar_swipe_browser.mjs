@@ -9,7 +9,7 @@ let browser;
 try {
   browser = await chromium.launch({ headless: true, ...(process.env.MIRA_BROWSER_EXECUTABLE ? { executablePath: process.env.MIRA_BROWSER_EXECUTABLE } : {}) });
   const context = await browser.newContext({ ...devices['Pixel 7'] });
-  const thread = { threadId, title: 'Swipe test', cwd: '/work', generation: 1 };
+  const thread = { threadId, title: 'Swipe test', cwd: '/work', generation: 1, updatedAt: new Date().toISOString() };
   let threadList = [thread];
   await context.route('**/v1/codex/threads?*', route => route.fulfill({ json: { data: threadList } }));
   await context.route(`**/v1/codex/threads/${threadId}?*`, route => route.fulfill({ json: thread }));
@@ -218,6 +218,7 @@ try {
   }
   // Native vertical scrolling inside a populated sidebar must still work.
   await stableOpen();
+  await page.locator('.thread-project-history-summary').click();
   const list = page.locator('#agentThreadList'); await list.evaluate(element => { element.scrollTop = 0; });
   await swipe(180, 500, 2, -180);
   assert.equal(await drawer.getAttribute('aria-hidden'), 'false');

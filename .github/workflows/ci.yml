@@ -107,6 +107,8 @@ jobs:
           node tests/web_console_e2e.mjs
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium
+          browser_status=0
           for test in web_shell thread_activity thread_models sidebar_swipe thread_token_usage; do
-            MIRA_SERVER_URL=http://127.0.0.1:8787 node "tests/${test}_browser.mjs" "$RUNNER_TEMP/mira-browser/node_modules/playwright/index.mjs"
+            MIRA_SERVER_URL=http://127.0.0.1:8787 node "tests/${test}_browser.mjs" "$RUNNER_TEMP/mira-browser/node_modules/playwright/index.mjs" || browser_status=1
           done
+          exit "$browser_status"

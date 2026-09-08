@@ -14,7 +14,10 @@ try {
     { threadId: idleId, title: "Finished conversation", cwd: "/work", generation: 1, itemCount: 1, activity: { state: "idle", turnId: "turn-b", generation: 1, itemCount: 2 } },
     { threadId: otherId, title: "Windows conversation", cwd: "C:\\work", generation: 1, itemCount: 1, activity: { state: "running", turnId: "turn-windows", generation: 1, itemCount: 1 } },
   ];
-  for (const row of rows) row.readState = { generation: 1, latestItemSeq: 1, readItemCount: 1, unread: false };
+  for (const row of rows) {
+    row.updatedAt = new Date().toISOString();
+    row.readState = { generation: 1, latestItemSeq: 1, readItemCount: 1, unread: false };
+  }
   let calls = 0, sockets = 0;
   const acknowledgments = [];
   const bodies = new Map(rows.map(row => [row.threadId, "A persisted conversation."]));
