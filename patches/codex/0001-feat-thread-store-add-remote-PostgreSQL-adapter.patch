@@ -1,4 +1,4 @@
-From 077e2d32cd390704b19db4698b3d663c57fa662c Mon Sep 17 00:00:00 2001
+From 3f0c97822c06e51f9a5e55bc0cdac5c2c721be1b Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 5 Sep 2026 14:20:34 +0800
 Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
@@ -40,7 +40,9 @@ Subject: [PATCH] feat(thread-store): add remote PostgreSQL adapter
  .../src/remote_http/retry_tests.rs            | 499 ++++++++++
  .../thread-store/src/remote_http/uploads.rs   | 141 +++
  .../thread-store/src/remote_http/writer.rs    | 311 ++++++
- 36 files changed, 2793 insertions(+), 216 deletions(-)
+ .../tui/src/app/app_server_event_targets.rs   |   3 +
+ codex-rs/tui/src/chatwidget/protocol.rs       |   1 +
+ 38 files changed, 2797 insertions(+), 216 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
@@ -16613,6 +16615,32 @@ index 0000000..cd8cc2a
 +        result
 +    }
 +}
+diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
+index 27359fd..ae17f5d 100644
+--- a/codex-rs/tui/src/app/app_server_event_targets.rs
++++ b/codex-rs/tui/src/app/app_server_event_targets.rs
+@@ -48,6 +48,9 @@ pub(super) fn server_notification_thread_target(
+     let thread_id = match notification {
+         ServerNotification::Error(notification) => Some(notification.thread_id.as_str()),
+         ServerNotification::ThreadStarted(notification) => Some(notification.thread.id.as_str()),
++        ServerNotification::MiraThreadForkProgress(notification) => {
++            Some(notification.thread_id.as_str())
++        }
+         ServerNotification::ThreadStatusChanged(notification) => {
+             Some(notification.thread_id.as_str())
+         }
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 48083eb..9231e72 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -218,6 +218,7 @@ impl ChatWidget {
+             ServerNotification::ServerRequestResolved(_)
+             | ServerNotification::AccountUpdated(_)
+             | ServerNotification::AccountRateLimitsUpdated(_)
++            | ServerNotification::MiraThreadForkProgress(_)
+             | ServerNotification::ThreadStarted(_)
+             | ServerNotification::ThreadStatusChanged(_)
+             | ServerNotification::ThreadReverted(_)
 -- 
 2.51.2
 
