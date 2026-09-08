@@ -2191,7 +2191,7 @@ function notificationIsForOpenThread(params = {}) {
 function syncActiveTurnUi() {
   agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
-  $("#conversationDetailsToggle").classList.toggle("hidden", !agent.threadId);
+  $("#conversationDetailsToggle").classList.remove("hidden");
   syncConversationSendUi();
   renderReplyProgress();
   renderThreadStates();
@@ -2289,10 +2289,7 @@ function renderModelChoices(menu, models, selected, defaultModel) {
     option.append(element("strong", "", model.displayName || model.model));
     if (detail) option.append(element("small", "", detail));
     option.addEventListener("click", () => {
-      const previousEffort = selectedConversationEffort();
-      agent.modelChoice = model.model;
-      const next = conversationModelDefinition(model.model)?.supportedReasoningEfforts ?? [];
-      agent.effortChoice = next.some(item => item.reasoningEffort === previousEffort) ? previousEffort : null;
+      chooseConversationModel(model.model);
       menu.hidePopover();
       renderConversationModel();
     });
@@ -2317,6 +2314,13 @@ function renderEffortChoices(menu, efforts, selected) {
     });
     menu.append(option);
   }
+}
+
+function chooseConversationModel(model) {
+  const previousEffort = selectedConversationEffort();
+  agent.modelChoice = model;
+  const next = conversationModelDefinition(model)?.supportedReasoningEfforts ?? [];
+  agent.effortChoice = next.some(item => item.reasoningEffort === previousEffort) ? previousEffort : null;
 }
 
 function renderConversationModel() {
@@ -2349,6 +2353,20 @@ function renderConversationModel() {
   if (effortSelect.disabled && effortMenu.matches(":popover-open")) effortMenu.hidePopover();
   $("#conversationModelStatus").textContent = error || (waiting ? "正在读取模型" : model
     ? `本轮模型：${model}${effort ? `；思考强度：${effortLabel(effort)}` : ""}` : placeholder);
+  const details = $("#conversationDetails");
+  const current = (details.dataset.threadId || null) === (agent.threadId || null);
+  $("#conversationDetailsSettings").classList.toggle("hidden", !current);
+  const detailsModel = $("#conversationDetailsModel"), detailsEffort = $("#conversationDetailsEffort");
+  if (detailsModel.dataset.signature !== signature) {
+    detailsModel.replaceChildren(...(models.length ? models.map(item => new Option(item.displayName || item.model, item.model)) : [new Option(placeholder, "")]));
+    detailsEffort.replaceChildren(...(efforts.length ? efforts.map(item => new Option(effortLabel(item.reasoningEffort), item.reasoningEffort)) : [new Option("当前模型未提供思考强度", "")]));
+    detailsModel.value = model || "";
+    detailsEffort.value = effort || "";
+    detailsModel.dataset.signature = signature;
+  }
+  detailsModel.disabled = !current || select.disabled;
+  detailsEffort.disabled = !current || effortSelect.disabled;
+  $("#conversationDetailsModelStatus").textContent = error || (waiting ? "正在读取模型…" : busy ? "当前操作完成后可修改" : "用于下一条消息");
 }
 
 function positionComposerChoiceMenu(menu, toggle) {
@@ -4075,12 +4093,15 @@ function openProjectDetails(group, name, anchor) {
 
 function renderConversationDetails(thread) {
   renderConversationTokenUsage(thread?.threadId);
-  $("#conversationDetailsName").textContent = thread?.title || "未命名会话";
+  const draft = !$("#conversationDetails").dataset.threadId;
+  $("#conversationDetailsName").textContent = draft ? "新会话" : thread?.title || "未命名会话";
+  $("#conversationDetails .conversation-token-usage").classList.toggle("hidden", draft);
   navigationFacts($("#conversationDetailsFacts"), [
-    ["运行机器", nodeDisplayName(thread?.runtimeNodeId || thread?.sourceNodeId)],
-    ["工作目录", thread?.cwd, true], ["最近使用的模型", thread?.model || "历史未记录"],
+    ["运行机器", nodeDisplayName(draft ? $("#agentRuntimeNode").value : thread?.runtimeNodeId || thread?.sourceNodeId)],
+    ["工作目录", draft ? $("#conversationCwd").value : thread?.cwd, true], ["最近使用的模型", draft ? "尚未发送消息" : thread?.model || "历史未记录"],
     ["最近更新", thread?.updatedAt ? new Date(thread.updatedAt).toLocaleString() : null],
   ]);
+  renderConversationModel();
 }
 
 function conversationCostKey(threadId) {
@@ -4153,7 +4174,77 @@ function closeConversationDetailsPanel() {
 
 function installConversationDetailsGestures() {
   const panel = $("#conversationDetails");
+  const surface = $(".chat-shell");
+  let opening = null;
   let gesture = null, outsideDown = false, suppressClickUntil = 0;
+  const cancelOpening = () => {
+    const started = opening?.horizontal;
+    opening = null;
+    if (started) closeConversationDetailsPanel();
+  };
+  // The reading surface retains native vertical scrolling and text selection.
+  // Claim only a deliberate leftward, single-finger gesture, as the left drawer
+  // does for rightward gestures; a horizontal code scroller keeps its own input.
+  surface.addEventListener("touchstart", event => {
+    if (opening) cancelOpening();
+    if (event.touches.length !== 1 || agentThreadDrawerOpen || conversationDetailsWide.matches ||
+        document.body.dataset.view !== "agentView" || document.querySelector("dialog[open], [popover]:popover-open") ||
+        (window.visualViewport?.scale ?? 1) > 1.05 || window.getSelection()?.type === "Range") return;
+    const target = event.target instanceof Element ? event.target : event.target.parentElement;
+    if (!target || target.closest("input, textarea, select, [role=slider], [contenteditable]:not([contenteditable=false]), video, audio, canvas")) return;
+    for (let node = target; node && node !== surface; node = node.parentElement) {
+      if (node.scrollWidth > node.clientWidth + 2 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowX)) return;
+    }
+    const touch = event.touches[0];
+    opening = { id: touch.identifier, x: touch.clientX, y: touch.clientY, time: event.timeStamp,
+      horizontal: false, position: 0, samples: [{ x: touch.clientX, time: event.timeStamp }] };
+  }, { passive: true });
+  const moveOpening = (touch, event) => {
+    const dx = opening.x - touch.clientX, dy = Math.abs(touch.clientY - opening.y);
+    if (!opening.horizontal) {
+      if (event.timeStamp - opening.time > 450 || dx < -8 || dy > 8 && dy >= Math.abs(dx)) { cancelOpening(); return; }
+      if (dx < 8 || dx < dy * 1.15) return;
+      opening.horizontal = true;
+      void openConversationDetails(agent.threadId);
+      opening.width = panel.getBoundingClientRect().width;
+      panel.classList.add("details-dragging");
+    }
+    event.preventDefault();
+    opening.position = Math.max(0, Math.min(opening.width, dx));
+    if (opening.samples.at(-1).x !== touch.clientX) {
+      opening.samples.push({ x: touch.clientX, time: event.timeStamp });
+      while (opening.samples.length > 2 && opening.samples[1].time < event.timeStamp - 100) opening.samples.shift();
+    }
+    panel.style.transform = `translate3d(${opening.width - opening.position}px, 0, 0)`;
+    panel.style.setProperty("--details-shade", String(opening.position / opening.width));
+  };
+  surface.addEventListener("touchmove", event => {
+    if (!opening) return;
+    const touch = [...event.touches].find(item => item.identifier === opening.id);
+    if (!touch || event.touches.length !== 1 || !event.cancelable || window.getSelection()?.type === "Range") { cancelOpening(); return; }
+    moveOpening(touch, event);
+  }, { passive: false });
+  surface.addEventListener("touchend", event => {
+    if (!opening) return;
+    const touch = [...event.changedTouches].find(item => item.identifier === opening.id);
+    if (!touch || event.touches.length || !opening.horizontal) { cancelOpening(); return; }
+    moveOpening(touch, event);
+    const first = opening.samples[0], last = opening.samples.at(-1);
+    const velocity = last.time > first.time && event.timeStamp - last.time < 100 ? (first.x - last.x) / (last.time - first.time) : 0;
+    const keep = Math.abs(opening.x - touch.clientX) >= 32 && Math.abs(velocity) >= 0.45
+      ? velocity > 0 : opening.position >= opening.width * 0.4;
+    opening = null;
+    suppressClickUntil = performance.now() + 400;
+    panel.getBoundingClientRect();
+    resetConversationDetailsDrag();
+    if (!keep) closeConversationDetailsPanel();
+  }, { passive: false });
+  surface.addEventListener("touchcancel", cancelOpening, { passive: true });
+  surface.addEventListener("click", event => {
+    if (event.detail && performance.now() < suppressClickUntil) { event.preventDefault(); event.stopImmediatePropagation(); }
+  }, { capture: true });
+  window.addEventListener("resize", cancelOpening);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) cancelOpening(); });
   const outside = event => {
     const rect = panel.getBoundingClientRect();
     return event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom;
@@ -4230,7 +4321,6 @@ function installConversationDetailsGestures() {
 }
 
 async function openConversationDetails(threadId) {
-  if (!threadId) return;
   const panel = $("#conversationDetails");
   const revision = (panel._miraRevision ?? 0) + 1;
   panel._miraRevision = revision;
@@ -4238,11 +4328,17 @@ async function openConversationDetails(threadId) {
   panel._miraCostRequest = costJob;
   panel._miraCostKey = null;
   if (panel.dataset.threadId !== threadId) renderConversationCost(null);
-  panel.dataset.threadId = threadId;
+  panel.dataset.threadId = threadId || "";
   renderConversationDetails(agent.threads.find(thread => thread.threadId === threadId));
   const checkedAt = Date.now();
   $("#conversationDetailsStatus").textContent = "正在更新…";
   showConversationDetailsPanel();
+  if (!threadId || threadId === agent.threadId) void loadConversationModels();
+  if (!threadId) {
+    panel._miraCostRequest = null;
+    $("#conversationDetailsStatus").textContent = "";
+    return;
+  }
   try {
     const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal&includeCost=1`);
     if (!panel.open || panel._miraRevision !== revision) return;
@@ -5326,6 +5422,16 @@ $("#agentRuntimeNode").addEventListener("change", () => {
 
 installComposerChoiceMenu($("#conversationModelSelect"), $("#conversationModelMenu"));
 installComposerChoiceMenu($("#conversationEffortSelect"), $("#conversationEffortMenu"));
+$("#conversationDetailsModel").addEventListener("change", event => {
+  if (event.target.disabled || ($("#conversationDetails").dataset.threadId || null) !== (agent.threadId || null)) return;
+  chooseConversationModel(event.target.value);
+  renderConversationModel();
+});
+$("#conversationDetailsEffort").addEventListener("change", event => {
+  if (event.target.disabled || ($("#conversationDetails").dataset.threadId || null) !== (agent.threadId || null)) return;
+  agent.effortChoice = event.target.value;
+  renderConversationModel();
+});
 window.addEventListener("resize", () => {
   for (const menu of [$("#conversationModelMenu"), $("#conversationEffortMenu")]) {
     if (menu.matches(":popover-open")) menu.hidePopover();

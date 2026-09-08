@@ -200,6 +200,13 @@
       <div class="conversation-details-head"><strong id="conversationDetailsTitle">会话详情</strong><button id="conversationDetailsClose" class="chat-icon-button" type="button" aria-label="收起会话详情" title="收起会话详情"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m8 5 5 5-5 5"></path></svg></button></div>
       <div class="conversation-details-body">
       <h3 id="conversationDetailsName"></h3>
+      <section id="conversationDetailsSettings" class="conversation-details-settings" aria-label="消息设置">
+        <label for="conversationDetailsModel">模型</label>
+        <select id="conversationDetailsModel" disabled></select>
+        <label for="conversationDetailsEffort">思考强度</label>
+        <select id="conversationDetailsEffort" disabled></select>
+        <p id="conversationDetailsModelStatus" class="muted" role="status"></p>
+      </section>
       <dl id="conversationDetailsFacts" class="navigation-facts"></dl>
       <section class="conversation-token-usage" aria-label="会话 Token 用量">
         <h4>Token 用量</h4>

@@ -717,10 +717,13 @@ progress { width: 100%; accent-color: var(--accent); }
   .tool-group-counts { text-align: left; }
   .tool-group-latest { grid-column: 1; }
   .conversation-composer { padding: 4px 0 max(8px, env(safe-area-inset-bottom)); }
-  .composer-input-row { min-height: 46px; padding: 7px 10px 0; }
-  .composer-toolbar { min-height: 44px; padding: 0 3px 3px; }
-  .composer-model-choice .composer-choice-toggle { max-width: min(150px, 39vw); }
-  .composer-effort-choice .composer-choice-toggle { max-width: 102px; }
+  .conversation-drop-zone { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; gap: 0 3px; padding: 3px; }
+  .conversation-attachments { grid-column: 1 / -1; }
+  .composer-input-row { grid-column: 2; grid-row: 2; align-self: center; min-width: 0; min-height: 40px; padding: 2px 0; }
+  .composer-toolbar { display: contents; }
+  .composer-choice { display: none; }
+  .composer-attach { grid-column: 1; grid-row: 2; }
+  .composer-submit-slot { grid-column: 3; grid-row: 2; margin-left: 0; }
   .composer-icon { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
   .attachment-name { max-width: 145px; }
   .debug-preset-fields { grid-template-columns: 1fr; }
@@ -801,6 +804,10 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-details.details-dragging { transition: none; user-select: none; -webkit-user-select: none; }
 .conversation-details-head { display: flex; align-items: center; justify-content: space-between; flex: none; min-height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line); font-size: 14px; }
 .conversation-details-body { flex: 1; min-height: 0; padding: 16px; overflow-y: auto; overscroll-behavior: contain; touch-action: pan-y pinch-zoom; }
+.conversation-details-settings { display: grid; gap: 8px; margin: 16px 0; }
+.conversation-details-settings label { font-size: 12px; color: var(--muted); }
+.conversation-details-settings select { width: 100%; min-width: 0; min-height: 44px; }
+.conversation-details-settings p { margin: 0; }
 .conversation-token-usage { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .conversation-token-usage h4 { margin: 0 0 12px; font-size: 13px; font-weight: 600; }
 .conversation-token-usage .navigation-facts > div + div { margin-top: 12px; }

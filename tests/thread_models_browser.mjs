@@ -127,6 +127,10 @@ try {
   await page.locator('#conversationDetailsToggle').click();
   await page.waitForFunction(()=>document.querySelector('#conversationDetailsStatus').textContent==='');
   assert.match(await page.locator('#conversationDetailsFacts').textContent(),/最近使用的模型gpt-5.6-sol/);
+  await page.locator('#conversationDetailsModel').selectOption('gpt-5.6-luna');
+  await page.locator('#conversationDetailsEffort').selectOption('low');
+  assert.equal(await picker.evaluate(element=>element.value),'gpt-5.6-luna','details shares the next-turn model');
+  assert.equal(await effortValue(),'low');
   await page.locator('#conversationDetailsClose').click();
   // A new draft uses the Node default, not the previous thread's override.
   const reads=modelCalls.length;
@@ -147,12 +151,26 @@ try {
   if (await page.locator('#agentThreadDrawer').getAttribute('aria-hidden')==='false') await page.locator('#agentThreadDrawerToggle').click({force:true});
   await page.waitForFunction(()=>document.querySelector('#agentThreadDrawer').getAttribute('aria-hidden')==='true');
   await page.locator('#agentThreadDrawer').evaluate(element=>Promise.all(element.getAnimations().map(animation=>animation.finished.catch(()=>{}))));
-  await picker.click();
-  const mobileMenu=await page.locator('#conversationModelMenu').boundingBox();
-  assert.ok(mobileMenu.x>=8&&mobileMenu.x+mobileMenu.width<=382,'mobile model menu stays inside the viewport');
+  assert.equal(await picker.isVisible(),false,'mobile hides the model picker');
+  assert.equal(await page.locator('#conversationEffortSelect').isVisible(),false,'mobile hides the effort picker');
+  const attachBox=await page.locator('#conversationAttach').boundingBox();
+  const mobileInput=await page.locator('#conversationInput').boundingBox();
+  const sendBox=await page.locator('#conversationSend').boundingBox();
+  assert.ok(attachBox.x+attachBox.width<=mobileInput.x&&mobileInput.x+mobileInput.width<=sendBox.x,'mobile input sits between attachment and send');
+  assert.ok(Math.abs(attachBox.y+attachBox.height/2-(mobileInput.y+mobileInput.height/2))<=2&&Math.abs(sendBox.y-attachBox.y)<=1,'mobile composer uses one row');
+  assert.ok(sendBox.x+sendBox.width<=390,'mobile composer stays inside the viewport');
+  await page.locator('#conversationDetailsToggle').click();
+  assert.equal(await page.locator('#conversationDetailsName').textContent(),'新会话');
+  assert.equal(await page.locator('#conversationDetailsModel').inputValue(),'custom-provider-model');
+  await page.locator('#conversationDetailsModel').selectOption('gpt-5.6-sol');
+  await page.locator('#conversationDetailsEffort').selectOption('high');
+  assert.equal(await picker.evaluate(element=>element.value),'gpt-5.6-sol','mobile draft settings share the composer model');
+  assert.equal(await effortValue(),'high');
+  await page.locator('#conversationDetailsClose').click();
+  await page.waitForFunction(()=>!document.querySelector('#conversationDetails').open);
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/composer-mobile.png`});
-  await picker.click();
   await page.setViewportSize({width:1200,height:900});
+  assert.equal(await picker.isVisible(),true,'desktop restores the model picker');
   // Late responses for another directory cannot replace this project's model.
   configured='old-project-model';deferConfig=true;
   await goToNodes();await nodeRefresh.click();
@@ -175,5 +193,5 @@ try {
   await page.setViewportSize({width:390,height:844});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   assert.deepEqual(errors,[]);
-  console.log('PASS: two-row composer, styled model/effort menus, Node-scoped refresh, concrete defaults, paginated caching, new-thread/turn settings, project races, failure clearing and mobile width');
+  console.log('PASS: desktop two-row and mobile single-row composer, styled model/effort menus, Node-scoped refresh, concrete defaults, paginated caching, new-thread/turn settings, project races and failure clearing');
 } finally { await browser.close(); }
