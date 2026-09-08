@@ -54,6 +54,7 @@ jobs:
           for file in server/public/*.js tests/*.mjs; do node --check "$file"; done
           node --test \
             tests/account_status_test.mjs \
+            tests/quota_reference.mjs \
             tests/conversation_progress_test.mjs \
             tests/thread_list_test.mjs \
             tests/thread_title_test.mjs \

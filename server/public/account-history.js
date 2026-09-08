@@ -11,6 +11,51 @@ export function quotaSegments(points) {
   return samples.length ? [samples] : [];
 }
 
+const weekMs = 7 * 24 * 60 * 60 * 1000;
+
+// Each observed refill starts a new budget, even when an extra reset leaves
+// resetsAt unchanged. Missing samples alone never imply a refill.
+export function quotaReferences(points, from, to) {
+  const cycles = [];
+  let previous, cycle;
+  for (const point of points) {
+    if (!Number.isFinite(point.at) || !Number.isFinite(point.remaining)) continue;
+    const inferred = Number.isFinite(point.resetsAt) ? point.resetsAt - weekMs : null;
+    const refill = previous && point.remaining > previous.remaining;
+    const changedWindow = previous && Number.isFinite(previous.resetsAt) &&
+      Number.isFinite(point.resetsAt) && point.resetsAt !== previous.resetsAt;
+    if (!previous || refill || changedWindow) {
+      // Prefer an observed refill over a deadline that may still describe the
+      // old weekly window. A boundary inside the sampling gap is more precise.
+      let start = inferred;
+      if (previous) {
+        start = inferred > previous.at && inferred <= point.at ? inferred : point.at;
+      } else if (point.remaining === 100) {
+        start = point.at;
+      }
+      if (cycle && previous) cycle.end = Math.min(cycle.end, start);
+      cycle = null;
+      if (Number.isFinite(start) && start <= point.at) {
+        cycle = { start, end: start + weekMs };
+        cycles.push(cycle);
+      }
+    } else if (!cycle && (point.remaining === 100 || (Number.isFinite(inferred) && inferred <= point.at))) {
+      const start = point.remaining === 100 ? point.at : inferred;
+      cycle = { start, end: start + weekMs };
+      cycles.push(cycle);
+    }
+    previous = point;
+  }
+  return cycles.flatMap(({ start, end }) => {
+    const left = Math.max(from, start), right = Math.min(to, end);
+    return right > left ? [{
+      from: left, to: right,
+      remainingFrom: 100 * (1 - (left - start) / weekMs),
+      remainingTo: 100 * (1 - (right - start) / weekMs),
+    }] : [];
+  });
+}
+
 export class AccountHistory {
   constructor(root) {
     this.root = root;
@@ -109,6 +154,8 @@ export class AccountHistory {
     empty.textContent = this.message || (!this.key ? "选择运行节点后查看额度历史" : this.account?.type && this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" :
       data?.account && this.account?.email && !sameAccount ? "账号已切换，等待首次采样" : "这个时间段暂无记录，采样后会显示在这里");
     this.svg.classList.toggle("hidden", !this.valid.length);
+    const references = quotaReferences(this.valid, data?.from, data?.to);
+    this.root.querySelector("[data-history-legend]").hidden = !references.length;
     if (!this.valid.length) return;
     const el = (tag, attrs, text) => {
       const node = document.createElementNS(ns, tag);
@@ -126,6 +173,10 @@ export class AccountHistory {
       const at = data.from + fraction * (data.to - data.from);
       const label = new Date(at).toLocaleString("zh-CN", this.range === "24h" ? { hour: "2-digit", minute: "2-digit", hour12: false } : { month: "2-digit", day: "2-digit" });
       el("text", { x: 42 + fraction * 540, y: 197, class: "quota-time-tick", "text-anchor": fraction === 0 ? "start" : fraction === 1 ? "end" : "middle" }, label);
+    }
+    for (const reference of references) {
+      el("line", { x1: this.x(reference.from), y1: this.y(reference.remainingFrom),
+        x2: this.x(reference.to), y2: this.y(reference.remainingTo), class: "quota-reference", "aria-hidden": "true" });
     }
     for (const segment of segments) {
       const first = segment[0];

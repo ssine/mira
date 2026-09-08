@@ -779,13 +779,15 @@ progress { width: 100%; accent-color: var(--accent); }
 .quota-chart text { fill: currentColor; font-family: var(--font-ui); font-size: 16px; }
 .quota-grid { stroke: var(--line); stroke-width: 1; }
 .quota-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.quota-reference { stroke: var(--muted); stroke-width: 1; opacity: .65; vector-effect: non-scaling-stroke; pointer-events: none; }
+.quota-legend { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .quota-dot, .quota-marker { fill: var(--accent); }
 .quota-marker { stroke: var(--surface-raised); stroke-width: 2; }
 .quota-tooltip { pointer-events: none; }
 .quota-tooltip rect { fill: var(--surface-raised); stroke: var(--line-strong); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .quota-tooltip text { font-size: 18px; font-variant-numeric: tabular-nums; }
 .quota-tooltip .quota-tooltip-value { fill: var(--text); font-size: 21px; font-weight: 600; }
-@media (forced-colors: active) { .quota-line, .quota-grid { stroke: CanvasText; } .quota-dot, .quota-marker { fill: Highlight; } }
+@media (forced-colors: active) { .quota-line, .quota-grid, .quota-reference { stroke: CanvasText; } .quota-dot, .quota-marker { fill: Highlight; } }
 .sidebar-popover-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; min-width: 0; font-size: 14px; }
 .sidebar-popover-head > strong { min-width: 0; overflow-wrap: anywhere; }
 .sidebar-popover-head .chat-icon-button { width: 28px; min-width: 28px; height: 28px; min-height: 28px; }

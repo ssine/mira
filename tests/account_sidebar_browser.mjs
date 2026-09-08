@@ -77,6 +77,8 @@ try {
  await panel.locator('.quota-chart:not(.hidden)').waitFor();
  assert.equal(await panel.locator('.quota-line').count(),1,'missing samples keep one continuous step line');
  assert.match(await panel.locator('.quota-line').getAttribute('d'),/H.*V.*H.*V/,'quota changes remain vertical steps at real sample times');
+ assert.equal(await panel.locator('.quota-reference').count(),2,'early refill splits the seven-day reference');
+ assert.equal(await panel.locator('[data-history-legend]').isVisible(),true);
  assert.equal(await panel.locator('[data-account-updated], [data-history-note]').count(),0,'account refresh and history sampling notes are removed');
  assert.equal(await panel.locator('[data-history-point]').count(),0,'the permanent sample detail row is removed');
  assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'labels appear only during inspection');
