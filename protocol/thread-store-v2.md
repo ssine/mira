@@ -1,6 +1,6 @@
 # Codex Remote Thread Store Adapter Protocol v2
 
-状态：已实现，数据库 schema 17。HTTP JSON；ThreadStore 请求使用获批 Node 的 Bearer 凭据。
+状态：已实现，数据库 schema 27。HTTP JSON；ThreadStore 请求使用获批 Node 的 Bearer 凭据。
 管理员使用数据库 Cookie 会话，见 [auth-v1.md](./auth-v1.md)。
 
 ## 1. 目标与不变量
@@ -183,6 +183,45 @@ Server 验证所有变化确实属于这个会话；不带该头仍兼容旧客�
 这允许 App Server 的 history writer 与 metadata writer 从同一旧 head 并发提交，也允许
 不同 thread 在同一 store 内并发推进。
 
+### 4.3 大历史分块暂存（schema 27）
+
+大 append / replace 的 `items` 可替换为 `itemsUploadId: "<uuid>"`；两者不能同时出现。
+原有小 JSON 提交与 v1 snapshot 保持兼容。新 runtime 对超过 8 MiB 的历史提交使用此路径，
+不再把 fork 的全部继承历史塞进单次请求。
+
+1. `POST /v2/stores/{storeId}/history-uploads/{uploadId}`，JSON body 为
+   `{ "threadId": "...", "itemCount": 6511, "totalBytes": 107458560 }`。
+   重复 begin 的 descriptor 必须完全一致。
+2. 把每个原始 JSON item 加换行形成 JSON record 流，按最多 **4 MiB** 的字节块发送：
+   `PUT .../{uploadId}?offset=0`，`Content-Type: application/octet-stream`。
+   offset 是已经确认的字节数；块可以跨 item、UTF-8 字符或 JSON 转义边界。
+   丢失响应时重复同一 offset 和完全相同的 bytes；空块、跳跃或内容不同的重试被拒绝。
+3. `POST .../{uploadId}/seal` 校验总长度和记录数量。Server 从 PostgreSQL 逐块读取，
+   逐条解码并保存原始 JSON 与 canonical fingerprint，不把整个历史装入内存。
+   最多保留一个解码中的 record；单个 record 可以大于传输块。
+4. 使用原有 `/commits`、operation UUID、stateChanges、generation 和 item count 提交，
+   history change 中带 `itemsUploadId`。Server 锁住 sealed upload，按原有 append overlap /
+   replace 规则规划历史，在一个事务中复制原始 records、发布边界、元数据和回执。
+   复制未完成、冲突或事务取消均不暴露部分历史。成功提交后重试仍走 operation receipt，
+   即使临时 upload 已清理，也不重复写入。
+
+上传响应带 `status`、`receivedBytes`、`totalBytes` 和 `itemCount`。
+`GET .../{uploadId}` 查询暂存状态；`DELETE .../{uploadId}` 取消尚未提交的上传。
+取消与最终提交使用同一 upload row lock；已提交返回 409，取消后的 seal / commit 被拒绝。
+接口接受获批 Node 凭据；管理员浏览器调用需要 Cookie，写入另需 CSRF。
+暂存始终按 store 隔离，不能用另一会话的 upload 写入当前会话。
+
+原始分块与解析后的暂存记录只用于传输，不是会话历史。后台分批清理已提交、已取消、
+会话已删除或超过 24 小时没有更新的 upload；客户端不得复用已经过期的 upload UUID。
+这不限制会话历史的总字节数或条数。旧 Server 不支持此扩展，发布时先升级 Server，
+再启用配套的新 Codex runtime。
+
+Web fork 使用运行时的 `mira/thread/fork/progress` 通知显示准备、复制字节数、校验和提交阶段。
+通知包含原 JSON-RPC `requestId`、预留的子会话 `threadId`、`uploadId`、`phase`、
+`completedBytes`、`totalBytes`。`heartbeat` 只表示请求仍在执行，不增加完成字节数；
+这些通知不进入 canonical history。App Server 在返回 fork 成功前等待 rollout flush，
+确保继承历史已经持久化。Web 复制阶段可以取消，并在失败确认后通过管理员接口清理未完成分支。
+
 ## 5. 错误与重试
 
 - 400：请求结构、路径、模式或策略非法；修正请求，不重试原 payload。
@@ -231,7 +270,7 @@ PoC 的 E2E 已验证这个 quiescent handoff。生产版仍应把它升级为�
 - Mira Node 每类托管 session：128；
 - process/PTY 游标输出缓存：1 MiB。
 
-这些是传输边界，不限制一个 thread 的总历史大小；大历史通过 append 和按 generation 读取。
+这些是传输边界，不限制一个 thread 的总历史大小；大历史写入使用 4.3 的分块暂存与原子提交，按 generation 读取。
 
 ## 9. Web transcript 投影
 

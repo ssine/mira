@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `502ee90`
+- Patch source commit: `077e2d3`
 
 Apply it to a clean checkout:
 
@@ -33,3 +33,16 @@ App Server, CLI resume and subagent E2E scenarios before changing the supported 
 device credential in `MIRA_NODE_TOKEN`, so the credential stays out of argv and central desired
 state. A manually launched patched Codex must receive that environment value from a wrapper that
 reads the protected Mira identity file, or use an explicit token only in isolated development.
+
+Runtime revision `0.153.1-mira.8` adds chunked history uploads and fork progress.
+Deploy a Server with schema 27 before using the new runtime for large writes.
+The adapter sends 4 MiB byte chunks, seals staged JSON records, then publishes
+history with the ordinary atomic commit receipt. App Server waits for the fork's
+rollout flush before reporting success and emits ephemeral, request-correlated
+`mira/thread/fork/progress` notifications. Existing small commits remain compatible.
+
+Regression coverage includes `codex-thread-store` unit tests, Mira's PostgreSQL
+history upload integration tests, `tests/large_fork_e2e.py` (a >64 MiB fork followed
+by cold-runtime resume), and `tests/fork_progress_browser.py` (Camoufox progress,
+request isolation and cancellation). Runtime packages still use the full canonical
+package build; the local development executable used by tests is not a release.

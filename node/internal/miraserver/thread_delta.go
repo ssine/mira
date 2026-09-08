@@ -33,6 +33,7 @@ type requestedHistoryChange struct {
 	ExpectedGeneration int64
 	ExpectedItemCount  int64
 	Items              []any
+	UploadID           string
 }
 
 type pathValue struct {
@@ -167,7 +168,14 @@ func parseHistoryChanges(value any) ([]requestedHistoryChange, error) {
 			return nil, fmt.Errorf("invalid history change")
 		}
 		var values []any
-		if mode != "delete" {
+		uploadID, _ := item["itemsUploadId"].(string)
+		if _, hasItems := item["items"]; uploadID != "" && hasItems {
+			return nil, fmt.Errorf("items and itemsUploadId are mutually exclusive")
+		}
+		if uploadID != "" && (!operationIDPattern.MatchString(uploadID) || mode == "delete") {
+			return nil, fmt.Errorf("invalid history upload reference")
+		}
+		if mode != "delete" && uploadID == "" {
 			var ok bool
 			values, ok = item["items"].([]any)
 			if !ok {
@@ -175,7 +183,7 @@ func parseHistoryChanges(value any) ([]requestedHistoryChange, error) {
 			}
 		}
 		ids[threadID] = true
-		result = append(result, requestedHistoryChange{ThreadID: threadID, Mode: mode, ExpectedGeneration: generation, ExpectedItemCount: count, Items: values})
+		result = append(result, requestedHistoryChange{ThreadID: threadID, Mode: mode, ExpectedGeneration: generation, ExpectedItemCount: count, Items: values, UploadID: uploadID})
 	}
 	return result, nil
 }
@@ -207,10 +215,12 @@ func activeHistoryItems(ctx context.Context, query dbtx, storeID, threadID strin
 }
 
 type historyPlan struct {
-	Changed  bool
-	Next     *historyEntry
-	Appends  []historyAppend
-	Conflict map[string]any
+	Changed                              bool
+	Next                                 *historyEntry
+	Appends                              []historyAppend
+	Conflict                             map[string]any
+	UploadID                             string
+	UploadStart, UploadBase, UploadCount int64
 }
 
 func planHistoryDelta(ctx context.Context, query dbtx, storeID string, version int64, entry *historyEntry, change requestedHistoryChange) (historyPlan, error) {
@@ -431,6 +441,8 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 		manifest[id] = entry
 	}
 	appends := []historyAppend{}
+	uploaded := map[string]historyPlan{}
+	var uploadedCount int64
 	changed := false
 	for _, change := range historyChanges {
 		var entry *historyEntry
@@ -438,7 +450,15 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 			copy := value
 			entry = &copy
 		}
-		plan, err := planHistoryDelta(ctx, tx, storeID, head.Version, entry, change)
+		var plan historyPlan
+		var err error
+		if change.UploadID != "" {
+			plan, err = planUploadedHistory(ctx, tx, storeID, entry, change)
+			uploaded[change.ThreadID] = plan
+			uploadedCount += plan.UploadCount
+		} else {
+			plan, err = planHistoryDelta(ctx, tx, storeID, head.Version, entry, change)
+		}
 		if err != nil {
 			return operationResponse{}, err
 		}
@@ -476,6 +496,18 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 	if err := insertHistoryAppends(ctx, tx, storeID, operationID, codexVersion, appends); err != nil {
 		return operationResponse{}, err
 	}
+
+	for threadID, plan := range uploaded {
+		generation := manifest[threadID].Generation
+		if _, err := tx.Exec(ctx, `INSERT INTO codex_thread_events(store_id,thread_id,generation,item_seq,operation_id,event_format_version,codex_version,payload,payload_sha256)
+   SELECT store_id,$3,$4,item_seq-$5+$6,$7,$8,$9,payload,payload_sha256 FROM mira_history_upload_items
+   WHERE store_id=$1 AND upload_id=$2 AND item_seq>$5 ORDER BY item_seq`, storeID, plan.UploadID, threadID, generation, plan.UploadStart, plan.UploadBase, operationID, eventFormatVersion, codexVersion); err != nil {
+			return operationResponse{}, err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE mira_history_uploads SET status='committed',updated_at=NOW() WHERE store_id=$1 AND upload_id=$2`, storeID, plan.UploadID); err != nil {
+			return operationResponse{}, err
+		}
+	}
 	if err := replaceProjections(ctx, tx, storeID, state, manifest, 1, affected, metadataAffected); err != nil {
 		return operationResponse{}, err
 	}
@@ -484,7 +516,7 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 	if noChange {
 		noChangeVersion = &head.Version
 	}
-	version, err := publishReceipt(ctx, tx, storeID, operationID, affected, int64(len(appends)), noChangeVersion)
+	version, err := publishReceipt(ctx, tx, storeID, operationID, affected, int64(len(appends))+uploadedCount, noChangeVersion)
 	if err != nil {
 		return operationResponse{}, err
 	}
@@ -498,7 +530,7 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 	if err := tx.Commit(ctx); err != nil {
 		return operationResponse{}, err
 	}
-	bodyOut := map[string]any{"version": version, "operationId": operationID, "rebased": version-boolInt64(!noChange) != expectedVersion, "historyManifest": responseManifest, "appendedItemCount": len(appends), "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)}
+	bodyOut := map[string]any{"version": version, "operationId": operationID, "rebased": version-boolInt64(!noChange) != expectedVersion, "historyManifest": responseManifest, "appendedItemCount": int64(len(appends)) + uploadedCount, "updatedAt": time.Now().UTC().Format(time.RFC3339Nano)}
 	if noChange {
 		bodyOut["noChange"] = true
 	}

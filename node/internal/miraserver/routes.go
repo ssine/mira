@@ -87,6 +87,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 	if handled, err := server.routeImports(ctx, response, request); handled || err != nil {
 		return err
 	}
+	if handled, err := server.routeHistoryUpload(ctx, response, request); handled || err != nil {
+		return err
+	}
 	if handled, err := server.routeViews(ctx, response, request); handled || err != nil {
 		return err
 	}

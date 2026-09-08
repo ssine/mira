@@ -807,4 +807,25 @@ CREATE INDEX codex_thread_events_model_idx
     `,
 		Checksum: "b82604a878f8788bd8e7a173efc6a48b9de2215317dd130528dae642869be66f",
 	},
+	{Version: 27, Name: "chunked-history-uploads", SQL: `
+      CREATE TABLE mira_history_uploads (
+        store_id TEXT NOT NULL, upload_id UUID NOT NULL, thread_id TEXT NOT NULL,
+        item_count BIGINT NOT NULL CHECK(item_count>=0), total_bytes BIGINT NOT NULL CHECK(total_bytes>=0),
+        received_bytes BIGINT NOT NULL DEFAULT 0 CHECK(received_bytes>=0 AND received_bytes<=total_bytes),
+        status TEXT NOT NULL DEFAULT 'uploading' CHECK(status IN ('uploading','sealed','committed','cancelled')),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(store_id,upload_id)
+      );
+      CREATE INDEX mira_history_uploads_expiry ON mira_history_uploads(updated_at);
+      CREATE TABLE mira_history_upload_chunks (
+        store_id TEXT NOT NULL, upload_id UUID NOT NULL, byte_offset BIGINT NOT NULL CHECK(byte_offset>=0),
+        data BYTEA NOT NULL CHECK(octet_length(data) BETWEEN 1 AND 4194304),
+        PRIMARY KEY(store_id,upload_id,byte_offset),
+        FOREIGN KEY(store_id,upload_id) REFERENCES mira_history_uploads ON DELETE CASCADE
+      );
+      CREATE TABLE mira_history_upload_items (
+        store_id TEXT NOT NULL, upload_id UUID NOT NULL, item_seq BIGINT NOT NULL CHECK(item_seq>0),
+        payload JSON NOT NULL, payload_sha256 TEXT NOT NULL, PRIMARY KEY(store_id,upload_id,item_seq),
+        FOREIGN KEY(store_id,upload_id) REFERENCES mira_history_uploads ON DELETE CASCADE
+      );
+    `, Checksum: "4019c43a6c95834ef08b2e37ec19272058c3a180a9f2f466a231e1336731b876"},
 }

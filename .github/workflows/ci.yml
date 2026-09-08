@@ -85,7 +85,7 @@ jobs:
           MIRA_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/foundation
           MIRA_NODES_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/nodes
           MIRA_VIEWS_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/views
-          MIRA_IMPORT_ADAPTER_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver ./internal/miraserver/imports
+          MIRA_IMPORT_ADAPTER_TEST_DATABASE_URL="$TEST_DATABASE_URL" MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver ./internal/miraserver/imports
 
       - name: Test Go Server, Web, authentication, and Node channel
         env:

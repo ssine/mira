@@ -14,8 +14,8 @@ func TestMigrationChecksumsMatchReleasedServer(t *testing.T) {
 	if err := validateMigrations(); err != nil {
 		t.Fatal(err)
 	}
-	if CurrentSchemaVersion() != 26 {
-		t.Fatalf("CurrentSchemaVersion() = %d, want 26", CurrentSchemaVersion())
+	if CurrentSchemaVersion() != 27 {
+		t.Fatalf("CurrentSchemaVersion() = %d, want 27", CurrentSchemaVersion())
 	}
 	copyOfMigrations := Migrations()
 	copyOfMigrations[0].Name = "changed"
