@@ -166,7 +166,7 @@
               <div id="conversationDropZone" class="conversation-drop-zone">
                 <div id="conversationAttachments" class="conversation-attachments hidden" aria-live="polite"></div>
                 <div class="composer-input-row">
-                  <textarea id="conversationInput" rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
+                  <textarea id="conversationInput" disabled rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
                 </div>
                 <div class="composer-toolbar">
                   <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
@@ -191,6 +191,7 @@
                 </div>
                 <span id="conversationModelStatus" class="visually-hidden" role="status"></span>
               </div>
+              <span id="conversationDraftStatus" class="conversation-draft-status" role="status" aria-live="polite"></span>
               <input id="conversationFileInput" class="visually-hidden" type="file" multiple>
               <span id="conversationHint" class="visually-hidden" role="status" aria-live="polite">可粘贴或拖入图片与文件，上传支持取消</span>
             </form>

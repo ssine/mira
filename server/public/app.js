@@ -3,6 +3,7 @@ import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/vendor/marked.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
+import { ComposerDrafts } from "/composer-drafts.js";
 import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
@@ -15,6 +16,14 @@ import { compareThreadsByRecency, splitProjectThreads } from "/thread-list.js";
 marked.setOptions({ gfm: true, breaks: false });
 
 const $ = (selector) => document.querySelector(selector);
+const composerDrafts = new ComposerDrafts();
+let composerDraftKey = null;
+let composerDraftLoading = false;
+let composerDraftEpoch = 0;
+let composerSaveRevision = 0;
+let composerDraftReadFailed = false;
+let composerDraftRemoveKey = null;
+
 let csrfToken = null;
 let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
@@ -58,7 +67,12 @@ async function restoreBrowserRoute() {
         return;
       }
       await resumeAgentThread(threadId, { updateRoute: false });
-    } else newAgentThread({ updateRoute: false });
+    } else {
+      let project = null;
+      try { project = await composerDrafts.read("personal:new-project"); } catch { /* The composer reports storage failures. */ }
+      if (epoch !== browserRouteEpoch) return;
+      newAgentThread({ updateRoute: false, project });
+    }
   } else if (view === "runtime") {
     show("runtimeView");
     await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
@@ -2208,7 +2222,8 @@ function syncConversationSendUi() {
   const running = agent.activeTurns.has(agent.threadId);
   const stopping = agent.interruptRequests.has(JSON.stringify([agent.threadId, agent.turnId]));
   $("#conversationSend").classList.toggle("hidden", running);
-  $("#conversationSend").disabled = busy || !selectedNode;
+  $("#conversationSend").disabled = busy || !composerDraftKey || composerDraftLoading || !selectedNode;
+  $("#conversationInput").disabled = !composerDraftKey || composerDraftLoading;
   const stop = $("#agentInterrupt");
   stop.classList.toggle("hidden", !running);
   const connected = agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN;
@@ -2218,10 +2233,10 @@ function syncConversationSendUi() {
   $("#agentRuntimeNode").disabled = busy;
   $("#agentNewThread").disabled = busy;
   $("#agentNewProject").disabled = busy;
-  $("#conversationAttach").disabled = busy;
+  $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
   $("#conversationCwd").disabled = busy;
   renderConversationModel();
-  for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy;
+  for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy || composerDraftLoading;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-project-new]")) button.disabled = busy || !button.dataset.projectNode;
 }
@@ -4584,6 +4599,7 @@ function removeThreadFromWindow(threadId, deleted) {
     for (const [key, diagnostic] of agent.diagnostics) if (diagnostic.threadId === threadId) agent.diagnostics.delete(key);
   }
   if (selected) newAgentThread({ project, force: deleted });
+  if (deleted) void composerDrafts.write(`personal:thread:${threadId}`, undefined).catch(() => toast("对话已删除，但本机草稿清理失败。"));
   renderAgentThreads();
 }
 
@@ -4898,6 +4914,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   clearTimeout(agent.heartbeatTimer);
   $("#conversationConnection").classList.add("hidden");
   agent.threadId = threadId;
+  void selectComposerDraft(`personal:thread:${threadId}`);
   resetAgentTranscript(threadId);
   agent.threadRuntimeNodeId = null;
   setConversationTitle("正在打开会话…");
@@ -4980,9 +4997,78 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#conversationCwd").value = project?.cwd || node?.desiredAppServer?.defaultCwd || "";
   setConversationMeta($("#conversationCwd").value);
+  const draftProject = project ?? projectForThread({ runtimeNodeId: $("#agentRuntimeNode").value, cwd: $("#conversationCwd").value });
+  agent.draftProject = draftProject;
+  void composerDrafts.write("personal:new-project", draftProject).catch(() => {});
+  void selectComposerDraft(`personal:new:${draftProject.key}`);
   void loadConversationModels();
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
+}
+
+function setComposerDraftStatus(text, failed = false) {
+  const status = $("#conversationDraftStatus");
+  status.textContent = text;
+  status.classList.toggle("draft-error", failed);
+}
+
+async function selectComposerDraft(key) {
+  if (key === composerDraftKey) return;
+  const epoch = ++composerDraftEpoch;
+  composerSaveRevision++;
+  composerDraftKey = key;
+  composerDraftRemoveKey = null;
+  composerDraftLoading = true;
+  composerDraftReadFailed = false;
+  $("#conversationInput").value = agent.composerValue = "";
+  agent.attachments = [];
+  renderComposerAttachments();
+  resizeConversationInput();
+  syncConversationSendUi();
+  setComposerDraftStatus("正在恢复草稿…");
+  try {
+    const draft = await composerDrafts.read(key);
+    if (epoch !== composerDraftEpoch) return;
+    $("#conversationInput").value = agent.composerValue = draft?.text ?? "";
+    agent.attachments = draft?.files ?? [];
+    const unsaved = composerDrafts.pending.has(key);
+    setComposerDraftStatus(unsaved ? "草稿尚未保存，关闭页面后可能丢失" : draft ? "草稿已恢复 · 仅此浏览器" : "", unsaved);
+  } catch {
+    if (epoch !== composerDraftEpoch) return;
+    composerDraftReadFailed = true;
+    setComposerDraftStatus("无法读取本机草稿；新输入暂存于当前页面", true);
+  } finally {
+    if (epoch === composerDraftEpoch) {
+      composerDraftLoading = false;
+      renderComposerAttachments();
+      resizeConversationInput();
+      syncConversationSendUi();
+    }
+  }
+}
+
+function saveComposerDraft() {
+  if (!composerDraftKey || composerDraftLoading) return;
+  const revision = ++composerSaveRevision;
+  const key = composerDraftKey;
+  const text = $("#conversationInput").value;
+  const files = [...agent.attachments];
+  const value = text || files.length ? { text, files } : undefined;
+  // A failed read must not let an empty editor overwrite an unseen saved draft.
+  if (composerDraftReadFailed) {
+    composerDrafts.pending.set(key, value);
+    setComposerDraftStatus("草稿仅保留在当前页面，关闭后可能丢失", true);
+    return;
+  }
+  const removeKey = composerDraftRemoveKey;
+  setComposerDraftStatus("正在保存草稿…");
+  void composerDrafts.write(key, value, { removeKey }).then(() => {
+    if (revision !== composerSaveRevision) return;
+    composerDraftRemoveKey = null;
+    setComposerDraftStatus(value ? "草稿已保存 · 仅此浏览器" : "");
+  }).catch(() => {
+    if (revision === composerSaveRevision) setComposerDraftStatus("草稿保存失败，关闭页面后可能丢失", true);
+  });
 }
 
 function nativeImageAttachment(file) {
@@ -5121,11 +5207,13 @@ function resizeConversationInput() {
 }
 
 function addComposerFiles(files) {
+  if (!composerDraftKey || composerDraftLoading) return;
   if (agent.sendPromise) { toast("请等待当前提交完成，或取消上传后修改附件"); return; }
   for (const file of files) {
     agent.attachments.push(file);
   }
   renderComposerAttachments();
+  saveComposerDraft();
 }
 
 async function sendAgentMessage(text, attachments = [], progress = null) {
@@ -5161,6 +5249,10 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    // Queue an atomic move so upload failures retain the draft on the created thread.
+    composerDraftRemoveKey = composerDraftKey;
+    composerDraftKey = `personal:thread:${agent.threadId}`;
+    saveComposerDraft();
     agent.untitledNewThreadIds.add(agent.threadId);
     agent.resumeRequestedThreadId = agent.threadId;
     writeBrowserRoute("agent", agent.threadId, { replace: true });
@@ -5255,6 +5347,11 @@ async function openAgentConsole() {
   writeBrowserRoute("agent", agent.threadId);
   show("agentView");
   await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+  if (!composerDraftKey) {
+    let project = null;
+    try { project = await composerDrafts.read("personal:new-project"); } catch { /* Reported by the composer. */ }
+    newAgentThread({ project });
+  }
   if (agent.threadId && agent.resumeRequestedThreadId === agent.threadId) {
     agent.connectionWanted = true;
     void recoverAgentSession({ probe: true });
@@ -5415,6 +5512,7 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   if (!agent.threadId) {
     $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
     setConversationMeta($("#conversationCwd").value);
+    newAgentThread({ project: projectForThread({ runtimeNodeId: node?.nodeId, cwd: $("#conversationCwd").value }) });
   }
   setAgentRuntimeState(`${node?.reportedAppServer?.status ?? "stopped"} · ${node ? nodeUserName(node) : ""}`, node?.status === "online" ? "online" : "offline");
   syncConversationSendUi();
@@ -5541,8 +5639,9 @@ $("#localSessionList").addEventListener("click", (event) => {
 });
 $("#conversationForm").addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (agent.sendPromise || agent.forkPromise || agent.threadActionPromise) return;
-  const text = $("#conversationInput").value.trim();
+  if (!composerDraftKey || composerDraftLoading || agent.sendPromise || agent.forkPromise || agent.threadActionPromise) return;
+  const submittedText = $("#conversationInput").value;
+  const text = submittedText.trim();
   const attachments = [...agent.attachments];
   if (!text && !attachments.length) return;
   setConversationNotice();
@@ -5554,13 +5653,14 @@ $("#conversationForm").addEventListener("submit", async (event) => {
   syncConversationSendUi();
   try {
     await operation;
-    if ($("#conversationInput").value.trim() === text) {
+    if ($("#conversationInput").value === submittedText) {
       $("#conversationInput").value = "";
       agent.composerValue = "";
       resizeConversationInput();
     }
     agent.attachments = agent.attachments.filter((file) => !attachments.includes(file));
     renderComposerAttachments();
+    saveComposerDraft();
     $("#conversationHint").textContent = "可粘贴或拖入图片与文件 · 上传支持取消";
   } catch (error) {
     replyProgress.finish(progress);
@@ -5593,6 +5693,7 @@ $("#conversationInput").addEventListener("input", (event) => {
   const value = event.currentTarget.value;
   if (value === agent.composerValue) return;
   agent.composerValue = value;
+  saveComposerDraft();
   const threadId = agent.threadId;
   if (!threadId || agent.resumeRequestedThreadId === threadId) return;
   agent.resumeRequestedThreadId = threadId;
@@ -5609,9 +5710,10 @@ $("#conversationFileInput").addEventListener("change", (event) => {
 });
 $("#conversationAttachments").addEventListener("click", (event) => {
   const button = event.target.closest("button[data-attachment-index]");
-  if (!button) return;
+  if (!button || composerDraftLoading || agent.sendPromise) return;
   agent.attachments.splice(Number(button.dataset.attachmentIndex), 1);
   renderComposerAttachments();
+  saveComposerDraft();
 });
 $("#conversationInput").addEventListener("paste", (event) => {
   const files = [...(event.clipboardData?.files ?? [])];

@@ -926,3 +926,7 @@ progress { width: 100%; accent-color: var(--accent); }
   .conversation-menu-toggle { margin-top: calc(4px + env(safe-area-inset-top)); margin-right: max(9px, env(safe-area-inset-right)); }
   .thread-options-menu > *, .chat-edit-actions button, .project-create-actions .ghost { min-height: 44px; }
 }
+
+.conversation-draft-status { display: block; min-height: 1em; font-size: 11px; color: var(--muted); }
+.conversation-draft-status:empty { display: none; }
+.conversation-draft-status.draft-error { color: var(--danger); }
