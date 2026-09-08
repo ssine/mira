@@ -10,13 +10,14 @@ import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 import net from 'node:net';
 import {loginAdmin,approvePendingNode,adminRequest} from '../../../tests/auth_helpers.mjs';
+import {closeRuntimeFixtureDatabase} from '../../../tests/runtime_fixture_cleanup.mjs';
 
 const repo=path.resolve(import.meta.dirname,'../../..');
 const targetWithoutPasswd=process.env.MIRA_OPENSSH_TEST_NO_PASSWD_TARGET==='1';
 const fixtureParent=targetWithoutPasswd&&process.getuid()===0?os.tmpdir():os.homedir();
 const fixture=await fs.mkdtemp(path.join(fixtureParent,'.mira-openssh-e2e-'));
 if(targetWithoutPasswd&&process.getuid()===0)await fs.chmod(fixture,0o755);
-const database=`mira_openssh_${process.pid}_${crypto.randomBytes(3).toString('hex')}`;
+const database=`mira_openssh_${process.pid}_${crypto.randomBytes(4).toString('hex')}`;
 const baseURL=process.env.MIRA_TEST_DATABASE_URL??'postgresql://mira:mira-local@127.0.0.1:55433/mira';
 const connection=new URL(baseURL);connection.pathname='/'+database;
 const rootPool=new pg.Pool({connectionString:baseURL});let pool,created=false;
@@ -164,5 +165,5 @@ try{
 }catch(e){console.error(logs.join('').slice(-10000));throw e}
 finally{
   for(const p of processes.reverse()){if(p.exitCode!==null)continue;p.kill('SIGTERM');await Promise.race([new Promise(r=>p.once('close',r)),sleep(2500)]);if(p.exitCode===null)p.kill('SIGKILL')}
-  await pool?.end();if(created)await rootPool.query(`DROP DATABASE ${database} WITH (FORCE)`);await rootPool.end();await fs.rm(fixture,{recursive:true,force:true});
+  if(created)await closeRuntimeFixtureDatabase(pool,rootPool,database);else await pool?.end();await rootPool.end();await fs.rm(fixture,{recursive:true,force:true});
 }

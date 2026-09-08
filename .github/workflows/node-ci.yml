@@ -130,7 +130,7 @@ jobs:
           capless_stage=$(mktemp -d /tmp/mira-capless-e2e.XXXXXX)
           mkdir -p "$capless_stage/node/openssh/tests" "$capless_stage/tests"
           cp node/openssh/tests/e2e.mjs "$capless_stage/node/openssh/tests/"
-          cp tests/auth_helpers.mjs "$capless_stage/tests/"
+          cp tests/auth_helpers.mjs tests/runtime_fixture_cleanup.mjs "$capless_stage/tests/"
           cp package.json "$capless_stage/"
           cp -a node_modules "$capless_stage/"
           cp "$(command -v node)" "$capless_stage/node-runtime"
