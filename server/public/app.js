@@ -5023,9 +5023,10 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   renderAgentThreads();
 }
 
-function setComposerDraftStatus(text, failed = false) {
+function setComposerDraftStatus(text = "", failed = false, pending = false) {
   const status = $("#conversationDraftStatus");
   status.textContent = text;
+  status.setAttribute("aria-busy", String(pending));
   status.classList.toggle("draft-error", failed);
 }
 
@@ -5042,14 +5043,14 @@ async function selectComposerDraft(key) {
   renderComposerAttachments();
   resizeConversationInput();
   syncConversationSendUi();
-  setComposerDraftStatus("正在恢复草稿…");
+  setComposerDraftStatus("", false, true);
   try {
     const draft = await composerDrafts.read(key);
     if (epoch !== composerDraftEpoch) return;
     $("#conversationInput").value = agent.composerValue = draft?.text ?? "";
     agent.attachments = draft?.files ?? [];
     const unsaved = composerDrafts.pending.has(key);
-    setComposerDraftStatus(unsaved ? "草稿尚未保存，关闭页面后可能丢失" : draft ? "草稿已恢复 · 仅此浏览器" : "", unsaved);
+    setComposerDraftStatus(unsaved ? "草稿尚未保存，关闭页面后可能丢失" : "", unsaved);
   } catch {
     if (epoch !== composerDraftEpoch) return;
     composerDraftReadFailed = true;
@@ -5078,11 +5079,11 @@ function saveComposerDraft() {
     return;
   }
   const removeKey = composerDraftRemoveKey;
-  setComposerDraftStatus("正在保存草稿…");
+  setComposerDraftStatus("", false, true);
   void composerDrafts.write(key, value, { removeKey }).then(() => {
     if (revision !== composerSaveRevision) return;
     composerDraftRemoveKey = null;
-    setComposerDraftStatus(value ? "草稿已保存 · 仅此浏览器" : "");
+    setComposerDraftStatus();
   }).catch(() => {
     if (revision === composerSaveRevision) setComposerDraftStatus("草稿保存失败，关闭页面后可能丢失", true);
   });

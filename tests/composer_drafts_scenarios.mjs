@@ -11,8 +11,8 @@ async function until(predicate, message) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
 }
-const ready = () => until(() => $("#agentView:not(.hidden)") && !$("#conversationInput").disabled && $("#conversationDraftStatus").textContent !== "正在恢复草稿…", "Composer did not restore");
-const saved = () => until(() => !$("#conversationDraftStatus").textContent.includes("正在") && !$("#conversationDraftStatus").classList.contains("draft-error"), "Draft did not save");
+const ready = () => until(() => $("#agentView:not(.hidden)") && !$("#conversationInput").disabled, "Composer did not restore");
+const saved = () => until(() => $("#conversationDraftStatus").getAttribute("aria-busy") !== "true" && !$("#conversationDraftStatus").classList.contains("draft-error"), "Draft did not save");
 const edit = text => { $("#conversationInput").value = text; $("#conversationInput").dispatchEvent(new Event("input", { bubbles: true })); };
 const switchTo = async id => { $(`[data-thread-id="${id}"]`).click(); await ready(); assert(new URL(location.href).searchParams.get("thread") === id, "Wrong selected thread"); };
 const control = async value => fetch("/__test/control", { method: "POST", body: JSON.stringify(value) });
