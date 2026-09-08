@@ -59,7 +59,7 @@ func equalGroupIDs(left, right []int) bool {
 }
 
 func identityIDProgram() string {
-	for _, candidate := range []string{"/usr/bin/id", "/bin/id"} {
+	for _, candidate := range []string{"/usr/bin/id", "/bin/id", "/run/current-system/sw/bin/id"} {
 		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
 			return candidate
 		}
