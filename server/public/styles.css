@@ -779,7 +779,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .quota-chart text { fill: currentColor; font-family: var(--font-ui); font-size: 16px; }
 .quota-grid { stroke: var(--line); stroke-width: 1; }
 .quota-line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
-.quota-reference { stroke: var(--muted); stroke-width: 1; opacity: .65; vector-effect: non-scaling-stroke; pointer-events: none; }
+.quota-reference { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 4; opacity: .65; vector-effect: non-scaling-stroke; pointer-events: none; }
 .quota-legend { margin: 4px 0 0; color: var(--muted); font-size: 11px; }
 .quota-dot, .quota-marker { fill: var(--accent); }
 .quota-marker { stroke: var(--surface-raised); stroke-width: 2; }
