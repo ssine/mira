@@ -23,7 +23,8 @@ try {
   await page.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: summary(threadB) }));
   await page.route("**/v1/codex/threads/*/transcript?*", (route) => {
     const threadId = new URL(route.request().url()).pathname.split("/").at(-2);
-    return route.fulfill({ json: { generation: 1, trace: [{ key: "message", turnId: "turn", kind: "assistant", body: `History ${threadId}` }] } });
+    const body = `History ${threadId}\n\n\`\`\`mermaid\nflowchart TD\n A["任务"] --> B["服务组生命周期"]\n\`\`\``;
+    return route.fulfill({ json: { generation: 1, trace: [{ key: "message", turnId: "turn", kind: "assistant", body }] } });
   });
   page.on("pageerror", (error) => pageErrors.push(error.message));
   page.on("console", (message) => {
@@ -62,6 +63,10 @@ try {
   await page.locator(`[data-thread-id="${threadA}"]`).click();
   await page.waitForURL(`**/?thread=${threadA}`);
   await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
+  await page.locator(".trace-card.assistant .trace-diagram-preview img").waitFor();
+  assert.ok(await page.locator(".trace-diagram-preview img").evaluate(image => image.naturalWidth > 0));
+  await page.locator(".trace-diagram summary").click();
+  assert.equal(await page.locator(".trace-diagram code").isVisible(), true);
   await page.reload({ waitUntil: "networkidle" });
   await page.locator(".trace-card.assistant").filter({ hasText: `History ${threadA}` }).waitFor();
   // A bookmarked conversation outside the recent list must still resolve.

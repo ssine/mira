@@ -2,6 +2,7 @@ import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/vendor/marked.js";
+import { decorateTraceDiagrams } from "/trace-diagrams.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ReplyProgress } from "/conversation-progress.js";
@@ -2745,6 +2746,15 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
     } });
     node.innerHTML = DOMPurify.sanitize(html);
     decorateTraceFileReferences(node, fileReferences);
+    decorateTraceDiagrams(node, () => {
+      const scroller = traceScroller();
+      const follow = traceNearBottom(scroller);
+      const top = scroller.scrollTop;
+      return () => {
+        if (follow) scrollTraceToBottom(scroller);
+        else scroller.scrollTop = top;
+      };
+    });
     for (const table of node.querySelectorAll("table")) {
       const scroll = element("div", "trace-table-scroll");
       scroll.tabIndex = 0;

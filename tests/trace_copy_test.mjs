@@ -28,6 +28,7 @@ function fixture(clipboard) {
     marked: { parse: (text) => `<p>${text}</p>` },
     DOMPurify: { sanitize: (html) => html },
     decorateTraceFileReferences: () => {},
+    decorateTraceDiagrams: () => {},
     traceStreamRenders: new WeakMap(),
     cancelAnimationFrame: () => {},
   });

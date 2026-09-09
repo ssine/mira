@@ -32,6 +32,8 @@ type asset struct {
 }
 
 var specs = map[string]assetSpec{
+	"/trace-diagrams.js":         {"web/trace-diagrams.js", "text/javascript; charset=utf-8"},
+	"/vendor/mermaid.js":         {"web/vendor/mermaid.js", "text/javascript; charset=utf-8"},
 	"/":                          {"web/index.html", "text/html; charset=utf-8"},
 	"/app.js":                    {"web/app.js", "text/javascript; charset=utf-8"},
 	"/thread-title.js":           {"web/thread-title.js", "text/javascript; charset=utf-8"},

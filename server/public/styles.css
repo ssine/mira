@@ -936,3 +936,15 @@ progress { width: 100%; accent-color: var(--accent); }
 #forkProgress { display: flex; align-items: center; flex-wrap: wrap; gap: 0.65rem; }
 #forkProgress.hidden { display: none; }
 #forkProgressBar { width: 9rem; max-width: 100%; accent-color: var(--accent); }
+
+/* Diagrams share the conversation reading surface; wide graphs scroll locally. */
+.markdown-body .trace-diagram { margin: 16px 0; min-width: 0; }
+.trace-diagram-preview { max-width: 100%; overflow: auto; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); }
+.markdown-body .trace-diagram-preview img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.markdown-body .trace-diagram-expanded img { max-width: none; }
+.trace-diagram-zoom { float: right; margin-top: 6px; padding: 0 4px; background: transparent; color: var(--muted); border: 0; font-size: 12px; }
+.trace-diagram-preview:empty ~ .trace-diagram-zoom { display: none; }
+.trace-diagram-preview:empty { display: none; }
+.trace-diagram details { margin-top: 6px; }
+.trace-diagram summary { width: fit-content; color: var(--muted); cursor: pointer; font-size: 12px; }
+.trace-diagram-status { color: var(--muted); font-size: 12px; }
