@@ -3263,7 +3263,9 @@ function mergeTranscriptItems(current, updates) {
           body: [fragments.input ? `输入\n${fragments.input}` : "", fragments.output ? `输出\n${fragments.output}` : ""].filter(Boolean).join("\n\n"),
         } : {}),
       });
-    } else merged.set(item.key, item);
+    } else merged.set(item.key, previous && previous.turnId === item.turnId
+      ? { ...item, turnCostEstimate: item.turnCostEstimate ?? previous.turnCostEstimate }
+      : item);
   }
   const narratives = new Map();
   return [...merged.values()].sort((left, right) =>
@@ -3457,7 +3459,8 @@ function renderTranscript(fallbackThread, options = {}) {
       elapsedApproximate: item.elapsedApproximate,
       ...(Number.isFinite(item.turnElapsedMs) ? {
         turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs,
-        turnElapsedApproximate: item.turnElapsedApproximate, turnCostEstimate: item.turnCostEstimate,
+        turnElapsedApproximate: item.turnElapsedApproximate,
+        turnCostEstimate: item.turnCostEstimate ?? knownTurnTimings.get(item.turnId)?.turnCostEstimate,
       } : knownTurnTimings.get(item.turnId)),
       ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
     });
@@ -3522,6 +3525,7 @@ function renderTranscript(fallbackThread, options = {}) {
   const last = trace.lastElementChild;
   const scroll = traceScroller();
   if (options.preserveViewport) restoreTraceViewport(options.preserveViewport);
+  else if (options.anchorBottom !== false) scrollTraceToBottom(trace);
   const scrollTop = scroll.scrollTop;
   requestAnimationFrame(() => {
     if (trace.lastElementChild !== last || scroll.scrollTop !== scrollTop) return;
@@ -3557,9 +3561,12 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   }
   const trace = $("#conversationTrace");
   const scroll = traceScroller();
+  // A request can outlive a user's scroll. Decide at mutation time, and restore
+  // before paint so the temporarily emptied transcript never becomes visible.
+  const anchorBottom = options.preserveLoaded && sameThread ? traceNearBottom() : options.anchorBottom !== false;
   const preserveViewport = options.prepend
     ? { mode: "prepend", top: scroll.scrollTop, height: scroll.scrollHeight }
-    : options.preserveLoaded && options.anchorBottom === false
+    : options.preserveLoaded && sameThread && !anchorBottom
       ? captureTraceViewport()
       : null;
   if (options.prepend) {
@@ -3586,7 +3593,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   renderTranscript(fallbackThread, {
     preserveViewport,
     preserveLive: options.preserveLoaded && sameThread,
-    anchorBottom: options.anchorBottom !== false,
+    anchorBottom,
   });
   if (!options.prepend && options.cursor == null) {
     agent.transcriptTailVersion = tailVersion;

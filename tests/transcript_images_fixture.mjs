@@ -25,6 +25,10 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
     if (path === "/v1/nodes") return json({ data: [] });
     if (path.endsWith("/invoke")) { nodeReads++; return json({ error: "No Node filesystem in this fixture" }); }
     if (path === "/v1/codex/threads") return json({ data: [row()] });
+    if (path.endsWith("/costs")) {
+      await new Promise(resolve => setTimeout(resolve, 700));
+      return json({ ...row(), turnCostEstimates: { turn: { amount: 0.21, status: "complete" } } });
+    }
     if (path.endsWith("/transcript/image")) {
       imageRequests++;
       await new Promise(resolve => setTimeout(resolve, url.searchParams.get("itemSeq") === "2" ? 120 : 10));
@@ -32,13 +36,15 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
     }
     if (path.endsWith("/transcript")) {
       const snapshot = version, loaded = url.searchParams.get("toolDetails") === "1";
+      if (!loaded) await new Promise(resolve => setTimeout(resolve, 250));
       if (loaded) { detailRequests++; await new Promise(resolve => setTimeout(resolve, 350)); }
       const output = `revision ${snapshot}\n` + "retained tool output\n".repeat(240);
       return json({ generation: 1, itemCount: snapshot * 10, storeVersion: snapshot, nextCursor: null,
         trace: [{ key: "tool", itemId: "tool", kind: "tool", title: "Long tool", turnId: "turn", sourceItemSeq: 1, status: "完成",
           body: loaded ? output : "", toolFragment: loaded ? { output } : { hasOutput: true },
           toolDetail: { pages: [{ cursor: `page-${snapshot}`, limit: 60, loaded }] } },
-          image(2), { key: "reply", kind: "assistant", body: "Between pictures", turnId: "turn", sourceItemSeq: 3 }, image(4),
+          image(2), { key: "reply", kind: "assistant", body: "Between pictures", turnId: "turn", sourceItemSeq: 3,
+            turnCompletedAt: "2026-09-01T00:00:00Z", turnElapsedMs: 6250 }, image(4),
           // A legacy path-only tool notification must never mount an image.
           { key: "path-only", kind: "tool", title: "Path only", body: "/tmp/missing.png", sourceItemSeq: 5, images: [{ path: "/tmp/missing.png" }] }],
       });
@@ -54,7 +60,10 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
       response.setHeader("Content-Type", type);
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:");
-      response.end(await fs.readFile(file));
+      let content = await fs.readFile(file);
+      if (resource === "app.js") content = content.toString().replace("void bootstrap();",
+        "window.transcriptRegression = { loadAgentTranscript }; void bootstrap();");
+      response.end(content);
     } catch { response.statusCode = 404; response.end(); }
   });
   await new Promise(resolve => server.listen(port, "127.0.0.1", resolve));
