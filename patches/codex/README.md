@@ -48,15 +48,18 @@ request isolation and cancellation). Runtime packages still use the full canonic
 package build; the local development executable used by tests is not a release.
 
 Runtime revision `0.153.1-mira.9` adds account/runtime request identity and
-administrator-confirmed encrypted-input recovery, requiring Server schema 28 for
-those features. The adapter keeps canonical history and persistence diffs intact;
+administrator-confirmed encrypted-input recovery and remote AgentGraphStore,
+requiring Server schema 29. The adapter keeps canonical history and persistence diffs intact;
 only resumed model context applies the binding-scoped, frozen-prefix policy.
 Reasoning remains unchanged unless the Server supplies an explicit consent record.
 Legacy CLI/App Server resume and restored subagents use the same input projection.
 The client never retries a failed model turn as part of this recovery.
+Spawn edges and open/closed status share the remote history writer's cancellation,
+retry and permanent-failure fencing. Server events rebuild the graph independently
+of account-local SQLite, with thread generations checked on reads and writes.
 
-Validation includes 256 thread-store tests, 367 core session tests, PostgreSQL
+Validation includes 258 thread-store tests, 367 core session tests, PostgreSQL
 v1/v2 account writer/receipt tests and `tests/codex_accounts_runtime_e2e.mjs` with
 real Node/App Server processes and a synthetic Responses provider. The latter
 covers separate keys, live handoff, compatible input, invalid_encrypted_content,
-consent replay, unchanged canonical history and forks.
+consent replay, unchanged canonical history, forks and cold subagent account handoff.
