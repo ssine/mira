@@ -8,13 +8,15 @@ const start = source.indexOf("async function startAgentRuntime(");
 const end = source.indexOf("async function stopAgentRuntime()", start);
 assert(start > 0 && end > start);
 
-function fixture(states, { managed = true, stopAt = Infinity } = {}) {
+function fixture(states, { managed = true, stopAt = Infinity, retiredRuntime = null } = {}) {
   let now = 0, requests = 0, starts = 0, connected = false;
   const messages = [];
   const agent = { runtimeStartEpoch: 0 };
   const node = { nodeId: "fixture", capabilities: { codexRuntimeDownload: managed } };
   const context = vm.createContext({
     agent, dashboardNodes: new Map([["fixture", node]]),
+    accountNode: node => node,
+    retiredAccountRuntimes: new Map(retiredRuntime ? [["fixture", retiredRuntime]] : []),
     $: () => ({ value: "fixture" }),
     Date: { now: () => now },
     setTimeout(resolve, delay) { now += delay; if (now >= stopAt) agent.runtimeStartEpoch++; resolve(); },
@@ -70,4 +72,12 @@ test("concurrent connection requests share one startup operation", async () => {
   await Promise.all([subject.run(), subject.run()]);
   assert.equal(subject.starts(), 1);
   assert(subject.connected());
+});
+
+test("a retired account runtime is ignored until a new process reports ready", async () => {
+  const subject = fixture(now => ({ status: "running", runtimeId: now < 1000 ? "retired" : "replacement" }),
+    { retiredRuntime: "retired" });
+  await subject.run();
+  assert(subject.connected());
+  assert(subject.requests() > 1);
 });
