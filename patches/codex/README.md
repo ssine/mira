@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `3f0c978`
+- Patch source commit: `1893d2f`
 
 Apply it to a clean checkout:
 
@@ -46,3 +46,17 @@ history upload integration tests, `tests/large_fork_e2e.py` (a >64 MiB fork foll
 by cold-runtime resume), and `tests/fork_progress_browser.py` (Camoufox progress,
 request isolation and cancellation). Runtime packages still use the full canonical
 package build; the local development executable used by tests is not a release.
+
+Runtime revision `0.153.1-mira.9` adds account/runtime request identity and
+administrator-confirmed encrypted-input recovery, requiring Server schema 28 for
+those features. The adapter keeps canonical history and persistence diffs intact;
+only resumed model context applies the binding-scoped, frozen-prefix policy.
+Reasoning remains unchanged unless the Server supplies an explicit consent record.
+Legacy CLI/App Server resume and restored subagents use the same input projection.
+The client never retries a failed model turn as part of this recovery.
+
+Validation includes 256 thread-store tests, 367 core session tests, PostgreSQL
+v1/v2 account writer/receipt tests and `tests/codex_accounts_runtime_e2e.mjs` with
+real Node/App Server processes and a synthetic Responses provider. The latter
+covers separate keys, live handoff, compatible input, invalid_encrypted_content,
+consent replay, unchanged canonical history and forks.
