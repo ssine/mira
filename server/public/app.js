@@ -12,7 +12,7 @@ import { AccountSidebar } from "/account-status.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages } from "/trace-images.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
-import { compareThreadsByRecency, splitProjectThreads } from "/thread-list.js";
+import { buildThreadTree, splitProjectThreads } from "/thread-list.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -183,6 +183,7 @@ const agent = {
   interruptRequests: new Set(),
   projectOpen: new Map(),
   projectHistoryOpen: new Map(),
+  subagentOpen: new Map(),
   draftProject: null,
   menuThreadId: null,
   rename: null,
@@ -437,6 +438,17 @@ function renderThreadStates() {
       }
     }
   }
+  for (const group of $("#agentThreadList").querySelectorAll("[data-subagent-parent]")) {
+    let running = 0, unread = 0, failed = 0;
+    for (const row of group.querySelectorAll("[data-thread-row]")) {
+      if (row.dataset.state === "running") running++;
+      if (row.dataset.state === "failed") failed++;
+      if (row.dataset.unread === "true") unread++;
+    }
+    const status = group.querySelector(":scope > summary .thread-subagents-activity");
+    status.textContent = [running && `${running} 进行中`, failed && `${failed} 失败`, unread && `${unread} 未读`].filter(Boolean).join(" · ");
+    status.title = status.textContent;
+  }
   if ($("#conversationDetails").open) {
     renderConversationTokenUsage($("#conversationDetails").dataset.threadId);
     void refreshConversationCost();
@@ -466,6 +478,7 @@ function loadVisibleSidebarCosts() {
     const id = row.dataset.threadRow, usage = agent.tokenUsages.get(id), key = conversationCostKey(id);
     const cached = agent.costEstimates.get(id);
     if (!usage || cached?.key === key || cached?.generation === usage.generation && Date.now() - cached.at < 10_000 || agent.costRequests.has(id) || agent.costRetryAfter.get(id) > Date.now()) continue;
+    if (row.closest("details:not([open])")) continue;
     const rect = row.getBoundingClientRect();
     if (!rect.height || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
     const job = api(`/v1/codex/threads/${encodeURIComponent(id)}?storeId=personal&includeCost=1`, { signal: AbortSignal.timeout(15_000) });
@@ -538,19 +551,25 @@ function scheduleThreadActivity(delay = threadActivity(agent.threadId).state ===
 async function refreshThreadActivity() {
   if (agent.activityRequest) return agent.activityRequest;
   const checkedAt = Date.now();
+  const listRequest = agent.threadListRequest, archived = agent.showArchived, selectionEpoch = agent.selectionEpoch;
+  const stale = () => document.body.dataset.view !== "agentView" || listRequest !== agent.threadListRequest ||
+    archived !== agent.showArchived || selectionEpoch !== agent.selectionEpoch;
   const operation = (async () => {
     try {
       const signal = AbortSignal.timeout(12_000);
-      const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${agent.showArchived ? 1 : 0}`, { signal });
-      if (document.body.dataset.view !== "agentView") return;
+      const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`, { signal });
+      if (stale()) return;
       const rows = response.data ?? [];
       const selected = agent.threadId;
       if (selected && !rows.some(thread => thread.threadId === selected)) {
         rows.push(await api(`/v1/codex/threads/${encodeURIComponent(selected)}?storeId=personal`, { signal }));
       }
-      if (document.body.dataset.view !== "agentView") return;
+      if (stale()) return;
       agent.activityCheckedAt = Date.now();
       for (const thread of rows) acceptThreadActivity(thread, checkedAt);
+      // New subagents appear while their parent is still running. Ordinary
+      // activity polls keep existing rows, focus and menus in place.
+      if (mergeAgentThreadSummaries(rows)) renderAgentThreads();
       const current = rows.find(thread => thread.threadId === agent.threadId);
       // A read-only window may have no App Server subscription (including CLI
       // threads on another Node). Follow the canonical history in every window.
@@ -3999,15 +4018,49 @@ function renderAgentThreadRow(thread) {
   return row;
 }
 
-function renderAgentThreads() {
+function renderAgentThreadBranch(entry, selectedAncestors) {
+  const branch = document.createDocumentFragment();
+  branch.append(renderAgentThreadRow(entry.thread));
+  if (!entry.children.length) return branch;
+  const children = element("details", "thread-subagents");
+  children.dataset.subagentParent = entry.threadId;
+  children.open = agent.subagentOpen.get(entry.threadId) ?? selectedAncestors.has(entry.threadId);
+  const summary = element("summary", "thread-subagents-summary");
+  summary.title = `${entry.thread.title || "未命名会话"} 的子 Agent（含下级）`;
+  summary.append(element("span", "thread-subagents-label", `子 Agent · ${entry.descendantCount}`),
+    element("span", "thread-subagents-activity"));
+  const list = element("div", "thread-subagent-threads");
+  list.setAttribute("role", "group");
+  list.setAttribute("aria-label", summary.title);
+  for (const child of entry.children) list.append(renderAgentThreadBranch(child, selectedAncestors));
+  children.addEventListener("toggle", () => {
+    if (!children.isConnected) return;
+    agent.subagentOpen.set(entry.threadId, children.open);
+    scheduleSidebarCosts();
+  });
+  children.append(summary, list);
+  branch.append(children);
+  return branch;
+}
+
+function renderAgentThreads(revealSelection = false) {
   const list = clear($("#agentThreadList"));
   const groups = new Map();
-  const threads = agent.threads.filter(thread => Boolean(thread.archived) === agent.showArchived).sort(compareThreadsByRecency);
+  const threads = agent.threads.filter(thread => Boolean(thread.archived) === agent.showArchived);
+  const { roots, parentById } = buildThreadTree(threads);
+  const selectedAncestors = new Set();
+  let selectedRoot = agent.threadId;
+  while (parentById.has(selectedRoot)) {
+    selectedRoot = parentById.get(selectedRoot);
+    selectedAncestors.add(selectedRoot);
+    if (revealSelection) agent.subagentOpen.set(selectedRoot, true);
+  }
   const renderedAt = Date.now();
-  for (const thread of threads) {
-    const project = projectForThread(thread);
+  for (const entry of roots) {
+    const project = projectForThread(entry.thread);
     if (!groups.has(project.key)) groups.set(project.key, { ...project, threads: [] });
-    groups.get(project.key).threads.push(thread);
+    groups.get(project.key).threads.push(entry);
+    if (revealSelection && entry.threadId === selectedRoot) agent.projectOpen.set(project.key, true);
   }
   if (agent.draftProject && !groups.has(agent.draftProject.key)) groups.set(agent.draftProject.key, { ...agent.draftProject, threads: [] });
   if (!groups.size) list.append(element("div", "agent-list-empty", agent.showArchived ? "没有已归档的对话" : "添加项目目录，开始新的对话"));
@@ -4057,11 +4110,13 @@ function renderAgentThreads() {
     conversations.setAttribute("aria-label", `${name} · ${location} 的对话`);
     if (!group.threads.length) conversations.append(element("p", "thread-project-empty", "发送第一条消息，开始项目对话"));
     const { visible, hidden } = splitProjectThreads(group.threads, renderedAt);
-    for (const thread of visible) conversations.append(renderAgentThreadRow(thread));
+    for (const entry of visible) conversations.append(renderAgentThreadBranch(entry, selectedAncestors));
     if (hidden.length) {
       const historyKey = JSON.stringify([agent.showArchived, group.key]);
       const history = element("details", "thread-project-history");
-      history.open = agent.projectHistoryOpen.get(historyKey) ?? false;
+      const containsSelection = hidden.some(entry => entry.threadId === selectedRoot);
+      if (revealSelection && containsSelection) agent.projectHistoryOpen.set(historyKey, true);
+      history.open = agent.projectHistoryOpen.get(historyKey) ?? containsSelection;
       const historySummary = element("summary", "thread-project-history-summary");
       const historyLabel = element("span", "thread-project-history-label");
       const updateHistoryLabel = () => {
@@ -4072,8 +4127,9 @@ function renderAgentThreads() {
       updateHistoryLabel();
       historySummary.append(historyLabel);
       const historyThreads = element("div", "thread-project-history-threads");
-      for (const thread of hidden) historyThreads.append(renderAgentThreadRow(thread));
+      for (const entry of hidden) historyThreads.append(renderAgentThreadBranch(entry, selectedAncestors));
       history.addEventListener("toggle", () => {
+        if (!history.isConnected) return;
         agent.projectHistoryOpen.set(historyKey, history.open);
         updateHistoryLabel();
         scheduleSidebarCosts();
@@ -4652,21 +4708,30 @@ async function loadAgentThreads() {
   const archived = agent.showArchived;
   const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
   if (request !== agent.threadListRequest || archived !== agent.showArchived) return;
-  const selected = currentAgentThread();
-  agent.threads = response.data ?? [];
+  mergeAgentThreadSummaries(response.data ?? []);
   agent.activityCheckedAt = Date.now();
   for (const thread of agent.threads) acceptThreadActivity(thread, checkedAt);
-  for (const [threadId, summary] of agent.pendingThreadSummaries) {
-    if (agent.threads.some(thread => thread.threadId === threadId)) agent.pendingThreadSummaries.delete(threadId);
-    else if (Boolean(summary.archived) === archived) agent.threads.push(summary);
-  }
-  if (selected && !agent.threads.some(thread => thread.threadId === selected.threadId) && Boolean(selected.archived) !== archived) agent.threads.push(selected);
   if (currentAgentThread()) agent.draftProject = null;
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
   renderAgentThreads();
   renderReplyProgress();
   scheduleThreadActivity();
+}
+
+function mergeAgentThreadSummaries(threads) {
+  const previous = new Map(agent.threads.map(thread => [thread.threadId, thread]));
+  const selected = currentAgentThread();
+  agent.threads = [...threads];
+  for (const [threadId, summary] of agent.pendingThreadSummaries) {
+    if (agent.threads.some(thread => thread.threadId === threadId)) agent.pendingThreadSummaries.delete(threadId);
+    else if (Boolean(summary.archived) === agent.showArchived) agent.threads.push(summary);
+  }
+  if (selected && !agent.threads.some(thread => thread.threadId === selected.threadId) && Boolean(selected.archived) !== agent.showArchived) agent.threads.push(selected);
+  return previous.size !== agent.threads.length || agent.threads.some(thread => {
+    const before = previous.get(thread.threadId);
+    return !before || ["parentThreadId", "archived", "cwd", "runtimeNodeId", "sourceNodeId"].some(key => before[key] !== thread[key]);
+  });
 }
 
 function removeThreadFromWindow(threadId, deleted) {
@@ -5026,7 +5091,6 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   }
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
   agent.threadReasoningEffort = typeof projected?.reasoningEffort === "string" ? projected.reasoningEffort : null;
-  agent.projectOpen.set(projectForThread(projected).key, true);
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
   if (preferredNode && [...$("#agentRuntimeNode").options].some((option) => option.value === preferredNode)) {
     $("#agentRuntimeNode").value = preferredNode;
@@ -5036,7 +5100,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   $("#conversationCwd").value = projected?.cwd || "";
   void loadConversationModels();
   syncActiveTurnUi();
-  renderAgentThreads();
+  renderAgentThreads(true);
   setConversationNotice();
   // Browsing only reads the authoritative transcript. If editing began while
   // its metadata was loading, prepare the runtime now that its Node is known.
