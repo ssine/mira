@@ -51,12 +51,14 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
     clear: value => value, element: () => ({}),
     upsertTrace: () => ({ dataset: {} }), prepareTurnInput: async () => ({ message: "Continue", inputs: [] }),
     replyProgress: { finish() {} },
+    accountRecovery: { select() {} },
   });
   for (const name of [
     "writeBrowserRoute", "selectComposerDraft", "resetAgentTranscript", "setConversationTitle",
     "renderTurnDiagnostics", "acceptThreadActivity", "setConversationMeta", "loadConversationModels",
     "syncActiveTurnUi", "renderAgentThreads", "setConversationNotice", "loadAgentTranscript",
     "startAgentRuntime", "scheduleAgentHeartbeat", "updateReplyProgress", "renderReplyProgress",
+    "refreshAccountChoices",
   ]) context[name] = () => {};
   for (const name of [
     "modelCatalogForConversation", "conversationModelDefinition", "conversationEffortOptions",
