@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,33 +17,40 @@ import (
 )
 
 type controlClient struct {
-	desktop       *desktopStatus
-	configuration config
-	endpoints     *serverEndpointSelector
-	runtime       *capabilityRuntime
-	appServer     *appServerManager
-	http          *http.Client
-	state         *persistedNodeState
-	token         string
-	nodeID        string
-	desired       desiredAppServer
-	writeMu       sync.Mutex
-	connectionMu  sync.Mutex
-	connection    *websocket.Conn
-	tunnelsMu     sync.Mutex
-	tunnels       map[string]*websocket.Conn
-	sshMu         sync.Mutex
-	sshWorkers    map[string]context.CancelFunc
+	desktop         *desktopStatus
+	configuration   config
+	endpoints       *serverEndpointSelector
+	runtime         *capabilityRuntime
+	appServer       *appServerManager
+	accountsMu      sync.Mutex
+	desiredAccounts []desiredCodexAccount
+	accountRuntimes map[string]*accountRuntime
+	accountsClosed  bool
+	http            *http.Client
+	state           *persistedNodeState
+	token           string
+	nodeID          string
+	desired         desiredAppServer
+	writeMu         sync.Mutex
+	connectionMu    sync.Mutex
+	connection      *websocket.Conn
+	tunnelsMu       sync.Mutex
+	tunnels         map[string]*websocket.Conn
+	tunnelAccounts  map[string]*appServerManager
+	sshMu           sync.Mutex
+	sshWorkers      map[string]context.CancelFunc
 }
 
 type registrationResponse struct {
-	NodeID                   string           `json:"nodeId"`
-	DesiredAppServer         desiredAppServer `json:"desiredAppServer"`
-	HeartbeatIntervalSeconds int              `json:"heartbeatIntervalSeconds"`
+	NodeID                   string                `json:"nodeId"`
+	DesiredAppServer         desiredAppServer      `json:"desiredAppServer"`
+	CodexAccounts            []desiredCodexAccount `json:"codexAccounts"`
+	HeartbeatIntervalSeconds int                   `json:"heartbeatIntervalSeconds"`
 }
 
 type heartbeatResponse struct {
-	DesiredAppServer desiredAppServer `json:"desiredAppServer"`
+	DesiredAppServer desiredAppServer      `json:"desiredAppServer"`
+	CodexAccounts    []desiredCodexAccount `json:"codexAccounts"`
 }
 
 type enrollmentResponse struct {
@@ -71,6 +79,9 @@ type controlMessage struct {
 	Capability      string          `json:"capability,omitempty"`
 	Params          json.RawMessage `json:"params,omitempty"`
 	SessionID       string          `json:"sessionId,omitempty"`
+	NodeAccountID   string          `json:"nodeAccountId,omitempty"`
+	RuntimeID       string          `json:"runtimeId,omitempty"`
+	Management      bool            `json:"accountManagement,omitempty"`
 	Payload         string          `json:"payload,omitempty"`
 	ClientPublicKey string          `json:"clientPublicKey,omitempty"`
 }
@@ -81,11 +92,12 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	client := &controlClient{
 		configuration: configuration, runtime: runtimeValue,
-		token:      configuration.Token,
-		appServer:  newAppServerManager(configuration),
-		http:       httpClient,
-		tunnels:    make(map[string]*websocket.Conn),
-		sshWorkers: make(map[string]context.CancelFunc),
+		token:          configuration.Token,
+		appServer:      newAppServerManager(configuration),
+		http:           httpClient,
+		tunnels:        make(map[string]*websocket.Conn),
+		tunnelAccounts: make(map[string]*appServerManager),
+		sshWorkers:     make(map[string]context.CancelFunc),
 	}
 	client.endpoints = newServerEndpointSelector(configuration.ServerURL, httpClient)
 	return client
@@ -295,7 +307,13 @@ func (client *controlClient) register(ctx context.Context) error {
 	var response registrationResponse
 	if err := client.postJSON(ctx, "/v1/nodes/register", body, &response); err != nil {
 		if httpError, ok := err.(*controlHTTPError); ok && httpError.status == http.StatusForbidden && client.state != nil {
-			_ = client.appServer.reconcile(ctx, desiredAppServer{Running: false})
+			client.closeTunnels()
+			client.closeAccountRuntimes()
+			client.accountsMu.Lock()
+			client.accountRuntimes = nil
+			client.desiredAccounts = nil
+			client.accountsClosed = false
+			client.accountsMu.Unlock()
 			if resetErr := client.state.resetCredential(); resetErr == nil {
 				_ = client.state.save(client.configuration.IdentityFile)
 				client.token = ""
@@ -319,6 +337,7 @@ func (client *controlClient) register(ctx context.Context) error {
 		}
 	}
 	client.desired = response.DesiredAppServer
+	client.setDesiredAccounts(response.CodexAccounts)
 	if response.HeartbeatIntervalSeconds > 0 && firstEnv("MIRA_NODE_HEARTBEAT_SECONDS", "NODE_AGENT_HEARTBEAT_SECONDS") == "" {
 		client.configuration.HeartbeatInterval = time.Duration(response.HeartbeatIntervalSeconds) * time.Second
 	}
@@ -340,6 +359,7 @@ func (client *controlClient) heartbeat(ctx context.Context) error {
 	}
 	body := map[string]any{
 		"reportedAppServer":  client.appServer.report(),
+		"codexAccounts":      client.accountReports(),
 		"codexInstallations": client.appServer.installationsView(),
 		"capabilities":       client.runtime.advertisedCapabilities(ctx),
 		"machineStatus":      status,
@@ -349,11 +369,12 @@ func (client *controlClient) heartbeat(ctx context.Context) error {
 		return err
 	}
 	client.desired = response.DesiredAppServer
+	client.setDesiredAccounts(response.CodexAccounts)
 	return nil
 }
 
 func (client *controlClient) reconcile(ctx context.Context) error {
-	return client.appServer.reconcile(ctx, client.desired)
+	return client.reconcileAccounts(ctx)
 }
 
 func (client *controlClient) websocketURL(ctx context.Context) (string, string, error) {
@@ -459,6 +480,30 @@ func (client *controlClient) heartbeatLoop(ctx context.Context) {
 
 func (client *controlClient) handleMessage(ctx context.Context, message controlMessage) {
 	switch message.Type {
+	case "account.retire":
+		manager, err := client.accountManager(message.NodeAccountID)
+		if err == nil {
+			manager.mu.Lock()
+			if manager.managementSession != message.SessionID || manager.instance == nil || manager.instance.runtimeID != message.RuntimeID {
+				err = fmt.Errorf("account runtime changed during handoff")
+			} else {
+				err = manager.stopLocked()
+			}
+			manager.mu.Unlock()
+		}
+		result := map[string]any{"type": "account.result", "sessionId": message.SessionID, "result": map[string]any{"retired": err == nil}}
+		if err != nil {
+			result["error"] = err.Error()
+		}
+		_ = client.writeControl(result)
+	case "account.configure":
+		// Configuration is bounded and serialized with runtime reconciliation.
+		result, err := client.configureCodexAccount(message.NodeAccountID, message.Params)
+		response := map[string]any{"type": "account.result", "sessionId": message.SessionID, "result": result}
+		if err != nil {
+			response["error"] = err.Error()
+		}
+		_ = client.writeControl(response)
 	case "ssh.open":
 		client.startSSH(ctx, message)
 	case "ssh.close":
@@ -479,16 +524,30 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 	case "appserver.open":
 		// Preserve control-channel ordering: the server may forward the first
 		// initialize message immediately after appserver.open.
-		if err := client.openAppServerTunnel(ctx, message.SessionID); err != nil {
-			_ = client.writeControl(map[string]any{"type": "appserver.error", "sessionId": message.SessionID, "error": err.Error()})
+		if err := client.openManagedAccountTunnel(ctx, message.SessionID, message.NodeAccountID, message.RuntimeID, message.Management); err != nil {
+			code := "account_unavailable"
+			if errors.Is(err, errCodexAccountBusy) {
+				code = "account_busy"
+			}
+			_ = client.writeControl(map[string]any{"type": "appserver.error", "sessionId": message.SessionID, "error": err.Error(), "code": code})
 		}
 	case "appserver.message":
 		client.tunnelsMu.Lock()
 		tunnel := client.tunnels[message.SessionID]
+		manager := client.tunnelAccounts[message.SessionID]
 		client.tunnelsMu.Unlock()
 		if tunnel == nil {
 			_ = client.writeControl(map[string]any{"type": "appserver.error", "sessionId": message.SessionID, "error": "tunnel is not open"})
 			return
+		}
+		if manager != nil {
+			if err := manager.reserveAccountRequest(message.SessionID, []byte(message.Payload)); err != nil {
+				var request map[string]any
+				_ = json.Unmarshal([]byte(message.Payload), &request)
+				payload, _ := json.Marshal(map[string]any{"id": request["id"], "error": map[string]any{"code": -32009, "message": err.Error()}})
+				_ = client.writeControl(map[string]any{"type": "appserver.message", "sessionId": message.SessionID, "payload": string(payload)})
+				return
+			}
 		}
 		if err := tunnel.WriteMessage(websocket.TextMessage, []byte(message.Payload)); err != nil {
 			_ = client.writeControl(map[string]any{"type": "appserver.error", "sessionId": message.SessionID, "error": err.Error()})
@@ -511,10 +570,36 @@ func (client *controlClient) writeControl(value any) error {
 }
 
 func (client *controlClient) openAppServerTunnel(ctx context.Context, sessionID string) error {
+	return client.openAccountTunnel(ctx, sessionID, "", "")
+}
+
+func (client *controlClient) openAccountTunnel(ctx context.Context, sessionID, accountID, runtimeID string) error {
+	return client.openManagedAccountTunnel(ctx, sessionID, accountID, runtimeID, false)
+}
+
+func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessionID, accountID, runtimeID string, management bool) error {
 	if sessionID == "" {
 		return fmt.Errorf("sessionId is required")
 	}
-	listenURL, ok := client.appServer.readyListenURL()
+	manager, err := client.accountManager(accountID)
+	if err != nil {
+		return err
+	}
+	if runtimeID != "" && manager.report()["runtimeId"] != runtimeID {
+		return fmt.Errorf("account runtime was replaced")
+	}
+	if management {
+		if err := manager.beginAccountManagement(sessionID); err != nil {
+			return err
+		}
+	}
+	opened := false
+	defer func() {
+		if management && !opened {
+			manager.endAccountManagement(sessionID)
+		}
+	}()
+	listenURL, ok := manager.readyListenURL()
 	if !ok {
 		return fmt.Errorf("local App Server is not running")
 	}
@@ -531,6 +616,10 @@ func (client *controlClient) openAppServerTunnel(ctx context.Context, sessionID 
 	tunnel.SetReadLimit(16 * 1024 * 1024)
 	client.tunnelsMu.Lock()
 	client.tunnels[sessionID] = tunnel
+	if client.tunnelAccounts == nil {
+		client.tunnelAccounts = map[string]*appServerManager{}
+	}
+	client.tunnelAccounts[sessionID] = manager
 	client.tunnelsMu.Unlock()
 	if err := client.writeControl(map[string]any{"type": "appserver.opened", "sessionId": sessionID}); err != nil {
 		client.closeTunnel(sessionID)
@@ -538,6 +627,9 @@ func (client *controlClient) openAppServerTunnel(ctx context.Context, sessionID 
 	}
 	go func() {
 		defer func() {
+			if management {
+				manager.endAccountManagement(sessionID)
+			}
 			client.closeTunnel(sessionID)
 			_ = client.writeControl(map[string]any{"type": "appserver.closed", "sessionId": sessionID})
 		}()
@@ -549,11 +641,13 @@ func (client *controlClient) openAppServerTunnel(ctx context.Context, sessionID 
 			if messageType != websocket.TextMessage {
 				continue
 			}
+			manager.observeAccountResponse(sessionID, payload)
 			if err := client.writeControl(map[string]any{"type": "appserver.message", "sessionId": sessionID, "payload": string(payload)}); err != nil {
 				return
 			}
 		}
 	}()
+	opened = true
 	return nil
 }
 
@@ -561,6 +655,7 @@ func (client *controlClient) closeTunnel(sessionID string) {
 	client.tunnelsMu.Lock()
 	tunnel := client.tunnels[sessionID]
 	delete(client.tunnels, sessionID)
+	delete(client.tunnelAccounts, sessionID)
 	client.tunnelsMu.Unlock()
 	if tunnel != nil {
 		_ = tunnel.Close()
@@ -571,6 +666,7 @@ func (client *controlClient) closeTunnels() {
 	client.tunnelsMu.Lock()
 	tunnels := client.tunnels
 	client.tunnels = make(map[string]*websocket.Conn)
+	client.tunnelAccounts = make(map[string]*appServerManager)
 	client.tunnelsMu.Unlock()
 	for _, tunnel := range tunnels {
 		_ = tunnel.Close()
@@ -586,5 +682,5 @@ func (client *controlClient) close() {
 		_ = connection.Close()
 	}
 	client.closeTunnels()
-	client.appServer.close()
+	client.closeAccountRuntimes()
 }

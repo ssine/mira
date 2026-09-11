@@ -55,30 +55,33 @@ type Result struct {
 
 // Node is the public representation returned by the legacy Server API.
 type Node struct {
-	NodeID             string         `json:"nodeId"`
-	NodeKey            string         `json:"nodeKey"`
-	Hostname           string         `json:"hostname"`
-	Platform           string         `json:"platform"`
-	Architecture       string         `json:"architecture"`
-	NodeMode           string         `json:"nodeMode"`
-	NodeVersion        string         `json:"nodeVersion"`
-	NodeBuild          map[string]any `json:"nodeBuild"`
-	Capabilities       map[string]any `json:"capabilities"`
-	CodexInstallations []any          `json:"codexInstallations"`
-	DesiredAppServer   map[string]any `json:"desiredAppServer"`
-	ReportedAppServer  map[string]any `json:"reportedAppServer"`
-	MachineStatus      map[string]any `json:"machineStatus"`
-	ChannelStatus      map[string]any `json:"channelStatus"`
-	DisplayName        *string        `json:"displayName"`
-	Aliases            []string       `json:"aliases"`
-	Labels             map[string]any `json:"labels"`
-	MetadataRevision   int64          `json:"metadataRevision"`
-	ApprovalStatus     string         `json:"approvalStatus"`
-	ApprovedAt         *string        `json:"approvedAt"`
-	RevokedAt          *string        `json:"revokedAt"`
-	RegisteredAt       string         `json:"registeredAt"`
-	LastSeenAt         string         `json:"lastSeenAt"`
-	Status             string         `json:"status"`
+	NodeID                string         `json:"nodeId"`
+	NodeKey               string         `json:"nodeKey"`
+	Hostname              string         `json:"hostname"`
+	Platform              string         `json:"platform"`
+	Architecture          string         `json:"architecture"`
+	NodeMode              string         `json:"nodeMode"`
+	NodeVersion           string         `json:"nodeVersion"`
+	NodeBuild             map[string]any `json:"nodeBuild"`
+	Capabilities          map[string]any `json:"capabilities"`
+	CodexInstallations    []any          `json:"codexInstallations"`
+	DesiredAppServer      map[string]any `json:"desiredAppServer"`
+	ReportedAppServer     map[string]any `json:"reportedAppServer"`
+	CodexAccounts         []CodexAccount `json:"codexAccounts"`
+	SelectedNodeAccountID string         `json:"-"`
+	SelectedAccountID     string         `json:"-"`
+	MachineStatus         map[string]any `json:"machineStatus"`
+	ChannelStatus         map[string]any `json:"channelStatus"`
+	DisplayName           *string        `json:"displayName"`
+	Aliases               []string       `json:"aliases"`
+	Labels                map[string]any `json:"labels"`
+	MetadataRevision      int64          `json:"metadataRevision"`
+	ApprovalStatus        string         `json:"approvalStatus"`
+	ApprovedAt            *string        `json:"approvedAt"`
+	RevokedAt             *string        `json:"revokedAt"`
+	RegisteredAt          string         `json:"registeredAt"`
+	LastSeenAt            string         `json:"lastSeenAt"`
+	Status                string         `json:"status"`
 }
 
 // New creates a Node registry and enrollment service.

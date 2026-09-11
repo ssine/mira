@@ -107,6 +107,7 @@ func (runtimeValue *capabilityRuntime) machineStatus(ctx context.Context) (map[s
 func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) map[string]any {
 	return map[string]any{
 		"appServer": true, "shell": true, "files": true, "processes": true, "pty": true,
+		"codexAccountsV1":      true,
 		"executionContexts":    runtime.GOOS == "windows",
 		"codexSessions":        true,
 		"fileChunkedWrite":     true,

@@ -151,6 +151,15 @@ func (sampler *Sampler) tick(ctx context.Context) {
 	}
 	eligible := make([]*nodes.Node, 0, len(listed))
 	for index := range listed {
+		if len(listed[index].CodexAccounts) > 0 {
+			for _, account := range listed[index].CodexAccounts {
+				candidate := nodes.AccountNode(&listed[index], account)
+				if account.Enabled && Eligible(candidate, sampler.connectivity) {
+					eligible = append(eligible, candidate)
+				}
+			}
+			continue
+		}
 		if Eligible(&listed[index], sampler.connectivity) {
 			eligible = append(eligible, &listed[index])
 		}
@@ -208,6 +217,9 @@ func wait(ctx context.Context, duration time.Duration) bool {
 // read errors create a gap, whereas cancellation and runtime replacement discard
 // the in-flight observation.
 func (sampler *Sampler) Sample(ctx context.Context, node *nodes.Node) (bool, error) {
+	if node != nil && node.SelectedNodeAccountID != "" {
+		return sampler.SampleAccount(ctx, node)
+	}
 	if ctx.Err() != nil || !Eligible(node, sampler.connectivity) {
 		return false, nil
 	}

@@ -1,3 +1,4 @@
+import { accountQuery } from "./codex-accounts.js";
 import { weeklyQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
 export { weeklyQuota } from "./account-quota.js";
@@ -21,7 +22,7 @@ export class AccountSidebar {
   }
 
   select(node, active) {
-    const cacheKey = node?.nodeId ? JSON.stringify([node.nodeId, node.reportedAppServer?.codexHome, node.reportedAppServer?.codexPath]) : null;
+    const cacheKey = node?.nodeId ? JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.runtimeId, node.reportedAppServer?.codexHome, node.reportedAppServer?.codexPath]) : null;
     const key = active ? JSON.stringify([cacheKey, node?.status, node?.reportedAppServer?.status]) : "";
     if (key === this.key) return;
     this.key = key;
@@ -64,7 +65,7 @@ export class AccountSidebar {
   connect() {
     if (this.session) return this.session;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${this.node.nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
+    const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${this.node.nodeId}/app-server?storeId=personal${accountQuery(this.node.nodeAccountId)}`, ["mira-client-v1"]);
     const pending = new Map();
     let id = 0, rejectOpen;
     const session = { socket, close: () => {
@@ -149,10 +150,11 @@ export class AccountSidebar {
       if (this.session !== session || this.revision !== revision) return;
       const previousEmail = this.account?.email;
       const previousType = this.account?.type;
-      this.account = account.account ?? null;
+      const custom = this.node?.reportedAppServer?.provider?.id && this.node.reportedAppServer.provider.id !== "openai";
+      this.account = custom ? { type: "providerConfig" } : account.account ?? null;
       if (previousEmail !== this.account?.email || previousType !== this.account?.type) this.cache.delete(this.cacheKey);
       if (previousEmail !== this.account?.email || this.account?.type !== "chatgpt") this.limits = null;
-      this.message = !this.account ? "此节点的 Codex 尚未登录" : this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" : "";
+      this.message = !this.account ? "此账号尚未登录" : this.account.type === "providerConfig" ? "服务商配置已接管，未提供额度接口" : this.account.type !== "chatgpt" ? "此登录方式不提供套餐额度" : "";
       this.render();
       if (this.account?.type !== "chatgpt") return;
       const limits = await session.call("account/rateLimits/read");
@@ -187,7 +189,7 @@ export class AccountSidebar {
   render() {
     const find = selector => this.root.querySelector(selector);
     const { remaining, resetsAt, resetCount } = weeklyQuota(this.limits);
-    const email = this.account?.email || (this.account?.type === "apiKey" ? "API Key 登录" : "Codex 账户");
+    const email = this.node?.accountName || this.account?.email || (this.account?.type === "apiKey" ? "API Key 登录" : "Codex 账户");
     find("[data-account-email]").textContent = email;
     find("[data-account-email]").title = email;
     const mode = this.node?.nodeMode === "wsl" ? " · WSL" : this.node?.platform === "windows" ? " · Windows" : "";

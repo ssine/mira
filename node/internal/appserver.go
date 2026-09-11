@@ -32,21 +32,26 @@ type codexInstallation struct {
 }
 
 type desiredAppServer struct {
-	Running         bool     `json:"running"`
-	ListenURL       string   `json:"listenUrl"`
-	CodexPath       string   `json:"codexPath"`
-	CodexHome       string   `json:"codexHome"`
-	ConfigOverrides []string `json:"configOverrides"`
-	Revision        int64    `json:"revision"`
+	Running          bool     `json:"running"`
+	ListenURL        string   `json:"listenUrl"`
+	CodexPath        string   `json:"codexPath"`
+	CodexHome        string   `json:"codexHome"`
+	ConfigOverrides  []string `json:"configOverrides"`
+	EnvironmentFiles []string `json:"environmentFiles"`
+	InheritEnv       []string `json:"inheritEnv"`
+	Revision         int64    `json:"revision"`
 }
 
 type appServerInstance struct {
+	runtimeID          string
 	command            *exec.Cmd
 	codex              codexInstallation
 	requestedListenURL string
 	listenURL          string
 	codexHome          string
 	configOverrides    []string
+	environmentFiles   []string
+	inheritEnv         []string
 	startedAt          time.Time
 	ready              bool
 	done               chan struct{}
@@ -54,17 +59,24 @@ type appServerInstance struct {
 }
 
 type appServerManager struct {
-	configuration    config
-	mu               sync.Mutex
-	nodeToken        string
-	discovered       bool
-	installations    []codexInstallation
-	instance         *appServerInstance
-	lastError        string
-	runtimePreparing bool
-	runtimeCancel    context.CancelFunc
-	runtimeRetryAt   time.Time
-	runtimeInstall   func(context.Context) (string, error) // injectable preparation for tests
+	configuration     config
+	mu                sync.Mutex
+	nodeToken         string
+	bindingID         string // actual binding, including the legacy default profile
+	discovered        bool
+	installations     []codexInstallation
+	instance          *appServerInstance
+	lastError         string
+	activeThreads     map[string]bool
+	pendingTurns      map[string]accountPendingRequest
+	managementSession string
+	loginPending      bool
+	transitioning     bool
+	providerView      map[string]any
+	runtimePreparing  bool
+	runtimeCancel     context.CancelFunc
+	runtimeRetryAt    time.Time
+	runtimeInstall    func(context.Context) (string, error) // injectable preparation for tests
 }
 
 func (manager *appServerManager) setNodeCredential(token string) {
@@ -217,17 +229,42 @@ func (manager *appServerManager) effectiveDesired(desired desiredAppServer) desi
 }
 
 func (manager *appServerManager) reconcile(ctx context.Context, desired desiredAppServer) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if !supportsAppServer() {
 		return nil
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	desired = manager.effectiveDesired(desired)
+	if manager.transitioning || (manager.managementSession != "" && manager.instance == nil) {
+		return nil
+	}
 	if !desired.Running {
+		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" {
+			manager.lastError = "账号仍有任务执行，请先结束任务"
+			return fmt.Errorf("%s", manager.lastError)
+		}
 		if manager.runtimeCancel != nil {
 			manager.runtimeCancel()
 		}
-		return manager.stopLocked()
+		if err := manager.stopLocked(); err != nil {
+			return err
+		}
+		// Stopped profiles expose provenance and missing variable names before
+		// starting Codex. Parsing never exports configuration values.
+		effective := desired
+		managed, err := managedAccountOverrides(manager.configuration)
+		if err == nil {
+			effective.ConfigOverrides = append(append([]string(nil), desired.ConfigOverrides...), managed...)
+			_, manager.providerView, err = prepareAccountEnvironment(manager.configuration, effective)
+		}
+		manager.lastError = ""
+		if err != nil {
+			manager.lastError = err.Error()
+		}
+		return nil
 	}
 	if desired.CodexPath == "" && manager.configuration.CodexBinary == "" {
 		// Unconfigured managed execution always uses the pinned Mira runtime, not
@@ -251,8 +288,12 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 	}
 	if manager.instance != nil && !channelClosed(manager.instance.done) {
 		current := manager.instance
-		if current.requestedListenURL == desired.ListenURL && current.codex.Path == selected.Path && current.codexHome == desired.CodexHome && stringSlicesEqual(current.configOverrides, desired.ConfigOverrides) {
+		if current.requestedListenURL == desired.ListenURL && current.codex.Path == selected.Path && current.codexHome == desired.CodexHome && stringSlicesEqual(current.configOverrides, desired.ConfigOverrides) && stringSlicesEqual(current.environmentFiles, desired.EnvironmentFiles) && stringSlicesEqual(current.inheritEnv, desired.InheritEnv) {
 			return nil
+		}
+		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" {
+			manager.lastError = "账号仍有任务执行，配置变更等待任务结束"
+			return fmt.Errorf("%s", manager.lastError)
 		}
 		if err := manager.stopLocked(); err != nil {
 			return err
@@ -369,23 +410,25 @@ func appServerAddressInUse(err error) bool {
 }
 
 func appServerFailureMessage(instance *appServerInstance, fallback string) string {
-	view := instance.output.read(0)
-	chunks, _ := view["chunks"].([]outputChunk)
-	var output strings.Builder
-	for _, chunk := range chunks {
-		output.WriteString(chunk.Text)
-	}
-	message := strings.TrimSpace(output.String())
-	if len(message) > 4096 {
-		message = strings.ToValidUTF8(message[len(message)-4096:], "�")
-	}
-	if message == "" {
-		return fallback
-	}
-	return fallback + ": " + message
+	// Startup diagnostics can quote TOML credentials. Keep them in the bounded
+	// local buffer rather than sending them into PostgreSQL.
+	return fallback
 }
 
 func (manager *appServerManager) startLocked(ctx context.Context, desired desiredAppServer, codex codexInstallation) error {
+	managed, err := managedAccountOverrides(manager.configuration)
+	if err != nil {
+		manager.lastError = err.Error()
+		return err
+	}
+	effective := desired
+	effective.ConfigOverrides = append(append([]string(nil), desired.ConfigOverrides...), managed...)
+	environment, provider, err := prepareAccountEnvironment(manager.configuration, effective)
+	manager.providerView = provider
+	if err != nil {
+		manager.lastError = err.Error()
+		return err
+	}
 	listenURL, err := availableAppServerListenURL(desired.ListenURL)
 	if err != nil {
 		manager.lastError = err.Error()
@@ -393,20 +436,27 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 	}
 	arguments := []string{"app-server", "--listen", listenURL}
 	if codex.RemoteThreadStoreSupported {
-		override, err := codexSQLiteOverride(manager.configuration.IdentityFile, codex.Path, desired.ConfigOverrides)
+		override, err := codexAccountSQLiteOverride(manager.configuration.IdentityFile, codex.Path, manager.configuration.CodexAccountID, desired.ConfigOverrides)
 		if err != nil {
 			manager.lastError = err.Error()
 			return err
 		}
-		if override != "" {
+		hasEnvironmentOverride := false
+		for _, value := range environment {
+			if strings.HasPrefix(value, "CODEX_SQLITE_HOME=") && value != "CODEX_SQLITE_HOME=" {
+				hasEnvironmentOverride = true
+			}
+		}
+		if override != "" && !hasEnvironmentOverride {
 			arguments = append(arguments, "-c", override)
 		}
 	}
-	for _, override := range desired.ConfigOverrides {
+	for _, override := range effective.ConfigOverrides {
 		arguments = append(arguments, "-c", override)
 	}
 	command := backgroundCommand(exec.Command(codex.Path, arguments...))
-	command.Env = os.Environ()
+	command.WaitDelay = 3 * time.Second
+	command.Env = environment
 	if manager.nodeToken != "" {
 		// The patched ThreadStore reads this environment variable when
 		// bearer_token is omitted. It intentionally never appears in argv.
@@ -419,7 +469,18 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		}
 		command.Env = append(command.Env, "CODEX_HOME="+desired.CodexHome)
 	}
+	runtimeID, err := randomUUID()
+	if err != nil {
+		return err
+	}
+	if manager.bindingID != "" {
+		command.Env = append(command.Env, "MIRA_NODE_CODEX_ACCOUNT_ID="+manager.bindingID, "MIRA_NODE_CODEX_RUNTIME_ID="+runtimeID)
+	}
+	manager.activeThreads = map[string]bool{}
+	manager.pendingTurns = map[string]accountPendingRequest{}
 	instance := &appServerInstance{
+		runtimeID:        runtimeID,
+		environmentFiles: append([]string(nil), desired.EnvironmentFiles...), inheritEnv: append([]string(nil), desired.InheritEnv...),
 		command: command, codex: codex, requestedListenURL: desired.ListenURL, listenURL: listenURL,
 		codexHome: desired.CodexHome, configOverrides: append([]string(nil), desired.ConfigOverrides...),
 		startedAt: time.Now().UTC(), done: make(chan struct{}),
@@ -486,6 +547,8 @@ func waitForAppServer(ctx context.Context, instance *appServerInstance) error {
 }
 
 func (manager *appServerManager) stopLocked() error {
+	manager.transitioning = true
+	defer func() { manager.transitioning = false }()
 	instance := manager.instance
 	if instance == nil {
 		return nil
@@ -496,6 +559,7 @@ func (manager *appServerManager) stopLocked() error {
 	}
 	if err := terminateProcess(instance.command.Process, "SIGTERM"); err != nil {
 		if !channelClosed(instance.done) {
+			manager.instance = instance
 			return err
 		}
 	}
@@ -526,6 +590,7 @@ func (manager *appServerManager) report() map[string]any {
 		}
 		return map[string]any{
 			"status": status, "lastError": manager.lastError,
+			"provider":         manager.providerView,
 			"runtimePreparing": manager.runtimePreparing,
 			"miraCliPath":      miraCLIPath,
 		}
@@ -536,6 +601,8 @@ func (manager *appServerManager) report() map[string]any {
 	}
 	return map[string]any{
 		"status": status, "pid": instance.command.Process.Pid, "listenUrl": instance.listenURL,
+		"runtimeId": instance.runtimeID, "busy": len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "",
+		"provider":  manager.providerView,
 		"codexPath": instance.codex.Path, "codexVersion": instance.codex.Version,
 		"miraCliPath": miraCLIPath,
 		"codexHome":   instance.codexHome, "configOverrideCount": len(instance.configOverrides),

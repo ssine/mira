@@ -21,7 +21,7 @@ const selectNodeColumns = `
   nodes.approved_at, nodes.revoked_at, nodes.registered_at, nodes.last_seen_at,
   CASE WHEN (nodes.channel_status->>'connected')::boolean IS TRUE
              AND nodes.last_seen_at > NOW() - INTERVAL '15 seconds'
-       THEN 'online' ELSE 'offline' END AS status`
+       THEN 'online' ELSE 'offline' END AS status, ` + accountRowsJSON
 
 const enrollmentColumns = `
   enrollment_id::text, node_id::text, credential_id::text, credential_secret_hash,
@@ -43,13 +43,14 @@ func scanNode(row scanner, withRank bool) (nodeRow, error) {
 	var value nodeRow
 	var nodeBuild, capabilities, installations, desired, reported, machine, channel, labels, aliases []byte
 	var revision string
+	var accounts []byte
 	var approvedAt, revokedAt *time.Time
 	var registeredAt, lastSeenAt time.Time
 	destinations := []any{
 		&value.NodeID, &value.NodeKey, &value.Hostname, &value.Platform, &value.Architecture, &value.NodeMode,
 		&value.NodeVersion, &nodeBuild, &capabilities, &installations, &desired, &reported, &machine, &channel,
 		&value.ApprovalStatus, &value.DisplayName, &labels, &revision, &aliases,
-		&approvedAt, &revokedAt, &registeredAt, &lastSeenAt, &value.Status,
+		&approvedAt, &revokedAt, &registeredAt, &lastSeenAt, &value.Status, &accounts,
 	}
 	if withRank {
 		destinations = append(destinations, &value.rank)
@@ -58,6 +59,12 @@ func scanNode(row scanner, withRank bool) (nodeRow, error) {
 		return nodeRow{}, err
 	}
 	var err error
+	if err = decodeJSON(accounts, &value.CodexAccounts); err != nil {
+		return nodeRow{}, fmt.Errorf("decode Node Codex accounts: %w", err)
+	}
+	if value.CodexAccounts == nil {
+		value.CodexAccounts = []CodexAccount{}
+	}
 	if value.NodeBuild, err = decodeObject(nodeBuild); err != nil {
 		return nodeRow{}, fmt.Errorf("decode Node build: %w", err)
 	}

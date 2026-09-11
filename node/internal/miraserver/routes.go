@@ -81,6 +81,12 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 	if handled, err := server.routeNodes(ctx, response, request); handled || err != nil {
 		return err
 	}
+	if handled, err := server.routeAccounts(ctx, response, request); handled || err != nil {
+		return err
+	}
+	if handled, err := server.routeInputRecovery(ctx, response, request); handled || err != nil {
+		return err
+	}
 	if handled, err := server.routeChannel(ctx, response, request); handled || err != nil {
 		return err
 	}
@@ -88,6 +94,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 		return err
 	}
 	if handled, err := server.routeHistoryUpload(ctx, response, request); handled || err != nil {
+		return err
+	}
+	if handled, err := server.routeAgentGraph(ctx, response, request); handled || err != nil {
 		return err
 	}
 	if handled, err := server.routeViews(ctx, response, request); handled || err != nil {
@@ -127,7 +136,10 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 			if err := foundation.ReadJSON(request, &body, server.config.Foundation.MaxBodyBytes); err != nil {
 				return err
 			}
-			result, err := PutSnapshot(ctx, server.pool, storeID, body, request.Header)
+			if err := server.observeAccountProtocol(ctx, request, principal); err != nil {
+				return err
+			}
+			result, err := PutSnapshot(withCodexWriter(ctx, request, principal), server.pool, storeID, body, request.Header)
 			if err != nil {
 				return err
 			}
@@ -138,6 +150,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 		if match := pathMatch(v2StorePattern, path); match != nil {
 			principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: "codex"})
 			if err != nil || principal == nil {
+				return err
+			}
+			if err := server.observeAccountProtocol(ctx, request, principal); err != nil {
 				return err
 			}
 			storeID, err := requireStoreID(match[1])
@@ -164,6 +179,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 			if err != nil || principal == nil {
 				return err
 			}
+			if err := server.observeAccountProtocol(ctx, request, principal); err != nil {
+				return err
+			}
 			storeID, err := requireStoreID(match[1])
 			if err != nil {
 				return err
@@ -179,6 +197,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 			}
 			result, err := GetThreadHistory(ctx, server.pool, storeID, threadID, generation, through)
 			if err != nil {
+				return err
+			}
+			if err := server.addInputRecovery(ctx, request, storeID, threadID, &result); err != nil {
 				return err
 			}
 			return writeJSON(response, result.Status, result.Body)
@@ -198,7 +219,10 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 			if err := foundation.ReadJSON(request, &body, server.config.Foundation.MaxBodyBytes); err != nil {
 				return err
 			}
-			result, err := CommitDelta(ctx, server.pool, storeID, body, request.Header)
+			if err := server.observeAccountProtocol(ctx, request, principal); err != nil {
+				return err
+			}
+			result, err := CommitDelta(withCodexWriter(ctx, request, principal), server.pool, storeID, body, request.Header)
 			if err != nil {
 				return err
 			}

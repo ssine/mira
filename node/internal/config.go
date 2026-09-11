@@ -24,6 +24,7 @@ type config struct {
 	BridgeToken        string
 	ExitWithParent     bool
 	CodexBinary        string
+	CodexAccountID     string // local derived-state scope; never a Mira credential
 	AppServerAutoStart bool
 	AppServerListenURL string
 	AppServerCodexHome string
@@ -269,6 +270,13 @@ func loadConfigArgs(args []string) (config, error) {
 			strings.Contains(lower, "password") || strings.Contains(lower, "api_key") ||
 			strings.Contains(lower, "secret") {
 			return config{}, fmt.Errorf("APP_SERVER_CONFIG_OVERRIDES must not contain credentials; use the Mira identity environment injection")
+		}
+	}
+
+	if raw := os.Getenv("MIRA_NODE_MAX_CODEX_RUNTIMES"); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 128 {
+			return config{}, fmt.Errorf("MIRA_NODE_MAX_CODEX_RUNTIMES must be between 1 and 128")
 		}
 	}
 

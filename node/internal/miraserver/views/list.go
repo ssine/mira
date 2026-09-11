@@ -26,7 +26,7 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
             projections.active_generation::text, activity.updated_at,
             imports.import_id::text, imports.source_node_id::text, imports.source_codex_version, imports.source_item_count::text,
             imports.created_at AS imported_at, runtimes.node_id::text AS runtime_node_id,
-            runtimes.bound_at AS runtime_bound_at
+            runtimes.bound_at AS runtime_bound_at, runtimes.node_account_id::text
      FROM codex_thread_projections projections
      LEFT JOIN LATERAL (
        SELECT action FROM mira_thread_actions WHERE store_id=projections.store_id AND thread_id=projections.thread_id
@@ -70,7 +70,7 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
 			&thread.ThreadID, &thread.ParentThreadID, &thread.SourceKind, &thread.Title, &thread.Name,
 			&thread.Archived, &thread.Cwd, &itemCount, &usageRaw, &modelRaw, &thread.ForkedFromID,
 			&thread.CreatedAt, &generation, &updatedAt, &thread.ImportID, &thread.SourceNodeID,
-			&thread.SourceCodexVersion, &importedCount, &importedAt, &thread.RuntimeNodeID, &runtimeBoundAt,
+			&thread.SourceCodexVersion, &importedCount, &importedAt, &thread.RuntimeNodeID, &runtimeBoundAt, &thread.NodeAccountID,
 		); err != nil {
 			return nil, err
 		}

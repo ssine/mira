@@ -110,7 +110,7 @@ export class AccountHistory {
 
   select(node, account, active, refresh = false) {
     this.node = node; this.account = account;
-    const key = active && node?.nodeId ? JSON.stringify([node.nodeId, node.reportedAppServer?.codexHome,
+    const key = active && node?.nodeId ? JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.codexHome,
       node.reportedAppServer?.codexPath, account?.type, account?.email, this.range]) : null;
     if (this.key !== key) {
       this.controller?.abort(); this.controller = null; this.key = key;
@@ -127,7 +127,7 @@ export class AccountHistory {
     this.controller = controller;
     const timer = setTimeout(() => controller.abort(), 15_000);
     try {
-      const response = await fetch(`/v1/nodes/${encodeURIComponent(this.node.nodeId)}/account-history?range=${this.range}`, { signal: controller.signal });
+      const response = await fetch(`/v1/nodes/${encodeURIComponent(this.node.nodeId)}/${this.node.nodeAccountId ? `codex-accounts/${encodeURIComponent(this.node.nodeAccountId)}/quota-history` : "account-history"}?range=${this.range}`, { signal: controller.signal });
       if (!response.ok) throw new Error("history unavailable");
       const data = await response.json();
       if (this.key !== key || this.controller !== controller) return;

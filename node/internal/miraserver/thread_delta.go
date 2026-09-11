@@ -389,6 +389,13 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 	if err := lockScope(ctx, tx, storeID, lockIDs); err != nil {
 		return operationResponse{}, err
 	}
+	historyIDs := make([]string, 0, len(historyChanges))
+	for _, change := range historyChanges {
+		historyIDs = append(historyIDs, change.ThreadID)
+	}
+	if err := checkAccountHistoryWriter(ctx, tx, storeID, historyIDs); err != nil {
+		return operationResponse{}, err
+	}
 	writtenIDs := []string{}
 	for _, change := range historyChanges {
 		if change.Mode != "delete" {

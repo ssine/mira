@@ -35,6 +35,10 @@ type invocationResult struct {
 type proxy struct {
 	mu                     sync.Mutex
 	targetNodeID           string
+	nodeAccountID          string
+	accountID              string
+	runtimeID              string
+	defaultAccount         bool
 	callerNodeID           string
 	actorKey               string
 	sessionID              string
@@ -43,6 +47,7 @@ type proxy struct {
 	target                 *nodes.Node
 	threadID               string
 	threadRequestBindings  map[string]*string
+	threadRequestMethods   map[string]string
 	idempotentThreadStarts map[string]string
 	boundThreadIDs         map[string]bool
 	ephemeralStartRequests map[string]bool
@@ -52,6 +57,9 @@ type proxy struct {
 	clientClosed           bool
 	abandoning             bool
 	detachTimer            *time.Timer
+	nodeMessages           chan map[string]any
+	nodeMessagesDone       chan struct{}
+	pendingNodeBytes       int
 }
 
 type threadStartWaiter struct {
@@ -136,7 +144,16 @@ func (channel *Channel) UpdateProxyDesiredAppServer(nodeID string, desired map[s
 				continue
 			}
 			copy := *proxy.target
-			copy.DesiredAppServer = desired
+			// Workspace policy is Node-wide; account runtime configuration is not.
+			copy.DesiredAppServer = make(map[string]any, len(proxy.target.DesiredAppServer))
+			for key, value := range proxy.target.DesiredAppServer {
+				copy.DesiredAppServer[key] = value
+			}
+			for _, key := range []string{"defaultCwd", "developerInstructionsFile"} {
+				if value, exists := desired[key]; exists {
+					copy.DesiredAppServer[key] = value
+				}
+			}
 			proxy.target = &copy
 			proxy.mu.Unlock()
 		}
@@ -255,6 +272,14 @@ func (channel *Channel) serveProxyUpgrade(response http.ResponseWriter, request 
 		http.Error(response, "conflict", 409)
 		return
 	}
+	account, err := nodes.SelectAccount(target, request.URL.Query().Get("nodeAccountId"))
+	if err != nil {
+		http.Error(response, err.Error(), http.StatusConflict)
+		return
+	}
+	if account != nil {
+		target = nodes.AccountNode(target, *account)
+	}
 	connection, err := channel.upgrader.Upgrade(response, request, http.Header{"Sec-WebSocket-Protocol": []string{"mira-client-v1"}})
 	if err != nil {
 		return
@@ -366,6 +391,30 @@ func (channel *Channel) handleNodeMessage(nodeID string, connection *socket, mes
 	if proxy == nil || proxy.targetNodeID != nodeID {
 		return nil
 	}
+	if proxy.nodeMessages != nil {
+		size := len(stringValue(message["payload"]))
+		proxy.mu.Lock()
+		fits := proxy.pendingNodeBytes+size <= MaxChannelPayload
+		if fits {
+			proxy.pendingNodeBytes += size
+		}
+		proxy.mu.Unlock()
+		if fits {
+			select {
+			case proxy.nodeMessages <- message:
+				return nil
+			default:
+			}
+		}
+		proxy.socket.close(websocket.CloseTryAgainLater, "App Server client is too slow")
+		channel.markProxyClientClosed(proxy, true)
+		return nil
+	}
+	return channel.handleProxyNodeMessage(proxy, message)
+}
+
+func (channel *Channel) handleProxyNodeMessage(proxy *proxy, message map[string]any) error {
+	messageType, _ := message["type"].(string)
 	switch messageType {
 	case "appserver.message":
 		payload, _ := message["payload"].(string)

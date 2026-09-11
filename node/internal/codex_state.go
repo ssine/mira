@@ -16,6 +16,10 @@ import (
 // incompatible migration checksums. Canonical Mira history stays in PostgreSQL;
 // config, authentication and Desktop rollouts remain in the original home.
 func codexSQLiteOverride(identityFile, binary string, overrides []string) (string, error) {
+	return codexAccountSQLiteOverride(identityFile, binary, "", overrides)
+}
+
+func codexAccountSQLiteOverride(identityFile, binary, accountID string, overrides []string) (string, error) {
 	for _, override := range overrides {
 		key, _, _ := strings.Cut(override, "=")
 		if strings.TrimSpace(key) == "sqlite_home" {
@@ -50,5 +54,11 @@ func codexSQLiteOverride(identityFile, binary string, overrides []string) (strin
 	// migration state; ordinary Mira upgrades with the same runtime can reuse it.
 	digest := sha256.Sum256([]byte(absolute))
 	directory := filepath.Join(filepath.Dir(identityFile), "state", "codex", pinned.Version, hex.EncodeToString(digest[:12]))
+	if accountID != "" {
+		if !nodeUUIDPattern.MatchString(accountID) {
+			return "", fmt.Errorf("invalid Codex account ID")
+		}
+		directory = filepath.Join(directory, "accounts", accountID)
+	}
 	return "sqlite_home=" + strconv.Quote(directory), nil
 }

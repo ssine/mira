@@ -9,6 +9,7 @@ import (
 
 	serverchannel "github.com/ssine/mira/node/internal/miraserver/channel"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
+	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
 
 var (
@@ -120,6 +121,14 @@ func (server *Server) routeChannel(ctx context.Context, response http.ResponseWr
 		if node == nil {
 			return true, &HTTPError{Status: 404, Code: "not_found", Message: "approved node not found"}
 		}
+		selector, _ := body["nodeAccountId"].(string)
+		account, err := nodes.SelectAccount(node, selector)
+		if err != nil {
+			return true, err
+		}
+		if account != nil {
+			node = nodes.AccountNode(node, *account)
+		}
 		if enabled, _ := node.Capabilities["appServer"].(bool); !enabled {
 			return true, &HTTPError{Status: 409, Code: "capability_unavailable", Message: "node cannot run Codex App Server"}
 		}
@@ -151,16 +160,30 @@ func (server *Server) routeChannel(ctx context.Context, response http.ResponseWr
 		} else {
 			desired["configOverrides"] = []any{}
 		}
-		result, err := server.nodes.SetDesiredAppServer(ctx, match[1], desired)
+		for _, key := range []string{"environmentFiles", "inheritEnv"} {
+			if value, ok := body[key]; ok {
+				desired[key] = value
+			} else if value, ok := node.DesiredAppServer[key]; ok {
+				desired[key] = value
+			}
+		}
+		var result nodes.Result
+		if account != nil {
+			result, err = server.nodes.SetAccountDesired(ctx, match[1], account.NodeAccountID, desired)
+		} else {
+			result, err = server.nodes.SetDesiredAppServer(ctx, match[1], desired)
+		}
 		if err == nil && result.Status == 200 {
 			resultBody, _ := result.Body.(map[string]any)
 			stored := object(resultBody["desiredAppServer"])
-			server.channel.UpdateProxyDesiredAppServer(match[1], stored)
+			if account == nil || account.IsDefault {
+				server.channel.UpdateProxyDesiredAppServer(match[1], stored)
+			}
 			action := "codex_runtime.stopped"
 			if running {
 				action = "codex_runtime.started"
 			}
-			err = foundation.AppendAudit(ctx, server.pool, foundation.AuditEvent{Action: action, Principal: principal, TargetNodeID: match[1], Request: request, Metadata: map[string]any{"storeId": storeID}}, server.config.Foundation.TrustProxyHeaders)
+			err = foundation.AppendAudit(ctx, server.pool, foundation.AuditEvent{Action: action, Principal: principal, TargetNodeID: match[1], Request: request, Metadata: map[string]any{"storeId": storeID, "nodeAccountId": node.SelectedNodeAccountID}}, server.config.Foundation.TrustProxyHeaders)
 		}
 		return true, writeNodeResult(response, result, err)
 	}

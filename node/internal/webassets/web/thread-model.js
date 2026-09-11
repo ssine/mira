@@ -1,3 +1,4 @@
+import { accountQuery } from "./codex-accounts.js";
 const cache = new Map();
 
 export function invalidateModelCatalog(nodeId) {
@@ -11,15 +12,15 @@ export function invalidateModelCatalog(nodeId) {
 
 // A short read-only connection: inspecting a picker never creates/resumes a
 // conversation or sends a model request. Cache only the model fields, not config.
-export async function readModelCatalog(nodeId, cwd, { refresh = false } = {}) {
-  const key = JSON.stringify([nodeId, cwd]);
+export async function readModelCatalog(nodeId, cwd, { refresh = false, nodeAccountId = "", accountRevision = 0, runtimeId = "" } = {}) {
+  const key = JSON.stringify([nodeId, cwd, nodeAccountId, accountRevision, runtimeId]);
   const existing = cache.get(key);
   if (existing?.job) return existing.job;
   if (!refresh && existing?.expires > Date.now()) return existing.value;
   const entry = {};
   const job = (async () => {
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
+    const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${nodeId}/app-server?storeId=personal${accountQuery(nodeAccountId)}`, ["mira-client-v1"]);
     const pending = new Map();
     let requestId = 0, rejectOpen;
     const fail = error => { rejectOpen?.(error); for (const request of pending.values()) request.reject(error); };

@@ -50,6 +50,7 @@ type Thread struct {
 	SourceCodexVersion *string        `json:"sourceCodexVersion"`
 	ImportedAt         *string        `json:"importedAt"`
 	RuntimeNodeID      *string        `json:"runtimeNodeId"`
+	NodeAccountID      *string        `json:"nodeAccountId"`
 	RuntimeBoundAt     *string        `json:"runtimeBoundAt"`
 	Activity           map[string]any `json:"activity"`
 	ReadState          map[string]any `json:"readState"`

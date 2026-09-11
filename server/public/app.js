@@ -9,6 +9,8 @@ import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { AccountSidebar } from "/account-status.js";
+import { CodexAccounts, accountNode, accountQuery } from "/codex-accounts.js";
+import { AccountRecovery } from "/account-recovery.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages } from "/trace-images.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
@@ -146,6 +148,8 @@ const workspace = {
 const agent = {
   socket: null,
   socketNodeId: null,
+  socketAccountId: null,
+  accountSelections: new Map(),
   loadedThreadIds: new Set(),
   resumePromises: new Map(),
   runtimePromise: null,
@@ -248,6 +252,50 @@ const agent = {
 
 const transcriptPageSize = 60;
 const accountSidebar = new AccountSidebar($("#agentAccount"));
+const codexAccounts = new CodexAccounts($("#codexAccountsPanel"), { api, refreshNodes: refreshAgentNodes, notice: toast });
+const accountRecovery = new AccountRecovery($("#conversationCompatibility"), { api, notice: toast,
+  beforeApply: async () => {
+    if (agent.sendPromise || agent.activeTurns.has(agent.threadId)) throw new Error("请等待本轮结束后再确认。");
+    stopAgentRecovery(); closeAgentSocket();
+  },
+  afterApply: async ({ threadId, bindingId, retiredRuntimeId }) => {
+    if (retiredRuntimeId) {
+      if (retiredAccountRuntimes.size >= 32) retiredAccountRuntimes.delete(retiredAccountRuntimes.keys().next().value);
+      retiredAccountRuntimes.set(bindingId, retiredRuntimeId);
+    }
+    if (agent.threadId === threadId && $("#conversationAccount").value === bindingId) await loadAgentTranscript(threadId);
+  },
+});
+
+const retiredAccountRuntimes = new Map();
+
+function selectedAccountNode(nodeId = $("#agentRuntimeNode").value) {
+  return accountNode(dashboardNodes.get(nodeId), nodeId === $("#agentRuntimeNode").value ? $("#conversationAccount").value : "");
+}
+
+function refreshAccountChoices(preferred) {
+  const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  const previous = preferred ?? agent.accountSelections.get(node?.nodeId) ?? "";
+  const accounts = node?.codexAccounts ?? [];
+  for (const select of [$("#conversationAccount"), $("#agentRuntimeAccount")]) {
+    select.replaceChildren(...(accounts.length ? accounts.map(account => {
+      const option = new Option(account.name, account.nodeAccountId); option.disabled = !account.enabled; return option;
+    }) : [new Option("默认账号", "")]));
+    select.value = accounts.some(account => account.nodeAccountId === previous) ? previous : accounts.find(account => account.isDefault)?.nodeAccountId ?? "";
+  }
+  if (node) agent.accountSelections.set(node.nodeId, $("#conversationAccount").value);
+}
+
+function selectConversationAccount(bindingId) {
+  const nodeId = $("#agentRuntimeNode").value;
+  agent.accountSelections.set(nodeId, bindingId); refreshAccountChoices(bindingId);
+  stopAgentRecovery(); closeAgentSocket(); agent.modelChoice = null; agent.effortChoice = null;
+  agent.modelCatalog = null; agent.modelCatalogKey = null;
+  syncAccountSidebar(); syncConversationSendUi(); void loadConversationModels();
+  if (!agent.threadId && agent.draftProject) void selectComposerDraft(`personal:new:${agent.draftProject.key}:${bindingId}`);
+  if (agent.threadId) setConversationNotice("下次发送将使用所选账号继续此对话；原有上下文会先完整保留。", "info");
+  accountRecovery.select(agent.threadId, bindingId);
+}
 const conversationDetailsWide = window.matchMedia("(min-width: 1100px)");
 let conversationDetailsCloseTimer = null;
 let resetConversationDetailsDrag = () => {};
@@ -258,7 +306,7 @@ const traceImages = new TraceImages($("#conversationTrace"), (href, signal) => a
 
 function syncAccountSidebar() {
   const active = document.body.dataset.view === "agentView" && agentThreadDrawerOpen && !document.hidden;
-  const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  const node = selectedAccountNode();
   accountSidebar.select(navigator.onLine === false && node ? { ...node, status: "offline" } : node, active);
 }
 
@@ -1009,7 +1057,7 @@ function renderNodes(nodes) {
         const refreshModels = actionButton("刷新模型", "refresh-models", node.nodeId, "secondary");
         refreshModels.disabled = node.status !== "online";
         refreshModels.title = node.status === "online" ? "刷新此节点的 Codex 模型目录" : "节点离线，无法刷新模型";
-        actions.append(refreshModels);
+        actions.append(refreshModels, actionButton(`账号 (${node.codexAccounts?.length ?? 1})`, "accounts", node.nodeId, "secondary"));
       }
       actions.append(actionButton("撤销设备", "revoke", node.nodeId, "danger"));
     }
@@ -1044,21 +1092,27 @@ async function loadDashboard() {
   $("#approvedCount").textContent = allNodes.filter((node) => node.approvalStatus === "approved").length;
   renderEnrollments(pending);
   renderNodes(allNodes);
+  codexAccounts.setNodes(allNodes);
   renderAudit(audit.data ?? []);
 }
 
 async function refreshNodeModels(nodeId) {
   let node = await api(`/v1/nodes/${nodeId}`);
+  const bindingId = nodeId === $("#agentRuntimeNode").value ? $("#conversationAccount").value : "";
   if (node.status !== "online" || node.capabilities?.appServer !== true) throw new Error("此节点当前无法读取 Codex 模型");
   dashboardNodes.set(node.nodeId, node);
+  node = accountNode(node, bindingId);
+  if (!node) throw new Error("所选账号已不可用");
   if (node.reportedAppServer?.status !== "running") {
-    await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+    await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: bindingId }) });
     const deadline = Date.now() + (node.capabilities?.codexRuntimeDownload ? 21 * 60_000 : 30_000);
     let lastError = "", errorSince = 0;
     while (Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, node.reportedAppServer?.runtimePreparing ? 2_000 : 500));
       node = await api(`/v1/nodes/${nodeId}`);
       dashboardNodes.set(node.nodeId, node);
+  node = accountNode(node, bindingId);
+  if (!node) throw new Error("所选账号已不可用");
       if (node.reportedAppServer?.status === "running") break;
       const currentError = node.reportedAppServer?.runtimePreparing ? "" : node.reportedAppServer?.lastError ?? "";
       if (currentError !== lastError) { lastError = currentError; errorSince = currentError ? Date.now() : 0; }
@@ -1068,7 +1122,7 @@ async function refreshNodeModels(nodeId) {
   }
   const selectedHere = $("#agentRuntimeNode").value === nodeId;
   const cwd = selectedHere ? $("#conversationCwd").value.trim() : node.desiredAppServer?.defaultCwd ?? "";
-  const key = JSON.stringify([nodeId, cwd]);
+  const key = JSON.stringify([nodeId, cwd, node.nodeAccountId ?? "", node.accountRevision ?? 0, node.reportedAppServer?.runtimeId ?? ""]);
   invalidateModelCatalog(nodeId);
   const composerJob = selectedHere && conversationModelKey() === key ? { key } : null;
   if (composerJob) {
@@ -1079,7 +1133,7 @@ async function refreshNodeModels(nodeId) {
     renderConversationModel();
   }
   try {
-    const request = readModelCatalog(nodeId, cwd, { refresh: true });
+    const request = readModelCatalog(nodeId, cwd, { refresh: true, nodeAccountId: node.nodeAccountId, accountRevision: node.accountRevision, runtimeId: node.reportedAppServer?.runtimeId });
     if (composerJob) composerJob.promise = request;
     const catalog = await request;
     if (composerJob && conversationModelKey() === key && agent.modelCatalogJob === composerJob) {
@@ -2251,6 +2305,8 @@ function syncConversationSendUi() {
   stop.title = stopping ? "正在停止…" : !connected ? "正在重连，连接恢复后可停止" : !agent.turnId ? "正在确认运行状态…" : "停止 Agent";
   stop.setAttribute("aria-label", stop.title);
   $("#agentRuntimeNode").disabled = busy;
+  $("#conversationAccount").disabled = busy;
+  $("#agentRuntimeAccount").disabled = busy;
   $("#agentNewThread").disabled = busy;
   $("#agentNewProject").disabled = busy;
   $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
@@ -2262,7 +2318,8 @@ function syncConversationSendUi() {
 }
 
 function conversationModelKey() {
-  return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim()]);
+  const node = selectedAccountNode();
+  return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim(), node?.nodeAccountId ?? "", node?.accountRevision ?? 0, node?.reportedAppServer?.runtimeId ?? ""]);
 }
 
 function selectedConversationModel() {
@@ -2452,7 +2509,7 @@ function installComposerChoiceMenu(toggle, menu) {
 }
 
 async function loadConversationModels({ refresh = false } = {}) {
-  const node = dashboardNodes.get($("#agentRuntimeNode").value), key = conversationModelKey();
+  const node = selectedAccountNode(), key = conversationModelKey();
   if (agent.modelCatalogJob?.key === key) return agent.modelCatalogJob.promise;
   if (!refresh && agent.modelCatalogKey === key && agent.modelCatalog && Date.now() - agent.modelCatalogLoadedAt < 300_000) { renderConversationModel(); return; }
   if (agent.modelCatalogKey !== key) { agent.modelCatalog = null; agent.modelCatalogError = ""; }
@@ -2463,7 +2520,7 @@ async function loadConversationModels({ refresh = false } = {}) {
   renderConversationModel();
   job.promise = (async () => {
     try {
-      const catalog = await readModelCatalog(node.nodeId, $("#conversationCwd").value.trim(), { refresh });
+      const catalog = await readModelCatalog(node.nodeId, $("#conversationCwd").value.trim(), { refresh, nodeAccountId: node.nodeAccountId, accountRevision: node.accountRevision, runtimeId: node.reportedAppServer?.runtimeId });
       if (conversationModelKey() !== key || agent.modelCatalogJob !== job) return;
       agent.modelCatalog = catalog;
       agent.modelCatalogLoadedAt = Date.now();
@@ -2484,6 +2541,7 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
   const socket = agent.socket;
   agent.socket = null;
   agent.socketNodeId = null;
+  agent.socketAccountId = null;
   agent.socketInitialized = false;
   agent.loadedThreadIds.clear();
   agent.resumePromises.clear();
@@ -3701,6 +3759,12 @@ async function refreshCompletedTranscript(threadId) {
 function handleAgentNotification(message) {
   const method = message.method ?? "";
   const params = message.params ?? {};
+  if (method === "mira/account/contextIncompatible") {
+    if (params.threadId === agent.threadId && params.nodeAccountId === $("#conversationAccount").value &&
+        (accountRecovery.context?.threadId !== params.threadId || accountRecovery.context?.bindingId !== params.nodeAccountId)) accountRecovery.select(params.threadId, params.nodeAccountId);
+    else accountRecovery.observe(params);
+    return;
+  }
   if (notificationIsForOpenThread(params) && (/^(item|turn)\//.test(method) || method === "thread/status/changed")) agent.liveRevision++;
   if (method === "thread/closed") agent.loadedThreadIds.delete(params.threadId);
   if (message.id !== undefined) {
@@ -3861,15 +3925,16 @@ function onAgentSocketMessage(event) {
   handleAgentNotification(message);
 }
 
-async function connectAgentSocket(nodeId) {
-  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
+async function connectAgentSocket(nodeId, bindingId = $("#conversationAccount").value) {
+  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId && agent.socketAccountId === bindingId) return;
   closeAgentSocket({ preserveSubmission: true });
   clearTimeout(agent.reconnectTimer);
   setAgentRuntimeState("正在建立 App Server 通道…", "offline");
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
+  const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal${accountQuery(bindingId)}`, ["mira-client-v1"]);
   agent.socket = socket;
   agent.socketNodeId = nodeId;
+  agent.socketAccountId = bindingId;
   socket.addEventListener("message", (event) => { if (agent.socket === socket) onAgentSocketMessage(event); });
   socket.addEventListener("close", () => {
     if (agent.socket !== socket) return;
@@ -3925,7 +3990,8 @@ async function refreshAgentNodes() {
   }
   if ([...runtimeSelect.options].some((option) => option.value === previousRuntime)) runtimeSelect.value = previousRuntime;
   if ([...sourceSelect.options].some((option) => option.value === previousSource)) sourceSelect.value = previousSource;
-  const selected = dashboardNodes.get(runtimeSelect.value);
+  refreshAccountChoices();
+  const selected = selectedAccountNode(runtimeSelect.value);
   const defaultCwd = selected?.desiredAppServer?.defaultCwd ?? "";
   $("#agentRuntimeDefaultCwd").value = defaultCwd;
   $("#agentRuntimeDeveloperInstructionsFile").value = selected?.desiredAppServer?.developerInstructionsFile ?? "";
@@ -4519,7 +4585,9 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
     if (!Number.isSafeInteger(source.generation)) throw new Error("会话信息尚未就绪，请稍后重试。");
     const nodeId = source.runtimeNodeId || source.sourceNodeId;
     if (!nodeId) throw new Error("此对话未关联运行节点，请先选择节点继续对话后重试。");
-    const node = await api(`/v1/nodes/${nodeId}`, { signal });
+    const rawNode = await api(`/v1/nodes/${nodeId}`, { signal });
+    const node = accountNode(rawNode, source.nodeAccountId ?? "");
+    if (!node) throw new Error("此对话的账号已不可用");
     let messages = automatic ? [{ kind: "user", body: firstMessage }] : [];
     if (!automatic) {
       let cursor;
@@ -4557,20 +4625,22 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
 }
 
 async function forkWithNode(node, params, onProgress = () => {}) {
+  const bindingId = node.nodeAccountId || "";
   if (node.status !== "online") throw new Error("运行机器离线，连接后才能创建分支。");
   if (node.reportedAppServer?.status !== "running") {
-    await api(`/v1/codex/runtimes/${node.nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+    await api(`/v1/codex/runtimes/${node.nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: bindingId }) });
     const deadline = Date.now() + 120_000;
     while (node.reportedAppServer?.status !== "running") {
       if (Date.now() >= deadline) throw new Error("等待运行机器启动超时，请稍后重试。");
       await new Promise((resolve) => setTimeout(resolve, 500));
-      node = await api(`/v1/nodes/${node.nodeId}`);
+      node = accountNode(await api(`/v1/nodes/${node.nodeId}`), bindingId);
+      if (!node) throw new Error("所选账号已不可用");
       if (node.status !== "online") throw new Error("运行机器已离线，请连接后重试。");
     }
   }
   // A separate connection keeps the current conversation and its live stream intact.
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${node.nodeId}/app-server?storeId=personal`, ["mira-client-v1"]);
+  const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${node.nodeId}/app-server?storeId=personal${accountQuery(bindingId)}`, ["mira-client-v1"]);
   const pending = new Map();
   let next = 0;
   socket.addEventListener("message", (event) => {
@@ -4646,8 +4716,8 @@ async function forkThreadFromMenu() {
     const source = await api(`/v1/codex/threads/${encodeURIComponent(sourceId)}?storeId=personal`);
     const nodeId = source.runtimeNodeId || source.sourceNodeId;
     if (!nodeId) throw new Error("请先为该对话选择运行机器，再创建分支。");
-    const node = await api(`/v1/nodes/${nodeId}`);
-    if (node.capabilities?.appServer !== true) throw new Error("该机器不能运行 Codex，请先选择兼容的运行机器。");
+    const node = accountNode(await api(`/v1/nodes/${nodeId}`), source.nodeAccountId ?? "");
+    if (!node || node.capabilities?.appServer !== true) throw new Error("该机器不能运行 Codex，请先选择兼容的运行机器。");
     let request = agent.forkRequests.get(sourceId);
     if (!request) {
       request = { threadId: sourceId, excludeTurns: true, deferGoalContinuation: true, miraRequestId: crypto.randomUUID(),
@@ -4922,12 +4992,13 @@ async function importLocalSession(index, button) {
 
 async function startAgentRuntime({ allowStart = true } = {}) {
   const nodeId = $("#agentRuntimeNode").value;
+  const bindingId = $("#conversationAccount").value;
   if (!nodeId) throw new Error("没有可运行 Codex 的节点");
   if (allowStart) agent.connectionWanted = true;
-  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId) return;
-  if (agent.runtimePromise?.nodeId === nodeId) return agent.runtimePromise.promise;
+  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId && agent.socketAccountId === $("#conversationAccount").value) return;
+  if (agent.runtimePromise?.nodeId === nodeId && agent.runtimePromise?.bindingId === bindingId) return agent.runtimePromise.promise;
   const promise = connectAgentRuntime(nodeId, allowStart);
-  agent.runtimePromise = { nodeId, promise };
+  agent.runtimePromise = { nodeId, bindingId, promise };
   try { await promise; }
   finally { if (agent.runtimePromise?.promise === promise) agent.runtimePromise = null; }
 }
@@ -4935,23 +5006,30 @@ async function startAgentRuntime({ allowStart = true } = {}) {
 async function connectAgentRuntime(nodeId, allowStart) {
   closeAgentSocket({ preserveSubmission: true });
   const epoch = agent.runtimeStartEpoch;
+  const bindingId = $("#conversationAccount").value;
+  const ready = node => node?.reportedAppServer?.status === "running" &&
+    (!retiredAccountRuntimes.has(bindingId) || node.reportedAppServer.runtimeId !== retiredAccountRuntimes.get(bindingId));
   let node = await api(`/v1/nodes/${nodeId}`);
-  if (epoch !== agent.runtimeStartEpoch || $("#agentRuntimeNode").value !== nodeId) throw new Error("连接已取消");
+  if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || $("#conversationAccount").value !== bindingId)) throw new Error("连接已取消");
   dashboardNodes.set(node.nodeId, node);
-  if (node.reportedAppServer?.status === "running") return connectAgentSocket(nodeId);
+  node = accountNode(node, bindingId);
+  if (!node) throw new Error("所选账号已不可用");
+  if (ready(node)) return connectAgentSocket(nodeId);
   if (!allowStart) throw new Error("运行节点尚未就绪");
   setAgentRuntimeState("正在启动运行节点…", "offline");
-  await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+  await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: $("#conversationAccount").value }) });
   // A fresh Node may need its independent Codex package before it can start.
   // Keep the page responsive and show preparation instead of a 30-second timeout.
   const deadline = Date.now() + (dashboardNodes.get(nodeId)?.capabilities?.codexRuntimeDownload ? 21 * 60_000 : 30_000);
   let lastError = "";
   let errorSince = 0;
   while (Date.now() < deadline) {
-    if (epoch !== agent.runtimeStartEpoch || $("#agentRuntimeNode").value !== nodeId) throw new Error("已取消等待 App Server 启动");
+    if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || $("#conversationAccount").value !== bindingId)) throw new Error("已取消等待 App Server 启动");
     node = await api(`/v1/nodes/${nodeId}`);
     dashboardNodes.set(node.nodeId, node);
-    if (node.reportedAppServer?.status === "running") break;
+    node = accountNode(node, bindingId);
+    if (!node) throw new Error("所选账号已不可用");
+    if (ready(node)) break;
     const preparing = node.reportedAppServer?.runtimePreparing === true;
     if (preparing) setAgentRuntimeState("首次准备 Codex 运行包，下载与校验可能需要几分钟；节点其他功能可继续使用…", "offline");
     const currentError = preparing ? "" : (node.reportedAppServer?.lastError ?? "");
@@ -4963,8 +5041,8 @@ async function connectAgentRuntime(nodeId, allowStart) {
     }
     await new Promise((resolve) => setTimeout(resolve, preparing ? 2_000 : 500));
   }
-  if (node?.reportedAppServer?.status !== "running") throw new Error("App Server 启动超时");
-  if (epoch !== agent.runtimeStartEpoch || $("#agentRuntimeNode").value !== nodeId) throw new Error("已取消等待 App Server 启动");
+  if (!ready(node)) throw new Error("App Server 启动超时");
+  if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || $("#conversationAccount").value !== bindingId)) throw new Error("已取消等待 App Server 启动");
   await connectAgentSocket(nodeId);
 }
 
@@ -4972,7 +5050,7 @@ async function stopAgentRuntime() {
   const nodeId = $("#agentRuntimeNode").value;
   if (!nodeId) return;
   stopAgentRecovery();
-  await api(`/v1/codex/runtimes/${nodeId}/stop`, { method: "POST", body: JSON.stringify({ storeId: "personal" }) });
+  await api(`/v1/codex/runtimes/${nodeId}/stop`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: $("#conversationAccount").value }) });
   setAgentRuntimeState("已请求停止 App Server", "offline");
 }
 
@@ -5001,6 +5079,7 @@ async function restoreAgentThread(threadId, socket) {
   if (agent.threadId !== threadId) return result.thread;
   agent.previousRuntimeNodeId = projectedThread?.runtimeNodeId ?? projectedThread?.sourceNodeId ?? null;
   agent.threadRuntimeNodeId = agent.socketNodeId;
+  if (projectedThread) projectedThread.nodeAccountId = agent.socketAccountId;
   const currentProjection = agent.threads.find((thread) => thread.threadId === threadId) ?? projectedThread;
   setConversationTitle(currentProjection?.name || result.thread.name || result.thread.preview || currentProjection?.title || "Codex 会话");
   const resumedCwd = result.cwd ?? projectedCwd;
@@ -5094,6 +5173,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
   if (preferredNode && [...$("#agentRuntimeNode").options].some((option) => option.value === preferredNode)) {
     $("#agentRuntimeNode").value = preferredNode;
+    refreshAccountChoices(projected?.nodeAccountId);
   }
   setConversationTitle(projected?.title || "Codex 会话");
   setConversationMeta(projected?.cwd, projected?.model);
@@ -5105,6 +5185,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   // Browsing only reads the authoritative transcript. If editing began while
   // its metadata was loading, prepare the runtime now that its Node is known.
   if (agent.resumeRequestedThreadId === threadId) void prepareEditedThread(threadId, epoch);
+  accountRecovery.select(threadId, $("#conversationAccount").value);
   await loadAgentTranscript(threadId);
 }
 
@@ -5129,12 +5210,14 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
       return;
     }
     $("#agentRuntimeNode").value = project.nodeId;
+    refreshAccountChoices();
   }
   agent.draftProject = project;
   if (project) agent.projectOpen.set(project.key, true);
   if (updateRoute) writeBrowserRoute("agent");
   agent.selectionEpoch++;
   agent.threadId = null;
+  accountRecovery.select(null, "");
   agent.modelChoice = null;
   agent.effortChoice = null;
   agent.threadReasoningEffort = null;
@@ -5153,7 +5236,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   const draftProject = project ?? projectForThread({ runtimeNodeId: $("#agentRuntimeNode").value, cwd: $("#conversationCwd").value });
   agent.draftProject = draftProject;
   void composerDrafts.write("personal:new-project", draftProject).catch(() => {});
-  void selectComposerDraft(`personal:new:${draftProject.key}`);
+  void selectComposerDraft(`personal:new:${draftProject.key}:${$("#conversationAccount").value}`);
   void loadConversationModels();
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
   renderAgentThreads();
@@ -5582,6 +5665,8 @@ $("#agentThemeToggle").addEventListener("click", toggleTheme);
 $("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
 $("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
+for (const id of ["globalAccounts", "agentManageAccounts"]) $("#" + id).addEventListener("click", () => navigateGlobal("nodes").then(() => codexAccounts.focusNode("")).catch(error => toast(error.message)));
+for (const id of ["conversationAccount", "agentRuntimeAccount"]) $("#" + id).addEventListener("change", event => selectConversationAccount(event.target.value));
 
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
 $("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
@@ -5657,6 +5742,7 @@ $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch(
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveDeveloperInstructions").addEventListener("click", () => saveAgentRuntimeDeveloperInstructionsFile().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
+  refreshAccountChoices();
   agent.modelChoice = null;
   agent.effortChoice = null;
   agent.threadReasoningEffort = null;
@@ -5715,12 +5801,12 @@ window.addEventListener("offline", () => {
 
 const conversationOverlayObserver = new ResizeObserver(() => {
   const head = $(".conversation-head").getBoundingClientRect().bottom - $(".conversation-card").getBoundingClientRect().top;
-  const notice = $("#conversationNotice");
-  const noticeHeight = notice.classList.contains("hidden") ? 0 : notice.getBoundingClientRect().height + 8;
+  const noticeHeight = $(".conversation-notices").getBoundingClientRect().height;
   $(".conversation-card").style.setProperty("--conversation-overlay-height", `${head + noticeHeight}px`);
 });
 conversationOverlayObserver.observe($(".conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
+conversationOverlayObserver.observe($(".conversation-notices"));
 const conversationWidthObserver = new ResizeObserver(() => {
   const scroll = traceScroller();
   const style = getComputedStyle(scroll);
@@ -6167,6 +6253,7 @@ document.addEventListener("click", (event) => {
   else if (button.dataset.action === "metadata") task = Promise.resolve().then(() => showNodeMetadataDialog(button.dataset.id));
   else if (button.dataset.action === "workspace") task = openWorkspace(button.dataset.id);
   else if (button.dataset.action === "refresh-models") task = refreshNodeModels(button.dataset.id);
+  else if (button.dataset.action === "accounts") task = navigateGlobal("nodes").then(() => codexAccounts.focusNode(button.dataset.id));
   else task = decide(button.dataset.id, button.dataset.action);
   task.catch((error) => toast(error.message)).finally(() => { button.disabled = false; });
 });

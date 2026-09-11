@@ -43,10 +43,18 @@ func (channel *Channel) attachProxy(targetNodeID string, connection *socket, cal
 	}
 	proxy := &proxy{
 		targetNodeID: targetNodeID, actorKey: proxyActorKey(caller), sessionID: sessionID,
-		socket: connection, storeID: storeID, target: target,
+		nodeAccountID: target.SelectedNodeAccountID, accountID: target.SelectedAccountID,
+		runtimeID: stringValue(target.ReportedAppServer["runtimeId"]),
+		socket:    connection, storeID: storeID, target: target,
 		threadRequestBindings: map[string]*string{}, idempotentThreadStarts: map[string]string{},
 		boundThreadIDs: map[string]bool{}, ephemeralStartRequests: map[string]bool{}, ephemeralThreadIDs: map[string]bool{},
 		toolFreeStartRequests: map[string]bool{}, toolFreeThreadIDs: map[string]bool{},
+		nodeMessages: make(chan map[string]any, 128), nodeMessagesDone: make(chan struct{}),
+	}
+	for _, account := range target.CodexAccounts {
+		if account.NodeAccountID == proxy.nodeAccountID {
+			proxy.defaultAccount = account.IsDefault
+		}
 	}
 	if caller.Kind == "node" {
 		proxy.callerNodeID = caller.NodeID
@@ -54,9 +62,33 @@ func (channel *Channel) attachProxy(targetNodeID string, connection *socket, cal
 	channel.mu.Lock()
 	channel.proxies[sessionID] = proxy
 	channel.mu.Unlock()
-	if !channel.TrySendToNode(targetNodeID, map[string]any{"type": "appserver.open", "sessionId": sessionID}) {
+	go func() {
+		for {
+			select {
+			case <-proxy.nodeMessagesDone:
+				return
+			case message := <-proxy.nodeMessages:
+				proxy.mu.Lock()
+				proxy.pendingNodeBytes -= len(stringValue(message["payload"]))
+				proxy.mu.Unlock()
+				if err := channel.handleProxyNodeMessage(proxy, message); err != nil {
+					channel.logger.Error("App Server message failed", "error", err)
+					proxy.socket.close(websocket.CloseInternalServerErr, "App Server processing failed")
+					channel.markProxyClientClosed(proxy, true)
+					return
+				}
+			}
+		}
+	}()
+	open := map[string]any{"type": "appserver.open", "sessionId": sessionID}
+	if supported, _ := target.Capabilities["codexAccountsV1"].(bool); supported {
+		open["nodeAccountId"] = proxy.nodeAccountID
+		open["runtimeId"] = proxy.runtimeID
+	}
+	if !channel.TrySendToNode(targetNodeID, open) {
 		channel.mu.Lock()
 		delete(channel.proxies, sessionID)
+		close(proxy.nodeMessagesDone)
 		channel.mu.Unlock()
 		connection.close(websocket.CloseTryAgainLater, "node capability channel is offline")
 		return
@@ -136,6 +168,9 @@ func (channel *Channel) cleanupProxy(proxy *proxy) {
 		return
 	}
 	delete(channel.proxies, proxy.sessionID)
+	if proxy.nodeMessagesDone != nil {
+		close(proxy.nodeMessagesDone)
+	}
 	channel.mu.Unlock()
 	proxy.mu.Lock()
 	if proxy.detachTimer != nil {
@@ -194,12 +229,24 @@ func (channel *Channel) reserveThreadStart(ctx context.Context, proxy *proxy, me
 		return false, err
 	}
 	key := threadStartKey(proxy, requestID)
+	legacyDigest := digest
+	if proxy.nodeAccountID != "" {
+		digest, err = requestDigest(map[string]any{"request": digestValue, "nodeId": proxy.targetNodeID, "nodeAccountId": proxy.nodeAccountID})
+		if err != nil {
+			return false, err
+		}
+	}
 	var returned string
-	err = channel.db.QueryRow(ctx, `INSERT INTO mira_appserver_thread_start_requests (
+	if proxy.nodeAccountID != "" {
+		err = channel.db.QueryRow(ctx, `INSERT INTO mira_appserver_thread_start_requests(store_id,actor_key,client_request_id,target_node_id,node_account_id,fingerprint_version,request_sha256,status)
+		 VALUES($1,$2,$3::uuid,$4::uuid,$5::uuid,2,$6,'pending') ON CONFLICT(store_id,actor_key,client_request_id) DO NOTHING RETURNING client_request_id::text`, proxy.storeID, proxy.actorKey, requestID, proxy.targetNodeID, proxy.nodeAccountID, digest).Scan(&returned)
+	} else {
+		err = channel.db.QueryRow(ctx, `INSERT INTO mira_appserver_thread_start_requests (
 	       store_id, actor_key, client_request_id, target_node_id, request_sha256, status
 	     ) VALUES ($1, $2, $3::uuid, $4::uuid, $5, 'pending')
 	     ON CONFLICT (store_id, actor_key, client_request_id) DO NOTHING
 	     RETURNING client_request_id::text`, proxy.storeID, proxy.actorKey, requestID, proxy.targetNodeID, digest).Scan(&returned)
+	}
 	if err == nil {
 		channel.mu.Lock()
 		channel.threadStarts[key] = &activeThreadStart{owner: proxy}
@@ -215,10 +262,20 @@ func (channel *Channel) reserveThreadStart(ctx context.Context, proxy *proxy, me
 	var existingDigest, status string
 	var threadID *string
 	var response []byte
-	err = channel.db.QueryRow(ctx, `SELECT request_sha256, status, thread_id, response
+	if proxy.nodeAccountID != "" {
+		var version int
+		var targetNode string
+		var targetBinding *string
+		err = channel.db.QueryRow(ctx, `SELECT request_sha256,status,thread_id,response,fingerprint_version,target_node_id::text,node_account_id::text FROM mira_appserver_thread_start_requests WHERE store_id=$1 AND actor_key=$2 AND client_request_id=$3::uuid`, proxy.storeID, proxy.actorKey, requestID).Scan(&existingDigest, &status, &threadID, &response, &version, &targetNode, &targetBinding)
+		if version == 1 && targetNode == proxy.targetNodeID && proxy.defaultAccount {
+			digest = legacyDigest
+		}
+	} else {
+		err = channel.db.QueryRow(ctx, `SELECT request_sha256, status, thread_id, response
 	     FROM mira_appserver_thread_start_requests
 	     WHERE store_id = $1 AND actor_key = $2 AND client_request_id = $3::uuid`,
-		proxy.storeID, proxy.actorKey, requestID).Scan(&existingDigest, &status, &threadID, &response)
+			proxy.storeID, proxy.actorKey, requestID).Scan(&existingDigest, &status, &threadID, &response)
+	}
 	if errors.Is(err, pgx.ErrNoRows) || (err == nil && existingDigest != digest) {
 		channel.sendProxyError(proxy, id, "miraRequestId was reused with different thread/start parameters", -32602)
 		return true, nil
@@ -401,13 +458,28 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 		}
 	}
 	method, _ := message["method"].(string)
+	if err := channel.recordInputFailure(ctx, proxy, message); err != nil {
+		return err
+	}
 	if (strings.HasPrefix(method, "thread/") || strings.HasPrefix(method, "turn/") || strings.HasPrefix(method, "item/")) && observedID != "" {
 		channel.bindProxyThread(proxy, observedID, false)
+	}
+	if method == "turn/started" || method == "turn/completed" {
+		turn, _ := params["turn"].(map[string]any)
+		state := "running"
+		if method == "turn/completed" {
+			state = "idle"
+		}
+		if err := channel.recordExecutionStatus(ctx, proxy, observedID, method, state, stringValue(turn["id"])); err != nil {
+			return err
+		}
 	}
 	if id, exists := message["id"]; exists {
 		key := rpcKey(id)
 		proxy.mu.Lock()
 		requested, bound := proxy.threadRequestBindings[key]
+		requestMethod := proxy.threadRequestMethods[key]
+		delete(proxy.threadRequestMethods, key)
 		if bound {
 			delete(proxy.threadRequestBindings, key)
 		}
@@ -416,6 +488,11 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 		wasToolFree := proxy.toolFreeStartRequests[key]
 		delete(proxy.toolFreeStartRequests, key)
 		proxy.mu.Unlock()
+		if bound && requested != nil && requestMethod == "turn/start" && message["error"] != nil {
+			if err := channel.recordExecutionStatus(ctx, proxy, *requested, "request_failed", "idle", ""); err != nil {
+				return err
+			}
+		}
 		if bound {
 			threadID := ""
 			if message["error"] == nil {
@@ -492,6 +569,21 @@ func (channel *Channel) bindProxyThread(proxy *proxy, threadID string, primary b
 		proxy.mu.Unlock()
 		return
 	}
+	if proxy.nodeAccountID != "" {
+		proxy.mu.Unlock()
+		revision, err := channel.claimExecution(context.Background(), proxy, threadID, false, false)
+		if err != nil {
+			channel.logger.Error("account execution binding failed")
+			return
+		}
+		if revision == 0 {
+			return
+		}
+		proxy.mu.Lock()
+		proxy.boundThreadIDs[threadID] = true
+		proxy.mu.Unlock()
+		return
+	}
 	proxy.boundThreadIDs[threadID] = true
 	storeID, nodeID := proxy.storeID, proxy.targetNodeID
 	proxy.mu.Unlock()
@@ -514,10 +606,26 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 		return nil
 	}
 	method, _ := message["method"].(string)
+	if method == "account/login/start" || method == "account/login/cancel" || method == "account/logout" || method == "account/rateLimitResetCredit/consume" {
+		channel.sendProxyError(proxy, message["id"], "请通过账号管理操作登录、退出和凭据变更", -32601)
+		return nil
+	}
 	params, _ := message["params"].(map[string]any)
 	if params == nil {
 		params = map[string]any{}
 		message["params"] = params
+	}
+	threadID, _ := params["threadId"].(string)
+	if threadID != "" && (method == "thread/resume" || method == "turn/start" || method == "turn/steer" || method == "turn/interrupt") {
+		proxy.mu.Lock()
+		ephemeral := proxy.ephemeralThreadIDs[threadID]
+		proxy.mu.Unlock()
+		if !ephemeral {
+			if _, err := channel.claimExecution(ctx, proxy, threadID, method == "thread/resume", method == "turn/start"); err != nil {
+				channel.sendProxyError(proxy, message["id"], err.Error(), -32009)
+				return nil
+			}
+		}
 	}
 	if threadID, ok := params["threadId"].(string); ok && methodUsesExistingThread(method) {
 		if err := channel.assertThreadsNotDeleted(ctx, proxy.storeID, []string{threadID}); err != nil {
@@ -541,6 +649,12 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 		proxy.mu.Lock()
 		target := proxy.target
 		proxy.mu.Unlock()
+		if proxy.nodeAccountID != "" && target != nil {
+			provider, _ := target.ReportedAppServer["provider"].(map[string]any)
+			if id := stringValue(provider["id"]); id != "" {
+				params["modelProvider"] = id
+			}
+		}
 		if method == "thread/start" || method == "thread/fork" {
 			if _, supplied := params["miraRequestId"]; supplied {
 				handled, err := channel.reserveThreadStart(ctx, proxy, message)
@@ -603,6 +717,10 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 		}
 		proxy.mu.Lock()
 		proxy.threadRequestBindings[rpcKey(id)] = thread
+		if proxy.threadRequestMethods == nil {
+			proxy.threadRequestMethods = map[string]string{}
+		}
+		proxy.threadRequestMethods[rpcKey(id)] = method
 		proxy.mu.Unlock()
 	}
 	encoded, err := json.Marshal(message)

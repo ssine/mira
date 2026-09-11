@@ -409,6 +409,20 @@ func PutSnapshot(ctx context.Context, pool *pgxpool.Pool, storeID string, body m
 	if err != nil {
 		return operationResponse{}, err
 	}
+	changedHistories := []string{}
+	for id, entry := range manifest {
+		if head.HistoryManifest[id] != entry {
+			changedHistories = append(changedHistories, id)
+		}
+	}
+	for id := range head.HistoryManifest {
+		if _, exists := manifest[id]; !exists {
+			changedHistories = append(changedHistories, id)
+		}
+	}
+	if err := checkAccountHistoryWriter(ctx, tx, storeID, changedHistories); err != nil {
+		return operationResponse{}, err
+	}
 	if err := repairNewGenerations(ctx, tx, storeID, head.HistoryManifest, manifest, appends); err != nil {
 		return operationResponse{}, err
 	}

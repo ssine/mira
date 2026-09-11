@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -85,8 +87,16 @@ func (service *Service) Register(ctx context.Context, nodeID string, body map[st
 	if err != nil {
 		return Result{}, err
 	}
+	if err := service.ensureDefaultAccount(ctx, nodeID); err != nil {
+		return Result{}, err
+	}
+	accounts, err := service.DesiredAccounts(ctx, nodeID)
+	if err != nil {
+		return Result{}, err
+	}
 	return result(200, map[string]any{
 		"nodeId": returnedNodeID, "desiredAppServer": desired,
+		"codexAccounts":            accounts,
 		"heartbeatIntervalSeconds": 3, "registeredAt": formatTime(registeredAt),
 		"lastSeenAt": formatTime(lastSeenAt),
 	}), nil
@@ -144,7 +154,17 @@ func (service *Service) Heartbeat(ctx context.Context, nodeID string, body map[s
 	if err != nil {
 		return Result{}, err
 	}
-	return result(200, map[string]any{"desiredAppServer": desired, "serverTime": formatTime(serverTime)}), nil
+	if err := service.ensureDefaultAccount(ctx, nodeID); err != nil {
+		return Result{}, err
+	}
+	if err := service.ReportAccounts(ctx, nodeID, body["codexAccounts"]); err != nil {
+		return Result{}, err
+	}
+	accounts, err := service.DesiredAccounts(ctx, nodeID)
+	if err != nil {
+		return Result{}, err
+	}
+	return result(200, map[string]any{"desiredAppServer": desired, "codexAccounts": accounts, "serverTime": formatTime(serverTime)}), nil
 }
 
 // List returns approved Nodes unless includeRevoked is true.
@@ -405,8 +425,47 @@ func (service *Service) normalizedDesiredState(body map[string]any) (desiredStat
 		return desiredState{}, err
 	}
 	desired := map[string]any{"running": running, "revision": service.now()}
+	for _, key := range []string{"environmentFiles", "inheritEnv"} {
+		if raw, present := body[key]; present {
+			values, ok := array(raw)
+			maximum := 128
+			if key == "environmentFiles" {
+				maximum = 8
+			}
+			if !ok || len(values) > maximum {
+				return desiredState{}, fmt.Errorf("invalid %s", key)
+			}
+			for _, value := range values {
+				text, ok := value.(string)
+				if !ok || text == "" || len(text) > 4096 || containsControl(text, false) {
+					return desiredState{}, fmt.Errorf("invalid %s", key)
+				}
+				if key == "inheritEnv" && !validAccountEnvironmentName(text) {
+					return desiredState{}, errors.New("invalid or reserved environment name")
+				}
+			}
+			desired[key] = values
+		}
+	}
 	for _, field := range []string{"listenUrl", "codexPath", "codexHome"} {
 		if value, exists := body[field]; exists {
+			if value != nil {
+				text, ok := value.(string)
+				if !ok || len(text) > 4096 || containsControl(text, false) {
+					return desiredState{}, fmt.Errorf("invalid %s", field)
+				}
+				if field == "listenUrl" && text != "" {
+					u, err := url.Parse(text)
+					if err != nil {
+						return desiredState{}, errors.New("listenUrl must be a loopback WebSocket URL")
+					}
+					ip := net.ParseIP(u.Hostname())
+					port, err := strconv.Atoi(u.Port())
+					if u.Scheme != "ws" || (u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback())) || err != nil || port < 0 || port > 65535 || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+						return desiredState{}, errors.New("listenUrl must be a loopback WebSocket URL")
+					}
+				}
+			}
 			desired[field] = value
 		}
 	}
@@ -430,7 +489,7 @@ func (service *Service) SetDesiredAppServer(ctx context.Context, nodeID string, 
 		return result(400, map[string]any{"error": err.Error(), "code": "invalid_request"}), nil
 	}
 	if (desired.DefaultCwd.Present && desired.DefaultCwd.Value != nil) ||
-		(desired.DeveloperInstructionsFile.Present && desired.DeveloperInstructionsFile.Value != nil) {
+		(desired.DeveloperInstructionsFile.Present && desired.DeveloperInstructionsFile.Value != nil) || body["environmentFiles"] != nil || body["codexHome"] != nil || body["codexPath"] != nil {
 		var platform string
 		err := service.db.QueryRow(ctx, `SELECT platform FROM codex_nodes WHERE node_id = $1::uuid AND approval_status = 'approved'`, nodeID).Scan(&platform)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -438,6 +497,9 @@ func (service *Service) SetDesiredAppServer(ctx context.Context, nodeID string, 
 		}
 		if err != nil {
 			return Result{}, err
+		}
+		if err := validateAccountDesiredPaths(desired.JSON, platform); err != nil {
+			return result(400, map[string]any{"error": err.Error(), "code": "invalid_request"}), nil
 		}
 		for _, field := range []struct {
 			name string
@@ -455,8 +517,10 @@ func (service *Service) SetDesiredAppServer(ctx context.Context, nodeID string, 
 		return Result{}, err
 	}
 	var storedRaw []byte
-	err = service.db.QueryRow(ctx, `UPDATE codex_nodes SET desired_app_server = desired_app_server || $2::jsonb, updated_at = NOW()
-     WHERE node_id = $1::uuid AND approval_status = 'approved' RETURNING desired_app_server`, nodeID, encoded).Scan(&storedRaw)
+	err = service.db.QueryRow(ctx, `WITH changed AS (UPDATE codex_nodes SET desired_app_server = desired_app_server || $2::jsonb, updated_at = NOW()
+     WHERE node_id = $1::uuid AND approval_status = 'approved' RETURNING desired_app_server), bumped AS (
+     UPDATE mira_node_codex_accounts SET revision=revision+1 WHERE node_id=$1::uuid AND is_default AND EXISTS(SELECT 1 FROM changed))
+     SELECT desired_app_server FROM changed`, nodeID, encoded).Scan(&storedRaw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return result(404, map[string]any{"error": "approved node not found", "code": "not_found"}), nil
 	}

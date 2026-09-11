@@ -25,6 +25,7 @@
         <button id="globalNodes" class="global-nav-item" type="button">设备</button>
         <button id="globalAgent" class="global-nav-item" type="button">对话</button>
         <button id="globalRuntime" class="global-nav-item" type="button">运行</button>
+		<button id="globalAccounts" class="global-nav-item" type="button">账号</button>
       </nav>
       <div class="server-state"><span id="healthDot" class="dot"></span><span id="healthText">正在连接 Server</span></div>
       <button id="themeToggle" class="topbar-action" type="button" aria-label="切换到深色主题" title="切换外观"><span aria-hidden="true">◐</span><span class="topbar-action-label">深色</span></button>
@@ -89,6 +90,11 @@
           <div id="nodeGrid" class="node-grid"></div>
         </section>
 
+        <section id="codexAccountsPanel" class="panel codex-accounts-panel" aria-label="Codex 账号管理">
+          <div class="panel-head"><div><p class="eyebrow">CODEX ACCOUNTS</p><h2>账号与额度</h2></div><div class="actions"><label>节点<select data-accounts-node aria-label="筛选账号所在节点"></select></label><button data-accounts-refresh class="secondary" type="button">刷新</button><button data-accounts-new class="approve" type="button">添加账号</button></div></div>
+          <div data-accounts-list class="codex-accounts-list"></div>
+        </section>
+
         <section class="panel audit-panel">
           <div class="panel-head"><div><p class="eyebrow">AUDIT</p><h2>最近活动</h2></div><span class="hint">敏感内容不会进入审计 metadata</span></div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>动作</th><th>身份</th><th>目标</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
@@ -106,6 +112,7 @@
               <div id="agentNavMenu" class="sidebar-popover sidebar-nav-menu" popover="auto" role="menu" aria-label="Mira 菜单">
                 <button id="agentHome" type="button" role="menuitem">Mira 主页</button>
                 <button id="agentNewProject" type="button" role="menuitem">新建项目</button>
+				<button id="agentManageAccounts" type="button" role="menuitem">管理 Codex 账号</button>
                 <button id="agentArchiveToggle" type="button" role="menuitemcheckbox" aria-checked="false" aria-pressed="false"><span id="agentArchiveLabel">归档对话</span></button>
                 <hr>
                 <button id="agentThemeToggle" type="button" role="menuitem">切换外观</button>
@@ -154,11 +161,14 @@
             <button id="conversationDetailsToggle" class="chat-icon-button conversation-details-toggle hidden" type="button" aria-label="打开会话详情" aria-expanded="false" aria-controls="conversationDetails" title="会话详情">
               <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="14" height="13" rx="1.5"></rect><path d="M12 4v12"></path></svg>
             </button>
+            <div class="conversation-notices">
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
+            <div id="conversationCompatibility" class="workspace-notice warning conversation-compatibility" role="status" hidden></div>
             <div id="forkProgress" class="workspace-notice hidden" role="status" aria-live="polite">
               <span id="forkProgressText"></span>
               <progress id="forkProgressBar" aria-label="分支历史复制进度"></progress>
               <button id="forkProgressCancel" type="button" class="secondary" hidden>取消复制</button>
+            </div>
             </div>
             <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
@@ -175,6 +185,7 @@
                   <textarea id="conversationInput" disabled rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
                 </div>
                 <div class="composer-toolbar">
+				  <label class="composer-account-choice"><span class="visually-hidden">本轮账号</span><select id="conversationAccount" aria-label="选择对话账号"></select></label>
                   <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
                   <div class="composer-choice composer-model-choice">
                     <button id="conversationModelSelect" class="composer-choice-toggle" type="button" aria-label="本轮模型" aria-haspopup="listbox" aria-expanded="false" aria-controls="conversationModelMenu" disabled>
@@ -245,6 +256,7 @@
             </div>
             <p id="agentSubtitle" class="agent-side-caption">PostgreSQL thread · 可选择原生运行节点</p>
             <label>Codex 运行位置<select id="agentRuntimeNode"></select></label>
+			<label>Codex 账号<select id="agentRuntimeAccount"></select></label>
             <label>该节点的默认工作目录<input id="agentRuntimeDefaultCwd" type="text" placeholder="Unix /path 或 Windows C:\\path"></label>
             <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
             <label>Developer Message 文件<input id="agentRuntimeDeveloperInstructionsFile" type="text" placeholder="节点上的 UTF-8 绝对路径"></label>
@@ -451,6 +463,31 @@
           <a id="nodeFileDownload" class="primary hidden" download>下载文件</a>
         </footer>
       </div>
+    </dialog>
+    <dialog id="codexAccountDialog" class="codex-account-dialog" aria-labelledby="codexAccountTitle">
+      <form id="codexAccountForm" autocomplete="off">
+        <div class="panel-head"><h2 id="codexAccountTitle" data-account-title>添加 Codex 账号</h2><button data-account-close class="ghost" type="button" aria-label="关闭账号管理">×</button></div>
+        <label>运行节点<select name="node" required></select></label>
+        <label>账号名称<input name="name" maxlength="128" required></label>
+        <label>配置方式<select name="mode"><option value="chatgpt">ChatGPT / OpenAI API Key</option><option value="custom">自定义 Responses 服务商</option><option value="adopt">接管已有 Codex 配置</option></select></label>
+        <label data-account-home hidden>节点上的 Codex home<input name="home" placeholder="配置目录的绝对路径"></label>
+        <label data-account-provider hidden>服务商 API 地址<input name="baseUrl" type="url" placeholder="https://provider.example/v1"></label>
+        <label>API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="32768"></label>
+        <p data-account-key-hint class="muted"></p>
+        <label data-account-clear-key class="toggle" hidden><input name="clearKey" type="checkbox">清除此账号保存的服务商密钥</label>
+        <details><summary>环境变量与配置来源</summary>
+          <p class="muted">接管现有配置时，请同时声明所需环境变量来源。环境文件按 KEY=VALUE 读取，不执行 shell 命令。变量值只写入节点。</p>
+          <label>节点上的环境文件（每行一个绝对路径）<textarea name="environmentFiles" rows="2"></textarea></label>
+          <label>额外继承的 Node 环境变量名称<input name="inheritEnv" placeholder="PROVIDER_API_KEY, CUSTOM_SETTING"></label>
+          <label>保存到此账号的环境变量（JSON）<textarea name="environment" rows="3" spellcheck="false" placeholder='{"PROVIDER_API_KEY":"..."}'></textarea></label>
+          <label class="toggle"><input name="clearEnvironment" type="checkbox">清空此前保存的账号环境变量</label>
+        </details>
+        <p data-account-profile class="muted" role="status"></p>
+        <div data-account-login-info role="status"></div>
+        <p data-account-error class="error" role="alert"></p>
+        <div class="actions"><button class="primary" type="submit">保存账号配置</button></div>
+        <div data-account-actions class="actions" hidden><button data-account-start class="approve" type="button">启动</button><button data-account-stop class="secondary" type="button">停止</button><button data-account-login class="secondary" type="button">登录</button><button data-account-cancel-login class="ghost" type="button">取消登录</button><button data-account-logout class="danger" type="button">退出账号</button></div>
+      </form>
     </dialog>
     <div id="toast" class="toast hidden" role="status"></div>
   </body>
