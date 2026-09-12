@@ -93,13 +93,17 @@ func TestAccountHistoryIsolationAndRecoveryProjection(t *testing.T) {
 		t.Fatalf("create: %+v %v", created, err)
 	}
 	exec(`INSERT INTO mira_codex_execution_routes(store_id,thread_id,generation,node_account_id,runtime_id,revision,state) VALUES($1,$2,1,$3::uuid,$4,1,'idle')`, storeID, threadID, bindingA, runtimeA)
+	// A user may retry before confirming recovery. Confirmation of the latest
+	// failure must not make an older failure reappear as another recovery plan.
+	exec(`INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail)
+	 VALUES($1::uuid,$2,$3,1,$4::uuid,$5,1,'invalid_encrypted_content','{"throughItemSeq":3,"credentialRevision":1}')`, uuid(), storeID, threadID, bindingA, runtimeA)
 	failureID := uuid()
 	exec(`INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail)
 	 VALUES($1::uuid,$2,$3,1,$4::uuid,$5,1,'invalid_encrypted_content','{"throughItemSeq":5,"credentialRevision":1}')`, failureID, storeID, threadID, bindingA, runtimeA)
 	server := &Server{pool: pool, nodes: nodes.New(pool, nodes.Options{})}
 	a := &nodes.CodexAccount{NodeAccountID: bindingA, CredentialRevision: 1}
 	plan, err := server.inputRecoveryPlan(ctx, storeID, threadID, a)
-	if err != nil || !plan.Recoverable || plan.Policy != "rebuildContext" || plan.ThroughItemSeq != 5 || plan.EncryptedItems != 2 {
+	if err != nil || plan.FailureID != failureID || !plan.Recoverable || plan.Policy != "rebuildContext" || plan.ThroughItemSeq != 5 || plan.EncryptedItems != 2 {
 		t.Fatalf("plan: %+v %v", plan, err)
 	}
 	if _, err := server.inputRecoveryPlan(ctx, storeID, threadID, &nodes.CodexAccount{NodeAccountID: bindingB, CredentialRevision: 1}); err == nil {
@@ -125,6 +129,20 @@ func TestAccountHistoryIsolationAndRecoveryProjection(t *testing.T) {
 	}
 	exec(`INSERT INTO mira_codex_input_compatibility(decision_id,store_id,thread_id,generation,node_account_id,model,policy,item_refs,credential_revision)
 	 VALUES($1::uuid,$2,$3,1,$4::uuid,'','rebuildContext',jsonb_build_object('throughItemSeq',5,'failureId',$5::text),1)`, uuid(), storeID, threadID, bindingA, failureID)
+	_, err = server.inputRecoveryPlan(ctx, storeID, threadID, a)
+	var resolved *HTTPError
+	if !errors.As(err, &resolved) || resolved.Code != "no_context_failure" {
+		t.Fatalf("confirmed recovery exposed an older failure: %v", err)
+	}
+	// A genuinely new failure still requires its own explicit confirmation,
+	// even if its encrypted input falls within the previous recovery prefix.
+	newFailureID := uuid()
+	exec(`INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail)
+	 VALUES($1::uuid,$2,$3,1,$4::uuid,$5,1,'invalid_encrypted_content','{"throughItemSeq":5,"credentialRevision":1}')`, newFailureID, storeID, threadID, bindingA, runtimeA)
+	plan, err = server.inputRecoveryPlan(ctx, storeID, threadID, a)
+	if err != nil || plan.FailureID != newFailureID || !plan.Recoverable {
+		t.Fatalf("new failure was hidden by an older confirmation: %+v %v", plan, err)
+	}
 	projected, err := GetThreadHistory(ctx, pool, storeID, threadID, nil, nil)
 	if err != nil {
 		t.Fatal(err)

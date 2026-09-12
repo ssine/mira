@@ -81,15 +81,21 @@ type inputRecoveryPlan struct {
 
 func (server *Server) inputRecoveryPlan(ctx context.Context, storeID, threadID string, account *nodes.CodexAccount) (inputRecoveryPlan, error) {
 	plan := inputRecoveryPlan{Policy: "omitReasoning", Recoverable: true}
-	err := server.pool.QueryRow(ctx, `SELECT e.operation_id::text,p.active_generation,p.item_count,(e.detail->>'throughItemSeq')::bigint
+	// Resolve only the latest failure in this account/credential/generation scope.
+	// Filtering confirmed failures before LIMIT would resurrect older errors
+	// whose input is already covered by the user's latest recovery decision.
+	err := server.pool.QueryRow(ctx, `WITH latest_failure AS (
+	 SELECT e.operation_id,e.store_id,e.thread_id,e.node_account_id,e.generation,e.detail,p.item_count
 	 FROM mira_codex_execution_events e JOIN codex_thread_projections p USING(store_id,thread_id)
 	 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.node_account_id=$3::uuid AND e.generation=p.active_generation
 	 AND e.kind='invalid_encrypted_content' AND (e.detail->>'credentialRevision')::bigint=$4
-	 AND NOT EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.store_id=e.store_id AND d.thread_id=e.thread_id
-	 AND d.node_account_id=e.node_account_id AND d.generation=e.generation AND d.item_refs->>'failureId'=e.operation_id::text)
-	 ORDER BY e.event_seq DESC LIMIT 1`, storeID, threadID, account.NodeAccountID, account.CredentialRevision).Scan(&plan.FailureID, &plan.Generation, &plan.ItemCount, &plan.ThroughItemSeq)
+	 ORDER BY e.event_seq DESC LIMIT 1
+	) SELECT e.operation_id::text,e.generation,e.item_count,(e.detail->>'throughItemSeq')::bigint FROM latest_failure e
+	 WHERE NOT EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.store_id=e.store_id AND d.thread_id=e.thread_id
+	 AND d.node_account_id=e.node_account_id AND d.generation=e.generation AND d.credential_revision=$4
+	 AND d.item_refs->>'failureId'=e.operation_id::text)`, storeID, threadID, account.NodeAccountID, account.CredentialRevision).Scan(&plan.FailureID, &plan.Generation, &plan.ItemCount, &plan.ThroughItemSeq)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return plan, &HTTPError{Status: 409, Code: "no_context_failure", Message: "尚未记录此账号的加密上下文错误，继续保留完整上下文"}
+		return plan, &HTTPError{Status: 409, Code: "no_context_failure", Message: "此账号没有待处理的加密上下文错误"}
 	}
 	if err != nil {
 		return plan, err

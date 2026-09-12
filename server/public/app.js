@@ -3831,6 +3831,7 @@ function handleAgentNotification(message) {
     const turn = params.turn ?? {};
     const completedTurnId = turn.id ?? params.turnId ?? null;
     const threadId = notificationThreadId(params) ?? agent.threadId;
+    accountRecovery.observeTurn(threadId);
     const completedAt = Date.now();
     const timing = completedTurnId ? (agent.turnTimings.get(completedTurnId) ?? {}) : {};
     timing.completedAt = completedAt;

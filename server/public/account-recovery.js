@@ -16,12 +16,20 @@ export class AccountRecovery {
   observe(params) {
     if (this.context?.threadId === params.threadId && this.context?.bindingId === params.nodeAccountId) void this.refresh();
   }
+  observeTurn(threadId) {
+    if (this.context?.threadId === threadId && !this.root.hidden) void this.refresh();
+  }
   async refresh() {
     const context = this.context, epoch = ++this.epoch;
     if (!context) return;
     let plan;
     try { plan = await this.api(this.endpoint(context)); }
-    catch { return; }
+    catch (error) {
+      if (epoch === this.epoch && this.context === context && error.code === "no_context_failure") {
+        this.root.replaceChildren(); this.root.hidden = true;
+      }
+      return;
+    }
     if (epoch !== this.epoch || this.context !== context) return;
     this.root.replaceChildren(); this.root.hidden = false;
     const text = document.createElement("span");
@@ -51,6 +59,7 @@ export class AccountRecovery {
           generation: plan.generation, itemCount: plan.itemCount,
         }) });
         if (this.context !== context) return;
+        this.epoch++;
         this.root.replaceChildren(); this.root.hidden = true;
         await this.afterApply({ ...context, retiredRuntimeId: result.retiredRuntimeId });
         this.notice("兼容处理已确认，原始历史已保留。请发送消息继续。");
