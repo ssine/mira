@@ -94,7 +94,10 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 			if unloadErr != nil {
 				return 0, unloadErr
 			}
-			defer release()
+			defer func() {
+				_ = tx.Rollback(ctx)
+				release()
+			}()
 			drained[source.key()] = true
 		}
 	}

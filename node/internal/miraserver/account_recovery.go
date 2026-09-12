@@ -305,7 +305,10 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 	if err != nil {
 		return true, &HTTPError{Status: 409, Code: "thread_busy", Message: err.Error()}
 	}
-	defer release()
+	defer func() {
+		_ = tx.Rollback(ctx)
+		release()
+	}()
 	var state, routeBinding, routeRuntime string
 	err = tx.QueryRow(ctx, `SELECT state,node_account_id::text,runtime_id FROM mira_codex_execution_routes WHERE store_id=$1 AND thread_id=$2 FOR UPDATE`, storeID, match[1]).Scan(&state, &routeBinding, &routeRuntime)
 	if err != nil || state != "idle" || routeBinding != bindingID || routeRuntime != runtimeID {
