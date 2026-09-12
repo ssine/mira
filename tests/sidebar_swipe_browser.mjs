@@ -66,7 +66,12 @@ try {
   await swipe(300,300,-190);
   assert.equal(await details.getAttribute('open'),'','left swipe from conversation opens details');
   await page.waitForTimeout(250);
-  await swipe(150,300,210);
+  // Settings can move form controls under fixed coordinates. Start on the
+  // heading because controls intentionally retain their native touch behavior.
+  const detailsHeading = await page.locator('#conversationDetailsTitle').boundingBox();
+  const closeStart = { x: detailsHeading.x + detailsHeading.width / 2, y: detailsHeading.y + detailsHeading.height / 2 };
+  assert.equal(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.id, closeStart), 'conversationDetailsTitle');
+  await swipe(closeStart.x,closeStart.y,210);
   await page.waitForFunction(()=>!document.querySelector('#conversationDetails').open);
   await closed();
   await beginDrag(300,300); await dragTo(240,300);
