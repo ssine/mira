@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `3571f5c`
+- Patch source commit: `36bf2a3`
 
 Apply it to a clean checkout:
 

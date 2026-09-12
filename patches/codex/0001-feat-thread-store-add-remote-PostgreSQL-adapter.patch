@@ -1,4 +1,4 @@
-From 3571f5c644317687f90a8925da926b947c6492d8 Mon Sep 17 00:00:00 2001
+From 36bf2a36c841d9e0a0ef847c2164fd241c4ae6e1 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 12 Sep 2026 05:14:26 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
@@ -22,11 +22,11 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  codex-rs/app-server/src/message_processor.rs  |    6 +
  codex-rs/app-server/src/notification_media.rs |    3 +-
  codex-rs/app-server/src/request_processors.rs |    1 +
- .../src/request_processors/thread_handoff.rs  |  128 ++
+ .../src/request_processors/thread_handoff.rs  |  129 +++
  .../request_processors/thread_lifecycle.rs    |    9 +-
  .../request_processors/thread_processor.rs    |  138 ++-
  codex-rs/app-server/src/thread_state.rs       |   15 +-
- .../tests/suite/v2/thread_unsubscribe.rs      |   62 +
+ .../tests/suite/v2/thread_unsubscribe.rs      |   65 ++
  codex-rs/config/src/config_toml.rs            |    5 +
  codex-rs/core/config.schema.json              |   25 +
  codex-rs/core/src/codex_delegate.rs           |    2 +-
@@ -54,7 +54,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  .../thread-store/src/remote_http/writer.rs    |  330 ++++++
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
- 49 files changed, 3557 insertions(+), 224 deletions(-)
+ 49 files changed, 3561 insertions(+), 224 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
@@ -13915,10 +13915,10 @@ index 60875fa..7a2131f 100644
  mod thread_summary;
 diff --git a/codex-rs/app-server/src/request_processors/thread_handoff.rs b/codex-rs/app-server/src/request_processors/thread_handoff.rs
 new file mode 100644
-index 0000000..e06e2ab
+index 0000000..5477b07
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/thread_handoff.rs
-@@ -0,0 +1,128 @@
+@@ -0,0 +1,129 @@
 +use super::*;
 +use codex_app_server_protocol::MiraThreadUnloadParams;
 +use codex_app_server_protocol::MiraThreadUnloadResponse;
@@ -13949,37 +13949,38 @@ index 0000000..e06e2ab
 +                "conversation tree changed; reopen the root conversation".to_string(),
 +            ));
 +        }
-+        let mut pending = self.pending_thread_unloads.lock().await;
-+        if ids.iter().any(|id| pending.contains(id)) {
-+            return Err(invalid_request(
-+                "conversation teardown is already in progress".to_string(),
-+            ));
-+        }
-+        let mut loaded = Vec::new();
-+        for id in &ids {
-+            if let Ok(thread) = self.thread_manager.get_thread(*id).await {
-+                let status = self
-+                    .thread_watch_manager
-+                    .loaded_status_for_thread(&id.to_string())
-+                    .await;
-+                if matches!(thread.agent_status().await, AgentStatus::Running)
-+                    || matches!(
-+                        status,
-+                        codex_app_server_protocol::ThreadStatus::Active { .. }
-+                    )
-+                {
-+                    return Err(invalid_request(format!(
-+                        "对话或子任务 {id} 仍在运行，请等待结束后重试"
-+                    )));
-+                }
-+                loaded.push((*id, thread));
++        {
++            let mut pending = self.pending_thread_unloads.lock().await;
++            if ids.iter().any(|id| pending.contains(id)) {
++                return Err(invalid_request(
++                    "conversation teardown is already in progress".to_string(),
++                ));
 +            }
++            pending.extend(ids.iter().copied());
 +        }
-+        pending.extend(ids.iter().copied());
-+        drop(pending);
 +        // Other threads retain their listeners, tasks, credentials and process.
 +        // Never acknowledge removal before both shutdown and durable writes finish.
 +        let result = async {
++            let mut loaded = Vec::new();
++            for id in &ids {
++                if let Ok(thread) = self.thread_manager.get_thread(*id).await {
++                    let status = self
++                        .thread_watch_manager
++                        .loaded_status_for_thread(&id.to_string())
++                        .await;
++                    if matches!(thread.agent_status().await, AgentStatus::Running)
++                        || matches!(
++                            status,
++                            codex_app_server_protocol::ThreadStatus::Active { .. }
++                        )
++                    {
++                        return Err(invalid_request(format!(
++                            "对话或子任务 {id} 仍在运行，请等待结束后重试"
++                        )));
++                    }
++                    loaded.push((*id, thread));
++                }
++            }
 +            for (id, thread) in &loaded {
 +                let state = self.thread_state_manager.thread_state(*id).await;
 +                let drain = {
@@ -14315,10 +14316,10 @@ index 3795638..dddc96a 100644
          self.shutdown_drain_waiter.take()
      }
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs b/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
-index da456ac..8cc36c4 100644
+index da456ac..1a5fa2d 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
-@@ -35,6 +35,68 @@ use tempfile::TempDir;
+@@ -35,6 +35,71 @@ use tempfile::TempDir;
  use tokio::time::timeout;
  
  const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -14332,6 +14333,9 @@ index da456ac..8cc36c4 100644
 +    let codex_home = TempDir::new()?;
 +    MockResponsesConfig::new(&server.uri())
 +        .with_sandbox_mode("danger-full-access")
++        .with_extra_config(
++            "[experimental_thread_store]\ntype = \"in_memory\"\nid = \"mira-unload-test\"",
++        )
 +        .write(codex_home.path())?;
 +    let mut client = TestAppServer::builder()
 +        .with_codex_home(codex_home.path())
