@@ -37,6 +37,28 @@ func closeFloat(left, right float64) bool {
 	return delta < 1e-12
 }
 
+func TestCostClonesKeepEveryRequestDeltaIndependent(t *testing.T) {
+	state := NewCostProjection(false, nil)
+	ApplyCostRecord(state, contextRecord("gpt-6-astra", "turn"), "")
+	var total costTotals
+	for i := int64(1); i <= 40; i++ {
+		before := cloneCostTotals(state.costTotals)
+		clone := state.clone()
+		ApplyCostRecord(state, usageRecord(usage(i*100000, i*80000, i*1000), usage(100000, 80000, 1000), ""), "")
+		delta := accountCostDelta(before, state.costTotals)
+		if value := pricedEstimate(&delta); !closeFloat(value["amount"].(float64), .33) {
+			t.Fatalf("request %d lost its delta: %#v", i, value)
+		}
+		if before.input.Cmp(&clone.input) != 0 || before.cached.Cmp(&clone.cached) != 0 || before.output.Cmp(&clone.output) != 0 {
+			t.Fatal("sampling mutated the previous cached projection")
+		}
+		mergeAccountCost(&total, delta)
+	}
+	if value := pricedEstimate(&total); !closeFloat(value["amount"].(float64), 13.2) {
+		t.Fatalf("request total: %#v", value)
+	}
+}
+
 func TestCostProjectionPricesModelsTurnsAndRepeatedSnapshots(t *testing.T) {
 	state := NewCostProjection(false, nil)
 	ApplyCostRecord(state, contextRecord("gpt-6-astra", "turn-a"), "")

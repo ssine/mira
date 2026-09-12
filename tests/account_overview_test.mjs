@@ -25,6 +25,19 @@ test("spending curves sum hourly costs inside each calendar day and reset at mid
   assert.deepEqual(result[1].points.map(point => [point.at, point.remaining]), [[200, 0], [300, 4], [380, 4]]);
 });
 
+test("empty default placeholders stay hidden while configured offline accounts remain", () => {
+  const placeholder = { name: "默认账号", nodeAccountId: "empty", isDefault: true, authType: "chatgpt", provider: "openai", credentialRevision: 1 };
+  const groups = accountGroups([{ nodeId: "offline", status: "offline", codexAccounts: [placeholder,
+    { ...placeholder, nodeAccountId: "logged-in", snapshot: { account: { type: "chatgpt" } } },
+    { ...placeholder, nodeAccountId: "configured", credentialRevision: 2 },
+    { ...placeholder, nodeAccountId: "api", authType: "apiKey" },
+    { ...placeholder, nodeAccountId: "custom", name: "Named account" },
+  ] }]);
+  assert.deepEqual(groups.find(group => group.name === "默认账号").members.map(member => member.account.nodeAccountId).sort(), ["api", "configured", "logged-in"]);
+  assert.ok(groups.some(group => group.name === "Named account"));
+  assert.deepEqual(accountGroups([{ codexAccounts: [placeholder] }]), []);
+});
+
 test("seven-day summaries bound concurrent reads, reuse totals and discard replies after logout", async () => {
   const originalFetch = globalThis.fetch, pending = [];
   globalThis.fetch = (url, { signal }) => new Promise(resolve => pending.push({ url, signal, resolve }));

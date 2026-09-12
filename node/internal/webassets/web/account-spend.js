@@ -19,7 +19,7 @@ export function spendingSeries(data) {
 
 // Shares history cancellation/cache and keyboard/touch inspection with quotas.
 export class AccountSpend extends AccountHistory {
-  constructor(root) { super(root); this.timeoutMs = 35_000; }
+  constructor(root) { super(root); this.timeoutMs = 65_000; }
 
   historyURL() {
     return this.urlFor(this.node.nodeId, this.range);
@@ -38,6 +38,8 @@ export class AccountSpend extends AccountHistory {
 
   render() {
     const data = this.data;
+    const attribution = this.root.querySelector("[data-spend-attribution]");
+    if (attribution) attribution.hidden = !data?.estimate?.reasons?.includes("historical_provider_attribution");
     const series = spendingSeries(data).filter(day => Number.isFinite(day.amount));
     this.valid = series.flatMap(day => day.points); this.pointIndex = null;
     this.svg.replaceChildren(); this.marker = this.tooltip = null;

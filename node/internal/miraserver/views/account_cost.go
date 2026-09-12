@@ -2,13 +2,17 @@ package views
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
 	_ "time/tzdata" // Calendar-day views also work on hosts without zoneinfo.
 
+	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 )
+
+const accountCostPredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|turn_context|thread_settings_applied|token_count)"'`
 
 // AccountCostHistory is a read projection. Account names combine Node bindings,
 // while every canonical request is priced only once in its own generation.
@@ -24,6 +28,31 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 	location, err := time.LoadLocation(zone)
 	if name == "" || len(name) > 128 || count == 0 || err != nil {
 		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "name, range (24h, 7d, 30d) and a valid timezone are required"}
+	}
+	// Older history predates named execution accounts. Only an unambiguous
+	// provider-to-name mapping can recover its ownership; never use today's route.
+	providers := []string{}
+	providerRows, err := service.pool.Query(ctx, `WITH identities AS (
+	 SELECT btrim(name) AS name,provider FROM mira_codex_accounts
+	 UNION SELECT btrim(a.name),b.reported#>>'{provider,id}' FROM mira_codex_accounts a JOIN mira_node_codex_accounts b USING(account_id)
+	 UNION SELECT btrim(a.name),n.reported_app_server#>>'{provider,id}' FROM mira_codex_accounts a
+	 JOIN mira_node_codex_accounts b USING(account_id) JOIN codex_nodes n USING(node_id) WHERE b.is_default)
+	 SELECT provider FROM identities WHERE provider<>'' GROUP BY provider HAVING count(DISTINCT name)=1 AND min(name)=$1`, name)
+	if err != nil {
+		return nil, err
+	}
+	for providerRows.Next() {
+		var provider string
+		if err := providerRows.Scan(&provider); err != nil {
+			providerRows.Close()
+			return nil, err
+		}
+		providers = append(providers, provider)
+	}
+	err = providerRows.Err()
+	providerRows.Close()
+	if err != nil {
+		return nil, err
 	}
 	now := service.now().In(location)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
@@ -43,7 +72,11 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 		 SELECT 1 FROM mira_codex_execution_events e JOIN mira_node_codex_accounts b USING(node_account_id)
 		 JOIN mira_codex_accounts a USING(account_id) WHERE e.store_id=p.store_id AND e.thread_id=p.thread_id
 		 AND e.generation=p.active_generation AND btrim(a.name)=$1)
-		 ORDER BY p.store_id,p.thread_id LIMIT 128`, name, afterStore, afterThread)
+		 OR (p.store_id,p.thread_id)>($2,$3) AND cardinality($4::text[])>0 AND EXISTS(
+		 SELECT 1 FROM codex_thread_events h WHERE h.store_id=p.store_id AND h.thread_id=p.thread_id AND h.generation=p.active_generation
+		 AND h.payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|thread_settings_applied)"'
+		 AND EXISTS(SELECT 1 FROM unnest($4::text[]) provider WHERE strpos(h.payload::text,to_json(provider)::text)>0))
+		 ORDER BY p.store_id,p.thread_id LIMIT 128`, name, afterStore, afterThread, providers)
 		if err != nil {
 			return nil, err
 		}
@@ -67,7 +100,7 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 		}
 		for _, value := range page {
 			state := NewCostProjection(value.thread.ForkedFromID != nil && *value.thread.ForkedFromID != "", []string{})
-			err := service.accountCostRecords(ctx, value.store, value.thread, state, name, from, now, func(at time.Time, delta costTotals) {
+			err := service.accountCostRecords(ctx, value.store, value.thread, state, name, providers, from, now, func(at time.Time, delta costTotals) {
 				date := at.In(location).Format("2006-01-02")
 				for i, day := range days {
 					if day["date"] != date {
@@ -123,6 +156,10 @@ func mergeAccountCost(target *costTotals, value costTotals) {
 	target.observed = target.observed || value.observed
 	target.priced += value.priced
 	target.unpriced += value.unpriced
+	target.longRequests += value.longRequests
+	for _, model := range value.models {
+		target.models = appendUnique(target.models, model)
+	}
 	for _, reason := range value.reasons {
 		incomplete(target, reason)
 	}
@@ -135,6 +172,8 @@ func accountCostDelta(before costTotals, after costTotals) costTotals {
 	delta.write.Sub(&after.write, &before.write)
 	delta.output.Sub(&after.output, &before.output)
 	delta.priced, delta.unpriced = after.priced-before.priced, after.unpriced-before.unpriced
+	delta.longRequests = after.longRequests - before.longRequests
+	delta.models = after.models
 	delta.observed = delta.priced > 0 || delta.unpriced > 0 || !before.observed && after.observed
 	if delta.observed || len(after.reasons) > len(before.reasons) {
 		delta.reasons = after.reasons
@@ -142,19 +181,28 @@ func accountCostDelta(before costTotals, after costTotals) costTotals {
 	return delta
 }
 
-func (service *Service) accountCostRecords(ctx context.Context, store string, thread Thread, state *CostProjection, name string, from, to time.Time, consume func(time.Time, costTotals)) error {
+func (service *Service) accountCostRecords(ctx context.Context, store string, thread Thread, state *CostProjection, name string, providers []string, from, to time.Time, consume func(time.Time, costTotals)) error {
 	cursor := int64(0)
-	var cachedTurn, cachedOwner string
+	var cachedTurn string
+	var cachedOwner, bindingOwner *string
+	var cachedTurnSet, bindingCached bool
+	var bindingFrom, bindingUntil *time.Time
+	var provider string
+	var hasExecution bool
+	if err := service.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_execution_events WHERE store_id=$1 AND thread_id=$2 AND generation=$3)`, store, thread.ThreadID, thread.Generation).Scan(&hasExecution); err != nil {
+		return err
+	}
 	for cursor < thread.ItemCount {
-		rows, err := service.pool.Query(ctx, `SELECT item_seq,payload FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2 AND generation=$3
-		 AND item_seq>$4 AND item_seq<=$5 AND `+costPredicate+` ORDER BY item_seq LIMIT 256`, store, thread.ThreadID, thread.Generation, cursor, thread.ItemCount)
+		rows, err := service.pool.Query(ctx, `SELECT item_seq,payload,created_at FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2 AND generation=$3
+		 AND item_seq>$4 AND item_seq<=$5 AND `+accountCostPredicate+` ORDER BY item_seq LIMIT 256`, store, thread.ThreadID, thread.Generation, cursor, thread.ItemCount)
 		if err != nil {
 			return err
 		}
-		page := []map[string]any{}
+		page := []transcriptRow{}
 		for rows.Next() {
 			var raw []byte
-			if err := rows.Scan(&cursor, &raw); err != nil {
+			var created time.Time
+			if err := rows.Scan(&cursor, &raw, &created); err != nil {
 				rows.Close()
 				return err
 			}
@@ -163,14 +211,27 @@ func (service *Service) accountCostRecords(ctx context.Context, store string, th
 				rows.Close()
 				return err
 			}
-			page = append(page, record)
+			page = append(page, transcriptRow{cursor, record, &created})
 		}
 		err = rows.Err()
 		rows.Close()
 		if err != nil {
 			return err
 		}
-		for _, record := range page {
+		recordedAt, err := service.restoreImportedTimestamps(ctx, store, thread.ThreadID, page)
+		if err != nil {
+			return err
+		}
+		for _, row := range page {
+			record := row.payload
+			payload := object(record["payload"])
+			if stringValue(record["type"]) == "session_meta" {
+				provider = stringValue(payload["model_provider"])
+			} else if stringValue(record["type"]) == "event_msg" && stringValue(payload["type"]) == "thread_settings_applied" {
+				if value := stringValue(object(payload["thread_settings"])["model_provider_id"]); value != "" {
+					provider = value
+				}
+			}
 			before := cloneCostTotals(state.costTotals)
 			ApplyCostRecord(state, record, thread.ThreadID)
 			if !state.scopeStarted {
@@ -180,31 +241,51 @@ func (service *Service) accountCostRecords(ctx context.Context, store string, th
 			if !delta.observed && len(delta.reasons) == 0 {
 				continue
 			}
-			at, err := time.Parse(time.RFC3339Nano, stringValue(record["timestamp"]))
+			timestamp := recordTimestamp(record)
+			if timestamp == "" {
+				timestamp = recordedAt[row.sequence]
+			}
+			at, err := time.Parse(time.RFC3339Nano, timestamp)
 			if err != nil || at.Before(from) || at.After(to) {
 				continue
 			}
 			// Exact turn ownership survives account switches and clock skew. A
 			// timestamp fallback is only for bound child runtimes lacking turn events.
 			var owner *string
-			var exact *bool
-			if cachedTurn != "" && cachedTurn == state.turnID {
-				owner = &cachedOwner
-			} else {
-				err = service.pool.QueryRow(ctx, `SELECT owned.name,owned.exact FROM (SELECT 1) seed LEFT JOIN LATERAL
-			 (SELECT btrim(a.name) AS name,(e.turn_id=$4 AND $4<>'' AND e.kind IN ('turn/started','turn/completed')) AS exact FROM mira_codex_execution_events e
-			 JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
-			 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.generation=$3 AND
-			 ((e.turn_id=$4 AND $4<>'' AND e.kind IN ('turn/started','turn/completed')) OR
-			 (e.kind IN ('bound','turn_requested') AND e.created_at<=$5))
-			 ORDER BY exact DESC NULLS LAST,e.event_seq DESC LIMIT 1) owned ON true`,
-					store, thread.ThreadID, thread.Generation, state.turnID, at).Scan(&owner, &exact)
-				if err != nil {
-					return err
+			if hasExecution {
+				if !cachedTurnSet || cachedTurn != state.turnID {
+					cachedTurn, cachedTurnSet, cachedOwner = state.turnID, true, nil
+					err = service.pool.QueryRow(ctx, `SELECT btrim(a.name) FROM mira_codex_execution_events e
+				 JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
+				 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.generation=$3 AND e.turn_id=$4 AND $4<>''
+				 AND e.kind IN ('turn/started','turn/completed') ORDER BY e.event_seq DESC LIMIT 1`,
+						store, thread.ThreadID, thread.Generation, state.turnID).Scan(&cachedOwner)
+					if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+						return err
+					}
 				}
-				if exact != nil && *exact && owner != nil {
-					cachedTurn, cachedOwner = state.turnID, *owner
+				owner = cachedOwner
+				if owner == nil {
+					if !bindingCached || bindingFrom != nil && at.Before(*bindingFrom) || bindingUntil != nil && !at.Before(*bindingUntil) {
+						err = service.pool.QueryRow(ctx, `SELECT previous.name,previous.created_at,following.created_at FROM (SELECT 1) seed
+					 LEFT JOIN LATERAL (SELECT btrim(a.name) AS name,e.created_at FROM mira_codex_execution_events e
+					 JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
+					 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.generation=$3 AND e.kind IN ('bound','turn_requested') AND e.created_at<=$4
+					 ORDER BY e.created_at DESC,e.event_seq DESC LIMIT 1) previous ON true
+					 LEFT JOIN LATERAL (SELECT min(created_at) AS created_at FROM mira_codex_execution_events
+					 WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND kind IN ('bound','turn_requested') AND created_at>$4) following ON true`,
+							store, thread.ThreadID, thread.Generation, at).Scan(&bindingOwner, &bindingFrom, &bindingUntil)
+						if err != nil {
+							return err
+						}
+						bindingCached = true
+					}
+					owner = bindingOwner
 				}
+			}
+			if owner == nil && includes(providers, provider) {
+				owner = &name
+				incomplete(&delta, "historical_provider_attribution")
 			}
 			if owner != nil && *owner == name {
 				consume(at, delta)

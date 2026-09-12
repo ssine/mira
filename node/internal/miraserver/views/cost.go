@@ -73,10 +73,10 @@ func cloneCostTotals(source costTotals) costTotals {
 	result := source
 	result.models = append([]string(nil), source.models...)
 	result.reasons = append([]string(nil), source.reasons...)
-	result.input.Set(&source.input)
-	result.cached.Set(&source.cached)
-	result.write.Set(&source.write)
-	result.output.Set(&source.output)
+	result.input = *new(big.Int).Set(&source.input)
+	result.cached = *new(big.Int).Set(&source.cached)
+	result.write = *new(big.Int).Set(&source.write)
+	result.output = *new(big.Int).Set(&source.output)
 	return result
 }
 

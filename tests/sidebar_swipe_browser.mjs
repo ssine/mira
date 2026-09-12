@@ -1,4 +1,5 @@
 import { closeSidebar } from "./sidebar_browser_helpers.mjs";
+import { accountOverviewFixture } from "./account_overview_fixtures.mjs";
 // Trusted touch input in mobile Chromium; no simulated DOM gesture handlers.
 // Run against the disposable Server with MIRA_SERVER_URL and its test administrator.
 import assert from 'node:assert/strict';
@@ -9,6 +10,10 @@ let browser;
 try {
   browser = await chromium.launch({ headless: true, ...(process.env.MIRA_BROWSER_EXECUTABLE ? { executablePath: process.env.MIRA_BROWSER_EXECUTABLE } : {}) });
   const context = await browser.newContext({ ...devices['Pixel 7'] });
+  const accountNode = accountOverviewFixture().nodes[0];
+  accountNode.codexAccounts = accountNode.codexAccounts.slice(0, 1);
+  await context.route(/\/v1\/nodes(?:\?|$)/, route => route.fulfill({ json: { data: [accountNode] } }));
+  await context.route(`**/v1/nodes/${accountNode.nodeId}`, route => route.fulfill({ json: accountNode }));
   const thread = { threadId, title: 'Swipe test', cwd: '/work', generation: 1, updatedAt: new Date().toISOString() };
   let threadList = [thread];
   await context.route('**/v1/codex/threads?*', route => route.fulfill({ json: { data: threadList } }));

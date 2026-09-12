@@ -38,9 +38,16 @@ export class AccountSidebar {
     for (const name of this.summaries.keys()) if (!names.has(name)) this.summaries.delete(name);
     for (const [name, controller] of this.summaryJobs) if (!names.has(name)) { controller.abort(); this.summaryJobs.delete(name); }
     const overview = this.groups.length > 0;
+    const emptyCatalog = !overview && nodes.some(node => (node.codexAccounts ?? []).length > 0);
+    this.root.classList.toggle("hidden", emptyCatalog);
     this.root.querySelector("#agentAccountToggle").classList.toggle("hidden", overview);
     this.root.querySelector("[data-account-list]").classList.toggle("hidden", !overview);
-    if (!overview) { this.select(legacyNode, active); return; }
+    if (!overview) {
+      this.selectedName = null;
+      this.select(emptyCatalog ? null : legacyNode, active && !emptyCatalog);
+      if (emptyCatalog && this.root.querySelector("#agentAccountDetails").matches(":popover-open")) this.root.querySelector("#agentAccountDetails").hidePopover();
+      return;
+    }
     if (!this.groups.some(group => group.name === this.selectedName)) this.selectedName = this.groups[0].name;
     this.selectGroup(this.selectedName);
     this.renderOverview();
@@ -106,7 +113,7 @@ export class AccountSidebar {
   }
 
   async loadSummary(name, controller) {
-    const timer = setTimeout(() => controller.abort(), 35_000);
+    const timer = setTimeout(() => controller.abort(), 65_000);
     try {
       const response = await fetch(this.spend.urlFor(name, "7d"), { signal: controller.signal });
       if (!response.ok) throw new Error("cost unavailable");

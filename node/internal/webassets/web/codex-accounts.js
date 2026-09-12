@@ -17,6 +17,11 @@ export function accountGroups(nodes) {
     for (const account of node.codexAccounts ?? []) {
       const name = account.name?.trim();
       if (!name) continue;
+      const provider = account.reportedAppServer?.provider;
+      const configured = account.snapshot?.account || weeklyQuota(account.snapshot?.limits).remaining !== null ||
+        Number(account.credentialRevision ?? 1) > 1 || account.authType && account.authType !== "chatgpt" ||
+        account.provider && account.provider !== "openai" || provider?.credentialSource && provider.credentialSource !== "chatgpt";
+      if (account.isDefault && name === "默认账号" && !configured) continue;
       if (!groups.has(name)) groups.set(name, { name, members: [] });
       groups.get(name).members.push({ node, account });
     }

@@ -32,7 +32,7 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 		if request.Method != http.MethodGet {
 			return true, foundation.WriteErrorJSON(response, 405, "method not allowed", "method_not_allowed")
 		}
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		query := request.URL.Query()
 		result, err := server.views.AccountCostHistory(ctx, query.Get("name"), query.Get("range"), query.Get("timezone"))

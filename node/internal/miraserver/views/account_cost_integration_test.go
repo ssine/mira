@@ -38,6 +38,13 @@ func TestAccountDailyCost(t *testing.T) {
 	const b = "20000000-0000-4000-8000-000000009002"
 	const c = "20000000-0000-4000-8000-000000009003"
 	t.Cleanup(func() {
+		exec(`INSERT INTO mira_thread_actions(store_id,thread_id,action,operation_id,generation)
+		 SELECT store_id,thread_id,'delete',gen_random_uuid(),1 FROM mira_codex_session_imports WHERE store_id=$1
+		 ON CONFLICT DO NOTHING`, store)
+		exec(`DELETE FROM mira_codex_session_import_segments WHERE import_id IN(SELECT import_id FROM mira_codex_session_imports WHERE store_id=$1)`, store)
+		exec(`DELETE FROM mira_codex_session_import_records WHERE import_id IN(SELECT import_id FROM mira_codex_session_imports WHERE store_id=$1)`, store)
+		exec(`DELETE FROM mira_codex_session_imports WHERE store_id=$1`, store)
+		exec(`DELETE FROM mira_thread_actions WHERE store_id=$1`, store)
 		for _, table := range []string{"mira_codex_execution_events", "codex_thread_events", "codex_thread_projections", "codex_store_events", "codex_store_heads"} {
 			exec("DELETE FROM "+table+" WHERE store_id=$1", store)
 		}
@@ -113,5 +120,68 @@ func TestAccountDailyCost(t *testing.T) {
 	}
 	if _, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "invalid-zone"); err == nil {
 		t.Fatal("invalid timezone accepted")
+	}
+
+	// Native ThreadStore items omit rollout timestamps. Their commit time must
+	// recover the request date, and exact execution ownership beats the provider.
+	exec(`UPDATE mira_codex_accounts SET provider='fixture-history-shared' WHERE account_id=ANY($1::uuid[])`, []string{a, b})
+	exec(`UPDATE mira_codex_accounts SET provider='fixture-history-other' WHERE account_id=$1::uuid`, c)
+	meta := func(provider string) map[string]any {
+		return record("session_meta", map[string]any{"model_provider": provider})
+	}
+	bare := func(total int64) map[string]any {
+		return usageRecord(usage(total, total*8/10, total/100), usage(100000, 80000, 1000), "")
+	}
+	items := []map[string]any{meta("fixture-history-other"), contextRecord("gpt-6-astra", "native")}
+	for i := int64(1); i <= 6; i++ {
+		items = append(items, bare(i*100000))
+	}
+	items = append(items, record("response_item", map[string]any{"type": "function_call_output", "output": "valid canonical NUL: \x00"}))
+	insert("native", "", 1, items...)
+	exec(`UPDATE codex_thread_events SET created_at='2026-09-10T10:00:00Z' WHERE store_id=$1 AND thread_id='native'`, store)
+	bind("native", "native", a, 1)
+	insert("historical", "", 1, meta("fixture-history-shared"), contextRecord("gpt-6-astra", "historical-a"), bare(100000),
+		record("event_msg", map[string]any{"type": "thread_settings_applied", "thread_settings": map[string]any{"model": "gpt-6-astra", "model_provider_id": "fixture-history-other"}}), bare(200000))
+	exec(`UPDATE codex_thread_events SET created_at='2026-09-09T10:00:00Z' WHERE store_id=$1 AND thread_id='historical'`, store)
+	exec(`UPDATE mira_node_codex_accounts SET reported='{"provider":{"id":"fixture-legacy-shared"}}' WHERE node_account_id=$1::uuid`, b)
+	insert("legacy-provider", "", 1, meta("fixture-legacy-shared"), contextRecord("gpt-6-astra", "legacy"), bare(100000))
+	exec(`UPDATE codex_thread_events SET created_at='2026-09-07T10:00:00Z' WHERE store_id=$1 AND thread_id='legacy-provider'`, store)
+
+	// Imported history belongs to its original calendar day. A missing source
+	// timestamp must remain unknown instead of being charged on the import day.
+	const importID = "30000000-0000-4000-8000-000000009001"
+	imported := []map[string]any{meta("fixture-history-shared"), contextRecord("gpt-6-astra", "imported"), bare(100000), bare(200000)}
+	insert("imported", "", 1, imported...)
+	exec(`UPDATE codex_thread_events SET created_at='2026-09-12T08:00:00Z' WHERE store_id=$1 AND thread_id='imported'`, store)
+	exec(`INSERT INTO mira_codex_session_imports(import_id,store_id,thread_id,source_node_id,source_path,source_sha256,source_size_bytes,source_item_count,store_event_seq,status)
+	 VALUES($1::uuid,$2,'imported',$3::uuid,'fixture-rollout','fixture-import-sha',1,4,1,'imported')`, importID, store, nodeA)
+	exec(`INSERT INTO mira_codex_session_import_segments(import_id,segment_index,source_import_id,first_line_seq,item_count) VALUES($1::uuid,0,$1::uuid,2,4)`, importID)
+	for i, item := range imported {
+		original := cloneMap(item)
+		if i < 3 {
+			original["timestamp"] = "2026-09-08T10:00:00Z"
+		}
+		raw, _ := json.Marshal(original)
+		exec(`INSERT INTO mira_codex_session_import_records(import_id,line_seq,raw_record,raw_sha256) VALUES($1::uuid,$2,$3::json,'fixture')`, importID, i+2, raw)
+	}
+	backfilled, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, day := range backfilled["days"].([]map[string]any) {
+		expected, ok := map[string]float64{"2026-09-07": .33, "2026-09-08": .33, "2026-09-09": .33, "2026-09-10": 1.98, "2026-09-12": .33}[day["date"].(string)]
+		if ok && (day["amount"] == nil || !closeFloat(day["amount"].(float64), expected)) {
+			t.Fatalf("backfill day: %#v", day)
+		}
+	}
+	other, err = service.AccountCostHistory(ctx, "Other cost fixture", "7d", "Asia/Shanghai")
+	if err != nil || !closeFloat(other["estimate"].(map[string]any)["amount"].(float64), .66) {
+		t.Fatalf("historical provider switch: %#v %v", other, err)
+	}
+	exec(`UPDATE mira_codex_accounts SET provider='fixture-history-shared' WHERE account_id=$1::uuid`, c)
+	exec(`UPDATE mira_node_codex_accounts SET reported='{"provider":{"id":"fixture-legacy-shared"}}' WHERE node_account_id=$1::uuid`, c)
+	ambiguous, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	if err != nil || !closeFloat(ambiguous["estimate"].(map[string]any)["amount"].(float64), 2.64) {
+		t.Fatalf("ambiguous historical provider was guessed: %#v %v", ambiguous, err)
 	}
 }
