@@ -482,7 +482,7 @@ function renderThreadStates() {
       if (sameGeneration) {
         price.textContent = `· ${compactCost(entry.estimate)}`;
         price.title = entry.estimate.amount == null ? "缺少模型、用量或价格，暂无法估算"
-          : `${entry.estimate.status === "partial" ? "部分请求已计价（*）" : "API 估算"}：${formatEstimatedCost(entry.estimate.amount)} USD${entry.estimate.scope === "fork" ? " · 仅分支创建后" : ""} · Standard 公开价，非套餐扣费`;
+          : `${entry.estimate.status === "partial" ? "部分请求已计价（*）" : "API 估算"}：${formatEstimatedCost(entry.estimate.amount)} USD${entry.estimate.includesSubagents ? ` · 含 ${entry.estimate.subagentCount} 个子 Agent（含下级）` : ""}${entry.estimate.scope === "fork" ? " · 仅分支创建后" : ""} · Standard 公开价，非套餐扣费`;
       }
     }
   }
@@ -523,9 +523,10 @@ function loadVisibleSidebarCosts() {
   const bounds = $("#agentThreadList").getBoundingClientRect();
   for (const row of $("#agentThreadList").querySelectorAll("[data-thread-row]")) {
     if (agent.costRequests.size >= 2) break;
-    const id = row.dataset.threadRow, usage = agent.tokenUsages.get(id), key = conversationCostKey(id);
+    const id = row.dataset.threadRow, usage = agent.tokenUsages.get(id);
     const cached = agent.costEstimates.get(id);
-    if (!usage || cached?.key === key || cached?.generation === usage.generation && Date.now() - cached.at < 10_000 || agent.costRequests.has(id) || agent.costRetryAfter.get(id) > Date.now()) continue;
+    // Descendant usage can advance while the parent's own history stays fixed.
+    if (!usage || cached?.generation === usage.generation && Date.now() - cached.at < 10_000 || agent.costRequests.has(id) || agent.costRetryAfter.get(id) > Date.now()) continue;
     if (row.closest("details:not([open])")) continue;
     const rect = row.getBoundingClientRect();
     if (!rect.height || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
@@ -4282,11 +4283,15 @@ function conversationCostKey(threadId) {
 
 function renderConversationCost(estimate, placeholder = "正在计算…") {
   $("#conversationCostAmount").textContent = estimate ? `${estimate.status === "partial" && estimate.amount !== null ? "已估算部分 " : ""}${estimate.amount === null ? "暂无法估算" : formatEstimatedCost(estimate.amount)}` : placeholder;
+  const components = $("#conversationCostComponents");
+  components.hidden = !estimate?.includesSubagents;
+  components.textContent = estimate?.includesSubagents
+    ? `自身 ${formatEstimatedCost(estimate.selfAmount)} · 子 Agent ${formatEstimatedCost(estimate.subagentAmount)}（含下级，共 ${estimate.subagentCount} 个）` : "";
   const parts = estimate?.breakdown;
   $("#conversationCostBreakdown").textContent = estimate?.amount != null && parts
     ? [`普通输入 ${formatEstimatedCost(parts.input)}`, `缓存输入 ${formatEstimatedCost(parts.cached)}`,
       ...(parts.write ? [`缓存写入 ${formatEstimatedCost(parts.write)}`] : []), `输出 ${formatEstimatedCost(parts.output)}`].join(" · ") : "";
-  const scope = estimate?.scope === "fork" ? "只计算创建分支后的请求。" : "";
+  const scope = `${estimate?.includesSubagents ? "合计包含此 Agent 及全部子 Agent。" : ""}${estimate?.scope === "fork" ? "只计算创建分支后的请求。" : ""}`;
   $("#conversationCostNote").textContent = !estimate ? "" : estimate.status === "unavailable"
     ? "缺少请求用量、模型或对应价格。" : estimate.status === "partial"
       ? `${scope}部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。`
@@ -4298,13 +4303,14 @@ async function refreshConversationCost() {
   const panel = $("#conversationDetails"), threadId = panel.dataset.threadId;
   if (!panel.open || !threadId || panel._miraCostRequest) return;
   const key = conversationCostKey(threadId);
-  if (panel._miraCostKey === key) return;
+  if (panel._miraCostKey === key && Date.now() - panel._miraCostAt < 10_000) return;
   const job = { key, revision: panel._miraRevision };
   panel._miraCostRequest = job;
   try {
     const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal&includeCost=1`);
     if (!panel.open || panel._miraRevision !== job.revision || conversationCostKey(threadId) !== key) return;
     panel._miraCostKey = key;
+    panel._miraCostAt = Date.now();
     rememberThreadCost(thread);
     renderConversationDetails(thread);
     renderConversationCost(thread.costEstimate ?? { status: "unavailable", amount: null });
@@ -4518,6 +4524,7 @@ async function openConversationDetails(threadId) {
     rememberThreadCost(thread);
     renderConversationDetails(thread);
     panel._miraCostKey = costJob.key;
+    panel._miraCostAt = Date.now();
     renderConversationCost(thread.costEstimate ?? { status: "unavailable", amount: null });
     renderThreadStates();
     $("#conversationDetailsStatus").textContent = "";

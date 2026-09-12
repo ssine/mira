@@ -24,6 +24,7 @@ const session = await loginAdmin(origin);
 const admin = (url, body, method = "POST") => adminRequest(origin, session, url,
   body === undefined ? {} : { method, body: JSON.stringify(body) });
 let nodeProcess, nodeId, token, rejectOld = false;
+let holdNextResponse = false, releaseResponse;
 const requests = [], sockets = [], logs = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(read, description, timeout = 60_000) {
@@ -67,7 +68,14 @@ const mock = http.createServer(async (request, response) => {
     ...items.map(item => ({ type: "response.output_item.done", item })),
     { type: "response.completed", response: { id, usage: { input_tokens: 10, output_tokens: 10, total_tokens: 20 } } }];
   response.writeHead(200, { "content-type": "text/event-stream", connection: "close" });
-  response.end(events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+  const chunks = events.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  if (holdNextResponse) {
+    holdNextResponse = false;
+    response.write(chunks.shift());
+    releaseResponse = () => response.end(chunks.join(""));
+  } else {
+    response.end(chunks.join(""));
+  }
 });
 await new Promise(resolve => mock.listen(0, "127.0.0.1", resolve));
 
@@ -155,6 +163,38 @@ try {
   console.log("Compatible account handoff completed");
   assert.equal(requests.at(-1).key, "Bearer synthetic-B");
   assert(encrypted(requests.at(-1).body.input).some(item => item.encrypted_content === "old-account-A"));
+
+  // Match the Web composer: native turn/start appends input to the active turn.
+  // Hold model sampling open so all submissions happen before turn completion.
+  const steeringId = (await second.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;
+  holdNextResponse = true;
+  const active = (await second.call("turn/start", { threadId: steeringId, input: [{ type: "text", text: "STEERING_INITIAL" }] })).turn;
+  await waitFor(() => releaseResponse && second.events.some(event => event.method === "turn/started" && event.params.turn.id === active.id), "active model response");
+  for (const text of ["STEERING_APPEND_ONE", "STEERING_APPEND_TWO"]) {
+    const appended = await second.call("turn/start", { threadId: steeringId, input: [{ type: "text", text }] });
+    assert.equal(appended.turn.id, active.id, "follow-up must keep the active turn ID");
+  }
+  const reconnected = await connect(b);
+  await reconnected.call("thread/resume", { threadId: steeringId });
+  const appended = await reconnected.call("turn/start", { threadId: steeringId, input: [{ type: "text", text: "STEERING_RECONNECTED" }] });
+  assert.equal(appended.turn.id, active.id);
+  await assert.rejects(reconnected.call("turn/steer", { threadId: steeringId, expectedTurnId: randomUUID(),
+    input: [{ type: "text", text: "STEERING_WRONG_TURN" }] }), /expected|mismatch/i);
+  const steered = await reconnected.call("turn/steer", { threadId: steeringId, expectedTurnId: active.id,
+    input: [{ type: "text", text: "STEERING_EXPLICIT" }] });
+  assert.equal(steered.turnId, active.id);
+  const otherAccount = await connect(a);
+  await assert.rejects(otherAccount.call("turn/start", { threadId: steeringId, input: [{ type: "text", text: "STEERING_WRONG_ACCOUNT" }] }), /切换到其他账号/);
+  await assert.rejects(otherAccount.call("thread/resume", { threadId: steeringId }), /仍有对话|busy/i);
+  releaseResponse(); releaseResponse = undefined;
+  await waitFor(() => second.events.some(event => event.method === "turn/completed" && event.params.turn.id === active.id && event.params.turn.status === "completed"), "steered turn completion");
+  const steeredInput = JSON.stringify(requests.at(-1).body.input);
+  for (const text of ["STEERING_APPEND_ONE", "STEERING_APPEND_TWO", "STEERING_RECONNECTED", "STEERING_EXPLICIT"]) assert(steeredInput.includes(text), `${text} must reach model input`);
+  for (const text of ["STEERING_WRONG_TURN", "STEERING_WRONG_ACCOUNT"]) assert(!steeredInput.includes(text));
+  assert.equal(second.events.filter(event => event.method === "turn/started" && event.params.turn.id === active.id).length, 1);
+  await turn(reconnected, steeringId, "Next turn after steering completes");
+  console.log("Active-turn steering passed: repeated input, reconnect, explicit steer, account isolation and completion");
+
   const compaction = process.env.MIRA_ACCOUNTS_TEST_COMPACTION === "1";
   if (compaction) {
     await admin(`/v1/codex/runtimes/${nodeId}/stop`, { nodeAccountId: b });
@@ -250,6 +290,7 @@ try {
 } catch (error) {
   console.error(error.stack, logs.join("").slice(-1500), (await fs.readFile(runtimeLog, "utf8").catch(() => "")).slice(-5000)); process.exitCode = 1;
 } finally {
+  releaseResponse?.();
   for (const socket of sockets) socket.close();
   if (nodeProcess?.exitCode === null) {
     const exited = new Promise(resolve => nodeProcess.once("exit", resolve)); nodeProcess.kill("SIGTERM"); await exited;

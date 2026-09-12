@@ -106,9 +106,6 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 			}
 		}
 	}
-	if turn && exists && !changed && (previous.State == "starting" || previous.State == "running") {
-		return 0, errors.New("此对话已有执行中的请求，请等待完成")
-	}
 	// Old writes may finish while retirement drains the runtime. Only after its
 	// exit is acknowledged do we serialize the new route with canonical commits.
 	for index, key := range [][]string{{"mira-store", proxy.storeID}, {"mira-thread", proxy.storeID, threadID}} {
@@ -129,11 +126,15 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		revision++
 		state = "idle"
 	}
-	if turn {
+	// Native turn/start also steers an active turn and returns its existing ID,
+	// without another turn/started notification. Let Codex serialize these inputs
+	// and preserve the pending/running route until its lifecycle events arrive.
+	starting := turn && (!exists || changed || (state != "starting" && state != "running"))
+	if starting {
 		state = "starting"
 		kind = "turn_requested"
 	}
-	if !exists || changed || turn {
+	if !exists || changed || starting {
 		operationID, err := randomUUID()
 		if err != nil {
 			return 0, err

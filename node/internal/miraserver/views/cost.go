@@ -488,7 +488,7 @@ func (service *Service) GetThreadCost(ctx context.Context, storeID string, threa
 	if err != nil {
 		return nil, err
 	}
-	return CostEstimate(state, thread), nil
+	return service.includeSubagentCosts(ctx, storeID, thread, state)
 }
 
 func (service *Service) GetTurnCosts(ctx context.Context, storeID string, thread Thread, turnIDs []string) (map[string]map[string]any, error) {

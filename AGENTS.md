@@ -98,6 +98,8 @@ Web message submission is single-flight across App Server connection, thread cre
 Web-created threads carry a UUID `miraRequestId`; the broker strips the Mira-only field before Codex,
 coalesces an in-flight duplicate, and persists successful replay data in PostgreSQL. Do not weaken
 this to a button-only debounce: retries after a lost response must resolve to the original thread.
+Native `turn/start` may append input to an active turn. Preserve its running state and turn ID when
+steering on the same account/runtime; do not reject it as a duplicate turn or reset it to starting.
 Managed App Server ports are desired state, not a globally reserved host port. A Node must keep the
 listener on loopback and may choose another free loopback port when the requested one is occupied
 (notably when Windows and WSL localhost forwarding overlap); report the actual listener to Server.
@@ -161,6 +163,10 @@ items. Render them independently of tool details, ordered and keyed by raw recor
 content position, and lazily load their saved data from PostgreSQL in the active generation.
 Do not reconstruct historical images from tool arguments, event notifications or current Node files.
 Expanded tool detail updates must preserve existing bodies and the user's reading position.
+Conversation cost estimates sum each thread's own requests and all descendant subagent threads from
+PostgreSQL, including archived children, without counting copied pre-fork history again. Show self
+and descendant amounts separately, preserve partial/unavailable estimates, and refresh child costs
+even when the parent history is unchanged. Per-turn cost remains local to that thread's requests.
 
 ## Protocol and upgrade policy
 

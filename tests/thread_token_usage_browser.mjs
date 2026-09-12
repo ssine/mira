@@ -106,6 +106,14 @@ try {
   await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "250k in · 16k out", ids[0]);
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["250,000", "200,000", "16,000"]);
   await page.waitForFunction(() => document.querySelector('#conversationCostAmount').textContent === '$1.50');
+  // A child may keep running after its parent stops writing history. Refresh
+  // totals even when the parent's generation, counters and token usage match.
+  rows[0].costEstimate = { ...estimate(2), includesSubagents: true, subagentCount: 2, selfAmount: 1.5, subagentAmount: 0.5 };
+  await page.waitForFunction(() => document.querySelector('#conversationCostAmount').textContent === '$2.00');
+  assert.equal(await page.locator('#conversationCostComponents').textContent(), '自身 $1.50 · 子 Agent $0.50（含下级，共 2 个）');
+  assert.match(await page.locator('#conversationCostNote').textContent(), /包含此 Agent 及全部子 Agent/);
+  await page.waitForFunction(id => document.querySelector(`[data-thread-cost="${id}"]`)?.textContent === '· $2.00', ids[0]);
+  assert.match(await page.locator(`[data-thread-cost="${ids[0]}"]`).getAttribute('title'), /含 2 个子 Agent/);
   assert.equal((await row.boundingBox()).height, height, "usage stays on the existing second row");
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
