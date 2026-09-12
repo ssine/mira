@@ -14,13 +14,15 @@ try {
   accountNode.codexAccounts = accountNode.codexAccounts.slice(0, 1);
   await context.route(/\/v1\/nodes(?:\?|$)/, route => route.fulfill({ json: { data: [accountNode] } }));
   await context.route(`**/v1/nodes/${accountNode.nodeId}`, route => route.fulfill({ json: accountNode }));
-  const thread = { threadId, title: 'Swipe test', cwd: '/work', generation: 1, updatedAt: new Date().toISOString() };
+  const thread = { threadId, title: 'Swipe test', cwd: '/work', generation: 1, itemCount: 1, updatedAt: new Date().toISOString() };
   let threadList = [thread];
   await context.route('**/v1/codex/threads?*', route => route.fulfill({ json: { data: threadList } }));
   await context.route(`**/v1/codex/threads/${threadId}?*`, route => route.fulfill({ json: thread }));
   const body = 'Reading text for a swipe from the middle of the conversation.\n\n'.repeat(50) +
     '\n```text\n' + 'a long horizontal code block '.repeat(50) + '\n```\n\n[Keep link gestures](https://example.com/)';
-  await context.route('**/v1/codex/threads/*/transcript?*', route => route.fulfill({ json: { generation: 1, trace: [{ key: 'prose', kind: 'assistant', body, turnId: 'turn' }] } }));
+  // Match the real API's versioned snapshot. An unversioned fixture rebuilds
+  // its unchanged prose on polling and detaches the native touch target mid-drag.
+  await context.route('**/v1/codex/threads/*/transcript?*', route => route.fulfill({ json: { generation: 1, storeVersion: 1, itemCount: 1, trace: [{ key: 'prose', kind: 'assistant', body, turnId: 'turn' }] } }));
   const page = await context.newPage();
   page.setDefaultTimeout(10_000);
   const errors = [];
