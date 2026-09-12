@@ -210,6 +210,9 @@ try {
   // Start a fresh gesture after the drawer has been fully open and idle. Cover
   // actual rows, the separate backdrop and the footer instead of empty list space.
   const stableOpen = async () => {
+    // The preceding drag intentionally suppresses accidental clicks for 400 ms.
+    // Let that guard expire before a new tap, rather than waiting after it.
+    await page.waitForTimeout(450);
     await page.locator('#agentThreadDrawerToggle').tap();
     await page.waitForTimeout(400); await follows(340);
   };
