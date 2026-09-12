@@ -37,16 +37,22 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "mira-execution:"+proxy.storeID+":"+threadID); err != nil {
-		return 0, err
-	}
-	var generation int64
-	err = tx.QueryRow(ctx, `SELECT active_generation FROM codex_thread_projections WHERE store_id=$1 AND thread_id=$2`, proxy.storeID, threadID).Scan(&generation)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, errors.New("对话尚未完成持久化，请稍后重试")
-	}
+
+	family, root, err := readExecutionFamily(ctx, tx, proxy.storeID, threadID)
 	if err != nil {
 		return 0, err
+	}
+	// All members use the root's execution gate. Do not hold canonical storage
+	// locks while waiting for old processes to drain their outstanding writes.
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "mira-execution:"+proxy.storeID+":"+root); err != nil {
+		return 0, err
+	}
+	family, lockedRoot, err := readExecutionFamily(ctx, tx, proxy.storeID, threadID)
+	if err != nil {
+		return 0, err
+	}
+	if lockedRoot != root {
+		return 0, errors.New("会话父子关系已变更，请重新打开")
 	}
 	current, err := channel.nodes.Get(ctx, proxy.targetNodeID, false)
 	if err != nil {
@@ -59,103 +65,225 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 	if stringValue(account.Reported["runtimeId"]) != proxy.runtimeID || account.Reported["status"] != "running" {
 		return 0, errors.New("账号运行实例已变更，请重新连接")
 	}
-	previous := executionRoute{}
-	err = tx.QueryRow(ctx, `SELECT node_account_id::text,runtime_id,revision,generation,state FROM mira_codex_execution_routes WHERE store_id=$1 AND thread_id=$2 FOR UPDATE`, proxy.storeID, threadID).Scan(&previous.Binding, &previous.Runtime, &previous.Revision, &previous.Generation, &previous.State)
-	exists := err == nil
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		return 0, err
-	}
-	changed := exists && (previous.Binding != proxy.nodeAccountID || previous.Runtime != proxy.runtimeID || previous.Generation != generation)
-	if changed && !handoff {
-		return 0, errors.New("此对话已切换到其他账号，请重新打开后再发送")
-	}
-	if changed {
-		var sourceNode string
-		if err = tx.QueryRow(ctx, `SELECT node_id::text FROM mira_node_codex_accounts WHERE node_account_id=$1::uuid`, previous.Binding).Scan(&sourceNode); err != nil {
+
+	retired := map[string]bool{}
+	for _, member := range family {
+		source, err := channel.executionSource(ctx, member, proxy, account.IsDefault)
+		if err != nil {
 			return 0, err
 		}
-		if err = channel.retirePreviousAccount(ctx, sourceNode, previous.Binding, previous.Runtime); err != nil {
-			return 0, err
+		if source == nil {
+			continue
 		}
-	}
-	if !exists {
-		// Imported/legacy threads still have a Node-only binding. Resolve its
-		// default profile without relabeling that Node or rewriting history.
-		var sourceNode string
-		err = tx.QueryRow(ctx, `SELECT node_id::text FROM mira_codex_thread_runtimes WHERE store_id=$1 AND thread_id=$2`, proxy.storeID, threadID).Scan(&sourceNode)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return 0, err
+		if !handoff {
+			return 0, errors.New("此对话或父子会话已切换到其他账号，请重新打开主会话后再发送")
 		}
-		if sourceNode != "" && (sourceNode != proxy.targetNodeID || !account.IsDefault) {
-			if !handoff {
-				return 0, errors.New("请先使用所选账号继续此对话")
-			}
-			source, err := channel.nodes.Get(ctx, sourceNode, false)
-			if err != nil {
-				return 0, err
-			}
-			legacy, err := nodes.SelectAccount(source, "")
-			if err != nil {
-				return 0, err
-			}
-			if legacy == nil {
-				return 0, errors.New("旧节点需要升级或停止其 Codex 实例后才能切换账号")
-			}
-			if err = channel.retirePreviousAccount(ctx, sourceNode, legacy.NodeAccountID, stringValue(legacy.Reported["runtimeId"])); err != nil {
+		if threadID != root {
+			return 0, errors.New("子 Agent 与主会话共用账号，请先从主会话切换账号")
+		}
+		if len(family) > 1 && len(retired) == 0 {
+			if err = channel.requireTreeExecutionProtocol(ctx, tx, proxy); err != nil {
 				return 0, err
 			}
 		}
-	}
-	// Old writes may finish while retirement drains the runtime. Only after its
-	// exit is acknowledged do we serialize the new route with canonical commits.
-	for index, key := range [][]string{{"mira-store", proxy.storeID}, {"mira-thread", proxy.storeID, threadID}} {
-		encoded, _ := json.Marshal(key)
-		lock := "SELECT pg_advisory_xact_lock(hashtextextended($1,0))"
-		if index == 0 {
-			lock = "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))"
-		}
-		if _, err = tx.Exec(ctx, lock, string(encoded)); err != nil {
-			return 0, err
+		if !retired[source.key()] {
+			if err = channel.retirePreviousAccount(ctx, source.Node, source.Binding, source.Runtime); err != nil {
+				return 0, err
+			}
+			retired[source.key()] = true
 		}
 	}
 
-	revision := previous.Revision
-	state := previous.State
-	kind := "bound"
-	if !exists || changed {
+	// A handoff takes the store gate exclusively only after retirement. This
+	// freezes graph membership/generations and makes every route switch atomic.
+	gate, _ := json.Marshal([]string{"mira-store", proxy.storeID})
+	lock := "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))"
+	if handoff {
+		lock = "SELECT pg_advisory_xact_lock(hashtextextended($1,0))"
+	}
+	if _, err = tx.Exec(ctx, lock, string(gate)); err != nil {
+		return 0, err
+	}
+	family, lockedRoot, err = readExecutionFamily(ctx, tx, proxy.storeID, threadID)
+	if err != nil {
+		return 0, err
+	}
+	if lockedRoot != root {
+		return 0, errors.New("会话父子关系已变更，请重新打开")
+	}
+	for _, member := range family {
+		source, err := channel.executionSource(ctx, member, proxy, account.IsDefault)
+		if err != nil {
+			return 0, err
+		}
+		if source != nil && (!handoff || !retired[source.key()]) {
+			return 0, errors.New("会话树的执行账号已变更，请重新打开主会话")
+		}
+	}
+	var requestedRevision int64
+	for _, member := range family {
+		if !handoff && member.ID != threadID {
+			continue
+		}
+		key, _ := json.Marshal([]string{"mira-thread", proxy.storeID, member.ID})
+		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", string(key)); err != nil {
+			return 0, err
+		}
+		revision, err := writeExecutionRoute(ctx, tx, proxy, member, turn && member.ID == threadID, root)
+		if err != nil {
+			return 0, err
+		}
+		if member.ID == threadID {
+			requestedRevision = revision
+		}
+	}
+	return requestedRevision, tx.Commit(ctx)
+}
+
+// A fresh account may not have touched the remote store yet. A bounded list
+// probes its actual adapter without starting a turn or trusting a version name.
+func (channel *Channel) requireTreeExecutionProtocol(ctx context.Context, tx pgx.Tx, proxy *proxy) error {
+	check := func() (bool, error) {
+		var supported bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_account_protocols WHERE node_account_id=$1::uuid AND runtime_id=$2::uuid AND protocol>=2)`, proxy.nodeAccountID, proxy.runtimeID).Scan(&supported)
+		return supported, err
+	}
+	if supported, err := check(); err != nil || supported {
+		return err
+	}
+	if channel.accounts != nil {
+		session, err := channel.accounts.open(ctx, proxy.targetNodeID, proxy.nodeAccountID, proxy.runtimeID, false)
+		if err != nil {
+			return err
+		}
+		defer channel.accounts.closeSession(session)
+		if _, err = channel.accounts.call(ctx, session, "thread/list", map[string]any{"limit": 1}); err != nil {
+			return err
+		}
+		if supported, err := check(); err != nil || supported {
+			return err
+		}
+	}
+	return errors.New("目标 Codex 运行时需要升级后才能完整切换父子会话的账号")
+}
+
+type executionMember struct {
+	ID         string
+	Generation int64
+	Previous   executionRoute
+	SourceNode string
+	LegacyNode string
+}
+
+type executionSource struct{ Node, Binding, Runtime string }
+
+func (source executionSource) key() string {
+	return source.Node + ":" + source.Binding + ":" + source.Runtime
+}
+
+func (channel *Channel) executionSource(ctx context.Context, member executionMember, proxy *proxy, defaultAccount bool) (*executionSource, error) {
+	if member.Previous.Binding != "" {
+		if member.Previous.Binding == proxy.nodeAccountID && member.Previous.Runtime == proxy.runtimeID {
+			return nil, nil
+		}
+		return &executionSource{member.SourceNode, member.Previous.Binding, member.Previous.Runtime}, nil
+	}
+	if member.LegacyNode == "" || (member.LegacyNode == proxy.targetNodeID && defaultAccount) {
+		return nil, nil
+	}
+	node, err := channel.nodes.Get(ctx, member.LegacyNode, false)
+	if err != nil {
+		return nil, err
+	}
+	account, err := nodes.SelectAccount(node, "")
+	if err != nil {
+		return nil, err
+	}
+	if account == nil {
+		return nil, errors.New("旧节点需要升级或停止其 Codex 实例后才能切换账号")
+	}
+	return &executionSource{member.LegacyNode, account.NodeAccountID, stringValue(account.Reported["runtimeId"])}, nil
+}
+
+// Prefer generation-scoped graph edges. Legacy parent metadata fills only rows
+// with no graph entry; a stale edge must not attach a recreated parent/child.
+const executionFamilySQL = `WITH RECURSIVE edges AS (
+ SELECT e.parent_thread_id AS parent,e.child_thread_id AS child FROM mira_agent_graph_edges e
+ JOIN codex_thread_projections p ON p.store_id=e.store_id AND p.thread_id=e.parent_thread_id AND p.active_generation=e.parent_generation
+ JOIN codex_thread_projections c ON c.store_id=e.store_id AND c.thread_id=e.child_thread_id AND c.active_generation=e.child_generation WHERE e.store_id=$1
+ UNION SELECT c.parent_thread_id,c.thread_id FROM codex_thread_projections c
+ JOIN codex_thread_projections p ON p.store_id=c.store_id AND p.thread_id=c.parent_thread_id
+ WHERE c.store_id=$1 AND NOT EXISTS(SELECT 1 FROM mira_agent_graph_edges e WHERE e.store_id=c.store_id AND e.child_thread_id=c.thread_id)
+), ancestors(id) AS (SELECT $2::text UNION SELECT e.parent FROM edges e JOIN ancestors a ON e.child=a.id),
+roots(id) AS (SELECT a.id FROM ancestors a WHERE NOT EXISTS(SELECT 1 FROM edges e WHERE e.child=a.id)),
+family(id) AS (SELECT id FROM roots UNION SELECT e.child FROM edges e JOIN family f ON e.parent=f.id)
+SELECT p.thread_id,p.active_generation,COALESCE(r.node_account_id::text,''),COALESCE(r.runtime_id,''),COALESCE(r.revision,0),COALESCE(r.generation,0),COALESCE(r.state,''),COALESCE(b.node_id::text,''),COALESCE(l.node_id::text,''),(SELECT count(*) FROM roots),(SELECT min(id) FROM roots)
+FROM family f JOIN codex_thread_projections p ON p.store_id=$1 AND p.thread_id=f.id
+LEFT JOIN mira_codex_execution_routes r ON r.store_id=p.store_id AND r.thread_id=p.thread_id
+LEFT JOIN mira_node_codex_accounts b USING(node_account_id)
+LEFT JOIN mira_codex_thread_runtimes l ON l.store_id=p.store_id AND l.thread_id=p.thread_id
+ORDER BY p.thread_id`
+
+func readExecutionFamily(ctx context.Context, tx pgx.Tx, storeID, threadID string) ([]executionMember, string, error) {
+	rows, err := tx.Query(ctx, executionFamilySQL, storeID, threadID)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var family []executionMember
+	var root string
+	found := false
+	for rows.Next() {
+		var member executionMember
+		var roots int
+		if err = rows.Scan(&member.ID, &member.Generation, &member.Previous.Binding, &member.Previous.Runtime, &member.Previous.Revision, &member.Previous.Generation, &member.Previous.State, &member.SourceNode, &member.LegacyNode, &roots, &root); err != nil {
+			return nil, "", err
+		}
+		if roots != 1 {
+			return nil, "", errors.New("会话父子关系不一致，无法切换账号")
+		}
+		found = found || member.ID == threadID
+		family = append(family, member)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, "", err
+	}
+	if !found {
+		return nil, "", errors.New("对话尚未完成持久化或父子关系存在循环，请稍后重试")
+	}
+	return family, root, nil
+}
+
+func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member executionMember, turn bool, root string) (int64, error) {
+	previous := member.Previous
+	exists := previous.Binding != ""
+	changed := !exists || previous.Binding != proxy.nodeAccountID || previous.Runtime != proxy.runtimeID || previous.Generation != member.Generation
+	revision, state, kind := previous.Revision, previous.State, "bound"
+	if changed {
 		revision++
 		state = "idle"
 	}
-	// Native turn/start also steers an active turn and returns its existing ID,
-	// without another turn/started notification. Let Codex serialize these inputs
-	// and preserve the pending/running route until its lifecycle events arrive.
-	starting := turn && (!exists || changed || (state != "starting" && state != "running"))
+	// Same-runtime turn/start can steer; retain its running state and turn ID.
+	starting := turn && state != "starting" && state != "running"
 	if starting {
 		state = "starting"
 		kind = "turn_requested"
 	}
-	if !exists || changed || starting {
+	if changed || starting {
 		operationID, err := randomUUID()
 		if err != nil {
 			return 0, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind)
-		 VALUES($1::uuid,$2,$3,$4,$5::uuid,$6,$7,$8)`, operationID, proxy.storeID, threadID, generation, proxy.nodeAccountID, proxy.runtimeID, revision, kind)
-		if err != nil {
+		detail, _ := json.Marshal(map[string]string{"rootThreadId": root})
+		if _, err = tx.Exec(ctx, `INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail) VALUES($1::uuid,$2,$3,$4,$5::uuid,$6,$7,$8,$9::jsonb)`, operationID, proxy.storeID, member.ID, member.Generation, proxy.nodeAccountID, proxy.runtimeID, revision, kind, detail); err != nil {
 			return 0, err
 		}
-		_, err = tx.Exec(ctx, `INSERT INTO mira_codex_execution_routes(store_id,thread_id,generation,node_account_id,runtime_id,revision,state)
-		 VALUES($1,$2,$3,$4::uuid,$5,$6,$7) ON CONFLICT(store_id,thread_id) DO UPDATE SET generation=EXCLUDED.generation,node_account_id=EXCLUDED.node_account_id,runtime_id=EXCLUDED.runtime_id,revision=EXCLUDED.revision,state=EXCLUDED.state,turn_id=NULL,updated_at=NOW()`, proxy.storeID, threadID, generation, proxy.nodeAccountID, proxy.runtimeID, revision, state)
-		if err != nil {
+		if _, err = tx.Exec(ctx, `INSERT INTO mira_codex_execution_routes(store_id,thread_id,generation,node_account_id,runtime_id,revision,state) VALUES($1,$2,$3,$4::uuid,$5,$6,$7) ON CONFLICT(store_id,thread_id) DO UPDATE SET generation=EXCLUDED.generation,node_account_id=EXCLUDED.node_account_id,runtime_id=EXCLUDED.runtime_id,revision=EXCLUDED.revision,state=EXCLUDED.state,turn_id=NULL,updated_at=NOW()`, proxy.storeID, member.ID, member.Generation, proxy.nodeAccountID, proxy.runtimeID, revision, state); err != nil {
 			return 0, err
 		}
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,node_account_id,bound_at)
-	 VALUES($1,$2,$3::uuid,$4::uuid,NOW()) ON CONFLICT(store_id,thread_id) DO UPDATE SET node_id=EXCLUDED.node_id,node_account_id=EXCLUDED.node_account_id,bound_at=EXCLUDED.bound_at`, proxy.storeID, threadID, proxy.targetNodeID, proxy.nodeAccountID)
-	if err != nil {
-		return 0, err
-	}
-	return revision, tx.Commit(ctx)
+	_, err := tx.Exec(ctx, `INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,node_account_id,bound_at) VALUES($1,$2,$3::uuid,$4::uuid,NOW()) ON CONFLICT(store_id,thread_id) DO UPDATE SET node_id=EXCLUDED.node_id,node_account_id=EXCLUDED.node_account_id,bound_at=EXCLUDED.bound_at`, proxy.storeID, member.ID, proxy.targetNodeID, proxy.nodeAccountID)
+	return revision, err
 }
 
 func (channel *Channel) retirePreviousAccount(ctx context.Context, nodeID, bindingID, runtimeID string) error {

@@ -189,6 +189,13 @@ parallel conversation model.
 
 ## Subagent model
 
+Account handoff starts from the root conversation and atomically moves its current-generation
+subagent tree, including closed/archived descendants; ordinary forks remain independent. Drain
+old runtimes before acquiring canonical storage locks. Child-only account switches must not split
+the tree. Managed runtime provider selection is a read projection at the ThreadStore boundary;
+keep each child's model and all canonical metadata/history intact. Require account protocol 2
+before switching a tree to a runtime, while retaining protocol 1 readers for older clients.
+
 A Codex subagent is not an in-memory detail of its parent. Persist it as its own thread with a parent
 thread ID and source kind. Parent and children share the same PostgreSQL store and can receive the
 same dynamic tools, but their histories and generations remain independent.

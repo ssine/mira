@@ -1,54 +1,54 @@
-From 8f9d732c8d6ad9d4799c9876172945ed277eb7d3 Mon Sep 17 00:00:00 2001
+From 69aa8fb0c923c46e9601e34c5c9f575b567ac80f Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 12 Sep 2026 05:14:26 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  account-scoped input recovery
 
 ---
- codex-rs/Cargo.lock                           | 299 +++---
- .../schema/json/ServerNotification.json       |  58 +
- .../codex_app_server_protocol.schemas.json    |  60 ++
- .../codex_app_server_protocol.v2.schemas.json |  60 ++
- .../MiraThreadForkProgressNotification.json   |  53 +
- .../app-server-exports-experimental.json.zst  | Bin 149904 -> 150308 bytes
- .../app-server-exports-stable.json.zst        | Bin 145918 -> 146269 bytes
- .../schema/typescript/ServerNotification.ts   |   3 +-
- .../typescript/ServerNotificationEnvelope.ts  |   3 +-
- .../v2/MiraThreadForkProgressNotification.ts  |   9 +
- .../schema/typescript/v2/index.ts             |   1 +
- .../src/protocol/common.rs                    |   1 +
- .../src/protocol/v2/thread.rs                 |  13 +
- codex-rs/app-server/src/message_processor.rs  |   1 +
- codex-rs/app-server/src/notification_media.rs |   3 +-
- .../request_processors/thread_processor.rs    | 138 ++-
- codex-rs/config/src/config_toml.rs            |   5 +
- codex-rs/core/config.schema.json              |  25 +
- codex-rs/core/src/codex_delegate.rs           |   2 +-
- codex-rs/core/src/codex_thread.rs             |   6 +
- codex-rs/core/src/config/mod.rs               |  17 +
- codex-rs/core/src/session/mod.rs              |   9 +
- codex-rs/core/src/session/session.rs          |  16 +
- codex-rs/core/src/session/turn.rs             |   7 +
- codex-rs/core/src/tasks/failure_tests.rs      |  61 ++
- codex-rs/core/src/tasks/mod.rs                |  47 +-
- codex-rs/core/src/thread_manager.rs           |  35 +
- .../src/thread_manager/remote_agent_graph.rs  |  95 ++
- codex-rs/core/src/thread_manager_tests.rs     |  45 +
- codex-rs/core/tests/suite/guardian_history.rs |   3 +
- codex-rs/thread-store/Cargo.toml              |   1 +
- codex-rs/thread-store/src/in_memory.rs        |  86 +-
- codex-rs/thread-store/src/lib.rs              |   4 +
- codex-rs/thread-store/src/remote_http.rs      | 990 ++++++++++++++++++
- .../src/remote_http/agent_graph.rs            |  35 +
- .../src/remote_http/input_recovery.rs         |  62 ++
- .../src/remote_http/input_recovery_tests.rs   |  47 +
- .../thread-store/src/remote_http/retry.rs     |  89 ++
- .../src/remote_http/retry_tests.rs            | 544 ++++++++++
- .../thread-store/src/remote_http/uploads.rs   | 146 +++
- .../thread-store/src/remote_http/writer.rs    | 330 ++++++
- .../tui/src/app/app_server_event_targets.rs   |   3 +
- codex-rs/tui/src/chatwidget/protocol.rs       |   1 +
- 43 files changed, 3197 insertions(+), 216 deletions(-)
+ codex-rs/Cargo.lock                           |  299 ++---
+ .../schema/json/ServerNotification.json       |   58 +
+ .../codex_app_server_protocol.schemas.json    |   60 +
+ .../codex_app_server_protocol.v2.schemas.json |   60 +
+ .../MiraThreadForkProgressNotification.json   |   53 +
+ .../app-server-exports-experimental.json.zst  |  Bin 149904 -> 150308 bytes
+ .../app-server-exports-stable.json.zst        |  Bin 145918 -> 146269 bytes
+ .../schema/typescript/ServerNotification.ts   |    3 +-
+ .../typescript/ServerNotificationEnvelope.ts  |    3 +-
+ .../v2/MiraThreadForkProgressNotification.ts  |    9 +
+ .../schema/typescript/v2/index.ts             |    1 +
+ .../src/protocol/common.rs                    |    1 +
+ .../src/protocol/v2/thread.rs                 |   13 +
+ codex-rs/app-server/src/message_processor.rs  |    1 +
+ codex-rs/app-server/src/notification_media.rs |    3 +-
+ .../request_processors/thread_processor.rs    |  138 ++-
+ codex-rs/config/src/config_toml.rs            |    5 +
+ codex-rs/core/config.schema.json              |   25 +
+ codex-rs/core/src/codex_delegate.rs           |    2 +-
+ codex-rs/core/src/codex_thread.rs             |    6 +
+ codex-rs/core/src/config/mod.rs               |   17 +
+ codex-rs/core/src/session/mod.rs              |    9 +
+ codex-rs/core/src/session/session.rs          |   16 +
+ codex-rs/core/src/session/turn.rs             |    7 +
+ codex-rs/core/src/tasks/failure_tests.rs      |   61 +
+ codex-rs/core/src/tasks/mod.rs                |   47 +-
+ codex-rs/core/src/thread_manager.rs           |   38 +
+ .../src/thread_manager/remote_agent_graph.rs  |   95 ++
+ codex-rs/core/src/thread_manager_tests.rs     |   45 +
+ codex-rs/core/tests/suite/guardian_history.rs |    3 +
+ codex-rs/thread-store/Cargo.toml              |    1 +
+ codex-rs/thread-store/src/in_memory.rs        |   86 +-
+ codex-rs/thread-store/src/lib.rs              |    4 +
+ codex-rs/thread-store/src/remote_http.rs      | 1028 +++++++++++++++++
+ .../src/remote_http/agent_graph.rs            |   35 +
+ .../src/remote_http/input_recovery.rs         |   62 +
+ .../src/remote_http/input_recovery_tests.rs   |   47 +
+ .../thread-store/src/remote_http/retry.rs     |   89 ++
+ .../src/remote_http/retry_tests.rs            |  616 ++++++++++
+ .../thread-store/src/remote_http/uploads.rs   |  146 +++
+ .../thread-store/src/remote_http/writer.rs    |  330 ++++++
+ .../tui/src/app/app_server_event_targets.rs   |    3 +
+ codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
+ 43 files changed, 3310 insertions(+), 216 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
@@ -14357,7 +14357,7 @@ index 5bf4101..3037a3a 100644
                  if !task_cancellation_token.is_cancelled() {
                      // Finish uniformly from the spawn site so all tasks share the same lifecycle.
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index cfa6196..ec79582 100644
+index cfa6196..4f2a0a8 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1,3 +1,5 @@
@@ -14374,7 +14374,7 @@ index cfa6196..ec79582 100644
  use codex_thread_store::StoredModelContext;
  use codex_thread_store::StoredThread;
  use codex_thread_store::ThreadMetadataPatch;
-@@ -411,6 +414,11 @@ pub fn thread_store_from_config(
+@@ -411,6 +414,14 @@ pub fn thread_store_from_config(
              store
          }
          ThreadStoreConfig::InMemory { id } => InMemoryThreadStore::for_id(id),
@@ -14382,11 +14382,14 @@ index cfa6196..ec79582 100644
 +            endpoint,
 +            store_id,
 +            bearer_token,
-+        } => Arc::new(RemoteHttpThreadStore::new(endpoint, store_id, bearer_token)),
++        } => Arc::new(
++            RemoteHttpThreadStore::new(endpoint, store_id, bearer_token)
++                .with_execution_provider(config.model_provider_id.clone()),
++        ),
      }
  }
  
-@@ -441,6 +449,16 @@ impl ThreadManager {
+@@ -441,6 +452,16 @@ impl ThreadManager {
          attestation_provider: Option<Arc<dyn AttestationProvider>>,
          external_time_provider: Option<Arc<dyn TimeProvider>>,
      ) -> Self {
@@ -14403,7 +14406,7 @@ index cfa6196..ec79582 100644
          let codex_home = config.codex_home.clone();
          let restriction_product = session_source.restriction_product();
          let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
-@@ -1745,6 +1763,7 @@ impl ThreadManagerState {
+@@ -1745,6 +1766,7 @@ impl ThreadManagerState {
          environments: Option<Vec<TurnEnvironmentSelection>>,
      ) -> CodexResult<NewThread> {
          let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
@@ -14411,7 +14414,7 @@ index cfa6196..ec79582 100644
          let options = StartThreadOptions {
              history_mode,
              session_source: Some(session_source),
-@@ -1752,6 +1771,7 @@ impl ThreadManagerState {
+@@ -1752,6 +1774,7 @@ impl ThreadManagerState {
              metrics_service_name,
              environments,
              client_mcp_extensions,
@@ -14419,7 +14422,7 @@ index cfa6196..ec79582 100644
              ..StartThreadOptions::new(config)
          };
          let mut request =
-@@ -1821,6 +1841,7 @@ impl ThreadManagerState {
+@@ -1821,6 +1844,7 @@ impl ThreadManagerState {
          thread_extension_init: ExtensionDataInit,
      ) -> CodexResult<NewThread> {
          let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
@@ -14427,7 +14430,7 @@ index cfa6196..ec79582 100644
          let options = StartThreadOptions {
              initial_history,
              history_mode,
-@@ -1829,6 +1850,7 @@ impl ThreadManagerState {
+@@ -1829,6 +1853,7 @@ impl ThreadManagerState {
              environments,
              thread_extension_init,
              client_mcp_extensions,
@@ -14435,7 +14438,7 @@ index cfa6196..ec79582 100644
              ..StartThreadOptions::new(config)
          };
          let mut request =
-@@ -1853,6 +1875,19 @@ impl ThreadManagerState {
+@@ -1853,6 +1878,19 @@ impl ThreadManagerState {
              .unwrap_or_default()
      }
  
@@ -14782,10 +14785,10 @@ index a8b6a36..1b94e25 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..f6b1efb
+index 0000000..c2e4a4b
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,990 @@
+@@ -0,0 +1,1028 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
@@ -14924,6 +14927,7 @@ index 0000000..f6b1efb
 +pub struct RemoteHttpThreadStore {
 +    client: reqwest::Client,
 +    account_headers: reqwest::header::HeaderMap,
++    execution_provider: Option<String>,
 +    store_url: String,
 +    bearer_token: String,
 +    input_recoveries: Arc<std::sync::Mutex<HashMap<ThreadId, InputRecovery>>>,
@@ -14960,6 +14964,7 @@ index 0000000..f6b1efb
 +        Self {
 +            client: reqwest::Client::new(),
 +            account_headers: headers,
++            execution_provider: None,
 +            input_recoveries: Arc::new(std::sync::Mutex::new(HashMap::new())),
 +            store_url: format!("{}/v2/stores/{store_id}", endpoint.trim_end_matches('/')),
 +            bearer_token: bearer_token.into(),
@@ -14969,6 +14974,34 @@ index 0000000..f6b1efb
 +            thread_write_errors: Arc::new(std::sync::Mutex::new(HashMap::new())),
 +            write_tail: Arc::new(std::sync::Mutex::new(None)),
 +        }
++    }
++
++    /// Bind runtime reads to the managed account's provider without changing
++    /// canonical metadata/history or the before/after persistence snapshots.
++    /// Unmanaged remote-store CLI sessions retain upstream provider selection.
++    pub fn with_execution_provider(mut self, provider: String) -> Self {
++        let managed = ["x-mira-codex-account", "x-mira-codex-runtime"]
++            .iter()
++            .all(|key| {
++                self.account_headers
++                    .get(*key)
++                    .is_some_and(|value| !value.is_empty())
++            });
++        if managed && !provider.is_empty() {
++            self.execution_provider = Some(provider);
++            self.account_headers.insert(
++                "x-mira-accounts-version",
++                reqwest::header::HeaderValue::from_static("2"),
++            );
++        }
++        self
++    }
++
++    fn project_execution_provider(&self, mut thread: StoredThread) -> StoredThread {
++        if let Some(provider) = &self.execution_provider {
++            thread.model_provider.clone_from(provider);
++        }
++        thread
 +    }
 +
 +    fn take_cache(&self) -> Option<CachedStore> {
@@ -15558,9 +15591,14 @@ index 0000000..f6b1efb
 +            .then_some(params.thread_id)
 +            .into_iter()
 +            .collect();
-+        Box::pin(self.read(histories, move |store| {
-+            ThreadStore::read_thread(store, params)
-+        }))
++        Box::pin(async move {
++            let thread = self
++                .read(histories, move |store| {
++                    ThreadStore::read_thread(store, params)
++                })
++                .await?;
++            Ok(self.project_execution_provider(thread))
++        })
 +    }
 +
 +    fn read_thread_by_rollout_path(
@@ -15569,11 +15607,12 @@ index 0000000..f6b1efb
 +    ) -> ThreadStoreFuture<'_, StoredThread> {
 +        Box::pin(async move {
 +            if !params.include_history {
-+                return self
++                let thread = self
 +                    .read(Vec::new(), move |store| {
 +                        ThreadStore::read_thread_by_rollout_path(store, params)
 +                    })
-+                    .await;
++                    .await?;
++                return Ok(self.project_execution_provider(thread));
 +            }
 +            let mut metadata_params = params.clone();
 +            metadata_params.include_history = false;
@@ -15582,10 +15621,12 @@ index 0000000..f6b1efb
 +                    ThreadStore::read_thread_by_rollout_path(store, metadata_params)
 +                })
 +                .await?;
-+            self.read(vec![thread.thread_id], move |store| {
-+                ThreadStore::read_thread_by_rollout_path(store, params)
-+            })
-+            .await
++            let thread = self
++                .read(vec![thread.thread_id], move |store| {
++                    ThreadStore::read_thread_by_rollout_path(store, params)
++                })
++                .await?;
++            Ok(self.project_execution_provider(thread))
 +        })
 +    }
 +
@@ -16035,10 +16076,10 @@ index 0000000..0054010
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 0000000..0afe772
+index 0000000..0de10fb
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
-@@ -0,0 +1,544 @@
+@@ -0,0 +1,616 @@
 +use std::sync::Arc;
 +use std::time::Duration;
 +
@@ -16583,6 +16624,78 @@ index 0000000..0afe772
 +    assert!(requests.recv().await.is_none());
 +    assert!(request.history_changes[0].items_upload_id.is_none());
 +}
++
++#[tokio::test]
++async fn managed_provider_projection_keeps_canonical_metadata_unchanged() {
++    let memory = crate::InMemoryThreadStore::default();
++    let id = ThreadId::new();
++    memory
++        .create_thread(create(id, Some(ThreadId::new())))
++        .await
++        .unwrap();
++    let mut snapshot = memory
++        .snapshot_for_threads(&[id].into_iter().collect())
++        .await
++        .unwrap();
++    snapshot["metadata_updates"][id.to_string()] = json!({
++        "model":"original-child-model",
++        "created_at":"2026-01-01T00:00:00Z",
++        "updated_at":"2026-01-01T00:00:00Z",
++        "advance_recency_at":"2026-01-01T00:00:00Z"
++    });
++    let memory = crate::InMemoryThreadStore::from_snapshot(Some(snapshot.clone())).unwrap();
++    let (state, _) = crate::remote_http::split_snapshot(snapshot).unwrap();
++    let head = json!({"version":1,"state":state,"historyManifest":{}}).to_string();
++    let (url, mut requests, handle) = server(vec![Some((200, head))]).await;
++    let mut remote = RemoteHttpThreadStore::new(url, "test", "test-token");
++    remote
++        .account_headers
++        .insert("x-mira-codex-account", "account-b".parse().unwrap());
++    remote
++        .account_headers
++        .insert("x-mira-codex-runtime", "runtime-b".parse().unwrap());
++    let remote = remote.with_execution_provider("provider-b".to_string());
++    let params = crate::ReadThreadParams {
++        thread_id: id,
++        include_archived: true,
++        include_history: false,
++    };
++    let original = memory.read_thread(params.clone()).await.unwrap();
++    let projected = remote.read_thread(params.clone()).await.unwrap();
++    assert_eq!(projected.model_provider, "provider-b");
++    let mut expected = serde_json::to_value(original).unwrap();
++    expected["model_provider"] = json!("provider-b");
++    assert_eq!(serde_json::to_value(projected).unwrap(), expected);
++    let cached = remote.take_cache().unwrap();
++    assert_eq!(cached.canonical_state, state);
++    assert_eq!(
++        cached
++            .store
++            .read_thread(params)
++            .await
++            .unwrap()
++            .model_provider,
++        "test"
++    );
++    handle.await.unwrap();
++    let request = requests.recv().await.unwrap().to_lowercase();
++    assert!(request.contains("x-mira-accounts-version: 2"));
++    assert!(
++        requests.recv().await.is_none(),
++        "a provider projection must never write history"
++    );
++}
++
++#[test]
++fn unmanaged_remote_store_does_not_override_provider() {
++    let mut remote = RemoteHttpThreadStore::new("http://127.0.0.1:1", "test", "token");
++    // Clear inherited test-runner identity without changing process environment.
++    remote.account_headers.remove("x-mira-codex-account");
++    remote.account_headers.remove("x-mira-codex-runtime");
++    let remote = remote.with_execution_provider("provider-b".to_string());
++    assert!(remote.execution_provider.is_none());
++    assert_eq!(remote.account_headers["x-mira-accounts-version"], "1");
++}
 diff --git a/codex-rs/thread-store/src/remote_http/uploads.rs b/codex-rs/thread-store/src/remote_http/uploads.rs
 new file mode 100644
 index 0000000..2bca717
@@ -17097,6 +17210,3 @@ index 48083eb..9231e72 100644
              | ServerNotification::ThreadStarted(_)
              | ServerNotification::ThreadStatusChanged(_)
              | ServerNotification::ThreadReverted(_)
--- 
-2.51.2
-

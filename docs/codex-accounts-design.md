@@ -45,6 +45,16 @@ start/resume/turn 入口检查 binding/runtime，追加执行事件并更新可�
 空闲并等待旧进程退出，然后恢复目标 runtime。该过程会断开旧账号其他空闲对话的连接，它们重新
 打开时恢复。旧 Node 离线或仍有任务时拒绝接管；thread/unsubscribe 并不证明线程已卸载。
 
+从主会话切换账号时，Server 将当前 generation 的整棵父子树作为交接单位，包括关闭或归档的
+子会话；普通 fork 保持独立。等待涉及的旧运行实例退出后，在同一事务中更新所有成员的账号、
+运行实例和执行事件，随后才允许目标进程继续。子 Agent 不能单独切到与主会话不同的账号；
+从子会话发起跨账号恢复会提示先打开主会话。新建子 Agent 继续使用所在 App Server 的凭据。
+
+0.153.1-mira.10 在 ThreadStore 的读取边界将恢复用的服务商投影为当前托管账号的服务商，
+保留子 Agent 原有模型及原始元数据、加密历史和持久化 diff。父会话恢复后可直接 followup_task
+唤醒旧子 Agent，无须在客户端逐个恢复。旧 runtime 未确认支持账号协议 2 时拒绝整树切换，
+避免仅更新路由而使用错误服务商；空账号通过只读 thread/list 完成协议探测。
+
 切换后的旧 runtime 写入会被拒绝，已提交但丢失响应的 operation UUID 仍可重放原收据。
 此机制不替代项目尚未实现的通用 writer lease、网络分区 fencing 和外部 CLI 生命周期协调。
 
@@ -78,8 +88,9 @@ Schema 29 将 Codex AgentGraphStore 的父子关系及 open/closed 状态保存�
 - 既有 runtime start/stop 请求及 App Server WebSocket 接受 nodeAccountId；省略用默认账号，显式无效值不回退。
 - GET/POST /v1/codex/threads/:threadId/input-recovery：读取计划/确认，使用 storeId 和 nodeAccountId 限定范围。
 - Node 报告 codexAccountsV1；appserver.open 携带 binding/runtime，管理使用 account.configure/account.retire。
-- ThreadStore 请求发送 X-Mira-Accounts-Version: 1、X-Mira-Codex-Account、X-Mira-Codex-Runtime。
-  认证仍以 Node 凭据为准，选择器不能冒充其他 Node；管理写操作仍要求管理员和 CSRF。
+- ThreadStore 请求发送 X-Mira-Accounts-Version、X-Mira-Codex-Account、X-Mira-Codex-Runtime。
+  版本 1 支持账号身份与输入恢复；版本 2 增加目标账号服务商投影，需要 Mira 1.0.20 或更新 Server，
+  Server 同时接受 1 和 2。认证仍以 Node 凭据为准，选择器不能冒充其他 Node；管理写操作仍要求管理员和 CSRF。
 - POST /v2/stores/:storeId/agent-graph：upsert/status 写入或 children/descendants 查询。
   写入携带 operation UUID，支持原收据重放；关闭边阻断 open 后代查询，缺失边的状态更新为空操作。
 

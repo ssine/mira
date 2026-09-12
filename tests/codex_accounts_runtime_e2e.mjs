@@ -46,7 +46,7 @@ const mock = http.createServer(async (request, response) => {
   }
   const body = JSON.parse(Buffer.concat(parts));
   const key = request.headers.authorization;
-  requests.push({ key, body });
+  requests.push({ key, body, path: request.url });
   if (rejectOld && encrypted(body.input).some(item => item.encrypted_content.startsWith("old-"))) {
     response.writeHead(400, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "The encrypted content could not be verified. Encrypted content could not be decrypted or parsed.",
@@ -138,11 +138,12 @@ try {
   console.log("Runtime fixture Node connected");
   const bindings = [];
   for (const name of ["A", "B"]) {
-    const { nodeAccountId: id } = await admin(`/v1/nodes/${nodeId}/codex-accounts`, { name, provider: "fixture", authType: "providerConfig" });
+    const provider = name === "A" ? "fixture" : "fixture_b";
+    const { nodeAccountId: id } = await admin(`/v1/nodes/${nodeId}/codex-accounts`, { name, provider, authType: "providerConfig" });
     bindings.push(id);
     await waitFor(async () => (await account(id)).reportedAppServer.status === "stopped", "stopped profile");
     await admin(`/v1/nodes/${nodeId}/codex-accounts/${id}/configure`, {
-      provider: { id: "fixture", name: "Fixture", baseUrl: `http://127.0.0.1:${mock.address().port}/v1`, envKey: "FIXTURE_KEY" }, apiKey: `synthetic-${name}`,
+      provider: { id: provider, name: "Fixture", baseUrl: `http://127.0.0.1:${mock.address().port}/${name}/v1`, envKey: `FIXTURE_${name}_KEY` }, apiKey: `synthetic-${name}`,
     });
     await admin(`/v1/codex/runtimes/${nodeId}/start`, { nodeAccountId: id, storeId: store });
     await running(id);
@@ -150,6 +151,7 @@ try {
     assert.equal((await admin(`/v1/nodes/${nodeId}/codex-accounts/${id}/quota`)).quotaSupported, false);
   }
   const [a, b] = bindings;
+  const initialAccountRuntime = (await running(a)).reportedAppServer.runtimeId;
   const first = await connect(a);
   const threadId = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
   await turn(first, threadId, "Initial request");
@@ -183,6 +185,10 @@ try {
   const steered = await reconnected.call("turn/steer", { threadId: steeringId, expectedTurnId: active.id,
     input: [{ type: "text", text: "STEERING_EXPLICIT" }] });
   assert.equal(steered.turnId, active.id);
+  await waitFor(async () => {
+    const current = await running(a);
+    return current.reportedAppServer.runtimeId !== initialAccountRuntime;
+  }, "old account restarted after retirement");
   const otherAccount = await connect(a);
   await assert.rejects(otherAccount.call("turn/start", { threadId: steeringId, input: [{ type: "text", text: "STEERING_WRONG_ACCOUNT" }] }), /切换到其他账号/);
   await assert.rejects(otherAccount.call("thread/resume", { threadId: steeringId }), /仍有对话|busy/i);
@@ -254,13 +260,15 @@ try {
   const parentOnB = await connect(b);
   await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: { "features.multi_agent_v2": true } });
   console.log("Parent resumed on B");
-  // Upstream requires explicit parent-then-child loading for persisted V2
-  // children; followup_task only accepts a live child path.
-  await parentOnB.call("thread/resume", { threadId: childId, excludeTurns: true });
-  console.log("Child resumed on B");
+  // Resume only the parent. The persisted child remains cold until the native
+  // followup_task restores it; its route and provider must already belong to B.
+  const childBeforeFollowup = await parentOnB.call("thread/read", { threadId: childId, includeTurns: false });
+  assert.equal(childBeforeFollowup.thread.modelProvider, "fixture_b");
   await turn(parentOnB, parentId, "FOLLOWUP_ACCOUNT_CHILD");
   await waitFor(async () => JSON.stringify((await history(childId)).items).includes("CHILD_FOLLOWUP_OK"), "child followup after account handoff");
-  assert.equal(requests.findLast(request => isChildFollowup(request.body)).key, "Bearer synthetic-B");
+  const childRequest = requests.findLast(request => isChildFollowup(request.body));
+  assert.equal(childRequest.key, "Bearer synthetic-B");
+  assert.equal(childRequest.path, "/B/v1/responses");
   console.log("Subagent identity and followup survived parent account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);
   await fs.writeFile(path.join(cliHome, "config.toml"), [

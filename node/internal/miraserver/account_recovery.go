@@ -19,15 +19,16 @@ func (server *Server) observeAccountProtocol(ctx context.Context, request *http.
 	if binding == "" && runtimeID == "" {
 		return nil
 	}
-	if request.Header.Get("X-Mira-Accounts-Version") != "1" {
+	protocol := request.Header.Get("X-Mira-Accounts-Version")
+	if protocol != "1" && protocol != "2" {
 		return &HTTPError{Status: 400, Code: "unsupported_account_protocol", Message: "unsupported Codex account protocol"}
 	}
 	if principal.Kind != "node" || !operationIDPattern.MatchString(binding) || !operationIDPattern.MatchString(runtimeID) {
 		return &HTTPError{Status: 400, Code: "invalid_account_context", Message: "invalid Codex account context"}
 	}
 	tag, err := server.pool.Exec(ctx, `INSERT INTO mira_codex_account_protocols(node_account_id,runtime_id,protocol)
-	 SELECT node_account_id,$3::uuid,1 FROM mira_node_codex_accounts WHERE node_id=$1::uuid AND node_account_id=$2::uuid AND enabled
-	 ON CONFLICT(node_account_id,runtime_id) DO UPDATE SET observed_at=NOW() WHERE mira_codex_account_protocols.observed_at < NOW()-INTERVAL '5 minutes'`, principal.NodeID, binding, runtimeID)
+	 SELECT node_account_id,$3::uuid,$4::integer FROM mira_node_codex_accounts WHERE node_id=$1::uuid AND node_account_id=$2::uuid AND enabled
+	 ON CONFLICT(node_account_id,runtime_id) DO UPDATE SET protocol=EXCLUDED.protocol,observed_at=NOW() WHERE mira_codex_account_protocols.protocol<>EXCLUDED.protocol OR mira_codex_account_protocols.observed_at < NOW()-INTERVAL '5 minutes'`, principal.NodeID, binding, runtimeID, protocol)
 	if err != nil {
 		return err
 	}
@@ -280,7 +281,7 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 	runtimeID, _ := account.Reported["runtimeId"].(string)
 	var supported bool
 	if operationIDPattern.MatchString(runtimeID) {
-		err = server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_account_protocols WHERE node_account_id=$1::uuid AND runtime_id=$2::uuid AND protocol=1)`, bindingID, runtimeID).Scan(&supported)
+		err = server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_account_protocols WHERE node_account_id=$1::uuid AND runtime_id=$2::uuid AND protocol>=1)`, bindingID, runtimeID).Scan(&supported)
 		if err != nil {
 			return true, err
 		}

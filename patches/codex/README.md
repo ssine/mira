@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `1893d2f`
+- Patch source commit: `69aa8fb`
 
 Apply it to a clean checkout:
 
@@ -63,3 +63,13 @@ v1/v2 account writer/receipt tests and `tests/codex_accounts_runtime_e2e.mjs` wi
 real Node/App Server processes and a synthetic Responses provider. The latter
 covers separate keys, live handoff, compatible input, invalid_encrypted_content,
 consent replay, unchanged canonical history, forks and cold subagent account handoff.
+
+Runtime revision `0.153.1-mira.10` projects the selected managed account's provider
+when reading a thread for restore. Existing subagents keep their saved model and
+canonical metadata/history, while direct followup uses the new account's provider
+and credentials. Account protocol 2 requires Mira Server 1.0.20 or later; the
+Server still reads protocol 1. The baseline and database schema remain unchanged.
+
+Validation adds provider-projection tests (260 thread-store tests total), atomic
+current-generation family handoff in PostgreSQL, and direct cold-child followup
+across different provider IDs, URLs and credentials in the actual runtime E2E.
