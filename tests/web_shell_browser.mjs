@@ -18,7 +18,9 @@ try {
   const cspErrors = [];
   const threadA = "00000000-0000-4000-8000-0000000000a1";
   const threadB = "00000000-0000-4000-8000-0000000000b2";
-  const summary = (threadId) => ({ threadId, title: `Conversation ${threadId}`, updatedAt: "2026-09-05T00:00:00Z", itemCount: 1 });
+  // Keep navigation fixtures in the visible seven-day window as the date moves.
+  const updatedAt = new Date().toISOString();
+  const summary = (threadId) => ({ threadId, title: `Conversation ${threadId}`, updatedAt, itemCount: 1 });
   await page.route("**/v1/codex/threads?*", (route) => route.fulfill({ json: { data: [summary(threadA)] } }));
   await page.route(/\/v1\/codex\/threads\/[^/?]+\?storeId=personal$/, (route) => route.fulfill({ json: summary(threadB) }));
   await page.route("**/v1/codex/threads/*/transcript?*", (route) => {
