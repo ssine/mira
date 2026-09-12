@@ -42,6 +42,7 @@ printf '%s' "$MIRA_NODE_TOKEN" > "$MIRA_TEST_TOKEN"
 	}
 	joined := string(arguments)
 	for _, expected := range []string{
+		`agents.max_threads=1000`,
 		`experimental_thread_store.type="remote_http"`,
 		`experimental_thread_store.endpoint="https://mira.example.test"`,
 		`experimental_thread_store.store_id="test-store"`,
@@ -56,5 +57,19 @@ printf '%s' "$MIRA_NODE_TOKEN" > "$MIRA_TEST_TOKEN"
 	token, err := os.ReadFile(tokenFile)
 	if err != nil || string(token) != "node-secret" {
 		t.Fatalf("Codex did not inherit the Node credential: %q, %v", token, err)
+	}
+	for _, override := range []string{"agents.max_threads=200", "agents.max_concurrent_threads_per_session=200"} {
+		if err := client.runCodex(context.Background(), []string{"-c", override, "--version"}, bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		arguments, err := os.ReadFile(argumentsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		joined := string(arguments)
+		defaultIndex, explicitIndex := strings.Index(joined, "agents.max_threads=1000"), strings.Index(joined, override)
+		if defaultIndex < 0 || explicitIndex <= defaultIndex {
+			t.Fatalf("explicit subagent limit must follow the launcher default: %s", joined)
+		}
 	}
 }

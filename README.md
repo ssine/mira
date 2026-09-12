@@ -359,6 +359,28 @@ multi_agent_v2 = true
 `MIRA_CODEX_STORE_ID` 可选择其他 store。不要打印 token。
 补丁保留显式 `bearer_token` 仅用于受控开发兼容。
 
+Mira 托管 App Server 和 `mira codex` 默认允许每个主会话同时打开 **1000 个 subagent**，
+包括该会话下各级后代，主会话本身不占名额；这只是并发上限，不会自动创建 subagent。
+两个入口在显式参数之前传入 `-c agents.max_threads=1000`，使用 Codex 支持的兼容别名
+（正式配置名为 `agents.max_concurrent_threads_per_session`）。这是启动参数，优先于
+`config.toml` 中同名设置。需要调整时，CLI 可使用：
+
+```sh
+mira codex -c agents.max_concurrent_threads_per_session=200
+```
+
+托管 App Server 可在对应账号的 `desiredAppServer.configOverrides` 中设置
+`agents.max_concurrent_threads_per_session=200`；默认账号也可使用本机的
+`appServerConfigOverrides`。
+Codex v2 的专用配置 `features.multi_agent_v2.max_concurrent_threads_per_session` 仍有优先权，
+且它计入主会话；若使用这个专用字段，1000 个 subagent 对应 1001。
+
+本调整不需要数据库迁移，也不需要更换 Codex runtime。新默认值随执行 Node 的 Mira 升级生效；
+只升级 Server 不会改变其他 Node 的启动参数。升级会重启该 Node 的 Codex 进程并中断活动任务，
+PostgreSQL 中的会话历史保留，可以重新打开并继续。应等任务结束后升级执行 Node。
+单独调整托管账号的配置覆盖时，Mira 会等该账号的活动任务结束后再重启 App Server；
+已加载的会话需重新加载后使用新上限。
+
 ## Android APK
 
 APK 内嵌相同 Go `mira` 程序并以 `node-worker` 启动，不依赖 ADB、Node.js 或 Termux。Java 负责 Activity、前台服务、

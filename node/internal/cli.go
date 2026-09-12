@@ -856,6 +856,7 @@ func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.R
 		storeID = "personal"
 	}
 	remoteArgs := []string{
+		"-c", codexDefaultSubagentOverride,
 		"-c", `experimental_thread_store.type="remote_http"`,
 		"-c", "experimental_thread_store.endpoint=" + strconv.Quote(client.identity.ServerURL),
 		"-c", "experimental_thread_store.store_id=" + strconv.Quote(storeID),

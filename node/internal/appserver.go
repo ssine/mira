@@ -219,11 +219,12 @@ func (manager *appServerManager) effectiveDesired(desired desiredAppServer) desi
 	if desired.CodexHome == "" {
 		desired.CodexHome = manager.configuration.AppServerCodexHome
 	}
-	// Server-provided overrides are deliberately non-secret. Local overrides are
-	// appended last so credentials stay on the Node and cannot be replaced by
+	// Launcher defaults precede explicit settings. Server-provided overrides are
+	// deliberately non-secret. Local overrides are appended last so credentials
+	// stay on the Node and cannot be replaced by
 	// central desired state.
 	desired.ConfigOverrides = append(
-		append([]string(nil), desired.ConfigOverrides...),
+		append([]string{codexDefaultSubagentOverride}, desired.ConfigOverrides...),
 		manager.configuration.ConfigOverrides...,
 	)
 	return desired
