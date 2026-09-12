@@ -248,8 +248,9 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 		}
 		var savedStore, savedThread, savedBinding, savedPolicy, savedFailure, savedRuntime string
 		var savedGeneration, savedCount int64
-		err = server.pool.QueryRow(ctx, `SELECT store_id,thread_id,node_account_id::text,policy,generation,item_refs->>'failureId',COALESCE((item_refs->>'itemCount')::bigint,0),COALESCE(item_refs->>'runtimeId','')
-		 FROM mira_codex_input_compatibility WHERE decision_id=$1::uuid`, decisionID).Scan(&savedStore, &savedThread, &savedBinding, &savedPolicy, &savedGeneration, &savedFailure, &savedCount, &savedRuntime)
+		var threadReload bool
+		err = server.pool.QueryRow(ctx, `SELECT store_id,thread_id,node_account_id::text,policy,generation,item_refs->>'failureId',COALESCE((item_refs->>'itemCount')::bigint,0),COALESCE(item_refs->>'runtimeId',''),COALESCE((item_refs->>'threadReload')::boolean,false)
+		 FROM mira_codex_input_compatibility WHERE decision_id=$1::uuid`, decisionID).Scan(&savedStore, &savedThread, &savedBinding, &savedPolicy, &savedGeneration, &savedFailure, &savedCount, &savedRuntime, &threadReload)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return true, err
 		}
@@ -259,7 +260,13 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 			if savedStore != storeID || savedThread != match[1] || savedBinding != bindingID || savedGeneration != generation || savedFailure != body["failureId"] || savedCount != count {
 				return true, &HTTPError{Status: 409, Code: "decision_reused", Message: "此确认编号已用于不同的兼容处理"}
 			}
-			return true, writeJSON(response, 200, map[string]any{"status": "confirmed", "policy": savedPolicy, "canonicalHistoryUnchanged": true, "duplicate": true, "retiredRuntimeId": savedRuntime})
+			result := map[string]any{"status": "confirmed", "policy": savedPolicy, "canonicalHistoryUnchanged": true, "duplicate": true}
+			if threadReload {
+				result["reloadedThreadId"] = savedThread
+			} else {
+				result["retiredRuntimeId"] = savedRuntime
+			}
+			return true, writeJSON(response, 200, result)
 		}
 	}
 	plan, err := server.inputRecoveryPlan(ctx, storeID, match[1], account)
@@ -294,21 +301,20 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 		return true, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "mira-execution:"+storeID+":"+match[1]); err != nil {
-		return true, err
+	release, err := server.channel.PrepareExecutionReload(ctx, tx, storeID, match[1], nodeID, bindingID, runtimeID)
+	if err != nil {
+		return true, &HTTPError{Status: 409, Code: "thread_busy", Message: err.Error()}
 	}
+	defer release()
 	var state, routeBinding, routeRuntime string
 	err = tx.QueryRow(ctx, `SELECT state,node_account_id::text,runtime_id FROM mira_codex_execution_routes WHERE store_id=$1 AND thread_id=$2 FOR UPDATE`, storeID, match[1]).Scan(&state, &routeBinding, &routeRuntime)
 	if err != nil || state != "idle" || routeBinding != bindingID || routeRuntime != runtimeID {
 		return true, &HTTPError{Status: 409, Code: "account_busy", Message: "请等待本轮结束，并保持当前账号再确认"}
 	}
-	if err := server.channel.Accounts().Retire(ctx, nodeID, bindingID, runtimeID); err != nil {
-		return true, &HTTPError{Status: 409, Code: "account_busy", Message: err.Error()}
-	}
 	if err := lockScope(ctx, tx, storeID, []string{match[1]}); err != nil {
 		return true, err
 	}
-	refs, _ := json.Marshal(map[string]any{"throughItemSeq": plan.ThroughItemSeq, "failureId": plan.FailureID, "itemCount": plan.ItemCount, "runtimeId": runtimeID})
+	refs, _ := json.Marshal(map[string]any{"throughItemSeq": plan.ThroughItemSeq, "failureId": plan.FailureID, "itemCount": plan.ItemCount, "runtimeId": runtimeID, "threadReload": true})
 	tag, err := tx.Exec(ctx, `INSERT INTO mira_codex_input_compatibility(decision_id,store_id,thread_id,generation,node_account_id,model,policy,item_refs,credential_revision)
 	 SELECT $1::uuid,$2,$3,$4,$5::uuid,'',$6,$7::jsonb,$8 FROM codex_thread_projections p WHERE p.store_id=$2 AND p.thread_id=$3 AND p.active_generation=$4 AND p.item_count=$9
 	 AND EXISTS(SELECT 1 FROM mira_node_codex_accounts b WHERE b.node_account_id=$5::uuid AND b.credential_revision=$8 AND b.enabled)
@@ -326,5 +332,5 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 	if err := tx.Commit(ctx); err != nil {
 		return true, err
 	}
-	return true, writeJSON(response, 200, map[string]any{"status": "confirmed", "policy": plan.Policy, "canonicalHistoryUnchanged": true, "retiredRuntimeId": runtimeID})
+	return true, writeJSON(response, 200, map[string]any{"status": "confirmed", "policy": plan.Policy, "canonicalHistoryUnchanged": true, "reloadedThreadId": match[1]})
 }

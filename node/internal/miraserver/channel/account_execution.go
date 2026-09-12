@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
@@ -66,7 +65,11 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		return 0, errors.New("账号运行实例已变更，请重新连接")
 	}
 
-	retired := map[string]bool{}
+	drained := map[string]bool{}
+	ids := make([]string, 0, len(family))
+	for _, member := range family {
+		ids = append(ids, member.ID)
+	}
 	for _, member := range family {
 		source, err := channel.executionSource(ctx, member, proxy, account.IsDefault)
 		if err != nil {
@@ -81,20 +84,22 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		if threadID != root {
 			return 0, errors.New("子 Agent 与主会话共用账号，请先从主会话切换账号")
 		}
-		if len(family) > 1 && len(retired) == 0 {
+		if len(family) > 1 && len(drained) == 0 {
 			if err = channel.requireTreeExecutionProtocol(ctx, tx, proxy); err != nil {
 				return 0, err
 			}
 		}
-		if !retired[source.key()] {
-			if err = channel.retirePreviousAccount(ctx, source.Node, source.Binding, source.Runtime); err != nil {
-				return 0, err
+		if !drained[source.key()] {
+			release, unloadErr := channel.unloadAccountThreads(ctx, *source, root, ids)
+			if unloadErr != nil {
+				return 0, unloadErr
 			}
-			retired[source.key()] = true
+			defer release()
+			drained[source.key()] = true
 		}
 	}
 
-	// A handoff takes the store gate exclusively only after retirement. This
+	// A handoff takes the store gate exclusively only after draining the selected threads. This
 	// freezes graph membership/generations and makes every route switch atomic.
 	gate, _ := json.Marshal([]string{"mira-store", proxy.storeID})
 	lock := "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))"
@@ -116,7 +121,7 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		if err != nil {
 			return 0, err
 		}
-		if source != nil && (!handoff || !retired[source.key()]) {
+		if source != nil && (!handoff || !drained[source.key()]) {
 			return 0, errors.New("会话树的执行账号已变更，请重新打开主会话")
 		}
 	}
@@ -284,34 +289,6 @@ func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member ex
 	}
 	_, err := tx.Exec(ctx, `INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,node_account_id,bound_at) VALUES($1,$2,$3::uuid,$4::uuid,NOW()) ON CONFLICT(store_id,thread_id) DO UPDATE SET node_id=EXCLUDED.node_id,node_account_id=EXCLUDED.node_account_id,bound_at=EXCLUDED.bound_at`, proxy.storeID, member.ID, proxy.targetNodeID, proxy.nodeAccountID)
 	return revision, err
-}
-
-func (channel *Channel) retirePreviousAccount(ctx context.Context, nodeID, bindingID, runtimeID string) error {
-	node, err := channel.nodes.Get(ctx, nodeID, false)
-	if err != nil {
-		return err
-	}
-	account, err := nodes.SelectAccount(node, bindingID)
-	if err != nil || account == nil {
-		return errors.New("无法确认旧账号状态，暂不能切换")
-	}
-	if node.Status != "online" || !channel.IsConnected(nodeID) {
-		return errors.New("旧账号所在节点离线，暂不能确认任务已结束")
-	}
-	if account.Reported["status"] == "stopped" {
-		return nil
-	}
-	actual := stringValue(account.Reported["runtimeId"])
-	if runtimeID != "" && actual != "" && actual != runtimeID {
-		return nil
-	}
-	if actual == "" {
-		return errors.New("请先停止旧节点的 Codex 实例并升级节点，再切换账号")
-	}
-	if err := channel.accounts.Retire(ctx, nodeID, bindingID, actual); err != nil {
-		return fmt.Errorf("无法切换账号：%w", err)
-	}
-	return nil
 }
 
 func (channel *Channel) recordExecutionStatus(ctx context.Context, proxy *proxy, threadID, kind, state, turnID string) error {

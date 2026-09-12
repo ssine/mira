@@ -37,6 +37,8 @@ async function waitFor(read, description, timeout = 60_000) {
   throw Error(`Timed out: ${description}`);
 }
 const encrypted = items => items.filter(item => item.encrypted_content);
+const importedEncrypted = new Set();
+const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
 const isChildFollowup = body => body.input.some(item => item.type === "agent_message" &&
   item.recipient === "/root/account_child" && JSON.stringify(item.content).includes("ACCOUNT_CHILD_SECOND"));
 const mock = http.createServer(async (request, response) => {
@@ -47,7 +49,7 @@ const mock = http.createServer(async (request, response) => {
   const body = JSON.parse(Buffer.concat(parts));
   const key = request.headers.authorization;
   requests.push({ key, body, path: request.url });
-  if (rejectOld && encrypted(body.input).some(item => item.encrypted_content.startsWith("old-"))) {
+  if (rejectOld && encrypted(body.input).some(incompatible)) {
     response.writeHead(400, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "The encrypted content could not be verified. Encrypted content could not be decrypted or parsed.",
       type: "invalid_request_error", code: "invalid_encrypted_content", param: null } })); return;
@@ -137,8 +139,8 @@ try {
   nodeId = online.nodeId; token = JSON.parse(await fs.readFile(identity, "utf8")).token;
   console.log("Runtime fixture Node connected");
   const bindings = [];
-  for (const name of ["A", "B"]) {
-    const provider = name === "A" ? "fixture" : "fixture_b";
+  for (const name of ["A", "B", "C"]) {
+    const provider = name === "A" ? "fixture" : `fixture_${name.toLowerCase()}`;
     const { nodeAccountId: id } = await admin(`/v1/nodes/${nodeId}/codex-accounts`, { name, provider, authType: "providerConfig" });
     bindings.push(id);
     await waitFor(async () => (await account(id)).reportedAppServer.status === "stopped", "stopped profile");
@@ -150,7 +152,7 @@ try {
     console.log(`Account ${name} running`);
     assert.equal((await admin(`/v1/nodes/${nodeId}/codex-accounts/${id}/quota`)).quotaSupported, false);
   }
-  const [a, b] = bindings;
+  const [a, b, c] = bindings;
   const initialAccountRuntime = (await running(a)).reportedAppServer.runtimeId;
   const first = await connect(a);
   const threadId = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
@@ -158,13 +160,23 @@ try {
   console.log("Initial account turn completed");
   assert.equal(requests.at(-1).key, "Bearer synthetic-A");
   await waitFor(async () => JSON.stringify((await history(threadId)).items).includes("old-account-A"), "encrypted reasoning persisted");
-  // Handoff drains A, then B must receive the original encrypted input unchanged.
+  // An unrelated live turn in A must survive another conversation's handoff.
+  const companionId = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;
+  holdNextResponse = true;
+  const companionTurn = (await first.call("turn/start", { threadId: companionId, input: [{ type: "text", text: "KEEP_OTHER_CONVERSATION_RUNNING" }] })).turn;
+  await waitFor(() => releaseResponse, "unrelated live response");
+  // Handoff drains only the selected tree; B receives the original input.
   let second = await connect(b);
   await second.call("thread/resume", { threadId, model: "gpt-5.1-codex", cwd: temporary });
   await turn(second, threadId, "Compatible account switch");
   console.log("Compatible account handoff completed");
   assert.equal(requests.at(-1).key, "Bearer synthetic-B");
   assert(encrypted(requests.at(-1).body.input).some(item => item.encrypted_content === "old-account-A"));
+  assert.equal((await running(a)).reportedAppServer.runtimeId, initialAccountRuntime);
+  assert.equal((await first.call("thread/read", { threadId: companionId, includeTurns: false })).thread.status.type, "active");
+  await assert.rejects(first.call("turn/start", { threadId, input: [{ type: "text", text: "STALE_ACCOUNT_INPUT" }] }), /切换到其他账号/);
+  releaseResponse(); releaseResponse = undefined;
+  await waitFor(() => first.events.some(event => event.method === "turn/completed" && event.params.turn.id === companionTurn.id), "unrelated turn survived handoff");
 
   // Match the Web composer: native turn/start appends input to the active turn.
   // Hold model sampling open so all submissions happen before turn completion.
@@ -185,13 +197,10 @@ try {
   const steered = await reconnected.call("turn/steer", { threadId: steeringId, expectedTurnId: active.id,
     input: [{ type: "text", text: "STEERING_EXPLICIT" }] });
   assert.equal(steered.turnId, active.id);
-  await waitFor(async () => {
-    const current = await running(a);
-    return current.reportedAppServer.runtimeId !== initialAccountRuntime;
-  }, "old account restarted after retirement");
+  assert.equal((await running(a)).reportedAppServer.runtimeId, initialAccountRuntime, "handoff must preserve the old account process");
   const otherAccount = await connect(a);
   await assert.rejects(otherAccount.call("turn/start", { threadId: steeringId, input: [{ type: "text", text: "STEERING_WRONG_ACCOUNT" }] }), /切换到其他账号/);
-  await assert.rejects(otherAccount.call("thread/resume", { threadId: steeringId }), /仍有对话|busy/i);
+  await assert.rejects(otherAccount.call("thread/resume", { threadId: steeringId }), /仍在运行|busy/i);
   releaseResponse(); releaseResponse = undefined;
   await waitFor(() => second.events.some(event => event.method === "turn/completed" && event.params.turn.id === active.id && event.params.turn.status === "completed"), "steered turn completion");
   const steeredInput = JSON.stringify(requests.at(-1).body.input);
@@ -219,17 +228,25 @@ try {
   const plan = await waitFor(async () => { try { return await admin(endpoint); } catch { return null; } }, "recovery evidence");
   assert(plan.recoverable); assert.equal(plan.policy, compaction ? "rebuildContext" : "omitReasoning");
   const canonical = (await history(threadId)).items;
+  const recoveryCompanion = (await second.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;
+  holdNextResponse = true;
+  const recoveryCompanionTurn = (await second.call("turn/start", { threadId: recoveryCompanion,
+    input: [{ type: "text", text: "KEEP_RUNNING_DURING_HISTORY_RECOVERY" }] })).turn;
+  await waitFor(() => releaseResponse, "live response during history recovery");
   const requestCount = requests.length;
+  const recoveryRuntime = (await running(b)).reportedAppServer.runtimeId;
   const decision = { confirm: true, decisionId: randomUUID(), failureId: plan.failureId, generation: plan.generation, itemCount: plan.itemCount };
   const confirmed = await admin(endpoint, decision);
   assert.equal(confirmed.canonicalHistoryUnchanged, true);
+  assert.equal(confirmed.reloadedThreadId, threadId);
+  assert.equal(confirmed.retiredRuntimeId, undefined);
   assert.equal((await admin(endpoint, decision)).duplicate, true, "lost acknowledgement must be replayable");
   assert.equal(requests.length, requestCount, "consent must never retry a model request");
   assert.deepEqual((await history(threadId)).items.slice(0, canonical.length), canonical);
-  await waitFor(async () => {
-    const current = await account(b);
-    return current.reportedAppServer.status === "running" && current.reportedAppServer.runtimeId !== confirmed.retiredRuntimeId;
-  }, "new account process after retirement");
+  assert.equal((await running(b)).reportedAppServer.runtimeId, recoveryRuntime, "history recovery must preserve the account process");
+  assert.equal((await second.call("thread/read", { threadId: recoveryCompanion, includeTurns: false })).thread.status.type, "active");
+  releaseResponse(); releaseResponse = undefined;
+  await waitFor(() => second.events.some(event => event.method === "turn/completed" && event.params.turn.id === recoveryCompanionTurn.id), "unrelated turn survived history recovery");
   const recovered = await connect(b);
   await recovered.call("thread/resume", { threadId, model: "gpt-5.1-codex", cwd: temporary });
   await turn(recovered, threadId, "Continue after explicit consent");
@@ -239,6 +256,76 @@ try {
   assert.deepEqual((await history(threadId)).items.slice(0, canonical.length), canonical);
   const forkId = (await recovered.call("thread/fork", { threadId, cwd: temporary, excludeTurns: true, deferGoalContinuation: true })).thread.id;
   assert(JSON.stringify((await history(forkId)).items).includes("old-account-A"), "fork must copy canonical history");
+  for (const binding of [c, a, b]) {
+    let client = await connect(binding);
+    await client.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
+    await turn(client, threadId, "Continue recovered history after another account switch", binding === b ? "completed" : "failed");
+    if (binding !== b) {
+      // Recovery consent remains scoped to each account; canonical encrypted
+      // input is preserved until that account also reports incompatibility.
+      const recoveryUrl = `/v1/codex/threads/${threadId}/input-recovery?storeId=${store}&nodeAccountId=${binding}`;
+      const recoveryPlan = await admin(recoveryUrl);
+      await admin(recoveryUrl, { confirm: true, decisionId: randomUUID(), failureId: recoveryPlan.failureId,
+        generation: recoveryPlan.generation, itemCount: recoveryPlan.itemCount });
+      client = await connect(binding);
+      await client.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
+      await turn(client, threadId, "Continue with this account's confirmed input recovery");
+    }
+    assert(!encrypted(requests.at(-1).body.input).some(incompatible));
+    assert.deepEqual((await history(threadId)).items.slice(0, canonical.length), canonical);
+  }
+  console.log("Three-account roundtrip preserved recovered context and canonical history");
+  if (process.env.MIRA_ACCOUNTS_TEST_HISTORY) {
+    // Optional private NDJSON fixture. It stays in the disposable loopback
+    // store and the mock never executes calls from historical tool arguments.
+    const imported = (await fs.readFile(process.env.MIRA_ACCOUNTS_TEST_HISTORY, "utf8"))
+      .split("\n").filter(Boolean).map(line => JSON.parse(line));
+    const importer = await connect(a);
+    const importedId = (await importer.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;
+    await admin(`/v1/codex/runtimes/${nodeId}/stop`, { nodeAccountId: a });
+    await waitFor(async () => (await account(a)).reportedAppServer.status === "stopped", "stopped before private fixture import");
+    for (const item of imported) {
+      if (item.type === "session_meta") item.payload.id = importedId;
+      JSON.stringify(item, (key, value) => {
+        if (key === "encrypted_content" && typeof value === "string") importedEncrypted.add(value);
+        return value;
+      });
+    }
+    const bytes = Buffer.from(imported.map(item => JSON.stringify(item)).join("\n") + "\n");
+    const uploadId = randomUUID(), upload = `/v2/stores/${store}/history-uploads/${uploadId}`;
+    await admin(upload, { threadId: importedId, itemCount: imported.length, totalBytes: bytes.length });
+    for (let offset = 0; offset < bytes.length; offset += 4 * 1024 * 1024) {
+      await adminRequest(origin, session, `${upload}?offset=${offset}`, { method: "PUT",
+        headers: { "Content-Type": "application/octet-stream" }, body: bytes.subarray(offset, offset + 4 * 1024 * 1024) });
+    }
+    await admin(`${upload}/seal`, {});
+    const head = await admin(`/v2/stores/${store}?threadId=${importedId}`), manifest = head.historyManifest[importedId];
+    await adminRequest(origin, session, `/v2/stores/${store}/commits`, { method: "POST", headers: { "X-Codex-Operation-Id": randomUUID() },
+      body: JSON.stringify({ expectedVersion: head.version, stateChanges: [], historyChanges: [{ threadId: importedId,
+        mode: "replace", expectedGeneration: manifest.generation, expectedItemCount: manifest.itemCount, itemsUploadId: uploadId }] }) });
+    await admin(`/v1/codex/runtimes/${nodeId}/start`, { nodeAccountId: a, storeId: store }); await running(a);
+    assert(importedEncrypted.size > 0, "Private history fixture must have encrypted context");
+    const recoveredBindings = new Set();
+    for (const binding of [a, b, c, a]) {
+      let client = await connect(binding);
+      await client.call("thread/resume", { threadId: importedId, cwd: temporary, model: "gpt-5.1-codex" });
+      const recoveryUrl = `/v1/codex/threads/${importedId}/input-recovery?storeId=${store}&nodeAccountId=${binding}`;
+      if (!recoveredBindings.has(binding)) {
+        await turn(client, importedId, "PRIVATE_HISTORY_COMPATIBILITY_CHECK", "failed");
+        const recoveryPlan = await admin(recoveryUrl);
+        assert(recoveryPlan.recoverable);
+        await admin(recoveryUrl, { confirm: true, decisionId: randomUUID(), failureId: recoveryPlan.failureId,
+          generation: recoveryPlan.generation, itemCount: recoveryPlan.itemCount });
+        recoveredBindings.add(binding);
+        client = await connect(binding);
+        await client.call("thread/resume", { threadId: importedId, cwd: temporary, model: "gpt-5.1-codex" });
+      }
+      await turn(client, importedId, "PRIVATE_HISTORY_CONTINUE");
+      assert(!encrypted(requests.at(-1).body.input).some(incompatible));
+      assert.deepEqual((await history(importedId)).items.slice(0, imported.length), imported);
+    }
+    console.log(`Full private history passed: ${imported.length} records, ${bytes.length} bytes, three accounts and return to first`);
+  }
   const parentClient = await connect(a);
   console.log("Testing persisted subagent handoff");
   const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: { "features.multi_agent_v2": true }, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;

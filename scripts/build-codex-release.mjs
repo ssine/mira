@@ -57,7 +57,12 @@ try {
     assert.equal(canonical.version, codexRuntime.upstreamVersion);
     assert.equal(canonical.layoutVersion, 1);
     assert.equal(canonical.variant, "codex");
-    assert.equal(canonical.target, platform === "windows-amd64" ? "x86_64-pc-windows-msvc" : "x86_64-unknown-linux-musl");
+    const target = platform === "windows-amd64" ? "x86_64-pc-windows-msvc" : "x86_64-unknown-linux-musl";
+    // Explicit local deployment can package a native GNU/Linux build. Keep the
+    // canonical target intact; CI and published packages continue to use musl.
+    assert(canonical.target === target || (platform === "linux-amd64" &&
+      process.env.MIRA_CODEX_LOCAL_NATIVE === "1" && canonical.target === "x86_64-unknown-linux-gnu"),
+    `Unexpected canonical target: ${canonical.target}`);
     assert.equal(canonical.entrypoint, platform === "windows-amd64" ? "bin/codex.exe" : "bin/codex");
     const files = await inventory(stage);
     const suffix = platform === "windows-amd64" ? ".exe" : "";

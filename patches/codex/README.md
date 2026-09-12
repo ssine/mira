@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `69aa8fb`
+- Patch source commit: `3571f5c`
 
 Apply it to a clean checkout:
 
@@ -73,3 +73,14 @@ Server still reads protocol 1. The baseline and database schema remain unchanged
 Validation adds provider-projection tests (260 thread-store tests total), atomic
 current-generation family handoff in PostgreSQL, and direct cold-child followup
 across different provider IDs, URLs and credentials in the actual runtime E2E.
+
+Runtime revision `0.153.1-mira.11` adds experimental `mira/thread/unload` for an
+idle conversation tree. Mira holds a Node-side execution gate through the route
+commit. The App Server validates the complete tree, waits for each loaded
+session's shutdown, listener drainage and ThreadStore flush, and confirms the
+exact scope without terminating the account process or changing canonical
+history/graph state. History compatibility confirmation uses the same path.
+Local GNU/Linux canonical packages can be assembled with
+`MIRA_CODEX_LOCAL_NATIVE=1 node scripts/build-codex-release.mjs ...` for explicit
+offline deployment; their canonical target remains GNU/Linux. Published CI
+packages continue to use musl.

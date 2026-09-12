@@ -12,6 +12,8 @@ import (
 type accountResponse struct {
 	result any
 	err    error
+	detail string
+	code   string
 }
 
 type accountSession struct {
@@ -67,6 +69,11 @@ func (reader *AccountReader) Handle(nodeID string, message map[string]any) bool 
 		if message["code"] == "account_busy" {
 			session.closeError = errors.New("此账号仍有对话、子任务或凭据操作运行，请等待结束后重试")
 		}
+		if message["code"] == "thread_handoff_failed" {
+			if detail, ok := message["error"].(string); ok && len(detail) <= 2048 {
+				session.closeError = errors.New(detail)
+			}
+		}
 		session.mu.Unlock()
 		if retiring {
 			return true
@@ -121,7 +128,9 @@ func (reader *AccountReader) Handle(nodeID string, message map[string]any) bool 
 	session.mu.Unlock()
 	if pending != nil {
 		if value["error"] != nil {
-			pending <- accountResponse{err: errors.New("account RPC failed")}
+			rpcError, _ := value["error"].(map[string]any)
+			detail, _ := rpcError["message"].(string)
+			pending <- accountResponse{err: errors.New("account RPC failed"), detail: detail, code: fmt.Sprint(rpcError["code"])}
 		} else {
 			pending <- accountResponse{result: value["result"]}
 		}
@@ -134,6 +143,10 @@ func (reader *AccountReader) Read(ctx context.Context, nodeID string) (AccountSn
 }
 
 func (reader *AccountReader) open(ctx context.Context, nodeID, accountID, runtimeID string, management ...bool) (*accountSession, error) {
+	return reader.openScoped(ctx, nodeID, accountID, runtimeID, len(management) > 0 && management[0], nil)
+}
+
+func (reader *AccountReader) openScoped(ctx context.Context, nodeID, accountID, runtimeID string, management bool, threadIDs []string) (*accountSession, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, errors.New("account operation stopped")
 	}
@@ -162,8 +175,11 @@ func (reader *AccountReader) open(ctx context.Context, nodeID, accountID, runtim
 	if runtimeID != "" {
 		message["runtimeId"] = runtimeID
 	}
-	if len(management) > 0 && management[0] {
+	if management {
 		message["accountManagement"] = true
+	}
+	if len(threadIDs) > 0 {
+		message["accountThreads"] = threadIDs
 	}
 	if !reader.send(nodeID, message) {
 		return nil, errors.New("account channel offline")
@@ -356,6 +372,12 @@ func (reader *AccountReader) call(ctx context.Context, session *accountSession, 
 	}
 	select {
 	case value := <-response:
+		if method == "mira/thread/unload" && value.err != nil && value.detail != "" && len(value.detail) <= 2048 {
+			if value.code == "-32601" {
+				return nil, errors.New("请升级旧账号的 Codex 运行包，以支持单独交接对话")
+			}
+			return nil, fmt.Errorf("无法交接此对话：%s", value.detail)
+		}
 		return value.result, value.err
 	case <-session.done:
 		session.mu.Lock()

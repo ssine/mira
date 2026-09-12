@@ -293,7 +293,13 @@ function selectConversationAccount(bindingId) {
   agent.modelCatalog = null; agent.modelCatalogKey = null;
   syncAccountSidebar(); syncConversationSendUi(); void loadConversationModels();
   if (!agent.threadId && agent.draftProject) void selectComposerDraft(`personal:new:${agent.draftProject.key}:${bindingId}`);
-  if (agent.threadId) setConversationNotice("下次发送将使用所选账号继续此对话；原有上下文会先完整保留。", "info");
+  if (agent.threadId) {
+    const boundId = agent.threads.find(thread => thread.threadId === agent.threadId)?.nodeAccountId;
+    const accounts = dashboardNodes.get(nodeId)?.codexAccounts ?? [];
+    const bound = accounts.find(account => account.nodeAccountId === boundId)?.name;
+    const target = accounts.find(account => account.nodeAccountId === bindingId)?.name ?? "所选账号";
+    setConversationNotice(`${bound ? `当前对话绑定：${bound}。` : ""}下次发送将尝试使用 ${target}；切换成功后才会更新绑定。`, "info");
+  }
   accountRecovery.select(agent.threadId, bindingId);
 }
 const conversationDetailsWide = window.matchMedia("(min-width: 1100px)");

@@ -108,6 +108,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 	return map[string]any{
 		"appServer": true, "shell": true, "files": true, "processes": true, "pty": true,
 		"codexAccountsV1":      true,
+		"codexThreadHandoffV1": true,
 		"executionContexts":    runtime.GOOS == "windows",
 		"codexSessions":        true,
 		"fileChunkedWrite":     true,

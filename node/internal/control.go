@@ -82,6 +82,7 @@ type controlMessage struct {
 	NodeAccountID   string          `json:"nodeAccountId,omitempty"`
 	RuntimeID       string          `json:"runtimeId,omitempty"`
 	Management      bool            `json:"accountManagement,omitempty"`
+	AccountThreads  []string        `json:"accountThreads,omitempty"`
 	Payload         string          `json:"payload,omitempty"`
 	ClientPublicKey string          `json:"clientPublicKey,omitempty"`
 }
@@ -524,10 +525,13 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 	case "appserver.open":
 		// Preserve control-channel ordering: the server may forward the first
 		// initialize message immediately after appserver.open.
-		if err := client.openManagedAccountTunnel(ctx, message.SessionID, message.NodeAccountID, message.RuntimeID, message.Management); err != nil {
+		if err := client.openManagedAccountTunnel(ctx, message.SessionID, message.NodeAccountID, message.RuntimeID, message.Management, message.AccountThreads...); err != nil {
 			code := "account_unavailable"
 			if errors.Is(err, errCodexAccountBusy) {
 				code = "account_busy"
+			}
+			if len(message.AccountThreads) > 0 {
+				code = "thread_handoff_failed"
 			}
 			_ = client.writeControl(map[string]any{"type": "appserver.error", "sessionId": message.SessionID, "error": err.Error(), "code": code})
 		}
@@ -577,7 +581,7 @@ func (client *controlClient) openAccountTunnel(ctx context.Context, sessionID, a
 	return client.openManagedAccountTunnel(ctx, sessionID, accountID, runtimeID, false)
 }
 
-func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessionID, accountID, runtimeID string, management bool) error {
+func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessionID, accountID, runtimeID string, management bool, threadIDs ...string) error {
 	if sessionID == "" {
 		return fmt.Errorf("sessionId is required")
 	}
@@ -593,8 +597,20 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 			return err
 		}
 	}
+	if len(threadIDs) > 0 {
+		if management {
+			manager.endAccountManagement(sessionID)
+			return fmt.Errorf("account and thread management cannot overlap")
+		}
+		if err := manager.beginThreadManagement(sessionID, threadIDs); err != nil {
+			return err
+		}
+	}
 	opened := false
 	defer func() {
+		if !opened {
+			manager.endThreadManagement(sessionID)
+		}
 		if management && !opened {
 			manager.endAccountManagement(sessionID)
 		}
@@ -627,6 +643,7 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 	}
 	go func() {
 		defer func() {
+			manager.endThreadManagement(sessionID)
 			if management {
 				manager.endAccountManagement(sessionID)
 			}

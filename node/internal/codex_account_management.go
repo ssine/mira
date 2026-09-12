@@ -19,7 +19,8 @@ func (manager *appServerManager) reserveAccountRequest(sessionID string, payload
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
 		Params struct {
-			ThreadID string `json:"threadId"`
+			ThreadID  string   `json:"threadId"`
+			ThreadIDs []string `json:"threadIds"`
 		} `json:"params"`
 	}
 	if json.Unmarshal(payload, &message) != nil {
@@ -27,6 +28,23 @@ func (manager *appServerManager) reserveAccountRequest(sessionID string, payload
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if owner := manager.threadManagement[message.Params.ThreadID]; owner != "" && owner != sessionID {
+		switch message.Method {
+		case "thread/read", "thread/turns/list", "thread/items/list":
+		default:
+			return fmt.Errorf("此对话正在交接账号或处理历史，请稍后重新打开")
+		}
+	}
+	if message.Method == "mira/thread/unload" {
+		if len(message.Params.ThreadIDs) == 0 || manager.threadManagement[message.Params.ThreadID] != sessionID {
+			return fmt.Errorf("thread unload requires a scoped management session")
+		}
+		for _, id := range message.Params.ThreadIDs {
+			if manager.threadManagement[id] != sessionID {
+				return fmt.Errorf("thread unload exceeds the management scope")
+			}
+		}
+	}
 	authMutation := strings.HasPrefix(message.Method, "account/login/") || message.Method == "account/logout" || strings.HasPrefix(message.Method, "config/value/") || message.Method == "config/batchWrite"
 	if authMutation && manager.managementSession != sessionID {
 		return fmt.Errorf("请从账号管理页修改凭据和配置")
@@ -143,7 +161,7 @@ func (client *controlClient) configureCodexAccount(id string, params json.RawMes
 func (manager *appServerManager) beginAccountManagement(sessionID string) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	if manager.managementSession != "" || len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 {
+	if manager.managementSession != "" || len(manager.threadManagement) > 0 || len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 {
 		return errCodexAccountBusy
 	}
 	manager.managementSession = sessionID

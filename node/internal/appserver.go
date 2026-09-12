@@ -68,6 +68,7 @@ type appServerManager struct {
 	instance          *appServerInstance
 	lastError         string
 	activeThreads     map[string]bool
+	threadManagement  map[string]string // thread ID -> handoff session; guarded by mu
 	pendingTurns      map[string]accountPendingRequest
 	managementSession string
 	loginPending      bool
@@ -242,7 +243,7 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 		return nil
 	}
 	if !desired.Running {
-		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" {
+		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" || len(manager.threadManagement) > 0 {
 			manager.lastError = "账号仍有任务执行，请先结束任务"
 			return fmt.Errorf("%s", manager.lastError)
 		}
@@ -291,7 +292,7 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 		if current.requestedListenURL == desired.ListenURL && current.codex.Path == selected.Path && current.codexHome == desired.CodexHome && stringSlicesEqual(current.configOverrides, desired.ConfigOverrides) && stringSlicesEqual(current.environmentFiles, desired.EnvironmentFiles) && stringSlicesEqual(current.inheritEnv, desired.InheritEnv) {
 			return nil
 		}
-		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" {
+		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" || len(manager.threadManagement) > 0 {
 			manager.lastError = "账号仍有任务执行，配置变更等待任务结束"
 			return fmt.Errorf("%s", manager.lastError)
 		}
@@ -601,7 +602,7 @@ func (manager *appServerManager) report() map[string]any {
 	}
 	return map[string]any{
 		"status": status, "pid": instance.command.Process.Pid, "listenUrl": instance.listenURL,
-		"runtimeId": instance.runtimeID, "busy": len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "",
+		"runtimeId": instance.runtimeID, "busy": len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" || len(manager.threadManagement) > 0,
 		"provider":  manager.providerView,
 		"codexPath": instance.codex.Path, "codexVersion": instance.codex.Version,
 		"miraCliPath": miraCLIPath,

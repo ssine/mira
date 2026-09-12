@@ -28,7 +28,8 @@ provider 覆盖参数或无关 API 密钥。环境文件逐行使用 KEY=VALUE�
 文件值覆盖继承值，受保护的账号环境和密钥最后覆盖。每个配置文件最多 256 KiB，页面只显示来源
 和变量名，不返回值。CODEX_HOME 和 MIRA_* 为保留名称，账号密钥使用专门的内部注入路径。
 
-修改配置须先停止账号。登录、退出和切换检查全部已加载对话，包括子任务；有任务时拒绝修改。
+修改配置须先停止账号。登录、退出检查全部已加载对话，包括子任务；有任务时拒绝修改凭据。
+会话切换与历史兼容处理只检查当前对话树，其他主对话可以继续运行。
 未完成登录断开后会结束其空闲实例，避免后台继续改写凭据。
 
 ## 路由与额度
@@ -41,12 +42,13 @@ CodexAccount 是逻辑账号，NodeAccount 将其关联到 Node 的本地配置�
 普通进程重启不割断身份统计。自定义服务商不提供套餐额度时明确显示不支持；不会把 token 用量
 或 API 等价费用当作套餐扣减，也不会把多 Node 的剩余百分比相加。
 
-start/resume/turn 入口检查 binding/runtime，追加执行事件并更新可重建路由。切换先确认旧账号
-空闲并等待旧进程退出，然后恢复目标 runtime。该过程会断开旧账号其他空闲对话的连接，它们重新
-打开时恢复。旧 Node 离线或仍有任务时拒绝接管；thread/unsubscribe 并不证明线程已卸载。
+start/resume/turn 入口检查 binding/runtime，追加执行事件并更新可重建路由。切换只锁住当前
+对话树，在旧实例中检查这棵树空闲、逐个退出并等待持久化和事件处理完成，再恢复目标账号。
+同账号其他对话及其进程保持运行。旧 Node 离线或这棵树仍有任务时拒绝接管，并返回具体对话 ID；
+thread/unsubscribe 并不证明线程已卸载。账号选择器的待选账号与已提交绑定明确区分。
 
 从主会话切换账号时，Server 将当前 generation 的整棵父子树作为交接单位，包括关闭或归档的
-子会话；普通 fork 保持独立。等待涉及的旧运行实例退出后，在同一事务中更新所有成员的账号、
+子会话；普通 fork 保持独立。等待涉及的旧实例确认指定对话树卸载后，在同一事务中更新所有成员的账号、
 运行实例和执行事件，随后才允许目标进程继续。子 Agent 不能单独切到与主会话不同的账号；
 从子会话发起跨账号恢复会提示先打开主会话。新建子 Agent 继续使用所在 App Server 的凭据。
 
@@ -67,6 +69,7 @@ compaction/context_compaction 和 compacted checkpoint，不依赖 cmp_ 等 ID �
 用户明确确认后，只过滤恢复时的模型输入。如果是推理则省略旧的加密推理项；如果压缩检查点也
 不兼容则从保存的完整压缩前消息重建输入，并提示输入可能变长。缺少完整来源、未知加密项或
 加密工具结果时拒绝自动处理。原始历史、导出、fork 和持久化 diff 不过滤、不删除、不换 generation。
+确认时只卸载当前对话树；同一账号进程下一次恢复会读取已确认策略，其他对话不受影响。
 
 确认绑定于 thread/generation/NodeAccount/credential revision 和冻结的历史前缀；新产生的加密
 推理继续保留。其他账号不继承该决定。确认 operation UUID 支持响应丢失重放；确认本身不重发
@@ -87,7 +90,12 @@ Schema 29 将 Codex AgentGraphStore 的父子关系及 open/closed 状态保存�
 - 绑定下的 quota、quota-history、configure、login、login-status、login-cancel、logout：额度和凭据管理。
 - 既有 runtime start/stop 请求及 App Server WebSocket 接受 nodeAccountId；省略用默认账号，显式无效值不回退。
 - GET/POST /v1/codex/threads/:threadId/input-recovery：读取计划/确认，使用 storeId 和 nodeAccountId 限定范围。
-- Node 报告 codexAccountsV1；appserver.open 携带 binding/runtime，管理使用 account.configure/account.retire。
+- Node 报告 codexAccountsV1 和 codexThreadHandoffV1；appserver.open 携带 binding/runtime，
+  accountThreads 指定交接范围。凭据管理仍使用账号全局锁；对话交接锁保持到路由事务完成。
+- 0.153.1-mira.11 新增 mira/thread/unload，接收 threadId（根）与 threadIds（完整树，最多 4096），
+  确认退出、事件排空和 ThreadStore flush 后返回相同 ID 集。重复调用可确认已卸载成员，
+  不修改归档状态或持久化父子边。旧 Node/运行包明确提示升级，不回退为关闭整个账号。
+- 历史兼容确认返回 reloadedThreadId，不再返回 retiredRuntimeId；旧确认收据仍按原格式重放。
 - ThreadStore 请求发送 X-Mira-Accounts-Version、X-Mira-Codex-Account、X-Mira-Codex-Runtime。
   版本 1 支持账号身份与输入恢复；版本 2 增加目标账号服务商投影，需要 Mira 1.0.20 或更新 Server，
   Server 同时接受 1 和 2。认证仍以 Node 凭据为准，选择器不能冒充其他 Node；管理写操作仍要求管理员和 CSRF。
