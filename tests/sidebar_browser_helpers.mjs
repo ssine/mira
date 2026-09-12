@@ -8,7 +8,7 @@ export async function sidebarAction(page, id) {
 export async function accountDetails(page) {
   await page.locator("#agentView:not(.hidden)").waitFor();
   if (await page.locator("#agentThreadDrawer").getAttribute("aria-hidden") === "true") await page.locator("#agentThreadDrawerToggle").click();
-  if (!await page.locator("#agentAccountDetails").isVisible()) await page.locator("#agentAccountToggle").click();
+  if (!await page.locator("#agentAccountDetails").isVisible()) await page.locator("#agentAccount .sidebar-account-row:visible, #agentAccountToggle:visible").first().click();
 }
 
 export async function closeSidebar(page, { touch = false } = {}) {

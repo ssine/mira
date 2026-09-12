@@ -208,7 +208,8 @@ try {
   };
   for (const area of ['list', 'backdrop', 'footer']) {
     await stableOpen();
-    const target = area === 'list' ? page.locator('.agent-thread').first() : area === 'footer' ? page.locator('#agentAccountToggle') : page.locator('#agentThreadDrawerBackdrop');
+    const target = area === 'list' ? page.locator('.agent-thread').first() : area === 'footer' ? page.locator('#agentAccount .sidebar-account-row:visible, #agentAccountToggle:visible').first() : page.locator('#agentThreadDrawerBackdrop');
+    await target.waitFor({ state: 'visible' });
     const bounds = await target.boundingBox();
     const x = area === 'backdrop' ? devices['Pixel 7'].viewport.width - 30 : bounds.x + Math.min(230, bounds.width - 20);
     const y = area === 'backdrop' ? 400 : bounds.y + bounds.height / 2;
