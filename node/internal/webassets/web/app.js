@@ -252,6 +252,7 @@ const agent = {
 
 const transcriptPageSize = 60;
 const accountSidebar = new AccountSidebar($("#agentAccount"));
+let accountNodesTimer = null, accountNodesController = null, accountNodesNextAt = 0;
 const codexAccounts = new CodexAccounts($("#codexAccountsPanel"), { api, refreshNodes: refreshAgentNodes, notice: toast });
 const accountRecovery = new AccountRecovery($("#conversationCompatibility"), { api, notice: toast,
   beforeApply: async () => {
@@ -277,7 +278,7 @@ function refreshAccountChoices(preferred) {
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   const previous = preferred ?? agent.accountSelections.get(node?.nodeId) ?? "";
   const accounts = node?.codexAccounts ?? [];
-  for (const select of [$("#conversationAccount"), $("#agentRuntimeAccount")]) {
+  for (const select of [$("#conversationAccount"), $("#agentRuntimeAccount"), $("#conversationDetailsAccount")]) {
     select.replaceChildren(...(accounts.length ? accounts.map(account => {
       const option = new Option(account.name, account.nodeAccountId); option.disabled = !account.enabled; return option;
     }) : [new Option("默认账号", "")]));
@@ -313,7 +314,33 @@ const traceImages = new TraceImages($("#conversationTrace"), (href, signal) => a
 function syncAccountSidebar() {
   const active = document.body.dataset.view === "agentView" && agentThreadDrawerOpen && !document.hidden;
   const node = selectedAccountNode();
-  accountSidebar.select(navigator.onLine === false && node ? { ...node, status: "offline" } : node, active);
+  const offline = navigator.onLine === false;
+  const signedOut = ["loginView", "setupView"].includes(document.body.dataset.view);
+  const nodes = signedOut ? [] : [...dashboardNodes.values()];
+  accountSidebar.setNodes(nodes.map(node => offline ? { ...node, status: "offline" } : node), active, offline && node ? { ...node, status: "offline" } : node);
+  if (!active || offline) {
+    clearTimeout(accountNodesTimer); accountNodesTimer = null;
+    accountNodesController?.abort(); accountNodesController = null;
+    if (signedOut) accountNodesNextAt = 0;
+  } else if (accountSidebar.groups.length && !accountNodesTimer && !accountNodesController) {
+    accountNodesTimer = setTimeout(() => { accountNodesTimer = null; void refreshAccountSidebarNodes(); }, Math.max(0, accountNodesNextAt - Date.now()));
+  }
+}
+
+async function refreshAccountSidebarNodes() {
+  if (accountNodesController) return;
+  const controller = new AbortController(); accountNodesController = controller;
+  accountNodesNextAt = Date.now() + 5 * 60_000;
+  const deadline = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await api("/v1/nodes", { signal: controller.signal });
+    if (accountNodesController !== controller) return;
+    dashboardNodes = new Map((response.data ?? []).map(node => [node.nodeId, node]));
+  } catch { /* Keep the last observations when the Server cannot be reached. */ }
+  finally {
+    clearTimeout(deadline);
+    if (accountNodesController === controller) { accountNodesController = null; syncAccountSidebar(); }
+  }
 }
 
 const replyProgress = new ReplyProgress();
@@ -2314,6 +2341,7 @@ function syncConversationSendUi() {
   $("#agentRuntimeNode").disabled = busy;
   $("#conversationAccount").disabled = busy;
   $("#agentRuntimeAccount").disabled = busy;
+  $("#conversationDetailsAccount").disabled = busy;
   $("#agentNewThread").disabled = busy;
   $("#agentNewProject").disabled = busy;
   $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
@@ -5680,7 +5708,7 @@ $("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch(
 $("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
 for (const id of ["globalAccounts", "agentManageAccounts"]) $("#" + id).addEventListener("click", () => navigateGlobal("nodes").then(() => codexAccounts.focusNode("")).catch(error => toast(error.message)));
-for (const id of ["conversationAccount", "agentRuntimeAccount"]) $("#" + id).addEventListener("change", event => selectConversationAccount(event.target.value));
+for (const id of ["conversationAccount", "agentRuntimeAccount", "conversationDetailsAccount"]) $("#" + id).addEventListener("change", event => selectConversationAccount(event.target.value));
 
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
 $("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
@@ -5690,6 +5718,23 @@ $("#agentNavMenuToggle").addEventListener("click", event => openSidebarPopover($
 $("#agentAccountToggle").addEventListener("click", event => {
   accountSidebar.render();
   openSidebarPopover($("#agentAccountDetails"), event.currentTarget, true);
+});
+$("#agentAccount [data-account-list]").addEventListener("click", event => {
+  const trigger = event.target.closest("[data-account-name]");
+  if (!trigger) return;
+  const changed = trigger.dataset.accountName !== accountSidebar.selectedName;
+  if (changed && $("#agentAccountDetails").matches(":popover-open")) $("#agentAccountDetails").hidePopover();
+  accountSidebar.selectGroup(trigger.dataset.accountName);
+  openSidebarPopover($("#agentAccountDetails"), trigger, true);
+});
+$("#agentAccount [data-account-refresh]").addEventListener("click", () => {
+  if (accountSidebar.groups?.length) void refreshAccountSidebarNodes();
+});
+$("#agentAccountDetails").addEventListener("toggle", event => {
+  accountSidebar.render();
+  for (const trigger of $("#agentAccount [data-account-list]").children) {
+    trigger.setAttribute("aria-expanded", String(event.newState === "open" && trigger.dataset.accountName === accountSidebar.selectedName));
+  }
 });
 for (const [panelId, triggerId] of [["agentNavMenu", "agentNavMenuToggle"], ["agentAccountDetails", "agentAccountToggle"]]) {
   $("#" + panelId).addEventListener("toggle", event => $("#" + triggerId).setAttribute("aria-expanded", String(event.newState === "open")));
@@ -5813,20 +5858,33 @@ window.addEventListener("offline", () => {
   if (agent.connectionWanted) setAgentRuntimeState("网络已断开，恢复后将自动连接", "offline");
 });
 
-const conversationOverlayObserver = new ResizeObserver(() => {
-  const head = $(".conversation-head").getBoundingClientRect().bottom - $(".conversation-card").getBoundingClientRect().top;
-  const noticeHeight = $(".conversation-notices").getBoundingClientRect().height;
-  $(".conversation-card").style.setProperty("--conversation-overlay-height", `${head + noticeHeight}px`);
-});
+let conversationMeasureFrame = null;
+function scheduleConversationMeasurements() {
+  if (conversationMeasureFrame !== null) return;
+  // Changing account notices and opening/closing the narrow details panel can
+  // resize the scroller again. Write measurements outside ResizeObserver's
+  // delivery phase so the resulting layout is observed on the next frame.
+  conversationMeasureFrame = requestAnimationFrame(() => {
+    conversationMeasureFrame = null;
+    const card = $(".conversation-card"), scroll = traceScroller();
+    const head = $(".conversation-head").getBoundingClientRect().bottom - card.getBoundingClientRect().top;
+    const noticeHeight = $(".conversation-notices").getBoundingClientRect().height;
+    const style = getComputedStyle(scroll);
+    const values = {
+      "--conversation-overlay-height": head + noticeHeight,
+      "--conversation-table-width": Math.max(0, scroll.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)),
+      "--conversation-scrollbar-width": scroll.offsetWidth - scroll.clientWidth,
+    };
+    for (const [key, value] of Object.entries(values)) {
+      if (card.style.getPropertyValue(key) !== `${value}px`) card.style.setProperty(key, `${value}px`);
+    }
+  });
+}
+const conversationOverlayObserver = new ResizeObserver(scheduleConversationMeasurements);
 conversationOverlayObserver.observe($(".conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
 conversationOverlayObserver.observe($(".conversation-notices"));
-const conversationWidthObserver = new ResizeObserver(() => {
-  const scroll = traceScroller();
-  const style = getComputedStyle(scroll);
-  $(".conversation-card").style.setProperty("--conversation-table-width", `${Math.max(0, scroll.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight))}px`);
-  $(".conversation-card").style.setProperty("--conversation-scrollbar-width", `${scroll.offsetWidth - scroll.clientWidth}px`);
-});
+const conversationWidthObserver = new ResizeObserver(scheduleConversationMeasurements);
 conversationWidthObserver.observe(traceScroller());
 traceScroller().addEventListener("scroll", scheduleOlderTranscriptLoad, { passive: true });
 traceScroller().addEventListener("scroll", scheduleThreadRead, { passive: true });

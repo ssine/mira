@@ -41,6 +41,7 @@ var specs = map[string]assetSpec{
 	"/thread-usage.js":           {"web/thread-usage.js", "text/javascript; charset=utf-8"},
 	"/thread-model.js":           {"web/thread-model.js", "text/javascript; charset=utf-8"},
 	"/account-history.js":        {"web/account-history.js", "text/javascript; charset=utf-8"},
+	"/account-spend.js":          {"web/account-spend.js", "text/javascript; charset=utf-8"},
 	"/account-quota.js":          {"web/account-quota.js", "text/javascript; charset=utf-8"},
 	"/account-status.js":         {"web/account-status.js", "text/javascript; charset=utf-8"},
 	"/codex-accounts.js":         {"web/codex-accounts.js", "text/javascript; charset=utf-8"},

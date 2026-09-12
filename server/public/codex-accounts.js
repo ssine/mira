@@ -4,8 +4,32 @@ export function accountNode(node, bindingId = "") {
   if (!node) return null;
   const account = (node.codexAccounts ?? []).find(value => bindingId ? value.nodeAccountId === bindingId : value.isDefault);
   if (!account) return bindingId ? null : node;
-  return { ...node, nodeAccountId: account.nodeAccountId, accountName: account.name, accountRevision: account.revision,
+  return { ...node, nodeAccountId: account.nodeAccountId, accountName: account.name, accountRevision: account.credentialRevision ?? account.revision,
     desiredAppServer: account.desiredAppServer, reportedAppServer: account.reportedAppServer, accountSnapshot: account.snapshot };
+}
+
+// Names are the user's grouping key. A balance is an observation, never a sum
+// of percentages from copies of an account on different Nodes.
+export function accountGroups(nodes) {
+  const groups = new Map();
+  for (const node of nodes) {
+    if (node.approvalStatus && node.approvalStatus !== "approved") continue;
+    for (const account of node.codexAccounts ?? []) {
+      const name = account.name?.trim();
+      if (!name) continue;
+      if (!groups.has(name)) groups.set(name, { name, members: [] });
+      groups.get(name).members.push({ node, account });
+    }
+  }
+  for (const group of groups.values()) {
+    group.members.sort((a, b) => {
+      const known = value => Number(weeklyQuota(value.account.snapshot?.limits).remaining !== null);
+      return known(b) - known(a) || (Date.parse(b.account.observedAt) || 0) - (Date.parse(a.account.observedAt) || 0) ||
+        Number(b.node.status === "online" && b.account.reportedAppServer?.status === "running") - Number(a.node.status === "online" && a.account.reportedAppServer?.status === "running") ||
+        a.account.nodeAccountId.localeCompare(b.account.nodeAccountId);
+    });
+  }
+  return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
 }
 
 export function accountQuery(bindingId) { return bindingId ? `&nodeAccountId=${encodeURIComponent(bindingId)}` : ""; }

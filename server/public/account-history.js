@@ -110,8 +110,7 @@ export class AccountHistory {
 
   select(node, account, active, refresh = false) {
     this.node = node; this.account = account;
-    const key = active && node?.nodeId ? JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.codexHome,
-      node.reportedAppServer?.codexPath, account?.type, account?.email, this.range]) : null;
+    const key = active && node?.nodeId ? this.historyKey(node, account) : null;
     if (this.key !== key) {
       this.controller?.abort(); this.controller = null; this.key = key;
       this.data = this.cache.get(key)?.data ?? null;
@@ -122,17 +121,22 @@ export class AccountHistory {
     void this.load(key);
   }
 
+  historyKey(node, account, range = this.range) {
+    return JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.codexHome,
+      node.reportedAppServer?.codexPath, account?.type, account?.email, range]);
+  }
+
   async load(key) {
     const controller = new AbortController();
     this.controller = controller;
-    const timer = setTimeout(() => controller.abort(), 15_000);
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs ?? 15_000);
     try {
-      const response = await fetch(`/v1/nodes/${encodeURIComponent(this.node.nodeId)}/${this.node.nodeAccountId ? `codex-accounts/${encodeURIComponent(this.node.nodeAccountId)}/quota-history` : "account-history"}?range=${this.range}`, { signal: controller.signal });
+      const response = await fetch(this.historyURL(), { signal: controller.signal });
       if (!response.ok) throw new Error("history unavailable");
       const data = await response.json();
       if (this.key !== key || this.controller !== controller) return;
       this.data = data; this.message = "";
-      const hasPoints = data.points?.some(point => Number.isFinite(point.remaining));
+      const hasPoints = data.points?.some(point => Number.isFinite(point.remaining) || Number.isFinite(point.amount));
       this.cache.set(key, { data, expiresAt: Date.now() + (hasPoints ? 5 * 60_000 : 30_000) });
       if (this.cache.size > 24) this.cache.delete(this.cache.keys().next().value);
     } catch {
@@ -143,6 +147,10 @@ export class AccountHistory {
       clearTimeout(timer);
       if (this.controller === controller) { this.controller = null; this.render(); }
     }
+  }
+
+  historyURL() {
+    return `/v1/nodes/${encodeURIComponent(this.node.nodeId)}/${this.node.nodeAccountId ? `codex-accounts/${encodeURIComponent(this.node.nodeAccountId)}/quota-history` : "account-history"}?range=${this.range}`;
   }
 
   render() {

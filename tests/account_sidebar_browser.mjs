@@ -78,7 +78,7 @@ try {
  assert.equal(await panel.locator('.quota-line').count(),1,'missing samples keep one continuous step line');
  assert.match(await panel.locator('.quota-line').getAttribute('d'),/H.*V.*H.*V/,'quota changes remain vertical steps at real sample times');
  assert.equal(await panel.locator('.quota-reference').count(),2,'early refill splits the seven-day reference');
- assert.equal(await panel.locator('[data-history-legend]').isVisible(),true);
+ assert.equal(await panel.locator('[data-account-history] [data-history-legend]').isVisible(),true);
  assert.equal(await panel.locator('[data-account-updated], [data-history-note]').count(),0,'account refresh and history sampling notes are removed');
  assert.equal(await panel.locator('[data-history-point]').count(),0,'the permanent sample detail row is removed');
  assert.equal(await panel.locator('.quota-tooltip').isVisible(),false,'labels appear only during inspection');
@@ -88,7 +88,7 @@ try {
  await page.reload();await page.locator('#agentView:not(.hidden)').waitFor();await accountDetails(page);
  assert.equal(await panel.locator('[aria-label="额度历史时间范围"]').inputValue(),'24h','the saved history range is restored after reload');
  await panel.locator('.quota-chart:not(.hidden)').waitFor();
- const chart = panel.locator('.quota-chart');
+ const chart = panel.locator('[data-account-history] .quota-chart');
  await chart.focus(); await page.keyboard.press('Home');
  assert.match(await panel.locator('.quota-tooltip').textContent(),/剩余 80%/);
  await page.keyboard.press('End');
@@ -182,8 +182,8 @@ try {
  await panel.locator('[data-account-refresh]').scrollIntoViewIfNeeded();
  assert.equal(await panel.locator('[data-account-refresh]').isVisible(),true);
  await panel.locator('.quota-chart:not(.hidden)').waitFor();
- assert.ok((await panel.locator('.quota-chart').boundingBox()).height<=180,'chart has a bounded mobile height');
- const mobileChart=await panel.locator('.quota-chart').boundingBox();
+ assert.ok((await panel.locator('[data-account-history] .quota-chart').boundingBox()).height<=180,'chart has a bounded mobile height');
+ const mobileChart=await panel.locator('[data-account-history] .quota-chart').boundingBox();
  await chart.dispatchEvent('pointerdown',{pointerType:'touch',clientX:mobileChart.x+mobileChart.width*.6,clientY:mobileChart.y+mobileChart.height*.5});
  await chart.dispatchEvent('pointerleave',{pointerType:'touch'});
  assert.equal(await panel.locator('.quota-tooltip').isVisible(),true,'touch labels remain visible after lifting the finger');

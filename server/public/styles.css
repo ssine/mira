@@ -386,6 +386,14 @@ tbody tr:hover { background: var(--hover); }
 .chat-icon-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.45; }
 .chat-drawer-footer { flex: none; padding: 4px 8px; border-top: 1px solid var(--line); }
 .sidebar-account { min-width: 0; font-size: 11px; }
+.sidebar-account-list { max-height: min(30dvh, 240px); overflow-y: auto; overscroll-behavior: contain; }
+.sidebar-account-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 38px; padding: 7px 8px; border: 0; background: transparent; text-align: left; }
+.sidebar-account-row:hover, .sidebar-account-row[aria-expanded="true"] { background: var(--hover); }
+.sidebar-account-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.sidebar-account-row > span { flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.spend-bar { fill: var(--accent); fill-opacity: .18; }
+@media (pointer: coarse) { .sidebar-account-row { min-height: 44px; } }
+@media (forced-colors: active) { .spend-bar { fill: Canvas; stroke: CanvasText; fill-opacity: 1; } }
 .sidebar-account-heading { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .sidebar-account-heading strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
 .sidebar-account-heading .chat-icon-button { width: 28px; min-width: 28px; height: 28px; min-height: 28px; font-size: 18px; }

@@ -1,6 +1,7 @@
-import { accountQuery } from "./codex-accounts.js";
+import { accountQuery, accountNode, accountGroups } from "./codex-accounts.js";
 import { weeklyQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
+import { AccountSpend } from "./account-spend.js";
 export { weeklyQuota } from "./account-quota.js";
 
 export function resetTime(timestamp, now = Date.now()) {
@@ -16,13 +17,115 @@ export class AccountSidebar {
     this.intervalMs = intervalMs;
     this.timeoutMs = timeoutMs;
     this.cache = new Map();
+    this.summaries = new Map(); this.summaryJobs = new Map();
     this.history = new AccountHistory(root.querySelector("[data-account-history]"));
-    root.querySelector("[data-account-refresh]").addEventListener("click", () => void this.refresh());
+    this.spend = new AccountSpend(root.querySelector("[data-account-spend]"));
+    root.querySelector("[data-account-refresh]").addEventListener("click", () => {
+      void this.refresh();
+      if (this.selectedName && !root.querySelector("[data-account-spend]").classList.contains("hidden")) {
+        this.summaries.delete(this.selectedName); this.loadSummaries();
+        if (this.spend.range !== "7d") this.spend.select({ nodeId: this.selectedName }, null, true, true);
+      }
+    });
     this.render();
   }
 
+  setNodes(nodes, active, legacyNode) {
+    this.groups = accountGroups(nodes);
+    this.active = active;
+    if (!active) this.stopSummaries();
+    const names = new Set(this.groups.map(group => group.name));
+    for (const name of this.summaries.keys()) if (!names.has(name)) this.summaries.delete(name);
+    for (const [name, controller] of this.summaryJobs) if (!names.has(name)) { controller.abort(); this.summaryJobs.delete(name); }
+    const overview = this.groups.length > 0;
+    this.root.querySelector("#agentAccountToggle").classList.toggle("hidden", overview);
+    this.root.querySelector("[data-account-list]").classList.toggle("hidden", !overview);
+    if (!overview) { this.select(legacyNode, active); return; }
+    if (!this.groups.some(group => group.name === this.selectedName)) this.selectedName = this.groups[0].name;
+    this.selectGroup(this.selectedName);
+    this.renderOverview();
+  }
+
+  selectGroup(name) {
+    const group = this.groups?.find(group => group.name === name);
+    if (!group) return;
+    this.selectedName = name;
+    const { node, account } = group.members[0];
+    this.select(accountNode(node, account.nodeAccountId), this.active);
+    this.render();
+  }
+
+  groupQuota(group) {
+    const account = group.members[0].account;
+    return weeklyQuota(this.node?.nodeAccountId === account.nodeAccountId && this.limits ? this.limits : account.snapshot?.limits);
+  }
+
+  renderOverview() {
+    const list = this.root.querySelector("[data-account-list]");
+    if (!list || !this.groups?.length) return;
+    const existing = new Map([...list.children].map(row => [row.dataset.accountName, row]));
+    for (const group of this.groups) {
+      let row = existing.get(group.name);
+      if (!row) {
+        row = document.createElement("button"); row.type = "button"; row.className = "sidebar-account-row";
+        row.dataset.accountName = group.name; row.setAttribute("aria-haspopup", "dialog"); row.setAttribute("aria-controls", "agentAccountDetails");
+        row.append(document.createElement("strong"), document.createElement("span"));
+        list.append(row);
+      }
+      existing.delete(group.name);
+      const { node } = group.members[0];
+      const quota = this.groupQuota(group);
+      row.firstChild.textContent = group.name;
+      const summary = this.summaries.get(group.name), estimate = summary?.data?.estimate;
+      const cost = Number.isFinite(estimate?.amount) ? `7 天 ${estimate.status === "partial" ? "≥ " : ""}$${estimate.amount.toFixed(2)}`
+        : summary?.message || (summary ? "7 天暂无可估费用" : "7 天费用…");
+      row.lastChild.textContent = quota.remaining === null ? cost : `剩余 ${Number(quota.remaining.toFixed(1))}%`;
+      row.title = `${group.name} · ${[...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join("、")}${node.status !== "online" ? " · 上次记录" : ""}`;
+      if (quota.remaining === null) row.title += " · 最近 7 天标准 API 价格估算，点击查看每日费用";
+      if (quota.remaining === null && summary?.message) row.title += ` · ${summary.message}`;
+      row.setAttribute("aria-label", `${group.name}，${row.lastChild.textContent}`);
+    }
+    for (const row of existing.values()) row.remove();
+    this.loadSummaries();
+  }
+
+  stopSummaries() {
+    for (const controller of this.summaryJobs.values()) controller.abort();
+    this.summaryJobs.clear();
+  }
+
+  loadSummaries() {
+    if (!this.active || navigator.onLine === false) return;
+    for (const group of this.groups ?? []) {
+      if (this.summaryJobs.size >= 2) break;
+      if (this.groupQuota(group).remaining !== null || this.summaryJobs.has(group.name) ||
+        (this.summaries.get(group.name)?.expiresAt ?? 0) > Date.now()) continue;
+      const controller = new AbortController(); this.summaryJobs.set(group.name, controller);
+      void this.loadSummary(group.name, controller);
+    }
+  }
+
+  async loadSummary(name, controller) {
+    const timer = setTimeout(() => controller.abort(), 35_000);
+    try {
+      const response = await fetch(this.spend.urlFor(name, "7d"), { signal: controller.signal });
+      if (!response.ok) throw new Error("cost unavailable");
+      const data = await response.json();
+      if (this.summaryJobs.get(name) !== controller) return;
+      const expiresAt = Date.now() + (Number.isFinite(data.estimate?.amount) ? this.intervalMs : 30_000);
+      this.summaries.set(name, { data, expiresAt });
+      this.spend.cacheSummary(name, data, expiresAt);
+    } catch {
+      if (this.summaryJobs.get(name) !== controller) return;
+      this.summaries.set(name, { ...this.summaries.get(name), message: "费用暂不可用", expiresAt: Date.now() + 30_000 });
+    } finally {
+      clearTimeout(timer);
+      if (this.summaryJobs.get(name) === controller) { this.summaryJobs.delete(name); this.renderOverview(); }
+    }
+  }
+
   select(node, active) {
-    const cacheKey = node?.nodeId ? JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.runtimeId, node.reportedAppServer?.codexHome, node.reportedAppServer?.codexPath]) : null;
+    const cacheKey = node?.nodeId ? JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.runtimeId, node.reportedAppServer?.codexHome, node.reportedAppServer?.codexPath, node.accountSnapshot]) : null;
     const key = active ? JSON.stringify([cacheKey, node?.status, node?.reportedAppServer?.status]) : "";
     if (key === this.key) return;
     this.key = key;
@@ -30,8 +133,8 @@ export class AccountSidebar {
     this.cacheKey = active ? cacheKey : null;
     this.node = active ? node : null;
     const cached = active && this.cache.get(cacheKey);
-    this.account = cached?.account ?? null;
-    this.limits = cached?.limits ?? null;
+    this.account = cached?.account ?? (active ? node?.accountSnapshot?.account : null) ?? null;
+    this.limits = cached?.limits ?? (active ? node?.accountSnapshot?.limits : null) ?? null;
     this.message = !active ? "" : !node ? "请选择运行节点" : node.status !== "online" ? "运行节点离线"
       : node.reportedAppServer?.status !== "running" ? "Codex 尚未启动" : cached ? cached.message : "正在读取账户…";
     this.available = Boolean(active && node?.status === "online" && node?.reportedAppServer?.status === "running");
@@ -43,9 +146,14 @@ export class AccountSidebar {
   }
 
   clear() {
+    this.active = false;
     this.stop();
     this.cache.clear();
+    this.stopSummaries(); this.summaries.clear();
     this.history.clear();
+    this.spend.clear();
+    this.groups = []; this.selectedName = null;
+    this.root.querySelector("[data-account-list]").replaceChildren();
     this.key = this.cacheKey = this.node = this.account = this.limits = null;
     this.available = false;
     this.message = "";
@@ -174,6 +282,7 @@ export class AccountSidebar {
         this.operation = null;
         if (this.session === session && this.revision === revision) {
           this.cache.set(this.cacheKey, { account: this.account, limits: this.limits, message: this.message, updatedAt: Date.now() });
+          if (this.cache.size > 64) this.cache.delete(this.cache.keys().next().value);
         }
         this.render();
         this.schedule(this.session === session && this.revision === revision ? undefined : this.intervalMs);
@@ -193,7 +302,8 @@ export class AccountSidebar {
     find("[data-account-email]").textContent = email;
     find("[data-account-email]").title = email;
     const mode = this.node?.nodeMode === "wsl" ? " · WSL" : this.node?.platform === "windows" ? " · Windows" : "";
-    const nodeLabel = this.node ? `${this.node.displayName?.trim() || this.node.hostname}${mode}` : "当前运行节点";
+    const group = this.groups?.find(group => group.name === this.selectedName);
+    const nodeLabel = group ? [...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join(" · ") : this.node ? `${this.node.displayName?.trim() || this.node.hostname}${mode}` : "当前运行节点";
     find("[data-account-node]").textContent = nodeLabel;
     find("[data-account-node]").title = nodeLabel;
     find("[data-account-plan]").textContent = this.account?.planType?.toUpperCase() ?? "";
@@ -220,8 +330,13 @@ export class AccountSidebar {
     find("dl").classList.toggle("hidden", this.account?.type !== "chatgpt");
     find("[data-account-status]").textContent = this.message ?? "";
     find("[data-account-status]").classList.toggle("hidden", !this.message);
-    find("[data-account-refresh]").disabled = !this.available || Boolean(this.operation);
+    find("[data-account-refresh]").disabled = (!this.available && !group) || Boolean(this.operation);
     this.root.setAttribute("aria-busy", String(Boolean(this.operation)));
-    this.history.select(this.node, this.account, Boolean(this.key));
+    const spending = Boolean(group && remaining === null);
+    find("[data-account-history]").classList.toggle("hidden", spending);
+    find("[data-account-spend]").classList.toggle("hidden", !spending);
+    this.history.select(this.node, this.account, Boolean(this.key) && !spending);
+    this.spend.select(group ? { nodeId: group.name } : null, null, Boolean(this.key) && spending && find("#agentAccountDetails").matches(":popover-open"));
+    this.renderOverview();
   }
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ssine/mira/node/internal/miraserver/accountsampler"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
@@ -16,7 +17,7 @@ var nodeAccountsPattern = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/cod
 func (server *Server) routeAccounts(ctx context.Context, response http.ResponseWriter, request *http.Request) (bool, error) {
 	path := request.URL.Path
 	match := nodeAccountsPattern.FindStringSubmatch(path)
-	if path != "/v1/codex/accounts" && match == nil {
+	if path != "/v1/codex/accounts" && path != "/v1/codex/accounts/cost-history" && match == nil {
 		return false, nil
 	}
 	role := "admin"
@@ -26,6 +27,20 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 	principal, err := server.authorize(ctx, response, request, role, authOptions{CSRF: request.Method != http.MethodGet})
 	if err != nil || principal == nil {
 		return true, err
+	}
+	if path == "/v1/codex/accounts/cost-history" {
+		if request.Method != http.MethodGet {
+			return true, foundation.WriteErrorJSON(response, 405, "method not allowed", "method_not_allowed")
+		}
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		query := request.URL.Query()
+		result, err := server.views.AccountCostHistory(ctx, query.Get("name"), query.Get("range"), query.Get("timezone"))
+		if err != nil {
+			return true, err
+		}
+		response.Header().Set("Cache-Control", "no-store")
+		return true, writeJSON(response, 200, result)
 	}
 	if path == "/v1/codex/accounts" {
 		if request.Method != http.MethodGet {

@@ -124,7 +124,8 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
-              <section id="agentAccount" class="sidebar-account" aria-label="当前运行节点的 Codex 账户">
+              <section id="agentAccount" class="sidebar-account" aria-label="所有节点的 Codex 账号与额度">
+                <div data-account-list class="sidebar-account-list"></div>
                 <button id="agentAccountToggle" class="sidebar-account-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="agentAccountDetails">
                   <span data-account-summary-email>Codex 账户</span><span data-account-summary-plan></span>
                   <span data-account-summary-remaining>查看账户与额度</span><span data-account-summary-credits></span>
@@ -145,6 +146,13 @@
                   <p data-history-empty class="account-history-empty">采样后会显示在这里</p>
                   <svg class="quota-chart hidden" viewBox="0 0 600 210" role="img" tabindex="0" aria-label="周额度剩余历史"></svg>
                   <p class="quota-legend" data-history-legend hidden>灰线 · 7 天匀速用完</p>
+                </section>
+                <section class="account-history hidden" data-account-spend aria-label="账号每日估算费用">
+                  <div class="account-history-heading"><strong>每日估算费用 · USD</strong><select aria-label="费用历史时间范围"><option value="24h">今天</option><option value="7d" selected>最近 7 天</option><option value="30d">最近 30 天</option></select></div>
+                  <p data-history-empty class="account-history-empty">正在读取费用…</p>
+                  <svg class="quota-chart hidden" viewBox="0 0 600 210" role="img" tabindex="0" aria-label="每日估算费用柱状图与日内累计曲线"></svg>
+                  <p class="quota-legend" data-history-legend>柱 · 每日费用　线 · 日内累计（每小时）</p>
+                  <p class="quota-legend">按已记录请求的标准 API 价格估算；服务商实际账单可能不同。无归属或未定价的用量不计入金额。</p>
                 </section>
                 </div>
               </section>
@@ -185,7 +193,7 @@
                   <textarea id="conversationInput" disabled rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
                 </div>
                 <div class="composer-toolbar">
-				  <label class="composer-account-choice"><span class="visually-hidden">本轮账号</span><select id="conversationAccount" aria-label="选择对话账号"></select></label>
+                  <label class="composer-choice composer-account-choice"><span class="visually-hidden">本轮账号</span><select id="conversationAccount" aria-label="选择对话账号"></select></label>
                   <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
                   <div class="composer-choice composer-model-choice">
                     <button id="conversationModelSelect" class="composer-choice-toggle" type="button" aria-label="本轮模型" aria-haspopup="listbox" aria-expanded="false" aria-controls="conversationModelMenu" disabled>
@@ -219,6 +227,8 @@
       <div class="conversation-details-body">
       <h3 id="conversationDetailsName"></h3>
       <section id="conversationDetailsSettings" class="conversation-details-settings" aria-label="消息设置">
+        <label for="conversationDetailsAccount">账号</label>
+        <select id="conversationDetailsAccount" aria-label="选择对话账号" disabled></select>
         <label for="conversationDetailsModel">模型</label>
         <select id="conversationDetailsModel" disabled></select>
         <label for="conversationDetailsEffort">思考强度</label>
