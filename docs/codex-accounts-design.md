@@ -95,8 +95,12 @@ thread/unsubscribe 并不证明线程已卸载。账号选择器的待选账号�
 
 ## 加密上下文恢复
 
-默认完整保留推理和压缩项，按 Codex 原语义继续。仅明确的模型错误 invalid_encrypted_content
-触发提示，普通认证错误或工具输出里的同名文本不会触发。根据 canonical type 判断 reasoning、
+默认完整保留推理和压缩项，按 Codex 原语义继续。明确的模型错误 invalid_encrypted_content，
+以及网关拒绝加密历史的 unknown_reasoning_pool 都触发同一恢复提示。Codex 只保留错误文案时，
+也识别已知的 `encrypted history has no known compatibility pool`、
+`history belongs to different compatibility pools` 及其 HTTP 409 包装。
+普通 409、认证错误或工具输出里的同名文本不会触发。可切回原账号，或确认输入兼容处理。
+根据 canonical type 判断 reasoning、
 compaction/context_compaction 和 compacted checkpoint，不依赖 cmp_ 等 ID 前缀。
 
 用户明确确认后，只过滤恢复时的模型输入。如果是推理则省略旧的加密推理项；如果压缩检查点也

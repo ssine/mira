@@ -34,8 +34,8 @@ export class AccountRecovery {
     this.root.replaceChildren(); this.root.hidden = false;
     const text = document.createElement("span");
     text.textContent = plan.recoverable
-      ? "此账号无法解密历史上下文。可以确认兼容处理后继续，原始历史会保留。"
-      : `此账号无法解密历史上下文：${plan.reason}。可切回原账号继续。`;
+      ? "此账号无法使用历史中的加密上下文。可切回原账号，或确认兼容处理后继续；原始历史会保留。"
+      : `此账号无法使用历史中的加密上下文：${plan.reason}。可切回原账号继续。`;
     this.root.append(text);
     if (!plan.recoverable) return;
     const button = document.createElement("button"); button.type = "button"; button.className = "secondary";

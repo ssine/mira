@@ -4,9 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"regexp"
+	"strings"
 )
 
-var encryptedContentCode = regexp.MustCompile(`"code"\s*:\s*"invalid_encrypted_content"`)
+var encryptedContentCode = regexp.MustCompile(`"code"\s*:\s*"(?:invalid_encrypted_content|unknown_reasoning_pool)"`)
+
+// Codex may keep only the gateway's message when formatting an HTTP error,
+// dropping its structured unknown_reasoning_pool code. Match the known error
+// exactly, including Codex's optional HTTP wrapper, rather than every 409.
+var unknownReasoningPoolMessage = regexp.MustCompile(`^(?:unexpected status 409(?: Conflict)?: )?(?:encrypted history has no known compatibility pool|history belongs to different compatibility pools)(?:, url: \S+)?$`)
 
 // Only inspect the model error envelope. A tool result mentioning this string
 // must not trigger a context change, and ordinary authentication errors do not
@@ -17,7 +23,7 @@ func invalidEncryptedContent(value any, depth int) bool {
 	}
 	switch value := value.(type) {
 	case map[string]any:
-		if value["code"] == "invalid_encrypted_content" {
+		if value["code"] == "invalid_encrypted_content" || value["code"] == "unknown_reasoning_pool" {
 			return true
 		}
 		for _, key := range []string{"error", "message", "additionalDetails"} {
@@ -33,7 +39,7 @@ func invalidEncryptedContent(value any, depth int) bool {
 		if json.Unmarshal([]byte(value), &parsed) == nil {
 			return invalidEncryptedContent(parsed, depth+1)
 		}
-		return encryptedContentCode.MatchString(value)
+		return encryptedContentCode.MatchString(value) || unknownReasoningPoolMessage.MatchString(strings.TrimSpace(value))
 	}
 	return false
 }
@@ -57,6 +63,8 @@ func (channel *Channel) recordInputFailure(ctx context.Context, proxy *proxy, me
 	if threadID == "" || !invalidEncryptedContent(failure, 0) {
 		return nil
 	}
+	// Normalize gateway routing failures to the existing recovery event so the
+	// account/credential scope, frozen input prefix and opt-in policy stay shared.
 	id, err := randomUUID()
 	if err != nil {
 		return err

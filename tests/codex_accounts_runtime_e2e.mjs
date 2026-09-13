@@ -50,6 +50,15 @@ const mock = http.createServer(async (request, response) => {
   const key = request.headers.authorization;
   requests.push({ key, body, path: request.url });
   if (rejectOld && encrypted(body.input).some(incompatible)) {
+    // Exercise both the gateway JSON envelope and Codex's message-only HTTP
+    // fallback; account A still covers the upstream invalid_encrypted_content.
+    if (key === "Bearer synthetic-B" || key === "Bearer synthetic-C") {
+      const message = "encrypted history has no known compatibility pool";
+      const json = key === "Bearer synthetic-B";
+      response.writeHead(409, { "content-type": json ? "application/json" : "text/plain" });
+      response.end(json ? JSON.stringify({ error: { type: "gateway_error", code: "unknown_reasoning_pool", message } }) : message);
+      return;
+    }
     response.writeHead(400, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "The encrypted content could not be verified. Encrypted content could not be decrypted or parsed.",
       type: "invalid_request_error", code: "invalid_encrypted_content", param: null } })); return;
@@ -224,6 +233,8 @@ try {
   }
   rejectOld = true;
   await turn(second, threadId, "Incompatible encrypted context", "failed");
+  assert(second.events.some(event => event.method === "mira/account/contextIncompatible" && event.params.threadId === threadId),
+    "gateway 409 must expose the recovery action");
   const endpoint = `/v1/codex/threads/${threadId}/input-recovery?storeId=${store}&nodeAccountId=${b}`;
   const plan = await waitFor(async () => { try { return await admin(endpoint); } catch { return null; } }, "recovery evidence");
   assert(plan.recoverable); assert.equal(plan.policy, compaction ? "rebuildContext" : "omitReasoning");
