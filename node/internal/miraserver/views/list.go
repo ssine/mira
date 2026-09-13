@@ -14,20 +14,25 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
 	if !safeStorePattern.MatchString(storeID) {
 		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "invalid store id"}
 	}
+	// Expand the projection once: each separate state operator would detoast
+	// the same potentially large JSONB (including runtime instructions) again.
+	// Projection state is always an object; its optional fields remain nullable.
 	rows, err := service.pool.Query(ctx, `SELECT projections.thread_id, projections.parent_thread_id, projections.source_kind,
-            COALESCE(NULLIF(projections.state->>'name', ''), projections.title) AS title,
-            projections.state->>'name' AS name, COALESCE(actions.action='archive',false) AS archived,
+            COALESCE(NULLIF(summary.name, ''), projections.title) AS title,
+            summary.name AS name, COALESCE(actions.action='archive',false) AS archived,
             projections.cwd, projections.item_count::text,
-            projections.state #> '{metadata,token_usage}' AS token_usage,
-            projections.state #> '{metadata,model}' AS model,
-            projections.state #>> '{createdThread,forked_from_id}' AS forked_from_id,
-            COALESCE(projections.state #>> '{createdThread,metadata,timestamp}',
-                     projections.state #>> '{metadata,created_at}') AS created_at,
+            summary.metadata->'token_usage' AS token_usage,
+            summary.metadata->'model' AS model,
+            summary."createdThread"->>'forked_from_id' AS forked_from_id,
+            COALESCE(summary."createdThread" #>> '{metadata,timestamp}',
+                     summary.metadata->>'created_at') AS created_at,
             projections.active_generation::text, activity.updated_at,
             imports.import_id::text, imports.source_node_id::text, imports.source_codex_version, imports.source_item_count::text,
             imports.created_at AS imported_at, runtimes.node_id::text AS runtime_node_id,
             runtimes.bound_at AS runtime_bound_at, runtimes.node_account_id::text
      FROM codex_thread_projections projections
+     CROSS JOIN LATERAL jsonb_to_record(projections.state)
+       AS summary(name text, metadata jsonb, "createdThread" jsonb)
      LEFT JOIN LATERAL (
        SELECT action FROM mira_thread_actions WHERE store_id=projections.store_id AND thread_id=projections.thread_id
        ORDER BY action_seq DESC LIMIT 1
@@ -35,10 +40,10 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
      LEFT JOIN LATERAL (
        SELECT value::timestamptz AS updated_at
        FROM (VALUES
-         (1, projections.state #>> '{metadata,updated_at}'),
-         (2, projections.state #>> '{metadata,advance_recency_at}'),
-         (3, projections.state #>> '{metadata,created_at}'),
-         (4, projections.state #>> '{createdThread,metadata,timestamp}')
+         (1, summary.metadata->>'updated_at'),
+         (2, summary.metadata->>'advance_recency_at'),
+         (3, summary.metadata->>'created_at'),
+         (4, summary."createdThread" #>> '{metadata,timestamp}')
        ) timestamps(priority, value)
        WHERE value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
          AND pg_input_is_valid(value, 'timestamp with time zone')
