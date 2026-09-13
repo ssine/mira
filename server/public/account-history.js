@@ -136,8 +136,7 @@ export class AccountHistory {
       const data = await response.json();
       if (this.key !== key || this.controller !== controller) return;
       this.data = data; this.message = "";
-      const hasPoints = data.points?.some(point => Number.isFinite(point.remaining) || Number.isFinite(point.amount));
-      this.cache.set(key, { data, expiresAt: Date.now() + (hasPoints ? 5 * 60_000 : 30_000) });
+      this.cache.set(key, { data, expiresAt: Date.now() + this.cacheLifetime(data) });
       if (this.cache.size > 24) this.cache.delete(this.cache.keys().next().value);
     } catch {
       if (this.key !== key || this.controller !== controller) return;
@@ -151,6 +150,10 @@ export class AccountHistory {
 
   historyURL() {
     return `/v1/nodes/${encodeURIComponent(this.node.nodeId)}/${this.node.nodeAccountId ? `codex-accounts/${encodeURIComponent(this.node.nodeAccountId)}/quota-history` : "account-history"}?range=${this.range}`;
+  }
+
+  cacheLifetime(data) {
+    return data.points?.some(point => Number.isFinite(point.remaining) || Number.isFinite(point.amount)) ? 5 * 60_000 : 30_000;
   }
 
   render() {

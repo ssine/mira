@@ -3,6 +3,12 @@ import { AccountHistory } from "./account-history.js";
 const money = value => `$${value.toFixed(2)}`;
 const ns = "http://www.w3.org/2000/svg";
 
+export function spendCacheLifetime(data, fallback = 5 * 60_000) {
+  if (data?.cache?.stale) return data.cache.refreshing ? 2_000 : 30_000;
+  const expiresAt = Date.parse(data?.cache?.expiresAt);
+  return Number.isFinite(expiresAt) ? Math.max(1_000, Math.min(fallback, expiresAt - Date.now())) : fallback;
+}
+
 export function spendingSeries(data) {
   return (data?.days ?? []).map(day => {
     let amount = 0;
@@ -21,6 +27,25 @@ export function spendingSeries(data) {
 export class AccountSpend extends AccountHistory {
   constructor(root) { super(root); this.timeoutMs = 65_000; }
 
+  cacheLifetime(data) { return spendCacheLifetime(data, super.cacheLifetime(data)); }
+
+  clear() { clearTimeout(this.refreshTimer); super.clear(); }
+
+  select(...args) {
+    clearTimeout(this.refreshTimer);
+    super.select(...args);
+    this.scheduleRefresh();
+  }
+
+  async load(key) { await super.load(key); this.scheduleRefresh(); }
+
+  scheduleRefresh() {
+    clearTimeout(this.refreshTimer);
+    if (this.key && !this.controller && this.data?.cache?.stale) {
+      this.refreshTimer = setTimeout(() => this.select(this.node, this.account, true, true), this.cacheLifetime(this.data));
+    }
+  }
+
   historyURL() {
     return this.urlFor(this.node.nodeId, this.range);
   }
@@ -38,6 +63,11 @@ export class AccountSpend extends AccountHistory {
 
   render() {
     const data = this.data;
+    const freshness = this.root.querySelector("[data-spend-freshness]");
+    if (freshness) {
+      freshness.hidden = !data?.cache?.updatedAt;
+      freshness.textContent = data?.cache?.updatedAt ? `统计更新于 ${new Date(data.cache.updatedAt).toLocaleString()}${data.cache.stale ? data.cache.refreshing ? " · 正在更新，暂显示上次统计" : " · 更新暂不可用，显示上次统计" : ""}` : "";
+    }
     const attribution = this.root.querySelector("[data-spend-attribution]");
     if (attribution) attribution.hidden = !data?.estimate?.reasons?.includes("historical_provider_attribution");
     const series = spendingSeries(data).filter(day => Number.isFinite(day.amount));

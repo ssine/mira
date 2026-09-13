@@ -1,7 +1,7 @@
 import { accountQuery, accountNode, accountGroups } from "./codex-accounts.js";
 import { weeklyQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
-import { AccountSpend } from "./account-spend.js";
+import { AccountSpend, spendCacheLifetime } from "./account-spend.js";
 export { weeklyQuota } from "./account-quota.js";
 
 export function resetTime(timestamp, now = Date.now()) {
@@ -30,10 +30,13 @@ export class AccountSidebar {
     this.render();
   }
 
-  setNodes(nodes, active, legacyNode) {
+  setNodes(nodes, active, legacyNode, { summariesActive = active } = {}) {
     this.groups = accountGroups(nodes);
     this.active = active;
-    if (!active) this.stopSummaries();
+    // Server-side cost reads can finish while the mobile drawer is closed.
+    // Live Node account subscriptions still follow the drawer's active state.
+    this.summariesActive = summariesActive;
+    if (!summariesActive) this.stopSummaries();
     const names = new Set(this.groups.map(group => group.name));
     for (const name of this.summaries.keys()) if (!names.has(name)) this.summaries.delete(name);
     for (const [name, controller] of this.summaryJobs) if (!names.has(name)) { controller.abort(); this.summaryJobs.delete(name); }
@@ -87,6 +90,7 @@ export class AccountSidebar {
       const cost = Number.isFinite(estimate?.amount) ? `7 天 ${estimate.status === "partial" ? "≥ " : ""}$${estimate.amount.toFixed(2)}`
         : summary?.message || (summary ? "7 天暂无可估费用" : "7 天费用…");
       row.lastChild.textContent = quota.remaining === null ? cost : `剩余 ${Number(quota.remaining.toFixed(1))}%`;
+      if (quota.remaining === null && summary?.data?.cache?.stale) row.lastChild.textContent += " · 上次统计";
       row.title = `${group.name} · ${[...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join("、")}${node.status !== "online" ? " · 上次记录" : ""}`;
       if (quota.remaining === null) row.title += " · 最近 7 天标准 API 价格估算，点击查看每日费用";
       if (quota.remaining === null && summary?.message) row.title += ` · ${summary.message}`;
@@ -97,12 +101,14 @@ export class AccountSidebar {
   }
 
   stopSummaries() {
+    clearTimeout(this.summaryTimer);
     for (const controller of this.summaryJobs.values()) controller.abort();
     this.summaryJobs.clear();
   }
 
   loadSummaries() {
-    if (!this.active || navigator.onLine === false) return;
+    clearTimeout(this.summaryTimer);
+    if (!this.summariesActive || navigator.onLine === false) return;
     for (const group of this.groups ?? []) {
       if (this.summaryJobs.size >= 2) break;
       if (this.groupQuota(group).remaining !== null || this.summaryJobs.has(group.name) ||
@@ -110,6 +116,9 @@ export class AccountSidebar {
       const controller = new AbortController(); this.summaryJobs.set(group.name, controller);
       void this.loadSummary(group.name, controller);
     }
+    const next = (this.groups ?? []).filter(group => this.groupQuota(group).remaining === null && !this.summaryJobs.has(group.name))
+      .map(group => this.summaries.get(group.name)?.expiresAt).filter(expiresAt => expiresAt > Date.now());
+    if (next.length) this.summaryTimer = setTimeout(() => this.loadSummaries(), Math.max(1, Math.min(...next) - Date.now()));
   }
 
   async loadSummary(name, controller) {
@@ -119,7 +128,7 @@ export class AccountSidebar {
       if (!response.ok) throw new Error("cost unavailable");
       const data = await response.json();
       if (this.summaryJobs.get(name) !== controller) return;
-      const expiresAt = Date.now() + (Number.isFinite(data.estimate?.amount) ? this.intervalMs : 30_000);
+      const expiresAt = Date.now() + spendCacheLifetime(data, Number.isFinite(data.estimate?.amount) ? this.intervalMs : 30_000);
       this.summaries.set(name, { data, expiresAt });
       this.spend.cacheSummary(name, data, expiresAt);
     } catch {
@@ -153,7 +162,7 @@ export class AccountSidebar {
   }
 
   clear() {
-    this.active = false;
+    this.active = this.summariesActive = false;
     this.stop();
     this.cache.clear();
     this.stopSummaries(); this.summaries.clear();

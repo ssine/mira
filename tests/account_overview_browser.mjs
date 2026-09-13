@@ -5,7 +5,9 @@ const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8787";
 const { nodes, threads, history } = accountOverviewFixture();
 const browser = await chromium.launch({ headless: true });
 try {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  // Start narrow with an empty page cache; shrinking a warmed desktop page
+  // misses the mobile drawer's initial loading lifecycle.
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
   await context.route(/\/v1\/nodes(?:\?|$)/, route => route.fulfill({ json: { data: nodes } }));
   for (const node of nodes) {
     await context.route(`**/v1/nodes/${node.nodeId}`, route => route.fulfill({ json: node }));
@@ -28,9 +30,13 @@ try {
   await page.locator('#loginForm button[type="submit"]').click();
   await page.locator("#dashboardView:not(.hidden)").waitFor();
   await page.goto(`${origin}/?thread=${threads[0].threadId}`);
-  const rows = page.locator(".sidebar-account-row"); await rows.first().waitFor();
+  const rows = page.locator(".sidebar-account-row"); await rows.first().waitFor({ state: "attached" });
   assert.equal(await rows.count(), 3);
   await page.waitForFunction(() => document.querySelector('[data-account-name="API"]').textContent.includes("$13.00"));
+  assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true", "mobile loads API summaries before opening the drawer");
+  await page.locator("#agentThreadDrawerToggle").click();
+  assert.match(await rows.filter({ hasText: /^API/ }).textContent(), /7 天 ≥ \$13\.00/);
+  await page.setViewportSize({ width: 1440, height: 1000 });
   assert.match(await rows.filter({ hasText: /^API/ }).textContent(), /7 天 ≥ \$13\.00/);
   assert.equal(await rows.filter({ hasText: "Shared" }).textContent(), "Shared剩余 0%");
   await rows.filter({ hasText: "Shared" }).click();

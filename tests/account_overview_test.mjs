@@ -42,24 +42,25 @@ test("seven-day summaries bound concurrent reads, reuse totals and discard repli
   const originalFetch = globalThis.fetch, pending = [];
   globalThis.fetch = (url, { signal }) => new Promise(resolve => pending.push({ url, signal, resolve }));
   const sidebar = Object.assign(Object.create(AccountSidebar.prototype), {
-    active: true, intervalMs: 300_000, summaryJobs: new Map(), summaries: new Map(),
+    active: false, summariesActive: true, intervalMs: 300_000, summaryJobs: new Map(), summaries: new Map(),
     groups: ["A", "B", "C"].map(name => ({ name, members: [{ account: {} }] })),
     spend: { urlFor: (name, range) => `${name}:${range}`, cacheSummary() {} },
     renderOverview() { this.loadSummaries(); },
   });
   const settle = () => new Promise(resolve => setImmediate(resolve));
   try {
-    sidebar.loadSummaries(); assert.equal(pending.length, 2);
+    sidebar.loadSummaries(); assert.equal(pending.length, 2, "mobile summaries load while the drawer and live account subscription are inactive");
     pending[0].resolve({ ok: true, json: async () => ({ estimate: { amount: 0, status: "complete" } }) });
     await settle(); assert.equal(pending.length, 3);
     assert.equal(sidebar.summaries.get("A").data.estimate.amount, 0);
     sidebar.loadSummaries(); assert.equal(pending.length, 3, "completed summaries use the cache");
     assert.ok(pending.every(request => request.url.endsWith(":7d")));
-    sidebar.active = false; sidebar.stopSummaries(); sidebar.summaries.clear();
+    sidebar.summariesActive = false; sidebar.stopSummaries(); sidebar.summaries.clear();
     for (const request of pending.slice(1)) {
       assert.equal(request.signal.aborted, true);
       request.resolve({ ok: true, json: async () => ({ estimate: { amount: 123 } }) });
     }
     await settle(); assert.equal(sidebar.summaries.size, 0, "stale account amounts cannot repopulate after logout");
-  } finally { sidebar.active = false; sidebar.stopSummaries(); globalThis.fetch = originalFetch; }
+    sidebar.loadSummaries(); assert.equal(pending.length, 3, "hidden or signed-out pages do not start further reads");
+  } finally { sidebar.summariesActive = false; sidebar.stopSummaries(); globalThis.fetch = originalFetch; }
 });

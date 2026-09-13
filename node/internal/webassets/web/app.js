@@ -312,12 +312,13 @@ const traceImages = new TraceImages($("#conversationTrace"), (href, signal) => a
 }, openTraceImagePreview);
 
 function syncAccountSidebar() {
-  const active = document.body.dataset.view === "agentView" && agentThreadDrawerOpen && !document.hidden;
+  const visible = document.body.dataset.view === "agentView" && !document.hidden;
+  const active = visible && agentThreadDrawerOpen;
   const node = selectedAccountNode();
   const offline = navigator.onLine === false;
   const signedOut = ["loginView", "setupView"].includes(document.body.dataset.view);
   const nodes = signedOut ? [] : [...dashboardNodes.values()];
-  accountSidebar.setNodes(nodes.map(node => offline ? { ...node, status: "offline" } : node), active, offline && node ? { ...node, status: "offline" } : node);
+  accountSidebar.setNodes(nodes.map(node => offline ? { ...node, status: "offline" } : node), active, offline && node ? { ...node, status: "offline" } : node, { summariesActive: visible });
   if (!active || offline) {
     clearTimeout(accountNodesTimer); accountNodesTimer = null;
     accountNodesController?.abort(); accountNodesController = null;

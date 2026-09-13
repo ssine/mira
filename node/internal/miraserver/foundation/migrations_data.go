@@ -830,4 +830,11 @@ CREATE INDEX codex_thread_events_model_idx
     `, Checksum: "4019c43a6c95834ef08b2e37ec19272058c3a180a9f2f466a231e1336731b876"},
 	{Version: 28, Name: "codex-account-resources", SQL: codexAccountsSQL, Checksum: "32123250e3d764c783014572e68c8b22d959d4f55253525656f3c2401b85c5cc"},
 	{Version: 29, Name: "canonical-agent-graph", SQL: agentGraphSQL, Checksum: "3cb1c9b27efc99b54dd1e62a83bf3cd964e93b23ac0f82482104d16c15ee7111"},
+	{Version: 30, Name: "account-cost-history-lookup", SQL: `CREATE INDEX codex_thread_events_account_cost_idx
+  ON codex_thread_events(store_id,thread_id,generation,item_seq)
+  WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|turn_context|thread_settings_applied|token_count)"';
+CREATE INDEX codex_thread_events_provider_idx
+  ON codex_thread_events(store_id,thread_id,generation,item_seq)
+  WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|thread_settings_applied)"';`,
+		Checksum: "f127f25c00f3a2ef4bba69aa0565342e237be1e4ddea3e1ae622121d48f43c5c"},
 }

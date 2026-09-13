@@ -35,7 +35,7 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 		ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		query := request.URL.Query()
-		result, err := server.views.AccountCostHistory(ctx, query.Get("name"), query.Get("range"), query.Get("timezone"))
+		result, err := server.accountCosts.Get(ctx, query.Get("name"), query.Get("range"), query.Get("timezone"))
 		if err != nil {
 			return true, err
 		}

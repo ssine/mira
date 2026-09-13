@@ -32,19 +32,20 @@ type Config struct {
 }
 
 type Server struct {
-	config      Config
-	pool        *pgxpool.Pool
-	auth        *foundation.AuthService
-	nodes       *miranodes.Service
-	channel     *serverchannel.Channel
-	views       *serverviews.Service
-	imports     *serverimports.Service
-	sampler     *accountsampler.Sampler
-	authState   foundation.AuthState
-	http        *http.Server
-	listener    net.Listener
-	stopErasure func()
-	closeOnce   sync.Once
+	config       Config
+	pool         *pgxpool.Pool
+	auth         *foundation.AuthService
+	nodes        *miranodes.Service
+	channel      *serverchannel.Channel
+	views        *serverviews.Service
+	accountCosts *accountCostCache
+	imports      *serverimports.Service
+	sampler      *accountsampler.Sampler
+	authState    foundation.AuthState
+	http         *http.Server
+	listener     net.Listener
+	stopErasure  func()
+	closeOnce    sync.Once
 }
 
 func New(ctx context.Context, configuration Config) (*Server, error) {
@@ -101,6 +102,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	server := &Server{
 		config: configuration, pool: pool, auth: auth, nodes: nodeService, channel: broker,
 		views: viewService, imports: importService, sampler: sampler, authState: authState,
+		accountCosts: newAccountCostCache(ctx, viewService.AccountCostHistory),
 	}
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.sampler.Start(ctx)
@@ -140,6 +142,7 @@ func (server *Server) ListenAndServe() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	var result error
 	server.closeOnce.Do(func() {
+		server.accountCosts.Close()
 		result = server.http.Shutdown(ctx)
 		if result != nil {
 			// Shutdown waits for active HTTP handlers. Once its deadline is
