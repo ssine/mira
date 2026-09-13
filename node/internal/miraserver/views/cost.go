@@ -49,6 +49,7 @@ type CostProjection struct {
 }
 
 type cachedCost struct {
+	key       string
 	itemCount int64
 	state     *CostProjection
 }
@@ -458,9 +459,7 @@ func (service *Service) costProjection(ctx context.Context, storeID string, thre
 	if thread.ForkedFromID != nil {
 		key += *thread.ForkedFromID
 	}
-	service.costMu.Lock()
-	entry, ok := service.costCache[key]
-	service.costMu.Unlock()
+	entry, ok := service.cachedCostProjection(key)
 	start := int64(0)
 	state := NewCostProjection(thread.ForkedFromID != nil, nil)
 	if ok && entry.itemCount <= thread.ItemCount {
@@ -469,17 +468,7 @@ func (service *Service) costProjection(ctx context.Context, storeID string, thre
 	if err := service.applyCostRows(ctx, storeID, thread, state, start); err != nil {
 		return nil, err
 	}
-	service.costMu.Lock()
-	if existing, exists := service.costCache[key]; !exists || existing.itemCount <= thread.ItemCount {
-		service.costCache[key] = cachedCost{thread.ItemCount, state.clone()}
-	}
-	for len(service.costCache) > 100 {
-		for candidate := range service.costCache {
-			delete(service.costCache, candidate)
-			break
-		}
-	}
-	service.costMu.Unlock()
+	service.rememberCostProjection(key, thread.ItemCount, state)
 	return state, nil
 }
 
