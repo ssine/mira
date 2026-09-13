@@ -8,6 +8,7 @@ import { ComposerDrafts } from "/composer-drafts.js";
 import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
+import { interruptThread } from "/thread-interrupt.js";
 import { AccountSidebar } from "/account-status.js";
 import { CodexAccounts, accountNode, accountQuery } from "/codex-accounts.js";
 import { AccountRecovery } from "/account-recovery.js";
@@ -2335,9 +2336,8 @@ function syncConversationSendUi() {
   $("#conversationInput").disabled = !composerDraftKey || composerDraftLoading;
   const stop = $("#agentInterrupt");
   stop.classList.toggle("hidden", !running);
-  const connected = agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN;
-  stop.disabled = stopping || !connected || !agent.turnId || !agent.loadedThreadIds.has(agent.threadId);
-  stop.title = stopping ? "正在停止…" : !connected ? "正在重连，连接恢复后可停止" : !agent.turnId ? "正在确认运行状态…" : "停止 Agent";
+  stop.disabled = stopping || !agent.turnId;
+  stop.title = stopping ? "正在停止…" : !agent.turnId ? "正在确认运行状态…" : "停止 Agent";
   stop.setAttribute("aria-label", stop.title);
   $("#agentRuntimeNode").disabled = busy;
   $("#conversationAccount").disabled = busy;
@@ -6074,7 +6074,11 @@ $("#agentInterrupt").addEventListener("click", async () => {
   if (!threadId || !turnId || agent.interruptRequests.has(key)) return;
   agent.interruptRequests.add(key);
   syncConversationSendUi();
-  try { await rpc("turn/interrupt", { threadId, turnId }); }
+  try {
+    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+    await interruptThread({ threadId, turnId, nodeId: thread.runtimeNodeId, nodeAccountId: thread.nodeAccountId });
+    void refreshThreadActivity();
+  }
   catch (error) { toast(error.message); }
   finally { agent.interruptRequests.delete(key); syncConversationSendUi(); }
 });

@@ -95,6 +95,9 @@ func TestPostgresReadViews(t *testing.T) {
 			}
 			defer pool.Exec(ctx, `UPDATE codex_thread_events SET payload='{"type":"unrecognized_fixture_record"}'::json WHERE thread_id=$1 AND generation=1 AND item_seq=$2`, threadID, entry.seq)
 		}
+		// This fixture rewrites immutable history in place. Start a fresh
+		// projection service, as a rebuild would, after installing the records.
+		service := New(pool)
 		for _, id := range []*string{nil, &threadID} {
 			got, err := service.ListThreads(ctx, "personal", 10, id, nil)
 			if err != nil || len(got) != 1 {

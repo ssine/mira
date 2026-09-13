@@ -3,6 +3,7 @@
 package views
 
 import (
+	"container/list"
 	"sync"
 	"time"
 
@@ -17,10 +18,14 @@ type Service struct {
 
 	costMu    sync.Mutex
 	costCache map[string]cachedCost
+
+	historyMu    sync.Mutex
+	historyCache map[historyKey]*list.Element
+	historyLRU   list.List
 }
 
 func New(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, now: time.Now, costCache: map[string]cachedCost{}}
+	return &Service{pool: pool, now: time.Now, costCache: map[string]cachedCost{}, historyCache: map[historyKey]*list.Element{}}
 }
 
 type Result struct {

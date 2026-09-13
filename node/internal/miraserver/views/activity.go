@@ -152,7 +152,7 @@ func ProjectThreadActivity(rows []ActivityRow, exhausted bool) map[string]any {
 	}
 }
 
-func (service *Service) addActivities(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
+func (service *Service) addActivityHistory(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
 	if len(threads) == 0 {
 		return threads, nil
 	}
@@ -207,7 +207,10 @@ func (service *Service) addActivities(ctx context.Context, storeID string, threa
 		threads[index].Activity["generation"] = threads[index].Generation
 		threads[index].Activity["itemCount"] = threads[index].ItemCount
 	}
+	return threads, nil
+}
 
+func (service *Service) addActivityReachability(ctx context.Context, threads []Thread) ([]Thread, error) {
 	nodeIDs := []string{}
 	for _, thread := range threads {
 		if thread.RuntimeNodeID != nil {

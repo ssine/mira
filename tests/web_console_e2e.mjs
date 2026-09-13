@@ -103,6 +103,7 @@ const assets = {};
 for (const [pathname, contentType] of [
   ["/", "text/html"],
   ["/app.js", "text/javascript"],
+  ["/thread-interrupt.js", "text/javascript"],
   ["/trace-activity.js", "text/javascript"],
   ["/theme.js", "text/javascript"],
   ["/styles.css", "text/css"],

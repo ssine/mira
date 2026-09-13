@@ -8,15 +8,24 @@ work immediately after migration, including after projection rebuilds.
 The Server inspects a bounded tail of lifecycle candidates in the current
 generation and item-count boundary. Go validates the raw envelope so
 unknown items and JSON containing escaped NUL remain safe. An immutable-boundary
-cache retains at most 1,000 projections per pool. Node reachability is checked
-afresh. An unfinished turn becomes uncertain when its Node is offline, its
-managed runtime has restarted, or its imported history cannot establish current
-execution. Uncertainty is not completion.
+cache retains at most 1,000 history summaries per Server view service, keyed by
+store, thread, generation and item count. These summaries contain lifecycle,
+latest readable output, token usage and model settings, without retaining raw
+messages or tools. Unchanged list polls reuse them; metadata, shared read
+positions and Node reachability are checked afresh. An unfinished turn becomes
+uncertain when its Node is offline, its managed runtime has restarted, or its
+imported history cannot establish current execution. Uncertainty is not completion.
 
 The Web combines durable activity with live App Server events. Late snapshots
 cannot undo newer generation/count observations or resurrect a locally finished
 turn. Losing the browser socket does not hide an ongoing task. If the central
 Server cannot be checked for 20 seconds, a running indicator becomes uncertain.
+
+The stop control works without a page-local App Server subscription. Clicking
+it opens a bounded temporary connection to the thread's recorded Node/account,
+checks the latest turn's metadata, and interrupts only the requested turn. It
+does not resume the thread, start a runtime or use a newly selected composer
+account. A failed or disconnected request remains retryable.
 
 Each visible conversation window checks the central list every two seconds while
 its selected turn runs, otherwise every five seconds. Status icons update in

@@ -61,6 +61,7 @@ try {
   await status.waitFor({ state: "visible" });
   assert.equal(await runningLabel.getAttribute("data-state"), "running", "full reload recovers activity from the Server");
   assert.equal(await page.locator("#agentInterrupt").isVisible(), true, "full reload restores the stop control for a running turn");
+  assert.equal(await page.locator("#agentInterrupt").isEnabled(), true, "a reader can stop without an existing App Server connection");
   assert.equal(await page.locator("#conversationSend").isVisible(), false, "full reload does not offer another send while the turn is running");
   await page.locator(`[data-thread-id="${idleId}"]`).click();
   await status.waitFor({ state: "hidden" });

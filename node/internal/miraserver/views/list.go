@@ -108,21 +108,17 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	threads, err = service.addActivities(ctx, storeID, threads)
+	threads, err = service.addHistorySummaries(ctx, storeID, threads)
 	if err != nil {
-		return nil, fmt.Errorf("add thread activity: %w", err)
+		return nil, fmt.Errorf("add thread history summaries: %w", err)
+	}
+	threads, err = service.addActivityReachability(ctx, threads)
+	if err != nil {
+		return nil, fmt.Errorf("add thread activity reachability: %w", err)
 	}
 	threads, err = service.addReadStates(ctx, storeID, threads)
 	if err != nil {
 		return nil, fmt.Errorf("add thread read state: %w", err)
-	}
-	threads, err = service.addTokenUsage(ctx, storeID, threads)
-	if err != nil {
-		return nil, fmt.Errorf("add thread token usage: %w", err)
-	}
-	threads, err = service.addModelSettings(ctx, storeID, threads)
-	if err != nil {
-		return nil, fmt.Errorf("add thread model settings: %w", err)
 	}
 	return threads, nil
 }

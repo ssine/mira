@@ -304,7 +304,7 @@ func VisibleAssistantUpdate(record map[string]any) bool {
 		hasReadableText(first(payload["content"], payload["output_text"], payload["text"]))
 }
 
-func (service *Service) addReadStates(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
+func (service *Service) addReadHistory(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
 	if len(threads) == 0 {
 		return threads, nil
 	}
@@ -383,6 +383,20 @@ func (service *Service) addReadStates(ctx context.Context, storeID string, threa
 			}
 		}
 		pending = next
+	}
+	for index := range threads {
+		threads[index].ReadState = map[string]any{"latestItemSeq": latest[threads[index].ThreadID]}
+	}
+	return threads, nil
+}
+
+func (service *Service) addReadStates(ctx context.Context, storeID string, threads []Thread) ([]Thread, error) {
+	if len(threads) == 0 {
+		return threads, nil
+	}
+	latest := map[string]int64{}
+	for _, thread := range threads {
+		latest[thread.ThreadID], _ = safeInteger(thread.ReadState["latestItemSeq"])
 	}
 	ids, generations, _ := threadCoordinates(threads)
 	rows, err := service.pool.Query(ctx, `SELECT selected.thread_id, selected.generation::text, reads.item_count::text
