@@ -107,7 +107,11 @@ def main():
             result = runtime.call("thread/fork", {"threadId": source, "cwd": home, "excludeTurns": True, "deferGoalContinuation": True, "approvalPolicy": "never", "sandbox": "danger-full-access"})
             child = result["thread"]["id"]
             progress = runtime.progress
-            assert any(p["phase"] == "uploading" and p["totalBytes"] > 64 * 1024 * 1024 for p in progress), progress
+            # Progress is sampled/coalesced. An optimized runtime can finish the
+            # upload before its next notification, so verification or commit may
+            # be the first observable byte-bearing phase.
+            assert any(p["phase"] in ("uploading", "verifying", "committing")
+                       and p["totalBytes"] > 64 * 1024 * 1024 for p in progress), progress
             assert all(p["threadId"] == child for p in progress if p["phase"] != "heartbeat")
         finally:
             runtime.close()
