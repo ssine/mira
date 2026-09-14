@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 const { WebSocketServer } = await import("ws").catch(() => import("../server/node_modules/ws/wrapper.mjs"));
 
-export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
+export async function startDraftFixture({ port = 0, forkTest = false, resumeTest = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001";
   const ids = ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000b2"];
   const node = { nodeId, hostname: "Draft fixture", platform: "linux", status: "online", approvalStatus: "approved", capabilities: { appServer: true, files: true }, reportedAppServer: { status: "running" }, desiredAppServer: { defaultCwd: "/work" } };
@@ -15,6 +15,8 @@ export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
   let forkPending = null;
   const forkChild = "00000000-0000-4000-8000-0000000000f1", forkUpload = "00000000-0000-4000-8000-0000000000f2";
   const forkEvents = [];
+  const resumes = [];
+  let turns = 0;
 
   const assetSource = await fs.readFile(new URL("../node/internal/webassets/webassets.go", import.meta.url), "utf8");
   const csp = assetSource.match(/const contentSecurityPolicy = "([^"]+)"/)[1];
@@ -22,6 +24,14 @@ export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
     const url = new URL(request.url, "http://localhost"), path = url.pathname;
     const json = value => { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); };
     let body = ""; for await (const chunk of request) body += chunk;
+    if (resumeTest && path === "/__test/resume") {
+      if (request.method === "GET") return json({ requests: resumes.length, turns, open: resumes.map(value => value.socket.readyState === 1) });
+      const { index = resumes.length - 1, fail = false } = JSON.parse(body);
+      const pending = resumes[index];
+      if (pending?.socket.readyState === 1) pending.socket.send(JSON.stringify({ id: pending.request.id,
+        ...(fail ? { error: { message: "fixture resume failed" } } : { result: { thread: { id: pending.request.params.threadId, status: { type: "idle" } }, cwd: "/work", model: "fixture" } }) }));
+      return json({});
+    }
     if (forkTest && path === "/__test/fork") {
       if (request.method === "GET") return json({ pending: Boolean(forkPending), events: forkEvents });
       const command = JSON.parse(body);
@@ -86,6 +96,7 @@ export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
     if (request.method === "config/read") return reply({ config: { model: "fixture" } });
     if (request.method === "model/list") return reply({ data: [{ model: "fixture", displayName: "Fixture", isDefault: true, supportedReasoningEfforts: [] }], nextCursor: null });
     if (request.method === "thread/resume") { forkEvents.push(`resume:${request.params.threadId}`); }
+    if (resumeTest && request.method === "thread/resume") { resumes.push({ socket, request }); return; }
     if (request.method === "thread/resume") return reply({ thread: { id: request.params.threadId, status: { type: "idle" } }, cwd: "/work", model: "fixture" });
     if (request.method === "thread/loaded/list") return reply({ data: rows.map(row => row.threadId) });
     if (forkTest && request.method === "thread/fork") { forkPending = { socket, request }; return; }
@@ -95,6 +106,7 @@ export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
       return reply({ thread: { id: row.threadId }, cwd: row.cwd, model: "fixture" });
     }
     if (request.method === "turn/start") {
+      turns++;
       const shouldFail = fail;
       await new Promise(resolve => setTimeout(resolve, delay));
       return shouldFail ? error("Fixture send failed") : reply({ turn: { id: "fixture-turn", status: "completed" } });
@@ -106,6 +118,6 @@ export async function startDraftFixture({ port = 0, forkTest = false } = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const fixture = await startDraftFixture({ port: Number(process.argv[2] ?? 0), forkTest: process.argv.includes("--fork") });
+  const fixture = await startDraftFixture({ port: Number(process.argv[2] ?? 0), forkTest: process.argv.includes("--fork"), resumeTest: process.argv.includes("--resume") });
   console.log(fixture.origin);
 }

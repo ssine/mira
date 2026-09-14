@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `36bf2a3`
+- Patch source commit: `fb29fd9ae`
 
 Apply it to a clean checkout:
 
@@ -84,3 +84,9 @@ Local GNU/Linux canonical packages can be assembled with
 `MIRA_CODEX_LOCAL_NATIVE=1 node scripts/build-codex-release.mjs ...` for explicit
 offline deployment; their canonical target remains GNU/Linux. Published CI
 packages continue to use musl.
+
+Runtime revision `0.153.1-mira.12` separates metadata read scope from history
+loading. Restoring subagent metadata requests the selected thread's state instead
+of repeatedly downloading the entire store; canonical metadata, generation and
+history remain unchanged. Regression coverage restores 220 children and asserts
+one scoped metadata request per child with no history downloads.

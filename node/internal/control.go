@@ -709,13 +709,15 @@ func (client *controlClient) closeCurrentTunnel(sessionID string, expected *webs
 
 // Losing the browser/Server does not cancel an accepted local RPC. Drain its
 // reply before closing the local socket so pending markers can be acknowledged.
-// A failed or timed-out drain retains unknown requests, never invents success.
+// Pending requests already have an account-wide capacity bound. Keep their
+// sockets until the acknowledgement or runtime exit; a short drain deadline
+// can permanently strand a slow resume's reservation after its browser leaves.
+// A failed read retains unknown requests, never invents success.
 func closeAccountTunnelConnection(tunnel *websocket.Conn, account appServerTunnelAccount, sessionID string) {
 	if tunnel == nil {
 		return
 	}
 	if account.manager != nil && account.manager.hasPendingAccountRequests(account.instance, sessionID) {
-		time.AfterFunc(10*time.Second, func() { _ = tunnel.Close() })
 		return
 	}
 	_ = tunnel.Close()

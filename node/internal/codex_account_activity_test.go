@@ -318,6 +318,7 @@ func TestAccountActivityResponseOrderingAndRuntimeIsolation(t *testing.T) {
 func TestAccountTunnelDisconnectDrainsPendingResponse(t *testing.T) {
 	for _, closeAll := range []bool{false, true} {
 		t.Run(fmt.Sprint(closeAll), func(t *testing.T) {
+			t.Parallel()
 			entered, release := make(chan struct{}), make(chan struct{})
 			url := activityTestServer(t, func(request activityTestRequest) any {
 				close(entered)
@@ -361,6 +362,8 @@ func TestAccountTunnelDisconnectDrainsPendingResponse(t *testing.T) {
 			if !manager.hasPendingAccountRequests(manager.instance, "browser") {
 				t.Error("disconnect acknowledged an unfinished request")
 			}
+			// Cold resumes can outlive the former ten-second disconnect drain.
+			time.Sleep(11 * time.Second)
 			close(release)
 			deadline := time.Now().Add(time.Second)
 			for manager.hasPendingAccountRequests(manager.instance, "browser") {
@@ -369,6 +372,10 @@ func TestAccountTunnelDisconnectDrainsPendingResponse(t *testing.T) {
 				}
 				time.Sleep(time.Millisecond)
 			}
+			if err := manager.beginThreadManagement("handoff", []string{"thread-one"}); err != nil {
+				t.Fatalf("acknowledged request still blocks handoff: %v", err)
+			}
+			manager.endThreadManagement("handoff")
 		})
 	}
 }

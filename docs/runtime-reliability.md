@@ -55,6 +55,24 @@ They do not claim end-to-end recovery of every subagent orchestration pattern.
 
 ### Web reconciliation and error lifetime
 
+Metadata-only thread reads retain their thread scope independently of whether
+history is requested. Restoring a tree of subagents must not download the whole
+store for every child. History reads retain generation/version validation.
+
+Web resume keeps one request per thread/socket until acknowledgement or
+disconnect. Elapsed time changes the visible waiting message instead of dropping
+the request and queuing another resume. Users can cancel the wait while retaining
+their draft; this closes the browser channel, not the accepted runtime operation.
+Connection probes do not queue behind an in-flight resume and mistake that delay
+for a dead connection. An explicit offline event closes the stale channel.
+
+When a browser disconnects, Node drains accepted account requests until their
+replies arrive or the runtime connection closes. The existing account request
+capacity bounds retained sockets. A ten-second deadline cannot safely discard
+these acknowledgements: slow resumes can still be executing after that deadline.
+An actual local transport failure retains unknown requests and continues to
+block handoff; it does not infer success from an idle thread observation.
+
 Messages arrive over the App Server WebSocket. The 25-second connection probe
 does not download history. Initial selection, reconnection/foreground recovery,
 older-page scrolling and completion reconciliation can fetch canonical history.

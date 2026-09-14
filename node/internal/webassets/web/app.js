@@ -2251,7 +2251,7 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
     try {
       // A suspended mobile socket can remain OPEN after its network is gone.
       // Check the end-to-end path before trusting that browser state.
-      if (probe && agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN) {
+      if (probe && !agent.resumePromises.size && agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN) {
         try { await rpc("thread/loaded/list", { limit: 1 }, 8_000); }
         catch { closeAgentSocket(); }
       }
@@ -2581,6 +2581,7 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
   agent.socketInitialized = false;
   agent.loadedThreadIds.clear();
   agent.resumePromises.clear();
+  $("#resumeProgress").classList.add("hidden");
   clearTimeout(agent.heartbeatTimer);
   for (const pending of agent.pending.values()) pending.reject(new Error("App Server connection closed"));
   agent.pending.clear();
@@ -2611,7 +2612,7 @@ function rpc(method, params = {}, timeoutMs = 60_000) {
   if (!agent.socket || agent.socket.readyState !== WebSocket.OPEN) return Promise.reject(new Error("App Server 尚未连接"));
   const id = ++agent.requestId;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = timeoutMs == null ? null : setTimeout(() => {
       agent.pending.delete(id);
       reject(new Error(`${method} 请求超时`));
     }, timeoutMs);
@@ -2619,7 +2620,8 @@ function rpc(method, params = {}, timeoutMs = 60_000) {
       resolve: (value) => { clearTimeout(timer); resolve(value); },
       reject: (error) => { clearTimeout(timer); reject(error); },
     });
-    agent.socket.send(JSON.stringify({ id, method, params }));
+    try { agent.socket.send(JSON.stringify({ id, method, params })); }
+    catch (error) { agent.pending.delete(id); clearTimeout(timer); reject(error); }
   });
 }
 
@@ -5101,10 +5103,23 @@ async function resumeAgentThreadOnSocket(threadId) {
   const pending = agent.resumePromises.get(threadId);
   if (pending?.socket === agent.socket) return pending.promise;
   const socket = agent.socket;
+  const startedAt = Date.now();
+  const render = () => {
+    if (agent.socket !== socket || agent.threadId !== threadId) return;
+    const seconds = Math.floor((Date.now() - startedAt) / 1000);
+    $("#resumeProgress").classList.remove("hidden");
+    $("#resumeProgressText").textContent = seconds < 15 ? "正在恢复会话…" : `仍在恢复会话，已等待 ${seconds} 秒。较大的历史可能需要更久。`;
+  };
   const promise = restoreAgentThread(threadId, socket);
   agent.resumePromises.set(threadId, { socket, promise });
+  render();
+  const timer = setInterval(render, 1_000);
   try { return await promise; }
-  finally { if (agent.resumePromises.get(threadId)?.promise === promise) agent.resumePromises.delete(threadId); }
+  finally {
+    clearInterval(timer);
+    if (agent.resumePromises.get(threadId)?.promise === promise) agent.resumePromises.delete(threadId);
+    if (!agent.resumePromises.has(agent.threadId)) $("#resumeProgress").classList.add("hidden");
+  }
 }
 
 async function restoreAgentThread(threadId, socket) {
@@ -5116,7 +5131,9 @@ async function restoreAgentThread(threadId, socket) {
   if (typeof projectedThread?.reasoningEffort === "string" && projectedThread.reasoningEffort) {
     params.config = { model_reasoning_effort: projectedThread.reasoningEffort };
   }
-  const result = await rpc("thread/resume", params, 120_000);
+  // An elapsed UI deadline does not cancel Codex's accepted resume. Keep the
+  // original request and single-flight promise until its reply or disconnect.
+  const result = await rpc("thread/resume", params, null);
   if (agent.socket !== socket) throw new Error("恢复会话时 App Server 通道已变更，请重新发送");
   agent.loadedThreadIds.add(result.thread.id);
   if (agent.threadId !== threadId) return result.thread;
@@ -5714,6 +5731,11 @@ for (const id of ["conversationAccount", "agentRuntimeAccount", "conversationDet
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
 $("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#agentHome").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
+$("#resumeProgressCancel").addEventListener("click", () => {
+  stopAgentRecovery();
+  agent.resumeRequestedThreadId = null;
+  setConversationNotice("已取消等待，输入已保留。后台恢复可能仍在完成。", "warning");
+});
 $("#agentLogout").addEventListener("click", () => $("#logoutButton").click());
 $("#agentNavMenuToggle").addEventListener("click", event => openSidebarPopover($("#agentNavMenu"), event.currentTarget));
 $("#agentAccountToggle").addEventListener("click", event => {
@@ -5852,6 +5874,7 @@ window.addEventListener("pagehide", () => { accountSidebar.select(null, false); 
 document.addEventListener("resume", () => { scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); });
 window.addEventListener("online", () => { syncAccountSidebar(); scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); });
 window.addEventListener("offline", () => {
+  closeAgentSocket();
   syncAccountSidebar();
   syncActiveTurnUi();
   clearTimeout(agent.reconnectTimer);

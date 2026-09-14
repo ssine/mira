@@ -1,4 +1,4 @@
-From 36bf2a36c841d9e0a0ef847c2164fd241c4ae6e1 Mon Sep 17 00:00:00 2001
+From fb29fd9aefbfadddf24a8b0f325834b3faf09d59 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 12 Sep 2026 05:14:26 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
@@ -22,11 +22,11 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  codex-rs/app-server/src/message_processor.rs  |    6 +
  codex-rs/app-server/src/notification_media.rs |    3 +-
  codex-rs/app-server/src/request_processors.rs |    1 +
- .../src/request_processors/thread_handoff.rs  |  129 +++
+ .../src/request_processors/thread_handoff.rs  |  129 ++
  .../request_processors/thread_lifecycle.rs    |    9 +-
  .../request_processors/thread_processor.rs    |  138 ++-
  codex-rs/app-server/src/thread_state.rs       |   15 +-
- .../tests/suite/v2/thread_unsubscribe.rs      |   65 ++
+ .../tests/suite/v2/thread_unsubscribe.rs      |   65 +
  codex-rs/config/src/config_toml.rs            |    5 +
  codex-rs/core/config.schema.json              |   25 +
  codex-rs/core/src/codex_delegate.rs           |    2 +-
@@ -44,17 +44,17 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  codex-rs/thread-store/Cargo.toml              |    1 +
  codex-rs/thread-store/src/in_memory.rs        |   86 +-
  codex-rs/thread-store/src/lib.rs              |    4 +
- codex-rs/thread-store/src/remote_http.rs      | 1028 +++++++++++++++++
+ codex-rs/thread-store/src/remote_http.rs      | 1043 +++++++++++++++++
  .../src/remote_http/agent_graph.rs            |   35 +
  .../src/remote_http/input_recovery.rs         |   62 +
  .../src/remote_http/input_recovery_tests.rs   |   47 +
  .../thread-store/src/remote_http/retry.rs     |   89 ++
- .../src/remote_http/retry_tests.rs            |  616 ++++++++++
+ .../src/remote_http/retry_tests.rs            |  672 +++++++++++
  .../thread-store/src/remote_http/uploads.rs   |  146 +++
  .../thread-store/src/remote_http/writer.rs    |  330 ++++++
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
- 49 files changed, 3561 insertions(+), 224 deletions(-)
+ 49 files changed, 3632 insertions(+), 224 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
@@ -70,7 +70,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  create mode 100644 codex-rs/thread-store/src/remote_http/writer.rs
 
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index e217b70..caf010a 100644
+index e217b7024..caf010a57 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -394,7 +394,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
@@ -1403,7 +1403,7 @@ index e217b70..caf010a 100644
   "anyhow",
   "codex-login",
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index b15474f..8969218 100644
+index b15474ffc..8969218ea 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -2936,6 +2936,44 @@
@@ -1479,7 +1479,7 @@ index b15474f..8969218 100644
        "properties": {
          "method": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 47e75d1..8c4d878 100644
+index 47e75d11d..8c4d878e4 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -4491,6 +4491,26 @@
@@ -1557,7 +1557,7 @@ index 47e75d1..8c4d878 100644
          "properties": {
            "detailedExplanation": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index fce5c1d..7af06c8 100644
+index fce5c1d1b..7af06c8d1 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -10908,6 +10908,46 @@
@@ -1636,7 +1636,7 @@ index fce5c1d..7af06c8 100644
              "method": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json b/codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
 new file mode 100644
-index 0000000..23ba9a8
+index 000000000..23ba9a841
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
 @@ -0,0 +1,53 @@
@@ -13711,7 +13711,7 @@ zgP!v}_njXXwCSiF+Y#yHHszIlO4yCqY5L)}IKo6tPRYGm68r7KqIvp_jLHJpNu6uu
 hmZnCBRs}|j7(dTt;_rTJ)>wF=lzDr>!>)kIS^z@vVtN1o
 
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
-index c65fccb..0cd6c3c 100644
+index c65fccb78..0cd6c3c1d 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 @@ -32,6 +32,7 @@ import type { McpServerEventStreamNotification } from "./v2/McpServerEventStream
@@ -13729,7 +13729,7 @@ index c65fccb..0cd6c3c 100644
 -export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 +export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "mira/thread/fork/progress", "params": MiraThreadForkProgressNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
-index bb5799a..c3bebcb 100644
+index bb5799a14..c3bebcb1d 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 @@ -32,6 +32,7 @@ import type { McpServerEventStreamNotification } from "./v2/McpServerEventStream
@@ -13748,7 +13748,7 @@ index bb5799a..c3bebcb 100644
 +emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "mira/thread/fork/progress", "params": MiraThreadForkProgressNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
 new file mode 100644
-index 0000000..070f566
+index 000000000..070f5662e
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
 @@ -0,0 +1,9 @@
@@ -13762,7 +13762,7 @@ index 0000000..070f566
 + */
 +export type MiraThreadForkProgressNotification = { requestId: RequestId, threadId: string, uploadId: string | null, phase: string, completedBytes: bigint, totalBytes: bigint, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index fefe723..cd363ea 100644
+index fefe72338..cd363eacf 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 @@ -300,6 +300,7 @@ export type { MemoryCitation } from "./MemoryCitation";
@@ -13774,7 +13774,7 @@ index fefe723..cd363ea 100644
  export type { MisalignmentSteer } from "./MisalignmentSteer";
  export type { Model } from "./Model";
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 6c00f88..24c3052 100644
+index 6c00f889f..24c305274 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -544,6 +544,12 @@ client_request_definitions! {
@@ -13799,7 +13799,7 @@ index 6c00f88..24c3052 100644
      ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
      ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-index 2a08c9f..a126d4f 100644
+index 2a08c9fd1..a126d4f3c 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 @@ -691,6 +691,23 @@ pub struct ThreadUnsubscribeParams {
@@ -13844,7 +13844,7 @@ index 2a08c9f..a126d4f 100644
 +    pub total_bytes: u64,
 +}
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index a0aa92b..694e3be 100644
+index a0aa92b7f..694e3be4d 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -2925,3 +2925,15 @@ For server-initiated request payloads, annotate the field the same way so schema
@@ -13864,7 +13864,7 @@ index a0aa92b..694e3be 100644
 +conversations and the account process remain running. This operation does not
 +archive threads, close durable graph edges, rewrite history or retry tools.
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 8e78c92..f8c1ddf 100644
+index 8e78c929e..f8c1ddf37 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -299,6 +299,7 @@ impl MessageProcessor {
@@ -13888,7 +13888,7 @@ index 8e78c92..f8c1ddf 100644
                  self.thread_processor
                      .thread_resume(
 diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
-index 844a312..496702c 100644
+index 844a31270..496702c36 100644
 --- a/codex-rs/app-server/src/notification_media.rs
 +++ b/codex-rs/app-server/src/notification_media.rs
 @@ -132,7 +132,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
@@ -13902,7 +13902,7 @@ index 844a312..496702c 100644
  }
  
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index 60875fa..7a2131f 100644
+index 60875fada..7a2131f24 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -685,6 +685,7 @@ mod config_errors;
@@ -13915,7 +13915,7 @@ index 60875fa..7a2131f 100644
  mod thread_summary;
 diff --git a/codex-rs/app-server/src/request_processors/thread_handoff.rs b/codex-rs/app-server/src/request_processors/thread_handoff.rs
 new file mode 100644
-index 0000000..5477b07
+index 000000000..5477b0755
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/thread_handoff.rs
 @@ -0,0 +1,129 @@
@@ -14049,7 +14049,7 @@ index 0000000..5477b07
 +    }
 +}
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-index 8354a4e..591cea0 100644
+index 8354a4e0d..591cea06e 100644
 --- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 @@ -358,13 +358,8 @@ pub(super) async fn ensure_listener_task_running(
@@ -14069,7 +14069,7 @@ index 8354a4e..591cea0 100644
                  }
                  unloading_watchers_open = unloading_state.wait_for_unloading_trigger() => {
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 56eb6fd..c1e4db6 100644
+index 56eb6fdc9..c1e4db63b 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -560,15 +560,31 @@ impl ThreadRequestProcessor {
@@ -14273,7 +14273,7 @@ index 56eb6fd..c1e4db6 100644
          let NewThread {
              thread_id,
 diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
-index 3795638..dddc96a 100644
+index 3795638cd..dddc96ad8 100644
 --- a/codex-rs/app-server/src/thread_state.rs
 +++ b/codex-rs/app-server/src/thread_state.rs
 @@ -101,6 +101,7 @@ pub(crate) struct ThreadState {
@@ -14316,7 +14316,7 @@ index 3795638..dddc96a 100644
          self.shutdown_drain_waiter.take()
      }
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs b/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
-index da456ac..1a5fa2d 100644
+index da456ac82..1a5fa2db3 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
 @@ -35,6 +35,71 @@ use tempfile::TempDir;
@@ -14392,7 +14392,7 @@ index da456ac..1a5fa2d 100644
  async fn thread_unsubscribe_keeps_thread_loaded_until_idle_timeout() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 5f0cc99..c318e24 100644
+index 5f0cc99a4..c318e242b 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -527,6 +527,11 @@ pub struct ConfigToml {
@@ -14408,7 +14408,7 @@ index 5f0cc99..c318e24 100644
      InMemory {
          id: String,
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 24d7988..db2ff2c 100644
+index 24d7988b0..db2ff2cc3 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -3634,6 +3634,31 @@
@@ -14444,7 +14444,7 @@ index 24d7988..db2ff2c 100644
        ]
      },
 diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
-index af19409..0115aec 100644
+index af194098e..0115aec44 100644
 --- a/codex-rs/core/src/codex_delegate.rs
 +++ b/codex-rs/core/src/codex_delegate.rs
 @@ -116,7 +116,7 @@ pub(crate) async fn run_codex_thread_interactive(
@@ -14457,7 +14457,7 @@ index af19409..0115aec 100644
          user_shell_override: None,
          inherited_environments: Some(parent_environments.clone()),
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 172726f..4d93fe8 100644
+index 172726f98..4d93fe8ea 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -231,6 +231,12 @@ impl CodexThread {
@@ -14474,7 +14474,7 @@ index 172726f..4d93fe8 100644
      pub fn session_telemetry(&self) -> SessionTelemetry {
          self.session.services.session_telemetry.clone()
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index dca329a..ab6634c 100644
+index dca329ab9..ab6634c90 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -598,6 +598,12 @@ pub enum ThreadStoreConfig {
@@ -14509,7 +14509,7 @@ index dca329a..ab6634c 100644
          None => ThreadStoreConfig::Local,
      }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 9130036..e263944 100644
+index 91300365b..e263944c1 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -1793,6 +1793,15 @@ impl Session {
@@ -14529,7 +14529,7 @@ index 9130036..e263944 100644
          let state = self.state.lock().await;
          state
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 6d1953e..b65f5ef 100644
+index 6d1953e3a..b65f5ef11 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -672,6 +672,22 @@ impl Session {
@@ -14556,7 +14556,7 @@ index 6d1953e..b65f5ef 100644
              "Configuring session: model={}; provider={:?}",
              session_configuration
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index f7c4268..81f3e83 100644
+index f7c42680c..81f3e8317 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -377,6 +377,13 @@ pub(crate) async fn run_turn(
@@ -14575,7 +14575,7 @@ index f7c4268..81f3e83 100644
                  sess.clone_history()
 diff --git a/codex-rs/core/src/tasks/failure_tests.rs b/codex-rs/core/src/tasks/failure_tests.rs
 new file mode 100644
-index 0000000..28ed006
+index 000000000..28ed006ad
 --- /dev/null
 +++ b/codex-rs/core/src/tasks/failure_tests.rs
 @@ -0,0 +1,61 @@
@@ -14641,7 +14641,7 @@ index 0000000..28ed006
 +    );
 +}
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 5bf4101..3037a3a 100644
+index 5bf41019d..3037a3a38 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -4,12 +4,17 @@ mod regular;
@@ -14725,7 +14725,7 @@ index 5bf4101..3037a3a 100644
                  if !task_cancellation_token.is_cancelled() {
                      // Finish uniformly from the spawn site so all tasks share the same lifecycle.
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index cfa6196..4f2a0a8 100644
+index cfa619697..4f2a0a88d 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1,3 +1,5 @@
@@ -14828,7 +14828,7 @@ index cfa6196..4f2a0a8 100644
          let ThreadSpawnRequest {
 diff --git a/codex-rs/core/src/thread_manager/remote_agent_graph.rs b/codex-rs/core/src/thread_manager/remote_agent_graph.rs
 new file mode 100644
-index 0000000..b5292cd
+index 000000000..b5292cd6e
 --- /dev/null
 +++ b/codex-rs/core/src/thread_manager/remote_agent_graph.rs
 @@ -0,0 +1,95 @@
@@ -14928,7 +14928,7 @@ index 0000000..b5292cd
 +    }
 +}
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 74cdb32..7db9edb 100644
+index 74cdb32dc..7db9edb8b 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -20,6 +20,10 @@ use codex_protocol::ResponseItemId;
@@ -14991,7 +14991,7 @@ index 74cdb32..7db9edb 100644
  #[test]
  fn thread_id_generator_defaults_to_standard_ids() {
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index 8bf3395..dc3f2b7 100644
+index 8bf33956a..dc3f2b71f 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -68,6 +68,9 @@ async fn guardian_history_survives_restart_and_user_fork(
@@ -15005,7 +15005,7 @@ index 8bf3395..dc3f2b7 100644
      let mut builder = test_codex()
          .with_history_mode(history_mode)
 diff --git a/codex-rs/thread-store/Cargo.toml b/codex-rs/thread-store/Cargo.toml
-index b0d2b15..64cb882 100644
+index b0d2b1556..64cb882f2 100644
 --- a/codex-rs/thread-store/Cargo.toml
 +++ b/codex-rs/thread-store/Cargo.toml
 @@ -27,6 +27,7 @@ codex-utils-path = { workspace = true }
@@ -15017,7 +15017,7 @@ index b0d2b15..64cb882 100644
  serde_json = { workspace = true }
  sqlx = { workspace = true }
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 9ea7e2b..8b4213c 100644
+index 9ea7e2bde..8b4213c44 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -20,6 +20,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
@@ -15130,7 +15130,7 @@ index 9ea7e2b..8b4213c 100644
      pub fn for_id(id: impl Into<String>) -> Arc<Self> {
          let id = id.into();
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index a8b6a36..1b94e25 100644
+index a8b6a3665..1b94e25db 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
 @@ -10,6 +10,7 @@ mod live_thread;
@@ -15153,10 +15153,10 @@ index a8b6a36..1b94e25 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000..c2e4a4b
+index 000000000..5b1d2cc37
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,1028 @@
+@@ -0,0 +1,1043 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
@@ -15201,6 +15201,13 @@ index 0000000..c2e4a4b
 +use retry::request_json;
 +pub use uploads::RemoteHistoryProgress;
 +pub use uploads::subscribe_remote_history_progress;
++
++// Metadata reads still need a thread scope even when no history is requested.
++enum ReadScope {
++    Store,
++    Thread(ThreadId),
++    ThreadWithHistory(ThreadId),
++}
 +
 +#[derive(Deserialize)]
 +#[serde(rename_all = "camelCase")]
@@ -15601,7 +15608,7 @@ index 0000000..c2e4a4b
 +
 +    async fn read<T: Send>(
 +        &self,
-+        thread_ids: Vec<ThreadId>,
++        scope: ReadScope,
 +        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
 +    ) -> ThreadStoreResult<T> {
 +        let _permit = self
@@ -15612,11 +15619,14 @@ index 0000000..c2e4a4b
 +        self.check_write_error()?;
 +        let mut cache = self.take_cache();
 +        let result = async {
-+            self.refresh_scoped(&mut cache, (thread_ids.len() == 1).then(|| thread_ids[0]))
-+                .await?;
++            let thread_id = match scope {
++                ReadScope::Store => None,
++                ReadScope::Thread(id) | ReadScope::ThreadWithHistory(id) => Some(id),
++            };
++            self.refresh_scoped(&mut cache, thread_id).await?;
 +            let cached = cache.as_mut().ok_or_else(cache_missing)?;
-+            for thread_id in thread_ids {
-+                self.ensure_history(cached, thread_id).await?;
++            if let ReadScope::ThreadWithHistory(id) = scope {
++                self.ensure_history(cached, id).await?;
 +            }
 +            operation(&cached.store).await
 +        }
@@ -15922,7 +15932,7 @@ index 0000000..c2e4a4b
 +    }
 +
 +    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.read(Vec::new(), move |store| {
++        Box::pin(self.read(ReadScope::Thread(thread_id), move |store| {
 +            ThreadStore::discard_thread(store, thread_id)
 +        }))
 +    }
@@ -15932,9 +15942,11 @@ index 0000000..c2e4a4b
 +        params: LoadThreadHistoryParams,
 +    ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
 +        let thread_id = params.thread_id;
-+        Box::pin(self.read(vec![thread_id], move |store| {
-+            ThreadStore::load_history(store, params)
-+        }))
++        Box::pin(
++            self.read(ReadScope::ThreadWithHistory(thread_id), move |store| {
++                ThreadStore::load_history(store, params)
++            }),
++        )
 +    }
 +
 +    fn load_latest_model_context(
@@ -15944,7 +15956,7 @@ index 0000000..c2e4a4b
 +        let thread_id = params.thread_id;
 +        Box::pin(async move {
 +            let mut context = self
-+                .read(vec![thread_id], move |store| {
++                .read(ReadScope::ThreadWithHistory(thread_id), move |store| {
 +                    ThreadStore::load_latest_model_context(store, params)
 +                })
 +                .await?;
@@ -15954,16 +15966,14 @@ index 0000000..c2e4a4b
 +    }
 +
 +    fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-+        let histories = params
-+            .include_history
-+            .then_some(params.thread_id)
-+            .into_iter()
-+            .collect();
++        let scope = if params.include_history {
++            ReadScope::ThreadWithHistory(params.thread_id)
++        } else {
++            ReadScope::Thread(params.thread_id)
++        };
 +        Box::pin(async move {
 +            let thread = self
-+                .read(histories, move |store| {
-+                    ThreadStore::read_thread(store, params)
-+                })
++                .read(scope, move |store| ThreadStore::read_thread(store, params))
 +                .await?;
 +            Ok(self.project_execution_provider(thread))
 +        })
@@ -15976,7 +15986,7 @@ index 0000000..c2e4a4b
 +        Box::pin(async move {
 +            if !params.include_history {
 +                let thread = self
-+                    .read(Vec::new(), move |store| {
++                    .read(ReadScope::Store, move |store| {
 +                        ThreadStore::read_thread_by_rollout_path(store, params)
 +                    })
 +                    .await?;
@@ -15985,21 +15995,22 @@ index 0000000..c2e4a4b
 +            let mut metadata_params = params.clone();
 +            metadata_params.include_history = false;
 +            let thread = self
-+                .read(Vec::new(), move |store| {
++                .read(ReadScope::Store, move |store| {
 +                    ThreadStore::read_thread_by_rollout_path(store, metadata_params)
 +                })
 +                .await?;
 +            let thread = self
-+                .read(vec![thread.thread_id], move |store| {
-+                    ThreadStore::read_thread_by_rollout_path(store, params)
-+                })
++                .read(
++                    ReadScope::ThreadWithHistory(thread.thread_id),
++                    move |store| ThreadStore::read_thread_by_rollout_path(store, params),
++                )
 +                .await?;
 +            Ok(self.project_execution_provider(thread))
 +        })
 +    }
 +
 +    fn list_threads(&self, params: ListThreadsParams) -> ThreadStoreFuture<'_, ThreadPage> {
-+        Box::pin(self.read(Vec::new(), move |store| {
++        Box::pin(self.read(ReadScope::Store, move |store| {
 +            ThreadStore::list_threads(store, params)
 +        }))
 +    }
@@ -16023,15 +16034,19 @@ index 0000000..c2e4a4b
 +    }
 +
 +    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
-+        Box::pin(self.read(Vec::new(), move |store| {
-+            ThreadStore::archive_thread(store, params)
-+        }))
++        Box::pin(
++            self.read(ReadScope::Thread(params.thread_id), move |store| {
++                ThreadStore::archive_thread(store, params)
++            }),
++        )
 +    }
 +
 +    fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-+        Box::pin(self.read(Vec::new(), move |store| {
-+            ThreadStore::unarchive_thread(store, params)
-+        }))
++        Box::pin(
++            self.read(ReadScope::Thread(params.thread_id), move |store| {
++                ThreadStore::unarchive_thread(store, params)
++            }),
++        )
 +    }
 +
 +    fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
@@ -16187,7 +16202,7 @@ index 0000000..c2e4a4b
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/agent_graph.rs b/codex-rs/thread-store/src/remote_http/agent_graph.rs
 new file mode 100644
-index 0000000..4c4610e
+index 000000000..4c4610e21
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/agent_graph.rs
 @@ -0,0 +1,35 @@
@@ -16228,7 +16243,7 @@ index 0000000..4c4610e
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/input_recovery.rs b/codex-rs/thread-store/src/remote_http/input_recovery.rs
 new file mode 100644
-index 0000000..2161eb5
+index 000000000..2161eb555
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/input_recovery.rs
 @@ -0,0 +1,62 @@
@@ -16296,7 +16311,7 @@ index 0000000..2161eb5
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/input_recovery_tests.rs b/codex-rs/thread-store/src/remote_http/input_recovery_tests.rs
 new file mode 100644
-index 0000000..d6957bb
+index 000000000..d6957bb49
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/input_recovery_tests.rs
 @@ -0,0 +1,47 @@
@@ -16349,7 +16364,7 @@ index 0000000..d6957bb
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/retry.rs b/codex-rs/thread-store/src/remote_http/retry.rs
 new file mode 100644
-index 0000000..0054010
+index 000000000..005401005
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry.rs
 @@ -0,0 +1,89 @@
@@ -16444,10 +16459,10 @@ index 0000000..0054010
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 0000000..0de10fb
+index 000000000..cddf95e97
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
-@@ -0,0 +1,616 @@
+@@ -0,0 +1,672 @@
 +use std::sync::Arc;
 +use std::time::Duration;
 +
@@ -16790,7 +16805,10 @@ index 0000000..0de10fb
 +        assert!(store.create_thread(create(parent, None)).await.is_err());
 +        // Even the failed thread's canonical state can be inspected without clearing its write fence.
 +        store
-+            .read(vec![parent], |_| Box::pin(async { Ok(()) }))
++            .read(
++                crate::remote_http::ReadScope::ThreadWithHistory(parent),
++                |_| Box::pin(async { Ok(()) }),
++            )
 +            .await
 +            .unwrap();
 +        store
@@ -16911,7 +16929,9 @@ index 0000000..0de10fb
 +        .unwrap_err();
 +    assert!(matches!(error, ThreadStoreError::ThreadNotFound { thread_id } if thread_id == thread));
 +    store
-+        .read(Vec::new(), |_| Box::pin(async { Ok(()) }))
++        .read(crate::remote_http::ReadScope::Store, |_| {
++            Box::pin(async { Ok(()) })
++        })
 +        .await
 +        .unwrap();
 +    handle.await.unwrap();
@@ -17064,9 +17084,60 @@ index 0000000..0de10fb
 +    assert!(remote.execution_provider.is_none());
 +    assert_eq!(remote.account_headers["x-mira-accounts-version"], "1");
 +}
++
++#[tokio::test]
++async fn restoring_many_child_metadata_records_never_reads_the_global_store_or_history() {
++    let mut replies = Vec::new();
++    let mut expected = Vec::new();
++    let root = ThreadId::new();
++    for _ in 0..220 {
++        let memory = crate::InMemoryThreadStore::default();
++        let id = ThreadId::new();
++        memory.create_thread(create(id, Some(root))).await.unwrap();
++        let mut snapshot = memory
++            .snapshot_for_threads(&[id].into_iter().collect())
++            .await
++            .unwrap();
++        snapshot["metadata_updates"][id.to_string()] = json!({
++            "created_at":"2026-01-01T00:00:00Z", "updated_at":"2026-01-01T00:00:00Z"
++        });
++        let memory = crate::InMemoryThreadStore::from_snapshot(Some(snapshot.clone())).unwrap();
++        let (state, _) = crate::remote_http::split_snapshot(snapshot).unwrap();
++        // A history manifest must not cause a metadata-only read to download it.
++        replies.push(Some((
++            200,
++            json!({"version":1,"state":state,
++            "historyManifest":{id.to_string():{"generation":1,"itemCount":12345}}})
++            .to_string(),
++        )));
++        expected.push((id, memory));
++    }
++    let (url, mut requests, handle) = server(replies).await;
++    let remote = RemoteHttpThreadStore::new(url, "test", "test-token");
++    for (id, memory) in &expected {
++        let params = crate::ReadThreadParams {
++            thread_id: *id,
++            include_archived: true,
++            include_history: false,
++        };
++        assert_eq!(
++            serde_json::to_value(remote.read_thread(params.clone()).await.unwrap()).unwrap(),
++            serde_json::to_value(memory.read_thread(params).await.unwrap()).unwrap()
++        );
++    }
++    handle.await.unwrap();
++    for (id, _) in expected {
++        let request = requests.recv().await.unwrap();
++        assert_eq!(
++            request.lines().next().unwrap(),
++            format!("GET /v2/stores/test?threadId={id} HTTP/1.1")
++        );
++    }
++    assert!(requests.recv().await.is_none());
++}
 diff --git a/codex-rs/thread-store/src/remote_http/uploads.rs b/codex-rs/thread-store/src/remote_http/uploads.rs
 new file mode 100644
-index 0000000..2bca717
+index 000000000..2bca71778
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/uploads.rs
 @@ -0,0 +1,146 @@
@@ -17218,7 +17289,7 @@ index 0000000..2bca717
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/writer.rs b/codex-rs/thread-store/src/remote_http/writer.rs
 new file mode 100644
-index 0000000..da88ca4
+index 000000000..da88ca449
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/writer.rs
 @@ -0,0 +1,330 @@
@@ -17553,7 +17624,7 @@ index 0000000..da88ca4
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
-index 27359fd..ae17f5d 100644
+index 27359fd5c..ae17f5d70 100644
 --- a/codex-rs/tui/src/app/app_server_event_targets.rs
 +++ b/codex-rs/tui/src/app/app_server_event_targets.rs
 @@ -48,6 +48,9 @@ pub(super) fn server_notification_thread_target(
@@ -17567,7 +17638,7 @@ index 27359fd..ae17f5d 100644
              Some(notification.thread_id.as_str())
          }
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 48083eb..9231e72 100644
+index 48083eb29..9231e72f1 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
 @@ -218,6 +218,7 @@ impl ChatWidget {
