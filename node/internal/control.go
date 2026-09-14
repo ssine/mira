@@ -36,9 +36,14 @@ type controlClient struct {
 	connection      *websocket.Conn
 	tunnelsMu       sync.Mutex
 	tunnels         map[string]*websocket.Conn
-	tunnelAccounts  map[string]*appServerManager
+	tunnelAccounts  map[string]appServerTunnelAccount
 	sshMu           sync.Mutex
 	sshWorkers      map[string]context.CancelFunc
+}
+
+type appServerTunnelAccount struct {
+	manager  *appServerManager
+	instance *appServerInstance
 }
 
 type registrationResponse struct {
@@ -97,7 +102,7 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 		appServer:      newAppServerManager(configuration),
 		http:           httpClient,
 		tunnels:        make(map[string]*websocket.Conn),
-		tunnelAccounts: make(map[string]*appServerManager),
+		tunnelAccounts: make(map[string]appServerTunnelAccount),
 		sshWorkers:     make(map[string]context.CancelFunc),
 	}
 	client.endpoints = newServerEndpointSelector(configuration.ServerURL, httpClient)
@@ -538,14 +543,14 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 	case "appserver.message":
 		client.tunnelsMu.Lock()
 		tunnel := client.tunnels[message.SessionID]
-		manager := client.tunnelAccounts[message.SessionID]
+		account := client.tunnelAccounts[message.SessionID]
 		client.tunnelsMu.Unlock()
 		if tunnel == nil {
 			_ = client.writeControl(map[string]any{"type": "appserver.error", "sessionId": message.SessionID, "error": "tunnel is not open"})
 			return
 		}
-		if manager != nil {
-			if err := manager.reserveAccountRequest(message.SessionID, []byte(message.Payload)); err != nil {
+		if account.manager != nil {
+			if err := account.manager.reserveAccountRequest(account.instance, message.SessionID, []byte(message.Payload)); err != nil {
 				var request map[string]any
 				_ = json.Unmarshal([]byte(message.Payload), &request)
 				payload, _ := json.Marshal(map[string]any{"id": request["id"], "error": map[string]any{"code": -32009, "message": err.Error()}})
@@ -615,9 +620,15 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 			manager.endAccountManagement(sessionID)
 		}
 	}()
-	listenURL, ok := manager.readyListenURL()
+	manager.mu.Lock()
+	instance := manager.instance
+	ok := instance != nil && instance.ready && !channelClosed(instance.done)
+	manager.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("local App Server is not running")
+	}
+	if runtimeID != "" && instance.runtimeID != runtimeID {
+		return fmt.Errorf("account runtime was replaced")
 	}
 	client.tunnelsMu.Lock()
 	if client.tunnels[sessionID] != nil {
@@ -625,7 +636,7 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 		return nil
 	}
 	client.tunnelsMu.Unlock()
-	tunnel, _, err := websocket.DefaultDialer.DialContext(ctx, listenURL, nil)
+	tunnel, _, err := websocket.DefaultDialer.DialContext(ctx, instance.listenURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect local App Server: %w", err)
 	}
@@ -633,9 +644,9 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 	client.tunnelsMu.Lock()
 	client.tunnels[sessionID] = tunnel
 	if client.tunnelAccounts == nil {
-		client.tunnelAccounts = map[string]*appServerManager{}
+		client.tunnelAccounts = map[string]appServerTunnelAccount{}
 	}
-	client.tunnelAccounts[sessionID] = manager
+	client.tunnelAccounts[sessionID] = appServerTunnelAccount{manager: manager, instance: instance}
 	client.tunnelsMu.Unlock()
 	if err := client.writeControl(map[string]any{"type": "appserver.opened", "sessionId": sessionID}); err != nil {
 		client.closeTunnel(sessionID)
@@ -643,11 +654,12 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 	}
 	go func() {
 		defer func() {
+			_ = tunnel.Close()
 			manager.endThreadManagement(sessionID)
 			if management {
 				manager.endAccountManagement(sessionID)
 			}
-			client.closeTunnel(sessionID)
+			client.closeCurrentTunnel(sessionID, tunnel)
 			_ = client.writeControl(map[string]any{"type": "appserver.closed", "sessionId": sessionID})
 		}()
 		for {
@@ -658,9 +670,18 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 			if messageType != websocket.TextMessage {
 				continue
 			}
-			manager.observeAccountResponse(sessionID, payload)
+			manager.observeAccountResponse(instance, sessionID, payload)
+			client.tunnelsMu.Lock()
+			attached := client.tunnels[sessionID] == tunnel
+			client.tunnelsMu.Unlock()
+			if !attached {
+				if !manager.hasPendingAccountRequests(instance, sessionID) {
+					return
+				}
+				continue
+			}
 			if err := client.writeControl(map[string]any{"type": "appserver.message", "sessionId": sessionID, "payload": string(payload)}); err != nil {
-				return
+				client.closeCurrentTunnel(sessionID, tunnel)
 			}
 		}
 	}()
@@ -669,24 +690,46 @@ func (client *controlClient) openManagedAccountTunnel(ctx context.Context, sessi
 }
 
 func (client *controlClient) closeTunnel(sessionID string) {
+	client.closeCurrentTunnel(sessionID, nil)
+}
+
+func (client *controlClient) closeCurrentTunnel(sessionID string, expected *websocket.Conn) {
 	client.tunnelsMu.Lock()
 	tunnel := client.tunnels[sessionID]
+	if expected != nil && tunnel != expected {
+		client.tunnelsMu.Unlock()
+		return
+	}
+	account := client.tunnelAccounts[sessionID]
 	delete(client.tunnels, sessionID)
 	delete(client.tunnelAccounts, sessionID)
 	client.tunnelsMu.Unlock()
-	if tunnel != nil {
-		_ = tunnel.Close()
+	closeAccountTunnelConnection(tunnel, account, sessionID)
+}
+
+// Losing the browser/Server does not cancel an accepted local RPC. Drain its
+// reply before closing the local socket so pending markers can be acknowledged.
+// A failed or timed-out drain retains unknown requests, never invents success.
+func closeAccountTunnelConnection(tunnel *websocket.Conn, account appServerTunnelAccount, sessionID string) {
+	if tunnel == nil {
+		return
 	}
+	if account.manager != nil && account.manager.hasPendingAccountRequests(account.instance, sessionID) {
+		time.AfterFunc(10*time.Second, func() { _ = tunnel.Close() })
+		return
+	}
+	_ = tunnel.Close()
 }
 
 func (client *controlClient) closeTunnels() {
 	client.tunnelsMu.Lock()
 	tunnels := client.tunnels
+	accounts := client.tunnelAccounts
 	client.tunnels = make(map[string]*websocket.Conn)
-	client.tunnelAccounts = make(map[string]*appServerManager)
+	client.tunnelAccounts = make(map[string]appServerTunnelAccount)
 	client.tunnelsMu.Unlock()
-	for _, tunnel := range tunnels {
-		_ = tunnel.Close()
+	for sessionID, tunnel := range tunnels {
+		closeAccountTunnelConnection(tunnel, accounts[sessionID], sessionID)
 	}
 }
 

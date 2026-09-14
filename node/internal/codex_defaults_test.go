@@ -44,7 +44,7 @@ func TestSubagentLimitChangeWaitsForActiveAccount(t *testing.T) {
 	manager.instance = current
 	manager.activeThreads = map[string]bool{"active-thread": true}
 	err := manager.reconcile(context.Background(), desiredAppServer{Running: true, CodexPath: binary})
-	if err == nil || !strings.Contains(err.Error(), "配置变更等待任务结束") {
+	if err == nil || !strings.Contains(err.Error(), "配置变更等待账号空闲") {
 		t.Fatalf("changing the subagent limit must wait for active tasks: %v", err)
 	}
 	if manager.instance != current || channelClosed(current.done) {

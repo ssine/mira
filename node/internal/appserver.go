@@ -73,6 +73,7 @@ type appServerManager struct {
 	managementSession string
 	loginPending      bool
 	transitioning     bool
+	activityChecking  bool
 	providerView      map[string]any
 	runtimePreparing  bool
 	runtimeCancel     context.CancelFunc
@@ -240,13 +241,13 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	desired = manager.effectiveDesired(desired)
-	if manager.transitioning || (manager.managementSession != "" && manager.instance == nil) {
+	if manager.transitioning || manager.activityChecking || (manager.managementSession != "" && manager.instance == nil) {
 		return nil
 	}
 	if !desired.Running {
-		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" || len(manager.threadManagement) > 0 {
-			manager.lastError = "账号仍有任务执行，请先结束任务"
-			return fmt.Errorf("%s", manager.lastError)
+		if err := manager.confirmAccountIdleLocked(ctx); err != nil {
+			manager.lastError = err.Error()
+			return err
 		}
 		if manager.runtimeCancel != nil {
 			manager.runtimeCancel()
@@ -293,8 +294,8 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 		if current.requestedListenURL == desired.ListenURL && current.codex.Path == selected.Path && current.codexHome == desired.CodexHome && stringSlicesEqual(current.configOverrides, desired.ConfigOverrides) && stringSlicesEqual(current.environmentFiles, desired.EnvironmentFiles) && stringSlicesEqual(current.inheritEnv, desired.InheritEnv) {
 			return nil
 		}
-		if len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 || manager.managementSession != "" || len(manager.threadManagement) > 0 {
-			manager.lastError = "账号仍有任务执行，配置变更等待任务结束"
+		if err := manager.confirmAccountIdleLocked(ctx); err != nil {
+			manager.lastError = "配置变更等待账号空闲：" + err.Error()
 			return fmt.Errorf("%s", manager.lastError)
 		}
 		if err := manager.stopLocked(); err != nil {
@@ -498,6 +499,11 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		_ = command.Wait()
 		instance.output.flush()
 		close(instance.done)
+		manager.mu.Lock()
+		if manager.instance == instance {
+			manager.clearAccountActivityLocked()
+		}
+		manager.mu.Unlock()
 	}()
 	manager.mu.Unlock()
 	err = waitForAppServer(ctx, instance)
@@ -553,10 +559,12 @@ func (manager *appServerManager) stopLocked() error {
 	defer func() { manager.transitioning = false }()
 	instance := manager.instance
 	if instance == nil {
+		manager.clearAccountActivityLocked()
 		return nil
 	}
 	manager.instance = nil
 	if channelClosed(instance.done) {
+		manager.clearAccountActivityLocked()
 		return nil
 	}
 	if err := terminateProcess(instance.command.Process, "SIGTERM"); err != nil {
@@ -573,6 +581,7 @@ func (manager *appServerManager) stopLocked() error {
 		<-instance.done
 	}
 	manager.mu.Lock()
+	manager.clearAccountActivityLocked()
 	Log("stopped Codex App Server", nil)
 	return nil
 }

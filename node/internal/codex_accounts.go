@@ -288,6 +288,12 @@ func (client *controlClient) closeAccountRuntimes() {
 }
 
 func (manager *appServerManager) observeAccountThread(payload []byte) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.observeAccountThreadLocked(payload)
+}
+
+func (manager *appServerManager) observeAccountThreadLocked(payload []byte) {
 	var message struct {
 		Method string `json:"method"`
 		Params struct {
@@ -300,21 +306,27 @@ func (manager *appServerManager) observeAccountThread(payload []byte) {
 	if json.Unmarshal(payload, &message) != nil || message.Params.ThreadID == "" {
 		return
 	}
-	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if manager.activeThreads == nil {
 		manager.activeThreads = map[string]bool{}
+	}
+	// A response can arrive after lifecycle events, including over another
+	// tunnel. Remember that the cache has newer evidence; an inProgress response
+	// must not resurrect a completed turn. Only its own reply releases a pending
+	// request, since an older turn's completion says nothing about a new request.
+	switch message.Method {
+	case "turn/started", "turn/completed", "thread/closed", "thread/status/changed":
+		for key, pending := range manager.pendingTurns {
+			if pending.ThreadID == message.Params.ThreadID {
+				pending.ObservedActivity = true
+				manager.pendingTurns[key] = pending
+			}
+		}
 	}
 	switch message.Method {
 	case "turn/started":
 		manager.activeThreads[message.Params.ThreadID] = true
 	case "turn/completed", "thread/closed":
 		delete(manager.activeThreads, message.Params.ThreadID)
-		for key, pending := range manager.pendingTurns {
-			if pending.ThreadID == message.Params.ThreadID {
-				delete(manager.pendingTurns, key)
-			}
-		}
 	case "thread/status/changed":
 		if message.Params.Status.Type == "active" {
 			manager.activeThreads[message.Params.ThreadID] = true

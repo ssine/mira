@@ -9,24 +9,24 @@ func TestThreadHandoffDoesNotBlockOtherConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"root", "child"} {
-		if err := manager.reserveAccountRequest("browser", []byte(`{"id":1,"method":"turn/start","params":{"threadId":"`+id+`"}}`)); err == nil {
+		if err := manager.reserveAccountRequest(manager.instance, "browser", []byte(`{"id":1,"method":"turn/start","params":{"threadId":"`+id+`"}}`)); err == nil {
 			t.Fatal("handoff admitted a competing turn")
 		}
 	}
-	if err := manager.reserveAccountRequest("browser", []byte(`{"id":2,"method":"turn/start","params":{"threadId":"other"}}`)); err != nil {
+	if err := manager.reserveAccountRequest(manager.instance, "browser", []byte(`{"id":2,"method":"turn/start","params":{"threadId":"other"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.reserveAccountRequest("handoff", []byte(`{"id":3,"method":"mira/thread/unload","params":{"threadId":"root","threadIds":["root","child"]}}`)); err != nil {
+	if err := manager.reserveAccountRequest(manager.instance, "handoff", []byte(`{"id":3,"method":"mira/thread/unload","params":{"threadId":"root","threadIds":["root","child"]}}`)); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.reserveAccountRequest("handoff", []byte(`{"id":4,"method":"mira/thread/unload","params":{"threadId":"root","threadIds":["other"]}}`)); err == nil {
+	if err := manager.reserveAccountRequest(manager.instance, "handoff", []byte(`{"id":4,"method":"mira/thread/unload","params":{"threadId":"root","threadIds":["other"]}}`)); err == nil {
 		t.Fatal("unload escaped its scope")
 	}
 	if err := manager.beginAccountManagement("login"); err == nil {
 		t.Fatal("credential mutation overlapped handoff")
 	}
 	manager.endThreadManagement("handoff")
-	if err := manager.reserveAccountRequest("browser", []byte(`{"id":5,"method":"thread/resume","params":{"threadId":"root"}}`)); err != nil {
+	if err := manager.reserveAccountRequest(manager.instance, "browser", []byte(`{"id":5,"method":"thread/resume","params":{"threadId":"root"}}`)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -34,7 +34,7 @@ func TestThreadHandoffDoesNotBlockOtherConversations(t *testing.T) {
 func TestThreadHandoffRejectsPendingRequestsInItsTree(t *testing.T) {
 	manager := newAppServerManager(config{})
 	request := []byte(`{"id":1,"method":"thread/resume","params":{"threadId":"child"}}`)
-	if err := manager.reserveAccountRequest("browser", request); err != nil {
+	if err := manager.reserveAccountRequest(manager.instance, "browser", request); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.beginThreadManagement("handoff", []string{"root", "child"}); err == nil {
@@ -43,7 +43,7 @@ func TestThreadHandoffRejectsPendingRequestsInItsTree(t *testing.T) {
 	if len(manager.threadManagement) != 0 {
 		t.Fatal("failed handoff leaked gates")
 	}
-	manager.observeAccountResponse("browser", []byte(`{"id":1,"result":{}}`))
+	manager.observeAccountResponse(nil, "browser", []byte(`{"id":1,"result":{}}`))
 	if err := manager.beginThreadManagement("handoff", []string{"root", "child"}); err != nil {
 		t.Fatal(err)
 	}

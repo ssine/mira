@@ -8,7 +8,7 @@ import "fmt"
 func (manager *appServerManager) beginThreadManagement(sessionID string, threadIDs []string) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	if manager.managementSession != "" {
+	if manager.transitioning || manager.activityChecking || manager.managementSession != "" {
 		return errCodexAccountBusy
 	}
 	if len(threadIDs) == 0 || len(threadIDs) > 4096 {

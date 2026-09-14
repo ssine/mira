@@ -119,24 +119,24 @@ func TestManagedAccountCredentialsAndOverride(t *testing.T) {
 func TestAccountCredentialGateAndPendingTurn(t *testing.T) {
 	manager := newAppServerManager(config{})
 	request := []byte(`{"id":1,"method":"turn/start","params":{"threadId":"thread-one"}}`)
-	if err := manager.reserveAccountRequest("client", request); err != nil {
+	if err := manager.reserveAccountRequest(manager.instance, "client", request); err != nil {
 		t.Fatal(err)
 	}
 	if err := manager.beginAccountManagement("login"); err == nil {
 		t.Fatal("login overlapped pending turn")
 	}
-	manager.observeAccountResponse("client", []byte(`{"id":1,"error":{"message":"rejected"}}`))
+	manager.observeAccountResponse(nil, "client", []byte(`{"id":1,"error":{"message":"rejected"}}`))
 	if err := manager.beginAccountManagement("login"); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.reserveAccountRequest("client", request); err == nil {
+	if err := manager.reserveAccountRequest(manager.instance, "client", request); err == nil {
 		t.Fatal("turn overlapped login")
 	}
 	manager.endAccountManagement("login")
-	if err := manager.reserveAccountRequest("client", request); err != nil {
+	if err := manager.reserveAccountRequest(manager.instance, "client", request); err != nil {
 		t.Fatal(err)
 	}
-	manager.observeAccountResponse("client", []byte(`{"id":1,"result":{"turn":{"id":"turn-one"}}}`))
+	manager.observeAccountResponse(nil, "client", []byte(`{"id":1,"result":{"turn":{"id":"turn-one","status":"inProgress"}}}`))
 	if err := manager.beginAccountManagement("login"); err == nil {
 		t.Fatal("login overlapped running turn")
 	}

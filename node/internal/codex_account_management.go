@@ -10,11 +10,12 @@ import (
 var errCodexAccountBusy = errors.New("账号仍有任务或其他凭据操作，请稍后再试")
 
 type accountPendingRequest struct {
-	Method   string
-	ThreadID string
+	Method           string
+	ThreadID         string
+	ObservedActivity bool
 }
 
-func (manager *appServerManager) reserveAccountRequest(sessionID string, payload []byte) error {
+func (manager *appServerManager) reserveAccountRequest(instance *appServerInstance, sessionID string, payload []byte) error {
 	var message struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -28,6 +29,15 @@ func (manager *appServerManager) reserveAccountRequest(sessionID string, payload
 	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
+	if manager.instance != instance || (instance != nil && channelClosed(instance.done)) {
+		return fmt.Errorf("account runtime was replaced")
+	}
+	if manager.transitioning || manager.activityChecking {
+		switch message.Method {
+		case "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
+			return fmt.Errorf("账号正在核验状态或停止，请稍后重试")
+		}
+	}
 	if owner := manager.threadManagement[message.Params.ThreadID]; owner != "" && owner != sessionID {
 		switch message.Method {
 		case "thread/read", "thread/turns/list", "thread/items/list":
@@ -59,7 +69,7 @@ func (manager *appServerManager) reserveAccountRequest(sessionID string, payload
 		manager.pendingTurns[sessionID+":"+string(message.ID)] = accountPendingRequest{Method: message.Method}
 	}
 	switch message.Method {
-	case "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork":
+	case "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
 		if manager.managementSession != "" {
 			return fmt.Errorf("此账号正在更新凭据，请完成或取消登录后再发送")
 		}
@@ -76,25 +86,32 @@ func (manager *appServerManager) reserveAccountRequest(sessionID string, payload
 	return nil
 }
 
-func (manager *appServerManager) observeAccountResponse(sessionID string, payload []byte) {
+func (manager *appServerManager) observeAccountResponse(instance *appServerInstance, sessionID string, payload []byte) {
 	var response struct {
 		ID     json.RawMessage `json:"id"`
 		Error  json.RawMessage `json:"error"`
 		Method string          `json:"method"`
 		Result struct {
 			Type string `json:"type"`
+			Turn struct {
+				Status string `json:"status"`
+			} `json:"turn"`
 		} `json:"result"`
 	}
 	if json.Unmarshal(payload, &response) != nil {
 		return
 	}
-	if response.Method == "account/login/completed" {
-		manager.mu.Lock()
-		manager.loginPending = false
-		manager.mu.Unlock()
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	// A replaced process can still have queued tunnel messages. They must not
+	// resurrect activity in the new runtime (or after the old process exited).
+	if manager.instance != instance || (instance != nil && channelClosed(instance.done)) {
+		return
 	}
-	if len(response.ID) > 0 {
-		manager.mu.Lock()
+	if response.Method == "account/login/completed" {
+		manager.loginPending = false
+	}
+	if len(response.ID) > 0 && response.Method == "" {
 		key := sessionID + ":" + string(response.ID)
 		pending, ok := manager.pendingTurns[key]
 		delete(manager.pendingTurns, key)
@@ -102,15 +119,28 @@ func (manager *appServerManager) observeAccountResponse(sessionID string, payloa
 		if ok && ((pending.Method == "account/login/start" && (failed || response.Result.Type == "apiKey")) || (pending.Method == "account/login/cancel" && !failed)) {
 			manager.loginPending = false
 		}
-		if ok && pending.Method == "turn/start" && pending.ThreadID != "" && (len(response.Error) == 0 || string(response.Error) == "null") {
+		if ok && pending.Method == "turn/start" && pending.ThreadID != "" && !pending.ObservedActivity && !failed && response.Result.Turn.Status == "inProgress" {
 			if manager.activeThreads == nil {
 				manager.activeThreads = map[string]bool{}
 			}
 			manager.activeThreads[pending.ThreadID] = true
 		}
-		manager.mu.Unlock()
 	}
-	manager.observeAccountThread(payload)
+	manager.observeAccountThreadLocked(payload)
+}
+
+func (manager *appServerManager) hasPendingAccountRequests(instance *appServerInstance, sessionID string) bool {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.instance != instance || (instance != nil && channelClosed(instance.done)) {
+		return false
+	}
+	for key := range manager.pendingTurns {
+		if strings.HasPrefix(key, sessionID+":") {
+			return true
+		}
+	}
+	return false
 }
 
 func (client *controlClient) configureCodexAccount(id string, params json.RawMessage) (map[string]any, error) {
@@ -161,7 +191,7 @@ func (client *controlClient) configureCodexAccount(id string, params json.RawMes
 func (manager *appServerManager) beginAccountManagement(sessionID string) error {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	if manager.managementSession != "" || len(manager.threadManagement) > 0 || len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 {
+	if manager.transitioning || manager.activityChecking || manager.managementSession != "" || len(manager.threadManagement) > 0 || len(manager.activeThreads) > 0 || len(manager.pendingTurns) > 0 {
 		return errCodexAccountBusy
 	}
 	manager.managementSession = sessionID
