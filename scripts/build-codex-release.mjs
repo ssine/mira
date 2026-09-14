@@ -22,6 +22,19 @@ async function sha256(file) {
   return hash.digest("hex");
 }
 
+// The pinned upstream CLI compiles this diagnostic only with debug assertions.
+// Reject it without executing the input, so the check also covers cross-platform
+// packages. Debug builds panic on recoverable interrupted tool histories.
+async function rejectDebugEntrypoint(file) {
+  const marker = Buffer.from("`codex update` is not available in debug builds.");
+  let tail = Buffer.alloc(0);
+  for await (const chunk of createReadStream(file)) {
+    const bytes = Buffer.concat([tail, chunk]);
+    assert(!bytes.includes(marker), "Refusing a debug Codex runtime: build every companion with cargo build --release before packaging");
+    tail = bytes.subarray(Math.max(0, bytes.length - marker.length + 1));
+  }
+}
+
 async function inventory(directory, relative = "") {
   const files = [];
   for (const entry of (await fs.readdir(path.join(directory, relative), { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
@@ -64,6 +77,7 @@ try {
       process.env.MIRA_CODEX_LOCAL_NATIVE === "1" && canonical.target === "x86_64-unknown-linux-gnu"),
     `Unexpected canonical target: ${canonical.target}`);
     assert.equal(canonical.entrypoint, platform === "windows-amd64" ? "bin/codex.exe" : "bin/codex");
+    await rejectDebugEntrypoint(path.join(stage, canonical.entrypoint));
     const files = await inventory(stage);
     const suffix = platform === "windows-amd64" ? ".exe" : "";
     const required = ["codex-package.json", `bin/codex${suffix}`, `bin/codex-code-mode-host${suffix}`, `codex-path/rg${suffix}`];

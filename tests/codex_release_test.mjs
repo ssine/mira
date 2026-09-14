@@ -47,6 +47,14 @@ test("independent Codex archives preserve canonical companions and file hashes",
       }
     }
     assert.throws(() => execFileSync(process.execPath, ["scripts/build-codex-release.mjs", output, ...sources], { cwd: root, stdio: "pipe" }), "must not overwrite existing artifacts");
+    for (const [index, platform] of ["linux-amd64", "windows-amd64"].entries()) {
+      const binary = path.join(temporary, platform, `bin/codex${platform.startsWith("windows") ? ".exe" : ""}`);
+      const original = await fs.readFile(binary);
+      // Stripping symbols retains the diagnostic; split it across read chunks.
+      await fs.writeFile(binary, Buffer.concat([Buffer.alloc(65520), Buffer.from("`codex update` is not available in debug builds. Install a release build of Codex to use this command.")]));
+      assert.throws(() => execFileSync(process.execPath, ["scripts/build-codex-release.mjs", path.join(temporary, `debug-${platform}`), sources[index]], { cwd: root, stdio: "pipe" }), /Refusing a debug Codex runtime/);
+      await fs.writeFile(binary, original);
+    }
     await fs.unlink(path.join(temporary, "linux-amd64/bin/codex-code-mode-host"));
     assert.throws(() => execFileSync(process.execPath, ["scripts/build-codex-release.mjs", path.join(temporary, "broken"), sources[0]], { cwd: root, stdio: "pipe" }), "must reject incomplete canonical packages");
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }

@@ -90,3 +90,12 @@ loading. Restoring subagent metadata requests the selected thread's state instea
 of repeatedly downloading the entire store; canonical metadata, generation and
 history remain unchanged. Regression coverage restores 220 children and asserts
 one scoped metadata request per child with no history downloads.
+
+Runtime revision `0.153.1-mira.13` retains the same persistence patch and requires
+release-profile packaging. Local runtime builds must compile **all** canonical
+companions with `cargo build --release`; symbol stripping does not turn a debug
+build into a release build. The packager rejects the pinned upstream CLI's
+debug-only diagnostic, including stripped binaries and foreign-platform inputs.
+This matters for interrupted custom tool calls: upstream release builds project
+an `aborted` result for sampling, while debug builds deliberately panic. Never
+repair this condition by deleting or inventing canonical tool history.
