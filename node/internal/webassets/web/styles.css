@@ -958,9 +958,11 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-draft-status:empty { display: none; }
 .conversation-draft-status.draft-error { color: var(--danger); }
 
-#forkProgress { display: flex; align-items: center; flex-wrap: wrap; gap: 0.65rem; }
-#forkProgress.hidden { display: none; }
-#forkProgressBar { width: 9rem; max-width: 100%; accent-color: var(--accent); }
+#forkProgress, #resumeProgress { display: flex; align-items: center; flex-wrap: wrap; gap: 0.65rem; }
+#forkProgress.hidden, #resumeProgress.hidden { display: none; }
+#forkProgressBar, #resumeProgressBar { width: 9rem; max-width: 100%; accent-color: var(--accent); }
+#resumeProgressText { min-width: 0; font-variant-numeric: tabular-nums; }
+#resumeProgressCancel { flex: none; }
 
 /* Diagrams share the conversation reading surface; wide graphs scroll locally. */
 .markdown-body .trace-diagram { margin: 16px 0; min-width: 0; }

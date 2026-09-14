@@ -10,7 +10,9 @@ ctl = os.environ["CAMOUFOXCTL"]
 
 
 def browser(*args):
-    result = subprocess.run([ctl, *args], check=True, capture_output=True, text=True)
+    result = subprocess.run([ctl, *args], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"browser {args[0]} failed: {result.stdout} {result.stderr}")
     return json.loads(result.stdout)
 
 
@@ -18,8 +20,8 @@ def evaluate(source):
     return browser("eval", source).get("value")
 
 
-def wait_for(source):
-    deadline = time.monotonic() + 15
+def wait_for(source, timeout=15):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         value = evaluate(source)
         if value:
@@ -35,13 +37,13 @@ try:
     assert origin.startswith("http://127.0.0.1:")
     browser("open", origin + "/?thread=00000000-0000-4000-8000-0000000000a1")
     wait_for("() => !document.querySelector('#conversationMenuToggle').classList.contains('hidden')")
-    # Accelerate the old 120 s request deadline and advance elapsed wall time.
+    # Accelerate the old 120 s request deadline.
     # The fixed UI keeps the same request alive beyond that deadline.
-    evaluate("mw:(() => { const timeout = window.setTimeout.bind(window); window.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 120000 ? 100 : ms, ...args); window.resumeTestNow = Date.now; return true; })()")
+    evaluate("mw:(() => { const timeout = window.setTimeout.bind(window); window.setTimeout = (fn, ms, ...args) => timeout(fn, ms === 120000 ? 100 : ms, ...args); return true; })()")
     browser("fill", "#conversationInput", "preserved draft")
     wait_for("async () => (await (await fetch('/__test/resume')).json()).requests === 1")
-    evaluate("mw:Date.now = () => window.resumeTestNow() + 180000")
-    wait_for("() => document.querySelector('#resumeProgressText').textContent.includes('仍在恢复')")
+    wait_for("() => document.querySelector('#resumeProgressText').textContent.includes('仍在恢复')", timeout=25)
+    assert evaluate("() => { const bar = document.querySelector('#resumeProgressBar'); return bar.matches(':indeterminate') && bar.getBoundingClientRect().width > 0; }")
     browser("fill", "#conversationInput", "preserved draft edited")
     evaluate("mw:document.dispatchEvent(new Event('visibilitychange'))")
     time.sleep(1)
