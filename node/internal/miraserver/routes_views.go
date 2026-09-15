@@ -36,6 +36,18 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 		if err != nil {
 			return true, err
 		}
+		query := request.URL.Query()
+		if view := query.Get("view"); view != "" {
+			options := serverviews.ThreadPageOptions{View: view, Archived: query.Get("archived") == "1",
+				Limit: int(boundedQueryInteger(query.Get("limit"), 50, 1, 100)), ParentID: query.Get("parentThreadId"),
+				ThreadID: query.Get("threadId"), ProjectKey: query.Get("projectKey"), Cursor: query.Get("cursor"),
+				Head: query.Get("head") == "1", IDs: query["id"]}
+			page, err := server.views.ListThreadPage(ctx, storeID, options)
+			if err != nil {
+				return true, err
+			}
+			return true, writeJSON(response, 200, page)
+		}
 		limit := int(boundedQueryInteger(request.URL.Query().Get("limit"), 200, 1, 500))
 		archived := request.URL.Query().Get("archived") == "1"
 		threads, err := server.views.ListThreads(ctx, storeID, limit, nil, &archived)
@@ -133,6 +145,7 @@ func (server *Server) manageThreadRequest(ctx context.Context, response http.Res
 	if err != nil {
 		return err
 	}
+	server.views.InvalidateThreadDirectory(storeID)
 	return writeJSON(response, result.Status, result.Body)
 }
 
@@ -193,7 +206,7 @@ func (server *Server) threadCosts(ctx context.Context, response http.ResponseWri
 	if len(threads) == 0 {
 		return foundation.WriteErrorJSON(response, 404, "会话不存在或已不可访问", "not_found")
 	}
-	cost, err := server.views.GetThreadCost(ctx, storeID, threads[0])
+	statistics, err := server.views.GetThreadStatistics(ctx, storeID, threads[0])
 	if err != nil {
 		return err
 	}
@@ -206,7 +219,8 @@ func (server *Server) threadCosts(ctx context.Context, response http.ResponseWri
 	}
 	return writeJSON(response, 200, map[string]any{
 		"threadId": threadID, "generation": threads[0].Generation, "itemCount": threads[0].ItemCount,
-		"costEstimate": cost, "turnCostEstimates": turnCosts,
+		"tokenUsage":   threads[0].TokenUsage,
+		"costEstimate": statistics.CostEstimate, "tokenUsageSummary": statistics.TokenUsageSummary, "turnCostEstimates": turnCosts,
 	})
 }
 
@@ -226,10 +240,11 @@ func (server *Server) threadView(ctx context.Context, response http.ResponseWrit
 		return foundation.WriteErrorJSON(response, 404, "会话不存在或已不可访问", "not_found")
 	}
 	if request.URL.Query().Get("includeCost") == "1" {
-		threads[0].CostEstimate, err = server.views.GetThreadCost(ctx, storeID, threads[0])
+		statistics, err := server.views.GetThreadStatistics(ctx, storeID, threads[0])
 		if err != nil {
 			return err
 		}
+		threads[0].CostEstimate, threads[0].TokenUsageSummary = statistics.CostEstimate, statistics.TokenUsageSummary
 	}
 	return writeJSON(response, 200, threads[0])
 }

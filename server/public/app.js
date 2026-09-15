@@ -16,6 +16,7 @@ import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, form
 import { TraceImages } from "/trace-images.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
 import { buildThreadTree, splitProjectThreads } from "/thread-list.js";
+import { ThreadPager, mergeThreadPages } from "/thread-pages.js";
 
 marked.setOptions({ gfm: true, breaks: false });
 
@@ -209,6 +210,7 @@ const agent = {
   sessionVisibleLimit: 40,
   threads: [],
   threadListRequest: 0,
+  threadPager: null,
   // Acknowledged creations remain visible while the PostgreSQL list catches up.
   // These in-memory previews are replaced by canonical summaries on the next read.
   pendingThreadSummaries: new Map(),
@@ -438,17 +440,40 @@ function acceptThreadTokenUsage(thread, checkedAt = Date.now()) {
   while (agent.tokenUsages.size > 1000) agent.tokenUsages.delete(agent.tokenUsages.keys().next().value);
 }
 
+function threadTokenDisplay(threadId, thread = agent.threads.find(thread => thread.threadId === threadId)) {
+  const current = agent.tokenUsages.get(threadId), cached = agent.costEstimates.get(threadId);
+  const key = JSON.stringify([threadId, current?.generation, current?.itemCount, current?.usage]);
+  const summary = cached?.key === key ? cached.tokenUsageSummary : null;
+  // A partial page cannot prove that a parent has no descendants. Until its
+  // server summary arrives, never present the parent's own usage as the total.
+  const needsSummary = thread?.forkedFromId || (thread?.hasSubagents ?? agent.threads.some(child => child.parentThreadId === threadId));
+  return { usage: summary?.total ?? (needsSummary ? null : current?.usage), summary, pending: Boolean(needsSummary && !summary) };
+}
+
 function renderConversationTokenUsage(threadId) {
-  const usage = agent.tokenUsages.get(threadId)?.usage;
+  const { usage, summary, pending } = threadTokenDisplay(threadId);
   const target = $("#conversationTokenUsageFacts");
-  const key = JSON.stringify([threadId, usage?.inputTokens, usage?.cachedInputTokens, usage?.outputTokens]);
+  const key = JSON.stringify([threadId, usage, summary, pending]);
   if (target._miraUsageKey === key) return;
   target._miraUsageKey = key;
   navigationFacts(target, [
-    ["累计输入 Token（含缓存）", tokenCount(usage?.inputTokens)],
+    [summary?.includesSubagents ? "合计输入 Token（含缓存）" : "累计输入 Token（含缓存）", pending ? "统计中…" : tokenCount(usage?.inputTokens)],
     ["其中缓存输入 Token", tokenCount(usage?.cachedInputTokens)],
-    ["累计输出 Token", tokenCount(usage?.outputTokens)],
+    [summary?.includesSubagents ? "合计输出 Token" : "累计输出 Token", tokenCount(usage?.outputTokens)],
   ]);
+  const components = $("#conversationTokenUsageComponents");
+  components.hidden = !summary?.includesSubagents;
+  if (summary?.includesSubagents) navigationFacts(components, [
+    ["自身用量", `输入 ${tokenCount(summary.self.inputTokens)} · 缓存 ${tokenCount(summary.self.cachedInputTokens)} · 输出 ${tokenCount(summary.self.outputTokens)}`],
+    [`子 Agent 用量（含下级，共 ${summary.subagentCount} 个）`, `输入 ${tokenCount(summary.subagents.inputTokens)} · 缓存 ${tokenCount(summary.subagents.cachedInputTokens)} · 输出 ${tokenCount(summary.subagents.outputTokens)}`],
+  ]);
+  $("#conversationTokenUsageNote").textContent = [
+    pending ? "正在汇总会话用量…" : "",
+    summary?.includesSubagents ? "包含自身及全部子 Agent，含已归档会话；复制的历史不重复计入。" : "",
+    summary?.scope === "fork" ? "仅统计分支创建后新增的用量。" : "",
+    usage?.status === "partial" ? "部分用量缺失，显示已统计部分。" : "",
+    usage?.status === "unavailable" ? "缺少可确认的用量，暂无法统计。" : "",
+  ].filter(Boolean).join(" ");
 }
 
 function acceptThreadActivity(thread, checkedAt = Date.now()) {
@@ -483,6 +508,7 @@ function acceptThreadActivity(thread, checkedAt = Date.now()) {
 }
 
 function renderThreadStates() {
+  const threadsById = new Map(agent.threads.map(thread => [thread.threadId, thread]));
   for (const label of $("#agentThreadList").querySelectorAll("[data-thread-activity]")) {
     const id = label.dataset.threadActivity;
     const activity = threadActivity(id);
@@ -500,12 +526,12 @@ function renderThreadStates() {
     label.textContent = stateLabel || label.dataset.recency || "";
     label.dataset.state = activity.state;
     label.title = stateLabel ? activity.state === "idle" ? stateLabel : activityLabel(activity) : label.dataset.recency || "";
-    const usage = agent.tokenUsages.get(id)?.usage;
+    const { usage, summary } = threadTokenDisplay(id, threadsById.get(id));
     const usageLabel = row.querySelector("[data-thread-token-usage]");
     if (usageLabel) {
-      const compact = compactTokenUsage(usage), title = tokenUsageTitle(usage);
+      const compact = compactTokenUsage(usage), title = tokenUsageTitle(usage, summary);
       if (usageLabel.textContent !== compact) usageLabel.textContent = compact;
-      usageLabel.dataset.compact = usage ? `${compactTokenCount(usage.inputTokens)}↑ ${compactTokenCount(usage.outputTokens)}↓` : "";
+      usageLabel.dataset.compact = compact ? `${compactTokenCount(usage.inputTokens)}↑ ${compactTokenCount(usage.outputTokens)}↓${usage.status === "partial" ? "*" : ""}` : "";
       usageLabel.hidden = !compact;
       if (usageLabel.title !== title) usageLabel.title = title;
     }
@@ -530,7 +556,8 @@ function renderThreadStates() {
     }
     const status = group.querySelector(":scope > summary .thread-subagents-activity");
     status.textContent = [running && `${running} 进行中`, failed && `${failed} 失败`, unread && `${unread} 未读`].filter(Boolean).join(" · ");
-    status.title = status.textContent;
+    if (agent.threadPager?.enabled && status.textContent) status.textContent = `已展开：${status.textContent}`;
+    status.title = agent.threadPager?.enabled ? "状态仅汇总当前展开的子 Agent；用量统计包含全部子 Agent。" : status.textContent;
   }
   if ($("#conversationDetails").open) {
     renderConversationTokenUsage($("#conversationDetails").dataset.threadId);
@@ -544,6 +571,7 @@ function rememberThreadCost(thread) {
   const previous = agent.costEstimates.get(thread.threadId);
   if (previous && (previous.generation > thread.generation || previous.generation === thread.generation && previous.itemCount > thread.itemCount)) return;
   agent.costEstimates.set(thread.threadId, { estimate: thread.costEstimate ?? {amount:null,status:"unavailable"}, generation: thread.generation, itemCount: thread.itemCount,
+    tokenUsageSummary: thread.tokenUsageSummary,
     key: JSON.stringify([thread.threadId, thread.generation, thread.itemCount, thread.tokenUsage]), at: Date.now() });
   while (agent.costEstimates.size > 1000) agent.costEstimates.delete(agent.costEstimates.keys().next().value);
 }
@@ -641,7 +669,25 @@ async function refreshThreadActivity() {
   const operation = (async () => {
     try {
       const signal = AbortSignal.timeout(12_000);
-      const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`, { signal });
+      const pager = agent.threadPager;
+      let response;
+      if (pager?.enabled) {
+        // Poll only the current conversation and rows visible in the sidebar.
+        // Head reads discover new work without replacing pagination cursors.
+        const ids = new Set(agent.threadId ? [agent.threadId] : []);
+        const bounds = $("#agentThreadList").getBoundingClientRect();
+        if (agentThreadDrawerOpen) for (const row of $("#agentThreadList").querySelectorAll("[data-thread-row]")) {
+          if (ids.size >= 100) break;
+          if (row.closest("details:not([open])")) continue;
+          const rect = row.getBoundingClientRect();
+          if (rect.height && rect.bottom > bounds.top && rect.top < bounds.bottom) ids.add(row.dataset.threadRow);
+        }
+        const query = new URLSearchParams({ storeId: "personal", view: "refresh", limit: "100", archived: archived ? "1" : "0" });
+        for (const id of ids) query.append("id", id);
+        response = await api(`/v1/codex/threads?${query}`, { signal });
+        if (stale()) return;
+
+      } else response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`, { signal });
       if (stale()) return;
       const rows = response.data ?? [];
       const selected = agent.threadId;
@@ -653,8 +699,9 @@ async function refreshThreadActivity() {
       for (const thread of rows) acceptThreadActivity(thread, checkedAt);
       // New subagents appear while their parent is still running. Ordinary
       // activity polls keep existing rows, focus and menus in place.
-      if (mergeAgentThreadSummaries(rows)) renderAgentThreads();
+      if (mergeAgentThreadSummaries(rows, response.removed)) renderAgentThreads();
       const current = rows.find(thread => thread.threadId === agent.threadId);
+      if (pager?.enabled) void refreshThreadHeads(pager, stale);
       // A read-only window may have no App Server subscription (including CLI
       // threads on another Node). Follow the canonical history in every window.
       // Avoid interrupting older-page loads or resetting a reader's position.
@@ -671,6 +718,24 @@ async function refreshThreadActivity() {
   agent.activityRequest = operation;
   try { await operation; }
   finally { if (agent.activityRequest === operation) agent.activityRequest = null; }
+}
+
+async function refreshThreadHeads(pager, stale) {
+  if (pager.refreshing) return;
+  pager.refreshing = true;
+  try {
+    if (Date.now() - pager.state("roots").checkedAt >= 10_000) await pager.load("roots", "", true);
+    if (stale()) return;
+    const expanded = [...$("#agentThreadList").querySelectorAll("details[data-subagent-parent][open]")]
+      .filter(group => !group.parentElement.closest("details:not([open])"))
+      .map(group => group.dataset.subagentParent)
+      .sort((a, b) => pager.state("children", a).checkedAt - pager.state("children", b).checkedAt);
+    if (agentThreadDrawerOpen) for (const id of expanded.slice(0, 2)) {
+      if (Date.now() - pager.state("children", id).checkedAt >= 10_000) await pager.load("children", id, true).catch(() => {});
+      if (stale()) return;
+    }
+  } catch { /* Navigation retries independently of the active transcript. */ }
+  finally { pager.refreshing = false; }
 }
 
 function observeTurnActivity(method, params) {
@@ -4126,7 +4191,8 @@ function renderAgentThreadRow(thread) {
 function renderAgentThreadBranch(entry, selectedAncestors) {
   const branch = document.createDocumentFragment();
   branch.append(renderAgentThreadRow(entry.thread));
-  if (!entry.children.length) return branch;
+  const paged = agent.threadPager?.enabled;
+  if (!(entry.thread.childCount ?? entry.children.length)) return branch;
   const children = element("details", "thread-subagents");
   children.dataset.subagentParent = entry.threadId;
   children.open = agent.subagentOpen.get(entry.threadId) ?? selectedAncestors.has(entry.threadId);
@@ -4137,11 +4203,27 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
   const list = element("div", "thread-subagent-threads");
   list.setAttribute("role", "group");
   list.setAttribute("aria-label", summary.title);
-  for (const child of entry.children) list.append(renderAgentThreadBranch(child, selectedAncestors));
+  const populate = () => {
+    clear(list);
+    if (paged && !children.open) return;
+    for (const child of entry.children) list.append(renderAgentThreadBranch(child, selectedAncestors));
+    if (paged) {
+      const more = threadPageButton("children", entry.threadId, entry.children.length, entry.thread.childCount);
+      if (more) list.append(more);
+    }
+  };
+  populate();
   children.addEventListener("toggle", () => {
     if (!children.isConnected) return;
     agent.subagentOpen.set(entry.threadId, children.open);
-    scheduleSidebarCosts();
+    if (paged) {
+      populate();
+      const state = threadPager().state("children", entry.threadId);
+      if (children.open && !state.started && !state.loading && !state.error) {
+        void threadPager().load("children", entry.threadId).catch(() => {});
+      }
+    }
+    renderThreadStates();
   });
   children.append(summary, list);
   branch.append(children);
@@ -4149,8 +4231,15 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
 }
 
 function renderAgentThreads(revealSelection = false) {
-  const list = clear($("#agentThreadList"));
+  const list = $("#agentThreadList"), scrollTop = list.scrollTop;
+  const active = list.contains(document.activeElement) ? document.activeElement : null;
+  const focusKey = active?.dataset.threadId ? ["threadId", active.dataset.threadId]
+    : active?.dataset.pageView ? ["pageView", active.dataset.pageView, active.dataset.pageKey]
+    : active?.tagName === "SUMMARY" ? ["summary", active.parentElement.dataset.subagentParent || active.parentElement.dataset.projectKey || active.parentElement.dataset.historyKey] : null;
+  clear(list);
   const groups = new Map();
+  const paged = agent.threadPager?.enabled;
+  if (paged) for (const project of agent.threadPager.projects) groups.set(project.key, { ...project, threads: [] });
   const threads = agent.threads.filter(thread => Boolean(thread.archived) === agent.showArchived);
   const { roots, parentById } = buildThreadTree(threads);
   const selectedAncestors = new Set();
@@ -4190,8 +4279,9 @@ function renderAgentThreads(revealSelection = false) {
     const machineLabel = element("span", "thread-project-machine", nameCounts.get(name) > 1 ? machine : "");
     machineLabel.title = machine;
     const platform = element("span", isWsl ? "thread-project-platform" : "", isWsl ? "WSL" : "");
-    const count = element("span", "thread-project-count visually-hidden", `${group.threads.length} 对话`);
-    count.setAttribute("aria-label", `${group.threads.length} 个${agent.showArchived ? "已归档" : ""}对话`);
+    const total = Math.max(group.count ?? 0, group.threads.length);
+    const count = element("span", "thread-project-count visually-hidden", `${total} 对话`);
+    count.setAttribute("aria-label", `${total} 个${agent.showArchived ? "已归档" : ""}对话`);
     const add = element("button", "chat-icon-button project-new-thread", "+");
     add.type = "button";
     add.dataset.projectNew = group.key;
@@ -4213,19 +4303,21 @@ function renderAgentThreads(revealSelection = false) {
     const conversations = element("div", "thread-project-threads");
     conversations.setAttribute("role", "group");
     conversations.setAttribute("aria-label", `${name} · ${location} 的对话`);
-    if (!group.threads.length) conversations.append(element("p", "thread-project-empty", "发送第一条消息，开始项目对话"));
+    if (!total) conversations.append(element("p", "thread-project-empty", "发送第一条消息，开始项目对话"));
     const { visible, hidden } = splitProjectThreads(group.threads, renderedAt);
     for (const entry of visible) conversations.append(renderAgentThreadBranch(entry, selectedAncestors));
-    if (hidden.length) {
+    const hiddenCount = total - visible.length;
+    if (hiddenCount) {
       const historyKey = JSON.stringify([agent.showArchived, group.key]);
       const history = element("details", "thread-project-history");
+      history.dataset.historyKey = historyKey;
       const containsSelection = hidden.some(entry => entry.threadId === selectedRoot);
       if (revealSelection && containsSelection) agent.projectHistoryOpen.set(historyKey, true);
       history.open = agent.projectHistoryOpen.get(historyKey) ?? containsSelection;
       const historySummary = element("summary", "thread-project-history-summary");
       const historyLabel = element("span", "thread-project-history-label");
       const updateHistoryLabel = () => {
-        historyLabel.textContent = history.open ? `收起 ${hidden.length} 个较早对话` : `展开 ${hidden.length} 个隐藏对话`;
+        historyLabel.textContent = history.open ? `收起 ${hiddenCount} 个较早对话` : `展开 ${hiddenCount} 个隐藏对话`;
         historySummary.title = historyLabel.textContent;
         historySummary.setAttribute("aria-label", historyLabel.textContent);
       };
@@ -4233,10 +4325,18 @@ function renderAgentThreads(revealSelection = false) {
       historySummary.append(historyLabel);
       const historyThreads = element("div", "thread-project-history-threads");
       for (const entry of hidden) historyThreads.append(renderAgentThreadBranch(entry, selectedAncestors));
+      if (paged) {
+        const more = threadPageButton("roots", group.key, group.threads.length, total);
+        if (more) historyThreads.append(more);
+      }
       history.addEventListener("toggle", () => {
         if (!history.isConnected) return;
         agent.projectHistoryOpen.set(historyKey, history.open);
         updateHistoryLabel();
+        if (paged && history.open && !group.threads.length) {
+          const state = threadPager().state("roots", group.key);
+          if (!state.started && !state.loading && !state.error) void threadPager().load("roots", group.key).catch(() => {});
+        }
         scheduleSidebarCosts();
       });
       history.append(historySummary, historyThreads);
@@ -4245,6 +4345,13 @@ function renderAgentThreads(revealSelection = false) {
     project.append(conversations);
     list.append(project);
   }
+  if (focusKey) {
+    const match = [...list.querySelectorAll("button, summary")].find(node => focusKey[0] === "summary"
+      ? node.tagName === "SUMMARY" && (node.parentElement.dataset.subagentParent || node.parentElement.dataset.projectKey || node.parentElement.dataset.historyKey) === focusKey[1]
+      : node.dataset[focusKey[0]] === focusKey[1] && (focusKey[0] !== "pageView" || node.dataset.pageKey === focusKey[2]));
+    match?.focus({ preventScroll: true });
+  }
+  list.scrollTop = scrollTop;
   renderThreadStates();
 }
 
@@ -4296,7 +4403,7 @@ function nodeDisplayName(nodeId) {
 function openProjectDetails(group, name, anchor) {
   $("#projectDetailsTitle").textContent = name;
   navigationFacts($("#projectDetailsFacts"), [
-    ["运行机器", nodeDisplayName(group.nodeId)], ["项目目录", group.cwd, true], ["对话数量", String(group.threads.length)],
+    ["运行机器", nodeDisplayName(group.nodeId)], ["项目目录", group.cwd, true], ["对话数量", String(Math.max(group.count ?? 0, group.threads.length))],
   ]);
   openSidebarPopover($("#projectDetails"), anchor);
 }
@@ -4655,7 +4762,7 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
         generation: source.generation, operationId: crypto.randomUUID() }),
     });
     agent.pendingThreadSummaries.delete(threadId);
-    agent.threads = agent.threads.map(value => value.threadId === threadId ? thread : value);
+    agent.threads = agent.threads.map(value => value.threadId === threadId ? { ...value, ...thread, listRoot: value.listRoot } : value);
     if (agent.threadId === threadId) setConversationTitle(thread.title);
     threadMetadataChannel?.postMessage({ threadId });
     if (!automatic) toast("标题已更新");
@@ -4817,27 +4924,81 @@ async function showProjectDialog() {
   $("#projectPath").focus();
 }
 
+function threadPager() {
+  agent.threadPager ??= new ThreadPager(
+    query => api(`/v1/codex/threads?${query}`, { signal: AbortSignal.timeout(15_000) }),
+    page => {
+      const previous = new Map(agent.threads.map(thread => [thread.threadId, thread.updatedAt]));
+      const changed = mergeAgentThreadSummaries(page.data ?? [], page.removed);
+      for (const thread of page.data ?? []) acceptThreadActivity(thread);
+      renderThreadStates();
+      return changed || (page.data ?? []).some(thread => previous.get(thread.threadId) !== thread.updatedAt);
+    },
+    () => renderAgentThreads(),
+  );
+  return agent.threadPager;
+}
+
 async function loadAgentThreads() {
-  const request = ++agent.threadListRequest;
-  const checkedAt = Date.now();
-  const archived = agent.showArchived;
-  const response = await api(`/v1/codex/threads?storeId=personal&limit=300&archived=${archived ? 1 : 0}`);
-  if (request !== agent.threadListRequest || archived !== agent.showArchived) return;
-  mergeAgentThreadSummaries(response.data ?? []);
+  ++agent.threadListRequest;
+  const pager = threadPager();
+  if (pager.archived !== agent.showArchived) {
+    pager.reset(agent.showArchived);
+    const selected = currentAgentThread();
+    agent.threads = selected ? [selected] : [];
+  }
+  const response = await pager.load("roots", "", true);
+  if (!response) return;
   agent.activityCheckedAt = Date.now();
-  for (const thread of agent.threads) acceptThreadActivity(thread, checkedAt);
   if (currentAgentThread()) agent.draftProject = null;
   const title = currentAgentThread()?.title;
   if (title) setConversationTitle(title);
-  renderAgentThreads();
   renderReplyProgress();
   scheduleThreadActivity();
 }
 
-function mergeAgentThreadSummaries(threads) {
+function threadPageButton(view, key, loaded, total) {
+  const pager = threadPager(), state = pager.state(view, key);
+  if (loaded >= total && (!state.started || state.done) && !state.error) return null;
+  const button = element("button", "ghost thread-page-more", state.loading ? "加载中…" : state.error ? "加载失败，重试" : loaded ? "加载更多对话" : "加载对话");
+  button.type = "button";
+  button.dataset.pageView = view;
+  button.dataset.pageKey = key;
+  button.disabled = state.loading;
+  if (state.error) button.title = state.error;
+  button.addEventListener("click", () => {
+    void (async () => {
+      const previous = new Set(agent.threads.map(thread => thread.threadId));
+      // The global first page may already include this project's first page.
+      // Advance through that overlap within the same user action.
+      let page;
+      const added = new Set();
+      do {
+        page = await pager.load(view, key);
+        for (const thread of page?.data ?? []) if (!previous.has(thread.threadId)) added.add(thread.threadId);
+      } while (page?.nextCursor && added.size < 50);
+    })().catch(() => {});
+  });
+  return button;
+}
+
+async function loadThreadPath(threadId, epoch) {
+  const pager = threadPager(), filterEpoch = pager.epoch, seen = new Set();
+  while (threadId && !seen.has(threadId)) {
+    seen.add(threadId);
+    const query = new URLSearchParams({ storeId: "personal", view: "path", threadId, limit: "100", archived: agent.showArchived ? "1" : "0" });
+    const page = await api(`/v1/codex/threads?${query}`, { signal: AbortSignal.timeout(15_000) });
+    if (epoch !== agent.selectionEpoch || filterEpoch !== pager.epoch) return;
+    mergeAgentThreadSummaries(page.data ?? []);
+    for (const row of page.data ?? []) acceptThreadActivity(row);
+    threadId = page.nextParentId;
+  }
+}
+
+function mergeAgentThreadSummaries(threads, removed = []) {
   const previous = new Map(agent.threads.map(thread => [thread.threadId, thread]));
   const selected = currentAgentThread();
-  agent.threads = [...threads];
+  agent.threads = agent.threadPager?.enabled ? mergeThreadPages(agent.threads, threads, removed) : [...threads];
   for (const [threadId, summary] of agent.pendingThreadSummaries) {
     if (agent.threads.some(thread => thread.threadId === threadId)) agent.pendingThreadSummaries.delete(threadId);
     else if (Boolean(summary.archived) === agent.showArchived) agent.threads.push(summary);
@@ -4845,7 +5006,7 @@ function mergeAgentThreadSummaries(threads) {
   if (selected && !agent.threads.some(thread => thread.threadId === selected.threadId) && Boolean(selected.archived) !== agent.showArchived) agent.threads.push(selected);
   return previous.size !== agent.threads.length || agent.threads.some(thread => {
     const before = previous.get(thread.threadId);
-    return !before || ["parentThreadId", "archived", "cwd", "runtimeNodeId", "sourceNodeId"].some(key => before[key] !== thread[key]);
+    return !before || ["parentThreadId", "hasSubagents", "listRoot", "childCount", "subagentCount", "title", "archived", "cwd", "runtimeNodeId", "sourceNodeId"].some(key => before[key] !== thread[key]);
   });
 }
 
@@ -5227,6 +5388,12 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
       setConversationNotice(error.message, "error");
       return;
     }
+  }
+  if (agent.threadPager?.enabled) {
+    try { await loadThreadPath(threadId, epoch); }
+    catch (error) { toast(`父级列表暂未加载：${error.message}`); }
+    if (epoch !== agent.selectionEpoch) return;
+    projected = currentAgentThread() ?? projected;
   }
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
   agent.threadReasoningEffort = typeof projected?.reasoningEffort === "string" ? projected.reasoningEffort : null;
@@ -6197,7 +6364,7 @@ $("#threadRenameForm").addEventListener("submit", async (event) => {
     const thread = await api(`/v1/codex/threads/${encodeURIComponent(rename.threadId)}?storeId=personal`, {
       method: "PATCH", body: JSON.stringify({ name, expectedName: rename.expectedName, generation: rename.generation, operationId: rename.operationId }),
     });
-    agent.threads = agent.threads.map((value) => value.threadId === thread.threadId ? thread : value);
+    agent.threads = agent.threads.map((value) => value.threadId === thread.threadId ? { ...value, ...thread, listRoot: value.listRoot } : value);
     if (agent.threadId === thread.threadId) setConversationTitle(thread.title);
     renderAgentThreads();
     threadMetadataChannel?.postMessage({ threadId: thread.threadId });

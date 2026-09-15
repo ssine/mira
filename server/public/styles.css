@@ -826,6 +826,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-token-usage h4 { margin: 0 0 12px; font-size: 13px; font-weight: 600; }
 .conversation-token-usage .navigation-facts > div + div { margin-top: 12px; }
 .conversation-token-usage dd { font-variant-numeric: tabular-nums; }
+#conversationTokenUsageComponents:not([hidden]) { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 .conversation-cost { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .conversation-cost > strong { display: block; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .conversation-cost > p, .conversation-cost > a { font-size: 11px; line-height: 1.6; }
@@ -894,6 +895,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .thread-project-history[open] > .thread-project-history-summary::before { transform: rotate(225deg) translate(-1px, -1px); }
 .thread-project-history[open] > .thread-project-history-summary { border-radius: 0; }
 .thread-project-history-threads { margin-top: 2px; }
+.thread-page-more { display: block; width: 100%; min-height: 32px; margin: 4px 0; color: var(--muted); font-size: 11px; }
 .thread-subagents { min-width: 0; margin: 0 0 4px 8px; }
 .thread-subagents-summary { display: flex; align-items: center; gap: 7px; min-height: 30px; padding: 0 6px; border-radius: var(--radius-control); color: var(--muted); font-size: 11px; list-style: none; cursor: pointer; }
 .thread-subagents-summary::-webkit-details-marker { display: none; }

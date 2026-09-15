@@ -23,6 +23,13 @@ type Service struct {
 	historyMu    sync.Mutex
 	historyCache map[historyKey]*list.Element
 	historyLRU   list.List
+
+	directoryMu sync.Mutex
+	directories map[string]*cachedThreadDirectory
+	pageMu      sync.Mutex
+	pageCache   map[string]*list.Element
+	pageLRU     list.List
+	pageBytes   int
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -46,6 +53,11 @@ type Thread struct {
 	ItemCount          int64          `json:"itemCount"`
 	Generation         int64          `json:"generation"`
 	TokenUsage         map[string]any `json:"tokenUsage"`
+	TokenUsageSummary  map[string]any `json:"tokenUsageSummary,omitempty"`
+	HasSubagents       bool           `json:"hasSubagents"`
+	ListRoot           bool           `json:"listRoot"`
+	SubagentCount      *int           `json:"subagentCount,omitempty"`
+	ChildCount         *int           `json:"childCount,omitempty"`
 	Model              *string        `json:"model"`
 	ReasoningEffort    *string        `json:"reasoningEffort"`
 	CreatedAt          *string        `json:"createdAt"`
@@ -61,6 +73,11 @@ type Thread struct {
 	Activity           map[string]any `json:"activity"`
 	ReadState          map[string]any `json:"readState"`
 	CostEstimate       map[string]any `json:"costEstimate,omitempty"`
+}
+
+type ThreadStatistics struct {
+	CostEstimate      map[string]any
+	TokenUsageSummary map[string]any
 }
 
 type TranscriptOptions struct {

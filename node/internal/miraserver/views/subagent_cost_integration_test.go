@@ -87,16 +87,37 @@ func TestSubagentCostTree(t *testing.T) {
 	}
 	check(root, .726, .33, .396, 3, "complete")
 	check(child, .396, .066, .33, 1, "complete")
+	checkUsage := func(thread Thread, input, own, children int64, count int, status string) {
+		t.Helper()
+		statistics, err := service.GetThreadStatistics(ctx, store, thread)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summary := statistics.TokenUsageSummary
+		total := object(summary["total"])
+		if total["inputTokens"] != input || total["cachedInputTokens"] != input*4/5 || total["outputTokens"] != input/100 ||
+			total["status"] != status || object(summary["self"])["inputTokens"] != own || object(summary["subagents"])["inputTokens"] != children || summary["subagentCount"] != count {
+			t.Fatalf("unexpected token tree: %#v", summary)
+		}
+	}
+	checkUsage(root, 250000, 100000, 150000, 3, "complete")
+	checkUsage(child, 150000, 50000, 100000, 1, "complete")
+	listed, err := service.ListThreads(ctx, store, 1, &root.ThreadID, nil)
+	if err != nil || len(listed) != 1 || !listed[0].HasSubagents || listed[0].TokenUsageSummary != nil {
+		t.Fatalf("list must signal lazy totals without loading descendants: %#v %v", listed, err)
+	}
 	// Child-only updates must invalidate its cached projection even if the root
 	// has no new history. Old generations and another store must not contribute.
 	insert(store, "grandchild", "child", 2, "", items("gpt-5.6-sol"))
 	check(root, .528, .33, .198, 3, "complete")
 	insert(store, "unknown", "root", 1, "", items("unknown-model"))
 	check(root, .528, .33, .198, 4, "partial")
+	checkUsage(root, 350000, 100000, 250000, 4, "complete")
 	exec(`UPDATE codex_thread_projections SET parent_thread_id='grandchild' WHERE store_id=$1 AND thread_id='root'`, store)
 	check(root, .528, .33, .198, 4, "partial")
 	// Traversal uses bounded pages, not a maximum tree size.
 	exec(`INSERT INTO codex_thread_projections(store_id,thread_id,parent_thread_id,active_generation,item_count,state,through_event_seq)
 	 SELECT $1,'pending-'||n::text,'root',1,0,'{}',1 FROM generate_series(1,260) n`, store)
 	check(root, .528, .33, .198, 264, "partial")
+	checkUsage(root, 350000, 100000, 250000, 264, "partial")
 }

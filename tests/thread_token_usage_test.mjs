@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeTokenUsage, tokenCount, compactTokenCount, compactTokenUsage } from "../server/public/thread-usage.js";
+import { normalizeTokenUsage, tokenCount, compactTokenCount, compactTokenUsage, tokenUsageTitle } from "../server/public/thread-usage.js";
 
 test("token counts preserve unknown and zero and treat cached input as a subset", () => {
   assert.deepEqual(normalizeTokenUsage({ input_tokens: 1000, cached_input_tokens: 800, output_tokens: 0 }),
@@ -11,6 +11,17 @@ test("token counts preserve unknown and zero and treat cached input as a subset"
   assert.equal(tokenCount(null), "未提供");
   assert.equal(tokenCount(0), "0");
   assert.equal(tokenCount(1234567), "1,234,567");
+});
+
+test("tree totals distinguish partial usage and explain aggregation scope", () => {
+  const usage = { inputTokens: 350000, cachedInputTokens: 280000, outputTokens: 3500, status: "partial" };
+  assert.equal(compactTokenUsage(usage), "350k in · 3.5k out*");
+  const title = tokenUsageTitle(usage, { includesSubagents: true, subagentCount: 264, scope: "fork" });
+  assert.match(title, /264 个子 Agent/);
+  assert.match(title, /已归档/);
+  assert.match(title, /分支创建后/);
+  assert.match(title, /已统计部分/);
+  assert.equal(compactTokenUsage({ inputTokens: null, outputTokens: 0, status: "partial" }), "");
 });
 
 test("sidebar summaries stay short, round across unit boundaries and omit partial data", () => {

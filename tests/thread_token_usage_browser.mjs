@@ -14,7 +14,8 @@ rows[1].costEstimate = estimate(0); rows[2].costEstimate = {amount:null,status:'
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
-  await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data: rows } }));
+  // Aggregates are lazy statistics, not embedded in each list response.
+  await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data: rows.map(({ costEstimate, tokenUsageSummary, ...row }) => row) } }));
   await context.route(/\/v1\/codex\/threads\/[^?]+\?/, route => {
     const url = new URL(route.request().url()), path = url.pathname, row = rows.find(row => path.includes(row.threadId));
     if (path.endsWith("/transcript")) {
@@ -22,7 +23,7 @@ try {
       assert.equal(url.searchParams.get("toolDetails"), "0", "transcript first paint defers tool details");
     }
     if (path.endsWith("/costs")) return route.fulfill({ json: {
-      threadId: row.threadId, generation: row.generation, itemCount: row.itemCount, costEstimate: row.costEstimate,
+      threadId: row.threadId, generation: row.generation, itemCount: row.itemCount, tokenUsage: row.tokenUsage, costEstimate: row.costEstimate, tokenUsageSummary: row.tokenUsageSummary,
       turnCostEstimates: { [`turn-${row.threadId}`]: estimate(0.21) },
     } });
     return route.fulfill({ json: path.endsWith("/transcript") ? { generation: row.generation, itemCount: row.itemCount,
@@ -109,11 +110,28 @@ try {
   // A child may keep running after its parent stops writing history. Refresh
   // totals even when the parent's generation, counters and token usage match.
   rows[0].costEstimate = { ...estimate(2), includesSubagents: true, subagentCount: 2, selfAmount: 1.5, subagentAmount: 0.5 };
+  rows[0].hasSubagents = true;
+  rows[0].tokenUsageSummary = {
+    includesSubagents: true, subagentCount: 2, scope: "thread",
+    self: { ...rows[0].tokenUsage, status: "complete" },
+    subagents: { inputTokens: 50000, cachedInputTokens: 40000, outputTokens: 4000, status: "complete" },
+    total: { inputTokens: 300000, cachedInputTokens: 240000, outputTokens: 20000, status: "complete" },
+  };
   await page.waitForFunction(() => document.querySelector('#conversationCostAmount').textContent === '$2.00');
   assert.equal(await page.locator('#conversationCostComponents').textContent(), '自身 $1.50 · 子 Agent $0.50（含下级，共 2 个）');
   assert.match(await page.locator('#conversationCostNote').textContent(), /包含此 Agent 及全部子 Agent/);
   await page.waitForFunction(id => document.querySelector(`[data-thread-cost="${id}"]`)?.textContent === '· $2.00', ids[0]);
   assert.match(await page.locator(`[data-thread-cost="${ids[0]}"]`).getAttribute('title'), /含 2 个子 Agent/);
+  await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "300k in · 20k out", ids[0]);
+  assert.deepEqual(await facts.locator("dd").allTextContents(), ["300,000", "240,000", "20,000"]);
+  assert.match(await page.locator("#conversationTokenUsageComponents").textContent(), /自身用量输入 250,000/);
+  assert.match(await page.locator("#conversationTokenUsageComponents").textContent(), /子 Agent 用量.*输入 50,000/);
+  assert.match(await summary.getAttribute("title"), /含下级及已归档/);
+  // No child rows are loaded. A child-only advance must update the parent.
+  rows[0].tokenUsageSummary.total = { inputTokens: 350000, cachedInputTokens: 280000, outputTokens: 24000, status: "partial" };
+  rows[0].tokenUsageSummary.subagents = { inputTokens: 100000, cachedInputTokens: 80000, outputTokens: 8000, status: "partial" };
+  await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "350k in · 24k out*", ids[0]);
+  assert.match(await page.locator("#conversationTokenUsageNote").textContent(), /已统计部分/);
   assert.equal((await row.boundingBox()).height, height, "usage stays on the existing second row");
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
     await fs.mkdir(process.env.MIRA_WEB_SCREENSHOT_DIR, { recursive: true });
@@ -129,6 +147,8 @@ try {
   await page.locator("#conversationDetailsClose").click();
   // Replaced history must clear the old generation, even when counters decrease.
   rows[0].costEstimate = estimate(0.02, 'partial');
+  delete rows[0].tokenUsageSummary;
+  rows[0].hasSubagents = false;
   rows[0].generation = 2; rows[0].tokenUsage = { inputTokens: 1000, cachedInputTokens: 0, outputTokens: 100 };
   await page.waitForFunction(id => document.querySelector(`[data-thread-token-usage="${id}"]`)?.textContent === "1k in · 100 out", ids[0]);
   await page.setViewportSize({ width: 390, height: 844 });

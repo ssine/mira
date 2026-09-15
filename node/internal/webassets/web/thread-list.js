@@ -14,7 +14,7 @@ export function buildThreadTree(threads) {
   const parentById = new Map();
   const roots = [];
   for (const entry of byId.values()) {
-    const parentId = entry.thread.parentThreadId;
+    const parentId = entry.thread.listRoot ? null : entry.thread.parentThreadId;
     let ancestor = parentId;
     while (ancestor && ancestor !== entry.threadId) ancestor = parentById.get(ancestor);
     // Missing/filtered parents and broken cycles must never hide a conversation.
@@ -30,6 +30,7 @@ export function buildThreadTree(threads) {
       entry.descendantCount += 1 + child.descendantCount;
       if ((Date.parse(child.updatedAt) || 0) > (Date.parse(entry.updatedAt) || 0)) entry.updatedAt = child.updatedAt;
     }
+    entry.descendantCount = entry.thread.subagentCount ?? entry.descendantCount;
     entry.children.sort(compareThreadsByRecency);
   }
   roots.sort(compareThreadsByRecency);
