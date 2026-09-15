@@ -3,6 +3,24 @@
 PostgreSQL is still the only durable conversation store. These changes add no
 local JSONL mirror, disk outbox, or alternate source of truth.
 
+## Model rate limits
+
+Codex runtime `0.153.1-mira.14` keeps a turn alive after an HTTP or wrapped
+WebSocket 429 rejects a model request. Sampling and remote compaction v2 use a
+separate, unbounded retry count: wait 5, 10, 20, 40, then 60 seconds, plus up to
+one second of jitter. A valid numeric or HTTP-date `Retry-After` takes precedence
+(with a five-second minimum); longer server waits are never shortened to the
+local backoff cap. Cancellation stops the wait. CLI, App Server and subagents
+use the same runtime behavior without a provider configuration change.
+
+Retries stay inside the current turn and preserve completed tool results.
+They do not start another turn or replay completed tools. Existing retry
+notifications expose the waiting state and delay to clients. Recognized usage,
+insufficient-quota and billing failures remain terminal. An unrecognized 429
+continues waiting until recovery or cancellation; a generic status alone cannot
+identify every provider's billing errors. Other HTTP errors and streamed SSE
+failures retain their existing retry policies.
+
 ## Persistence acknowledgement
 
 - Every delta commit gets one operation UUID and one serialized request body.

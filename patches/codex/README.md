@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `fb29fd9ae`
+- Patch source commit: `4b98e20f8`
 
 Apply it to a clean checkout:
 
@@ -99,3 +99,12 @@ debug-only diagnostic, including stripped binaries and foreign-platform inputs.
 This matters for interrupted custom tool calls: upstream release builds project
 an `aborted` result for sampling, while debug builds deliberately panic. Never
 repair this condition by deleting or inventing canonical tool history.
+
+Runtime revision `0.153.1-mira.14` adds persistent, cancellable retry for model
+HTTP/wrapped-WebSocket 429 responses in sampling and remote compaction v2.
+The runtime respects `Retry-After`, uses capped exponential backoff with jitter,
+and reports rate-limit waits through existing retry notifications. Explicit
+usage/quota/billing failures remain terminal. This targeted model-request fix
+does not replay completed tools or alter ThreadStore persistence. No provider
+configuration changes are required; the new runtime must be installed and the
+account App Server must load it before existing conversations benefit.

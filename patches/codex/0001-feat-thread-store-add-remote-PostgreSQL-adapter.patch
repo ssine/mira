@@ -1,4 +1,4 @@
-From fb29fd9aefbfadddf24a8b0f325834b3faf09d59 Mon Sep 17 00:00:00 2001
+From 4b98e20f8efb2b888baecef8a46245410da9a7fe Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 12 Sep 2026 05:14:26 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
@@ -27,11 +27,14 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  .../request_processors/thread_processor.rs    |  138 ++-
  codex-rs/app-server/src/thread_state.rs       |   15 +-
  .../tests/suite/v2/thread_unsubscribe.rs      |   65 +
+ codex-rs/codex-api/src/api_bridge.rs          |   41 +-
+ codex-rs/codex-api/src/api_bridge_tests.rs    |   85 ++
  codex-rs/config/src/config_toml.rs            |    5 +
  codex-rs/core/config.schema.json              |   25 +
  codex-rs/core/src/codex_delegate.rs           |    2 +-
  codex-rs/core/src/codex_thread.rs             |    6 +
  codex-rs/core/src/config/mod.rs               |   17 +
+ codex-rs/core/src/responses_retry.rs          |   45 +
  codex-rs/core/src/session/mod.rs              |    9 +
  codex-rs/core/src/session/session.rs          |   16 +
  codex-rs/core/src/session/turn.rs             |    7 +
@@ -41,6 +44,12 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  .../src/thread_manager/remote_agent_graph.rs  |   95 ++
  codex-rs/core/src/thread_manager_tests.rs     |   45 +
  codex-rs/core/tests/suite/guardian_history.rs |    3 +
+ codex-rs/core/tests/suite/mod.rs              |    1 +
+ codex-rs/core/tests/suite/rate_limit_retry.rs |  205 ++++
+ codex-rs/core/tests/suite/retry_after.rs      |  152 +--
+ ...uite__rate_limit_retry__http_429_wait.snap |    6 +
+ codex-rs/protocol/src/error.rs                |   12 +-
+ codex-rs/protocol/src/error_tests.rs          |    2 +-
  codex-rs/thread-store/Cargo.toml              |    1 +
  codex-rs/thread-store/src/in_memory.rs        |   86 +-
  codex-rs/thread-store/src/lib.rs              |    4 +
@@ -54,12 +63,14 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  .../thread-store/src/remote_http/writer.rs    |  330 ++++++
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
- 49 files changed, 3632 insertions(+), 224 deletions(-)
+ 58 files changed, 4046 insertions(+), 359 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/core/src/thread_manager/remote_agent_graph.rs
+ create mode 100644 codex-rs/core/tests/suite/rate_limit_retry.rs
+ create mode 100644 codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/agent_graph.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/input_recovery.rs
@@ -70,7 +81,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  create mode 100644 codex-rs/thread-store/src/remote_http/writer.rs
 
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index e217b7024..caf010a57 100644
+index e217b702497e6ff02969a51046f7ba887024f487..caf010a5757f79b299362c6fb498ffa7be4b4a32 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
 @@ -394,7 +394,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
@@ -1403,7 +1414,7 @@ index e217b7024..caf010a57 100644
   "anyhow",
   "codex-login",
 diff --git a/codex-rs/app-server-protocol/schema/json/ServerNotification.json b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
-index b15474ffc..8969218ea 100644
+index b15474ffc7b18a3e2d0af04507bf39d0f891b553..8969218ea6872fea73ae3f4c21a660d40c191e0d 100644
 --- a/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 +++ b/codex-rs/app-server-protocol/schema/json/ServerNotification.json
 @@ -2936,6 +2936,44 @@
@@ -1479,7 +1490,7 @@ index b15474ffc..8969218ea 100644
        "properties": {
          "method": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
-index 47e75d11d..8c4d878e4 100644
+index 47e75d11d5900b35ad599f22fa61f57a31acf0fd..8c4d878e44a537454b4db43ec3650b1936ed53cf 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json
 @@ -4491,6 +4491,26 @@
@@ -1557,7 +1568,7 @@ index 47e75d11d..8c4d878e4 100644
          "properties": {
            "detailedExplanation": {
 diff --git a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
-index fce5c1d1b..7af06c8d1 100644
+index fce5c1d1b81f18d59d14467101ed2ff21a95b2ca..7af06c8d1e6ed5621f2da81d9f88879cc11eda0e 100644
 --- a/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 +++ b/codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json
 @@ -10908,6 +10908,46 @@
@@ -1636,7 +1647,7 @@ index fce5c1d1b..7af06c8d1 100644
              "method": {
 diff --git a/codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json b/codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
 new file mode 100644
-index 000000000..23ba9a841
+index 0000000000000000000000000000000000000000..23ba9a84112982648d1caa71f40aa2853210e3b3
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
 @@ -0,0 +1,53 @@
@@ -13711,7 +13722,7 @@ zgP!v}_njXXwCSiF+Y#yHHszIlO4yCqY5L)}IKo6tPRYGm68r7KqIvp_jLHJpNu6uu
 hmZnCBRs}|j7(dTt;_rTJ)>wF=lzDr>!>)kIS^z@vVtN1o
 
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
-index c65fccb78..0cd6c3c1d 100644
+index c65fccb789601a0ba08464392e967b8be083e2d3..0cd6c3c1dc5dcb46ca6ba4c80425c3f874768987 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotification.ts
 @@ -32,6 +32,7 @@ import type { McpServerEventStreamNotification } from "./v2/McpServerEventStream
@@ -13729,7 +13740,7 @@ index c65fccb78..0cd6c3c1d 100644
 -export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 +export type ServerNotification = { "method": "error", "params": ErrorNotification } | { "method": "mira/thread/fork/progress", "params": MiraThreadForkProgressNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
-index bb5799a14..c3bebcb1d 100644
+index bb5799a14092ea78a3065548f159325012b1fbfb..c3bebcb1d2713d1c83a36f474e11efe37c3c837e 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/ServerNotificationEnvelope.ts
 @@ -32,6 +32,7 @@ import type { McpServerEventStreamNotification } from "./v2/McpServerEventStream
@@ -13748,7 +13759,7 @@ index bb5799a14..c3bebcb1d 100644
 +emittedAtMs?: number, } & ({ "method": "error", "params": ErrorNotification } | { "method": "mira/thread/fork/progress", "params": MiraThreadForkProgressNotification } | { "method": "thread/started", "params": ThreadStartedNotification } | { "method": "thread/status/changed", "params": ThreadStatusChangedNotification } | { "method": "thread/archived", "params": ThreadArchivedNotification } | { "method": "thread/deleted", "params": ThreadDeletedNotification } | { "method": "thread/unarchived", "params": ThreadUnarchivedNotification } | { "method": "thread/closed", "params": ThreadClosedNotification } | { "method": "thread/reverted", "params": ThreadRevertedNotification } | { "method": "skills/changed", "params": SkillsChangedNotification } | { "method": "thread/name/updated", "params": ThreadNameUpdatedNotification } | { "method": "thread/goal/updated", "params": ThreadGoalUpdatedNotification } | { "method": "thread/goal/cleared", "params": ThreadGoalClearedNotification } | { "method": "thread/queue/changed", "params": ThreadQueueChangedNotification } | { "method": "project/changed", "params": ProjectChangedNotification } | { "method": "thread/project/updated", "params": ThreadProjectUpdatedNotification } | { "method": "thread/environment/connected", "params": EnvironmentConnectionNotification } | { "method": "thread/environment/disconnected", "params": EnvironmentConnectionNotification } | { "method": "thread/settings/updated", "params": ThreadSettingsUpdatedNotification } | { "method": "thread/tokenUsage/updated", "params": ThreadTokenUsageUpdatedNotification } | { "method": "turn/started", "params": TurnStartedNotification } | { "method": "hook/started", "params": HookStartedNotification } | { "method": "turn/completed", "params": TurnCompletedNotification } | { "method": "hook/completed", "params": HookCompletedNotification } | { "method": "turn/diff/updated", "params": TurnDiffUpdatedNotification } | { "method": "turn/plan/updated", "params": TurnPlanUpdatedNotification } | { "method": "item/started", "params": ItemStartedNotification } | { "method": "item/autoApprovalReview/started", "params": ItemGuardianApprovalReviewStartedNotification } | { "method": "item/autoApprovalReview/completed", "params": ItemGuardianApprovalReviewCompletedNotification } | { "method": "autoApprovalReview/strictReviewRequired", "params": StrictReviewRequiredNotification } | { "method": "item/completed", "params": ItemCompletedNotification } | { "method": "rawResponseItem/completed", "params": RawResponseItemCompletedNotification } | { "method": "rawResponse/completed", "params": RawResponseCompletedNotification } | { "method": "item/agentMessage/delta", "params": AgentMessageDeltaNotification } | { "method": "item/plan/delta", "params": PlanDeltaNotification } | { "method": "command/exec/outputDelta", "params": CommandExecOutputDeltaNotification } | { "method": "process/outputDelta", "params": ProcessOutputDeltaNotification } | { "method": "process/exited", "params": ProcessExitedNotification } | { "method": "item/commandExecution/outputDelta", "params": CommandExecutionOutputDeltaNotification } | { "method": "item/commandExecution/terminalInteraction", "params": TerminalInteractionNotification } | { "method": "item/fileChange/outputDelta", "params": FileChangeOutputDeltaNotification } | { "method": "item/fileChange/patchUpdated", "params": FileChangePatchUpdatedNotification } | { "method": "serverRequest/resolved", "params": ServerRequestResolvedNotification } | { "method": "item/mcpToolCall/progress", "params": McpToolCallProgressNotification } | { "method": "mcpServer/oauthLogin/completed", "params": McpServerOauthLoginCompletedNotification } | { "method": "mcpServer/startupStatus/updated", "params": McpServerStatusUpdatedNotification } | { "method": "mcpServer/event/stream/notification", "params": McpServerEventStreamNotification } | { "method": "account/updated", "params": AccountUpdatedNotification } | { "method": "account/rateLimits/updated", "params": AccountRateLimitsUpdatedNotification } | { "method": "app/list/updated", "params": AppListUpdatedNotification } | { "method": "remoteControl/status/changed", "params": RemoteControlStatusChangedNotification } | { "method": "externalAgentConfig/import/progress", "params": ExternalAgentConfigImportProgressNotification } | { "method": "externalAgentConfig/import/completed", "params": ExternalAgentConfigImportCompletedNotification } | { "method": "fs/changed", "params": FsChangedNotification } | { "method": "item/reasoning/summaryTextDelta", "params": ReasoningSummaryTextDeltaNotification } | { "method": "item/reasoning/summaryPartAdded", "params": ReasoningSummaryPartAddedNotification } | { "method": "item/reasoning/textDelta", "params": ReasoningTextDeltaNotification } | { "method": "thread/compacted", "params": ContextCompactedNotification } | { "method": "model/rerouted", "params": ModelReroutedNotification } | { "method": "model/verification", "params": ModelVerificationNotification } | { "method": "modelProvider/authRecoveryStarted", "params": AuthRecoveryNotification } | { "method": "modelProvider/authRecoveryCompleted", "params": AuthRecoveryNotification } | { "method": "turn/moderationMetadata", "params": TurnModerationMetadataNotification } | { "method": "model/safetyBuffering/updated", "params": ModelSafetyBufferingUpdatedNotification } | { "method": "warning", "params": WarningNotification } | { "method": "guardianWarning", "params": GuardianWarningNotification } | { "method": "deprecationNotice", "params": DeprecationNoticeNotification } | { "method": "configWarning", "params": ConfigWarningNotification } | { "method": "fuzzyFileSearch/sessionUpdated", "params": FuzzyFileSearchSessionUpdatedNotification } | { "method": "fuzzyFileSearch/sessionCompleted", "params": FuzzyFileSearchSessionCompletedNotification } | { "method": "thread/realtime/started", "params": ThreadRealtimeStartedNotification } | { "method": "thread/realtime/itemAdded", "params": ThreadRealtimeItemAddedNotification } | { "method": "thread/realtime/item/started", "params": ThreadRealtimeItemStartedNotification } | { "method": "thread/realtime/item/transcript/delta", "params": ThreadRealtimeItemTranscriptDeltaNotification } | { "method": "thread/realtime/item/completed", "params": ThreadRealtimeItemCompletedNotification } | { "method": "thread/realtime/transcript/delta", "params": ThreadRealtimeTranscriptDeltaNotification } | { "method": "thread/realtime/transcript/done", "params": ThreadRealtimeTranscriptDoneNotification } | { "method": "thread/realtime/outputAudio/delta", "params": ThreadRealtimeOutputAudioDeltaNotification } | { "method": "thread/realtime/sdp", "params": ThreadRealtimeSdpNotification } | { "method": "thread/realtime/error", "params": ThreadRealtimeErrorNotification } | { "method": "thread/realtime/closed", "params": ThreadRealtimeClosedNotification } | { "method": "windows/worldWritableWarning", "params": WindowsWorldWritableWarningNotification } | { "method": "windowsSandbox/setupCompleted", "params": WindowsSandboxSetupCompletedNotification } | { "method": "account/login/completed", "params": AccountLoginCompletedNotification });
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts b/codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
 new file mode 100644
-index 000000000..070f5662e
+index 0000000000000000000000000000000000000000..070f5662eaaad4d8fb7c43b06fcea9f30e9fc3f0
 --- /dev/null
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
 @@ -0,0 +1,9 @@
@@ -13762,7 +13773,7 @@ index 000000000..070f5662e
 + */
 +export type MiraThreadForkProgressNotification = { requestId: RequestId, threadId: string, uploadId: string | null, phase: string, completedBytes: bigint, totalBytes: bigint, };
 diff --git a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
-index fefe72338..cd363eacf 100644
+index fefe723385851fcee7496a1a3dc7246ba2bccaa9..cd363eacfbd31d179d405290918d41b8fbd80552 100644
 --- a/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 +++ b/codex-rs/app-server-protocol/schema/typescript/v2/index.ts
 @@ -300,6 +300,7 @@ export type { MemoryCitation } from "./MemoryCitation";
@@ -13774,7 +13785,7 @@ index fefe72338..cd363eacf 100644
  export type { MisalignmentSteer } from "./MisalignmentSteer";
  export type { Model } from "./Model";
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index 6c00f889f..24c305274 100644
+index 6c00f889f55cdf0be495a39c8693610af9a40010..24c3052744590353cdff857e914d9608e519193b 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -544,6 +544,12 @@ client_request_definitions! {
@@ -13799,7 +13810,7 @@ index 6c00f889f..24c305274 100644
      ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
      ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-index 2a08c9fd1..a126d4f3c 100644
+index 2a08c9fd1d4c6bf478a3c7881816c7766d3c4b59..a126d4f3c1acbbc3efcdcbdff1159717e9fd7a5a 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 @@ -691,6 +691,23 @@ pub struct ThreadUnsubscribeParams {
@@ -13844,7 +13855,7 @@ index 2a08c9fd1..a126d4f3c 100644
 +    pub total_bytes: u64,
 +}
 diff --git a/codex-rs/app-server/README.md b/codex-rs/app-server/README.md
-index a0aa92b7f..694e3be4d 100644
+index a0aa92b7fcef8ee5fcc5c1810d7f2459429c8aad..694e3be4d86d2c3f13d0b0bf59b110e93db0306a 100644
 --- a/codex-rs/app-server/README.md
 +++ b/codex-rs/app-server/README.md
 @@ -2925,3 +2925,15 @@ For server-initiated request payloads, annotate the field the same way so schema
@@ -13864,7 +13875,7 @@ index a0aa92b7f..694e3be4d 100644
 +conversations and the account process remain running. This operation does not
 +archive threads, close durable graph edges, rewrite history or retry tools.
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 8e78c929e..f8c1ddf37 100644
+index 8e78c929e14b65fa7189d8597ed7a077c805003e..f8c1ddf3755074be7e583c6b34f112155e44b18a 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -299,6 +299,7 @@ impl MessageProcessor {
@@ -13888,7 +13899,7 @@ index 8e78c929e..f8c1ddf37 100644
                  self.thread_processor
                      .thread_resume(
 diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
-index 844a31270..496702c36 100644
+index 844a3127050bba1c9061e64be4bd4eda7a7c3e15..496702c36a9ca014ddb6da2e2a0ceb9eb8ea4ed2 100644
 --- a/codex-rs/app-server/src/notification_media.rs
 +++ b/codex-rs/app-server/src/notification_media.rs
 @@ -132,7 +132,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
@@ -13902,7 +13913,7 @@ index 844a31270..496702c36 100644
  }
  
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index 60875fada..7a2131f24 100644
+index 60875fadaf0b7b32e8671fc9454019ba77619241..7a2131f2490b8dc0a13bded1910614b4e9c46db2 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
 @@ -685,6 +685,7 @@ mod config_errors;
@@ -13915,7 +13926,7 @@ index 60875fada..7a2131f24 100644
  mod thread_summary;
 diff --git a/codex-rs/app-server/src/request_processors/thread_handoff.rs b/codex-rs/app-server/src/request_processors/thread_handoff.rs
 new file mode 100644
-index 000000000..5477b0755
+index 0000000000000000000000000000000000000000..5477b0755c0a0d7538f4daaba0fb3ba4724b195f
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/thread_handoff.rs
 @@ -0,0 +1,129 @@
@@ -14049,7 +14060,7 @@ index 000000000..5477b0755
 +    }
 +}
 diff --git a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
-index 8354a4e0d..591cea06e 100644
+index 8354a4e0d37d0f3b46f10ab0538450c7c258c9f4..591cea06e80a133c3d489e2e1cf2c34f9b67f508 100644
 --- a/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_lifecycle.rs
 @@ -358,13 +358,8 @@ pub(super) async fn ensure_listener_task_running(
@@ -14069,7 +14080,7 @@ index 8354a4e0d..591cea06e 100644
                  }
                  unloading_watchers_open = unloading_state.wait_for_unloading_trigger() => {
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 56eb6fdc9..c1e4db63b 100644
+index 56eb6fdc9353b4ec79fe2ee2edcec0f8abd06ac3..c1e4db63b9443af076909cd8447538bc8a6f85b9 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -560,15 +560,31 @@ impl ThreadRequestProcessor {
@@ -14273,7 +14284,7 @@ index 56eb6fdc9..c1e4db63b 100644
          let NewThread {
              thread_id,
 diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
-index 3795638cd..dddc96ad8 100644
+index 3795638cdd36d377afcbf4d7026d15d77dbf64ca..dddc96ad890dc8d706022de9d8fbc319a6f83aa6 100644
 --- a/codex-rs/app-server/src/thread_state.rs
 +++ b/codex-rs/app-server/src/thread_state.rs
 @@ -101,6 +101,7 @@ pub(crate) struct ThreadState {
@@ -14316,7 +14327,7 @@ index 3795638cd..dddc96ad8 100644
          self.shutdown_drain_waiter.take()
      }
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs b/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
-index da456ac82..1a5fa2db3 100644
+index da456ac820c8f04bb51ae902594d53972a289fbb..1a5fa2db34490f486fed95730fce42db7af9aa24 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_unsubscribe.rs
 @@ -35,6 +35,71 @@ use tempfile::TempDir;
@@ -14391,8 +14402,176 @@ index da456ac82..1a5fa2db3 100644
  #[tokio::test]
  async fn thread_unsubscribe_keeps_thread_loaded_until_idle_timeout() -> Result<()> {
      let server = create_mock_responses_server_repeating_assistant("Done").await;
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index e8d7c4743c5a9e827f5f020847dbc25da58f64ac..b557818cc88fdc86ee275ab762c195cf2bc719d9 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -17,6 +17,7 @@ use codex_protocol::protocol::MisalignmentErrorDetails;
+ use http::HeaderMap;
+ use serde::Deserialize;
+ use serde_json::Value;
++use std::time::Duration;
+ 
+ pub fn map_api_error(err: ApiError) -> CodexErr {
+     match err {
+@@ -132,6 +133,20 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+                     CodexErr::InternalServerError
+                 } else if status == http::StatusCode::TOO_MANY_REQUESTS {
+                     if let Ok(err) = serde_json::from_str::<UsageErrorResponse>(&body_text) {
++                        if [err.error.code.as_deref(), err.error.error_type.as_deref()]
++                            .into_iter()
++                            .flatten()
++                            .any(|code| {
++                                matches!(
++                                    code,
++                                    "insufficient_quota"
++                                        | "billing_hard_limit_reached"
++                                        | "billing_not_active"
++                                )
++                            })
++                        {
++                            return CodexErr::QuotaExceeded;
++                        }
+                         if err.error.error_type.as_deref() == Some("usage_limit_reached") {
+                             let limit_id = extract_header(headers.as_ref(), ACTIVE_LIMIT_HEADER);
+                             let promo_message = headers.as_ref().and_then(parse_promo_message);
+@@ -162,10 +177,31 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+                         }
+                     }
+ 
+-                    CodexErr::RetryLimit(RetryLimitReachedError {
++                    let error = CodexErr::RetryLimit(RetryLimitReachedError {
+                         status,
+                         request_id: extract_request_tracking_id(headers.as_ref()),
+-                    })
++                    });
++                    let delay = headers
++                        .as_ref()
++                        .and_then(|headers| headers.get(http::header::RETRY_AFTER))
++                        .and_then(|value| value.to_str().ok())
++                        .and_then(|value| {
++                            let value = value.trim();
++                            if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
++                            {
++                                value.parse::<u64>().ok().map(Duration::from_secs)
++                            } else {
++                                DateTime::parse_from_rfc2822(value).ok().map(|date| {
++                                    date.signed_duration_since(Utc::now())
++                                        .to_std()
++                                        .unwrap_or_default()
++                                })
++                            }
++                        });
++                    match delay {
++                        Some(delay) => error.with_retry_delay(delay),
++                        None => error,
++                    }
+                 } else {
+                     CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                         status,
+@@ -263,6 +299,7 @@ struct UsageErrorResponse {
+ 
+ #[derive(Debug, Deserialize)]
+ struct UsageErrorBody {
++    code: Option<String>,
+     #[serde(rename = "type")]
+     error_type: Option<String>,
+     plan_type: Option<PlanType>,
+diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
+index 666dea886441e12479650e3839ddea7b9c56e1b6..f82f600e979d5d8b69b20eac0d6d397ca5113994 100644
+--- a/codex-rs/codex-api/src/api_bridge_tests.rs
++++ b/codex-rs/codex-api/src/api_bridge_tests.rs
+@@ -521,3 +521,88 @@ fn map_api_error_extracts_identity_auth_details_from_headers() {
+     );
+     assert_eq!(err.identity_error_code.as_deref(), Some("token_expired"));
+ }
++
++#[test]
++fn http_rate_limit_keeps_status_request_id_and_server_delay() {
++    for (value, expected) in [
++        ("75", Some(Duration::from_secs(75))),
++        ("0", Some(Duration::ZERO)),
++        ("bad", None),
++        ("-1", None),
++        ("1.5", None),
++        ("Wed, 21 Oct 2015 07:28:00 GMT", Some(Duration::ZERO)),
++    ] {
++        let mut headers = HeaderMap::new();
++        headers.insert(http::header::RETRY_AFTER, value.parse().unwrap());
++        headers.insert("x-request-id", "request-429".parse().unwrap());
++        let err = map_api_error(ApiError::Transport(TransportError::Http {
++            status: http::StatusCode::TOO_MANY_REQUESTS,
++            url: None,
++            headers: Some(headers),
++            body: Some(r#"{"error":{"code":"rate_limit_exceeded"}}"#.into()),
++        }));
++        assert_eq!(
++            (
++                err.is_retryable(),
++                err.http_status_code_value(),
++                err.retry_delay(),
++                err.to_codex_protocol_error(),
++                err.to_string()
++            ),
++            (
++                true,
++                Some(429),
++                expected,
++                CodexErrorInfo::RateLimitExceeded,
++                "rate limit reached, status: 429 Too Many Requests, request id: request-429".into()
++            )
++        );
++    }
++}
++
++#[test]
++fn http_rate_limit_accepts_future_http_date() {
++    let date = Utc::now() + chrono::Duration::seconds(120);
++    let mut headers = HeaderMap::new();
++    headers.insert(
++        http::header::RETRY_AFTER,
++        date.to_rfc2822().parse().unwrap(),
++    );
++    let err = map_api_error(ApiError::Transport(TransportError::Http {
++        status: http::StatusCode::TOO_MANY_REQUESTS,
++        url: None,
++        headers: Some(headers),
++        body: None,
++    }));
++    assert!(
++        (Duration::from_secs(118)..=Duration::from_secs(120)).contains(&err.retry_delay().unwrap())
++    );
++}
++
++#[test]
++fn http_quota_errors_remain_terminal_even_with_retry_after() {
++    for field in ["code", "type"] {
++        for code in [
++            "insufficient_quota",
++            "billing_hard_limit_reached",
++            "billing_not_active",
++        ] {
++            let mut headers = HeaderMap::new();
++            headers.insert(http::header::RETRY_AFTER, "1".parse().unwrap());
++            let err = map_api_error(ApiError::Transport(TransportError::Http {
++                status: http::StatusCode::TOO_MANY_REQUESTS,
++                url: None,
++                headers: Some(headers),
++                body: Some(serde_json::json!({"error": {field: code}}).to_string()),
++            }));
++            assert_eq!(
++                (
++                    err.is_retryable(),
++                    err.to_codex_protocol_error(),
++                    err.retry_delay()
++                ),
++                (false, CodexErrorInfo::UsageLimitExceeded, None)
++            );
++        }
++    }
++}
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 5f0cc99a4..c318e242b 100644
+index 5f0cc99a4740803805791250d7e87332673c6d85..c318e242b498ab0d922e30927e9a13632bc40514 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -527,6 +527,11 @@ pub struct ConfigToml {
@@ -14408,7 +14587,7 @@ index 5f0cc99a4..c318e242b 100644
      InMemory {
          id: String,
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 24d7988b0..db2ff2cc3 100644
+index 24d7988b04e801005ee926ea8381ae21f6ff1ab6..db2ff2cc3d9d86b861e2eb29dbb99ffc5738e794 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -3634,6 +3634,31 @@
@@ -14444,7 +14623,7 @@ index 24d7988b0..db2ff2cc3 100644
        ]
      },
 diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
-index af194098e..0115aec44 100644
+index af194098eebe210b85668cef9939e927c19f4109..0115aec441784927a2b0d94b60f3197ee3cce2f8 100644
 --- a/codex-rs/core/src/codex_delegate.rs
 +++ b/codex-rs/core/src/codex_delegate.rs
 @@ -116,7 +116,7 @@ pub(crate) async fn run_codex_thread_interactive(
@@ -14457,7 +14636,7 @@ index af194098e..0115aec44 100644
          user_shell_override: None,
          inherited_environments: Some(parent_environments.clone()),
 diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
-index 172726f98..4d93fe8ea 100644
+index 172726f98b48dd138e6b59859b8a420e2fd9fc5c..4d93fe8eab9da14bcdc2c66cf96b4c2e9ae1818c 100644
 --- a/codex-rs/core/src/codex_thread.rs
 +++ b/codex-rs/core/src/codex_thread.rs
 @@ -231,6 +231,12 @@ impl CodexThread {
@@ -14474,7 +14653,7 @@ index 172726f98..4d93fe8ea 100644
      pub fn session_telemetry(&self) -> SessionTelemetry {
          self.session.services.session_telemetry.clone()
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index dca329ab9..ab6634c90 100644
+index dca329ab98ea218f7b96f1bd2d4cf25612a5fc1f..ab6634c903dad16547b50cbf645c7410629b1d9f 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -598,6 +598,12 @@ pub enum ThreadStoreConfig {
@@ -14508,8 +14687,84 @@ index dca329ab9..ab6634c90 100644
          Some(ThreadStoreToml::InMemory { id }) => ThreadStoreConfig::InMemory { id },
          None => ThreadStoreConfig::Local,
      }
+diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
+index fb0505411e19db75d29d6ea16300825001cdd1c2..349cab218e561293c52a8c2dc121879e867b792a 100644
+--- a/codex-rs/core/src/responses_retry.rs
++++ b/codex-rs/core/src/responses_retry.rs
+@@ -1,5 +1,6 @@
+ //! Shared retry and transport fallback decisions for Responses requests.
+ 
++use rand::Rng;
+ use std::time::Duration;
+ 
+ use crate::client::ModelClientSession;
+@@ -27,6 +28,8 @@ pub(crate) struct ResponsesStreamRetryState {
+     retries: u64,
+     connection_retries: u64,
+     connection_retry_delay: Duration,
++    rate_limit_retries: u64,
++    rate_limit_retry_delay: Duration,
+ }
+ 
+ impl Default for ResponsesStreamRetryState {
+@@ -35,6 +38,8 @@ impl Default for ResponsesStreamRetryState {
+             retries: 0,
+             connection_retries: 0,
+             connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
++            rate_limit_retries: 0,
++            rate_limit_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
+         }
+     }
+ }
+@@ -55,6 +60,46 @@ pub(crate) async fn handle_retryable_response_stream_error(
+         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
+     };
+ 
++    // HTTP/WS 429 rejects this inference request before output. Keep the same
++    // turn and its completed tool results, with a separate unbounded retry budget.
++    // Structured quota/usage failures are classified as terminal by the API bridge.
++    if err.http_status_code_value() == Some(429) {
++        let base = err
++            .retry_delay()
++            .unwrap_or(retry_state.rate_limit_retry_delay);
++        let jitter = Duration::from_millis(rand::rng().random_range(0..=1000));
++        let delay = base
++            .max(INITIAL_CONNECTION_RETRY_DELAY)
++            .saturating_add(jitter);
++        retry_state.rate_limit_retries = retry_state.rate_limit_retries.saturating_add(1);
++        retry_state.rate_limit_retry_delay = retry_state
++            .rate_limit_retry_delay
++            .saturating_mul(2)
++            .min(MAX_CONNECTION_RETRY_DELAY);
++        warn!(turn_id = %turn_context.sub_id, error = %err, ?delay,
++            "rate limited; waiting to retry the model request");
++        sess.notify_stream_error(
++            turn_context,
++            format!(
++                "Rate limited; retrying in {}s (attempt {}). Stop to cancel",
++                delay.as_secs().saturating_add(1),
++                retry_state.rate_limit_retries
++            ),
++            err,
++        )
++        .await;
++        codex_client::record_retry!(retry_state.rate_limit_retries, delay, operation);
++        // Chunk unusually long server hints so Instant arithmetic stays bounded.
++        // Cancelling the turn drops this future, including the active sleep.
++        let mut remaining = delay;
++        while !remaining.is_zero() {
++            let chunk = remaining.min(MAX_CONNECTION_RETRY_DELAY);
++            tokio::time::sleep(chunk).await;
++            remaining -= chunk;
++        }
++        return Ok(());
++    }
++
+     if turn_context
+         .config
+         .features
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 91300365b..e263944c1 100644
+index 91300365bbecb511d1f1fcc37f4ec3f24d99a7b5..e263944c1731b23c3ea460c482e893b8247b40fe 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -1793,6 +1793,15 @@ impl Session {
@@ -14529,7 +14784,7 @@ index 91300365b..e263944c1 100644
          let state = self.state.lock().await;
          state
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 6d1953e3a..b65f5ef11 100644
+index 6d1953e3a2665139e328cc31250ccae32763bb62..b65f5ef11ff01fbd5c06da4b1dcc5594c1e39ce1 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
 @@ -672,6 +672,22 @@ impl Session {
@@ -14556,7 +14811,7 @@ index 6d1953e3a..b65f5ef11 100644
              "Configuring session: model={}; provider={:?}",
              session_configuration
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index f7c42680c..81f3e8317 100644
+index f7c42680c2bb3005dcb2e49ff418dcdc2cb393a2..81f3e831747b0211379eb269f95fbf8696e3a63d 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -377,6 +377,13 @@ pub(crate) async fn run_turn(
@@ -14575,7 +14830,7 @@ index f7c42680c..81f3e8317 100644
                  sess.clone_history()
 diff --git a/codex-rs/core/src/tasks/failure_tests.rs b/codex-rs/core/src/tasks/failure_tests.rs
 new file mode 100644
-index 000000000..28ed006ad
+index 0000000000000000000000000000000000000000..28ed006ad9219d67dffb8b4a24152e8668d39c4e
 --- /dev/null
 +++ b/codex-rs/core/src/tasks/failure_tests.rs
 @@ -0,0 +1,61 @@
@@ -14641,7 +14896,7 @@ index 000000000..28ed006ad
 +    );
 +}
 diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
-index 5bf41019d..3037a3a38 100644
+index 5bf41019d58225082e94d9ca9ef54c4576d0336e..3037a3a388a12fe828b9c198c48e723e30d0e9f6 100644
 --- a/codex-rs/core/src/tasks/mod.rs
 +++ b/codex-rs/core/src/tasks/mod.rs
 @@ -4,12 +4,17 @@ mod regular;
@@ -14725,7 +14980,7 @@ index 5bf41019d..3037a3a38 100644
                  if !task_cancellation_token.is_cancelled() {
                      // Finish uniformly from the spawn site so all tasks share the same lifecycle.
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index cfa619697..4f2a0a88d 100644
+index cfa619697f2be42c025fe8ba39912c61277c616e..4f2a0a88d52bfccf94df3c561856a8dad3944f44 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1,3 +1,5 @@
@@ -14828,7 +15083,7 @@ index cfa619697..4f2a0a88d 100644
          let ThreadSpawnRequest {
 diff --git a/codex-rs/core/src/thread_manager/remote_agent_graph.rs b/codex-rs/core/src/thread_manager/remote_agent_graph.rs
 new file mode 100644
-index 000000000..b5292cd6e
+index 0000000000000000000000000000000000000000..b5292cd6e267ab3ed9ccfe6a529cff2d18417afe
 --- /dev/null
 +++ b/codex-rs/core/src/thread_manager/remote_agent_graph.rs
 @@ -0,0 +1,95 @@
@@ -14928,7 +15183,7 @@ index 000000000..b5292cd6e
 +    }
 +}
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index 74cdb32dc..7db9edb8b 100644
+index 74cdb32dc35cfb9f3b1f6e9f6bd06d7c8cb9b7ed..7db9edb8bd01726b903f93d287d73a23719899b3 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
 @@ -20,6 +20,10 @@ use codex_protocol::ResponseItemId;
@@ -14991,7 +15246,7 @@ index 74cdb32dc..7db9edb8b 100644
  #[test]
  fn thread_id_generator_defaults_to_standard_ids() {
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index 8bf33956a..dc3f2b71f 100644
+index 8bf33956a8a2f05718dc5263b80b7bf64f0c0e20..dc3f2b71f50beeea94a9baf26fec0cd76971db23 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -68,6 +68,9 @@ async fn guardian_history_survives_restart_and_user_fork(
@@ -15004,8 +15259,478 @@ index 8bf33956a..dc3f2b71f 100644
      };
      let mut builder = test_codex()
          .with_history_mode(history_mode)
+diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
+index 8d43ca03efd099dc8910a2622438c5e4c35f9702..3263a17104ec8b8bcc4ef21935c1872a57aeb6d3 100644
+--- a/codex-rs/core/tests/suite/mod.rs
++++ b/codex-rs/core/tests/suite/mod.rs
+@@ -124,6 +124,7 @@ mod prompt_cache_key;
+ mod prompt_caching;
+ mod prompt_debug_tests;
+ mod quota_exceeded;
++mod rate_limit_retry;
+ mod realtime_conversation;
+ mod realtime_initial_items;
+ mod realtime_sideband_endpoint;
+diff --git a/codex-rs/core/tests/suite/rate_limit_retry.rs b/codex-rs/core/tests/suite/rate_limit_retry.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8cf37e90db55c2b9315a0641a5be3a25c6b14848
+--- /dev/null
++++ b/codex-rs/core/tests/suite/rate_limit_retry.rs
+@@ -0,0 +1,205 @@
++use anyhow::Result;
++use codex_core::StartThreadOptions;
++use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
++use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
++use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
++use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
++use codex_protocol::dynamic_tools::DynamicToolResponse;
++use codex_protocol::dynamic_tools::DynamicToolSpec;
++use codex_protocol::protocol::CodexErrorInfo;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::Op;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::SubAgentSource;
++use codex_protocol::turn_input::TurnInputRequest;
++use codex_protocol::user_input::UserInput;
++use core_test_support::responses;
++use core_test_support::skip_if_no_network;
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use std::time::Duration;
++use std::time::Instant;
++use wiremock::Mock;
++use wiremock::ResponseTemplate;
++use wiremock::matchers::method;
++use wiremock::matchers::path;
++
++#[test_case::test_case(SessionSource::Mcp; "root")]
++#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Other("rate-limit-test".into())); "subagent")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn http_429_preserves_completed_tool_and_outlives_retry_budget(
++    source: SessionSource,
++) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = responses::start_mock_server().await;
++    let mock = responses::mount_response_sequence(
++        &server,
++        vec![
++            responses::sse_response(responses::sse(vec![
++                responses::ev_response_created("tool"),
++                responses::ev_function_call_with_namespace("write-once", "fixture", "write", "{}"),
++                responses::ev_completed("tool"),
++            ])),
++            ResponseTemplate::new(429)
++                .set_body_json(json!({"error":{"code":"rate_limit_exceeded"}})),
++            ResponseTemplate::new(429)
++                .insert_header("Retry-After", "7")
++                .set_body_json(json!({"error":{"code":"rate_limit_exceeded"}})),
++            responses::sse_response(responses::sse(vec![
++                responses::ev_response_created("recovered"),
++                responses::ev_assistant_message("answer", "done"),
++                responses::ev_completed("recovered"),
++            ])),
++        ],
++    )
++    .await;
++    let base = test_codex()
++        .with_config(|config| {
++            config.model_provider.request_max_retries = Some(0);
++            config.model_provider.stream_max_retries = Some(0);
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    let created = base
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            session_source: Some(source),
++            dynamic_tools: vec![DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
++                name: "fixture".into(),
++                description: "Test tools".into(),
++                tools: vec![DynamicToolNamespaceTool::Function(
++                    DynamicToolFunctionSpec {
++                        name: "write".into(),
++                        description: "Perform one write".into(),
++                        input_schema: json!({"type":"object","properties":{}}),
++                        defer_loading: false,
++                    },
++                )],
++            })],
++            ..StartThreadOptions::new(base.config.clone())
++        })
++        .await?;
++    let codex = created.thread;
++    codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "write once then finish".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let mut calls = 0;
++    let mut waits = Vec::new();
++    tokio::time::timeout(Duration::from_secs(35), async {
++        loop {
++            match wait_for_event(&codex, |_| true).await {
++                EventMsg::DynamicToolCallRequest(request) => {
++                    calls += 1;
++                    codex
++                        .submit(Op::DynamicToolResponse {
++                            id: request.call_id,
++                            response: DynamicToolResponse {
++                                success: true,
++                                content_items: vec![DynamicToolCallOutputContentItem::InputText {
++                                    text: "WRITE_COMMITTED".into(),
++                                }],
++                            },
++                        })
++                        .await
++                        .expect("submit completed tool result");
++                }
++                EventMsg::StreamError(error) => {
++                    assert_eq!(
++                        error.codex_error_info,
++                        Some(CodexErrorInfo::ResponseStreamDisconnected {
++                            http_status_code: Some(429),
++                        })
++                    );
++                    waits.push(Instant::now());
++                }
++                EventMsg::Error(error) => panic!("unexpected terminal error: {error:?}"),
++                EventMsg::TurnComplete(event) => {
++                    assert_eq!(event.error, None);
++                    break;
++                }
++                _ => {}
++            }
++        }
++    })
++    .await?;
++    assert_eq!((calls, waits.len(), mock.requests().len()), (1, 2, 4));
++    assert!(waits[1].duration_since(waits[0]) >= Duration::from_secs(5));
++    assert!(waits[1].elapsed() >= Duration::from_secs(7));
++    let requests = mock.requests();
++    let output = requests[1].function_call_output("write-once");
++    assert_eq!(requests[2].function_call_output("write-once"), output);
++    assert_eq!(requests[3].function_call_output("write-once"), output);
++    assert!(output.to_string().contains("WRITE_COMMITTED"));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn http_429_long_wait_is_cancellable() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = responses::start_mock_server().await;
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3600"))
++        .expect(1)
++        .mount(&server)
++        .await;
++    let test = test_codex().build_with_auto_env(&server).await?;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "wait for capacity".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let EventMsg::StreamError(error) =
++        wait_for_event(&test.codex, |e| matches!(e, EventMsg::StreamError(_))).await
++    else {
++        unreachable!()
++    };
++    let message = regex_lite::Regex::new(r"in \d+s")?.replace_all(&error.message, "in <delay>s");
++    insta::assert_snapshot!("http_429_wait", message);
++    test.codex.submit(Op::Interrupt).await?;
++    tokio::time::timeout(
++        Duration::from_secs(3),
++        wait_for_event(&test.codex, |e| matches!(e, EventMsg::TurnAborted(_))),
++    )
++    .await?;
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn http_429_quota_failure_finishes_without_retry() -> Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = responses::start_mock_server().await;
++    Mock::given(method("POST"))
++        .and(path("/v1/responses"))
++        .respond_with(
++            ResponseTemplate::new(429)
++                .insert_header("Retry-After", "1")
++                .set_body_json(json!({"error":{"code":"insufficient_quota"}})),
++        )
++        .expect(1)
++        .mount(&server)
++        .await;
++    let test = test_codex().build_with_auto_env(&server).await?;
++    test.codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "check quota handling".into(),
++            text_elements: vec![],
++        }]))
++        .await?;
++    let EventMsg::TurnComplete(event) =
++        wait_for_event(&test.codex, |e| matches!(e, EventMsg::TurnComplete(_))).await
++    else {
++        unreachable!()
++    };
++    assert_eq!(
++        event.error.and_then(|error| error.codex_error_info),
++        Some(CodexErrorInfo::UsageLimitExceeded)
++    );
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/retry_after.rs b/codex-rs/core/tests/suite/retry_after.rs
+index c24d510049e7774bb00de852135847de3debaec7..7e89add29549327cf720f6ed9c430aa0204db859 100644
+--- a/codex-rs/core/tests/suite/retry_after.rs
++++ b/codex-rs/core/tests/suite/retry_after.rs
+@@ -1457,149 +1457,41 @@ async fn websocket_connection_limit_retries_with_local_backoff() -> Result<()> {
+     Ok(())
+ }
+ 
+-// TODO(anp) respect Retry-After
+-/// Nested websocket retry headers are currently ignored, leaving rate-limit errors terminal.
+-#[tokio::test(flavor = "current_thread")]
+-async fn websocket_rate_limit_with_nested_retry_after_is_terminal() -> Result<()> {
+-    skip_if_no_network!(Ok(()));
+-
+-    let mut telemetry = RetryTelemetryCapture::install();
+-    let server = responses::start_websocket_server(vec![vec![
+-        vec![
+-            responses::ev_response_created("prewarm"),
+-            responses::ev_completed("prewarm"),
+-        ],
+-        vec![json!({
+-            "type": "error",
+-            "status": 429,
+-            "error": {
+-                "type": "rate_limit_error",
+-                "code": "rate_limit_exceeded",
+-                "message": "Rate limit exceeded.",
+-                "headers": { "Retry-After": "1" }
+-            }
+-        })],
+-    ]])
+-    .await;
+-    let test = test_codex()
+-        .with_config(|config| {
+-            config.model_provider.request_max_retries = Some(0);
+-            config.model_provider.stream_max_retries = Some(1);
+-        })
+-        .build_with_websocket_server(&server)
+-        .await?;
+-
+-    submit_user_input(&test, "surface the websocket rate limit").await?;
+-
+-    let mut error_events = 0;
+-    let mut stream_error_events = 0;
+-    loop {
+-        match wait_for_event(&test.codex, |_| true).await {
+-            EventMsg::Error(error) => {
+-                error_events += 1;
+-                assert_eq!(
+-                    error.codex_error_info,
+-                    Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
+-                        http_status_code: Some(429),
+-                    })
+-                );
+-            }
+-            EventMsg::StreamError(_) => stream_error_events += 1,
+-            EventMsg::TurnComplete(event) => {
+-                assert_eq!(
+-                    event.error.and_then(|error| error.codex_error_info),
+-                    Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
+-                        http_status_code: Some(429),
+-                    })
+-                );
+-                break;
+-            }
+-            _ => {}
+-        }
+-    }
+-
+-    assert_eq!(error_events, 1);
+-    assert_eq!(stream_error_events, 0);
+-    let request_count: usize = server.connections().iter().map(Vec::len).sum();
+-    assert_eq!(request_count, 2, "expected only prewarm and terminal error");
+-    assert_eq!(
+-        telemetry.events.try_recv(),
+-        Err(mpsc::error::TryRecvError::Empty)
+-    );
+-    server.shutdown().await;
+-
+-    Ok(())
+-}
+-
+-/// Headerless websocket rate limits complete with the same terminal error as nested headers.
++/// Wrapped websocket 429 errors use the same persistent wait as HTTP 429.
+ #[tokio::test(flavor = "current_thread")]
+-async fn websocket_rate_limit_without_retry_after_is_terminal() -> Result<()> {
++async fn websocket_rate_limit_recovers_beyond_stream_retry_budget() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+-
+     let mut telemetry = RetryTelemetryCapture::install();
+-    let server = responses::start_websocket_server(vec![vec![
++    let server = responses::start_websocket_server(vec![
+         vec![
+-            responses::ev_response_created("prewarm"),
+-            responses::ev_completed("prewarm"),
++            vec![
++                responses::ev_response_created("prewarm"),
++                responses::ev_completed("prewarm"),
++            ],
++            vec![json!({"type":"error", "status":429,
++                "error":{"type":"rate_limit_error", "code":"rate_limit_exceeded"},
++                "headers":{"Retry-After":"5"}})],
+         ],
+-        vec![json!({
+-            "type": "error",
+-            "status": 429,
+-            "error": {
+-                "type": "rate_limit_error",
+-                "code": "rate_limit_exceeded",
+-                "message": "Rate limit exceeded."
+-            }
+-        })],
+-    ]])
++        vec![vec![
++            responses::ev_response_created("recovered"),
++            responses::ev_completed("recovered"),
++        ]],
++    ])
+     .await;
+     let test = test_codex()
+         .with_config(|config| {
+             config.model_provider.request_max_retries = Some(0);
+-            config.model_provider.stream_max_retries = Some(1);
++            config.model_provider.stream_max_retries = Some(0);
+         })
+         .build_with_websocket_server(&server)
+         .await?;
+-
+-    submit_user_input(&test, "surface the headerless websocket rate limit").await?;
+-
+-    let mut error_events = 0;
+-    let mut stream_error_events = 0;
+-    loop {
+-        match wait_for_event(&test.codex, |_| true).await {
+-            EventMsg::Error(error) => {
+-                error_events += 1;
+-                assert_eq!(
+-                    error.codex_error_info,
+-                    Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
+-                        http_status_code: Some(429),
+-                    })
+-                );
+-            }
+-            EventMsg::StreamError(_) => stream_error_events += 1,
+-            EventMsg::TurnComplete(event) => {
+-                assert_eq!(
+-                    event.error.and_then(|error| error.codex_error_info),
+-                    Some(CodexErrorInfo::ResponseTooManyFailedAttempts {
+-                        http_status_code: Some(429),
+-                    })
+-                );
+-                break;
+-            }
+-            _ => {}
+-        }
+-    }
+-
+-    assert_eq!(error_events, 1);
+-    assert_eq!(stream_error_events, 0);
+-    let request_count: usize = server.connections().iter().map(Vec::len).sum();
+-    assert_eq!(request_count, 2, "expected only prewarm and terminal error");
+-    assert_eq!(
+-        telemetry.events.try_recv(),
+-        Err(mpsc::error::TryRecvError::Empty)
+-    );
++    submit_user_input(&test, "retry the rate-limited websocket request").await?;
++    let retry = telemetry.next_retry().await;
++    assert!((Duration::from_secs(5)..=Duration::from_secs(6)).contains(&retry.delay));
++    wait_for_retry(&mut telemetry, &retry).await;
++    wait_for_turn_completion(&test).await;
++    assert_eq!(server.connections().iter().map(Vec::len).sum::<usize>(), 3);
+     server.shutdown().await;
+-
+     Ok(())
+ }
+ 
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap b/codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap
+new file mode 100644
+index 0000000000000000000000000000000000000000..fbbb08fbafed204862d16697bc936b9246282323
+--- /dev/null
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap
+@@ -0,0 +1,6 @@
++---
++source: core/tests/suite/rate_limit_retry.rs
++assertion_line: 162
++expression: message
++---
++Rate limited; retrying in <delay>s (attempt 1). Stop to cancel
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 1b4cf067fc5229426c41e70ee12998f7b076a5ab..43ad8f3d4767db8277291089961b45984707785c 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -370,6 +370,7 @@ impl CodexErr {
+ 
+     pub fn is_retryable(&self) -> bool {
+         match self.details() {
++            CodexErrorDetails::RetryLimit(err) => err.status == StatusCode::TOO_MANY_REQUESTS,
+             CodexErrorDetails::TurnAborted
+             | CodexErrorDetails::SessionBudgetExceeded
+             | CodexErrorDetails::Interrupted
+@@ -384,7 +385,6 @@ impl CodexErr {
+             | CodexErrorDetails::UnsupportedOperation(_)
+             | CodexErrorDetails::Sandbox(_)
+             | CodexErrorDetails::LandlockSandboxExecutableNotProvided
+-            | CodexErrorDetails::RetryLimit(_)
+             | CodexErrorDetails::ContextWindowExceeded
+             | CodexErrorDetails::ThreadNotFound(_)
+             | CodexErrorDetails::AgentLimitReached { .. }
+@@ -441,6 +441,9 @@ impl CodexErr {
+             CodexErrorDetails::MisalignmentPolicyViolation { .. } => {
+                 CodexErrorInfo::MisalignmentPolicyViolation
+             }
++            CodexErrorDetails::RetryLimit(err) if err.status == StatusCode::TOO_MANY_REQUESTS => {
++                CodexErrorInfo::RateLimitExceeded
++            }
+             CodexErrorDetails::RetryLimit(_) => CodexErrorInfo::ResponseTooManyFailedAttempts {
+                 http_status_code: self.http_status_code_value(),
+             },
+@@ -627,9 +630,14 @@ pub struct RetryLimitReachedError {
+ 
+ impl std::fmt::Display for RetryLimitReachedError {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        let prefix = if self.status == StatusCode::TOO_MANY_REQUESTS {
++            "rate limit reached, status"
++        } else {
++            "exceeded retry limit, last status"
++        };
+         write!(
+             f,
+-            "exceeded retry limit, last status: {}{}",
++            "{prefix}: {}{}",
+             self.status,
+             self.request_id
+                 .as_ref()
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index 25909946539488235147a1f04393299084e2373c..e3829840bba40c25dfbdb2995ee77e68110b0c80 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -45,7 +45,7 @@ fn retryability_preserves_error_details_distinctions() {
+                 status: StatusCode::TOO_MANY_REQUESTS,
+                 request_id: None,
+             }),
+-            false,
++            true,
+         ),
+         (
+             CodexErr::UnexpectedStatus(UnexpectedResponseError {
 diff --git a/codex-rs/thread-store/Cargo.toml b/codex-rs/thread-store/Cargo.toml
-index b0d2b1556..64cb882f2 100644
+index b0d2b155682a5458c2b9bcb94e72d15e701c5e97..64cb882f286d601b3e4f3fb12cdc4c7b04dbe01d 100644
 --- a/codex-rs/thread-store/Cargo.toml
 +++ b/codex-rs/thread-store/Cargo.toml
 @@ -27,6 +27,7 @@ codex-utils-path = { workspace = true }
@@ -15017,7 +15742,7 @@ index b0d2b1556..64cb882f2 100644
  serde_json = { workspace = true }
  sqlx = { workspace = true }
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 9ea7e2bde..8b4213c44 100644
+index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..8b4213c44f823a7ef68e14be847b6b3125b3927c 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -20,6 +20,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
@@ -15130,7 +15855,7 @@ index 9ea7e2bde..8b4213c44 100644
      pub fn for_id(id: impl Into<String>) -> Arc<Self> {
          let id = id.into();
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index a8b6a3665..1b94e25db 100644
+index a8b6a366506829c9b5e291d20ae852a5c98f1588..1b94e25db98d51e996ee6a076f6bbad7e2c2bb8c 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
 @@ -10,6 +10,7 @@ mod live_thread;
@@ -15153,7 +15878,7 @@ index a8b6a3665..1b94e25db 100644
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 000000000..5b1d2cc37
+index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c33965b67c877
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
 @@ -0,0 +1,1043 @@
@@ -16202,7 +16927,7 @@ index 000000000..5b1d2cc37
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/agent_graph.rs b/codex-rs/thread-store/src/remote_http/agent_graph.rs
 new file mode 100644
-index 000000000..4c4610e21
+index 0000000000000000000000000000000000000000..4c4610e21b9bffaa288920b1ae88739c1894521c
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/agent_graph.rs
 @@ -0,0 +1,35 @@
@@ -16243,7 +16968,7 @@ index 000000000..4c4610e21
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/input_recovery.rs b/codex-rs/thread-store/src/remote_http/input_recovery.rs
 new file mode 100644
-index 000000000..2161eb555
+index 0000000000000000000000000000000000000000..2161eb555cd3dcebaee813d1c390c0708579857e
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/input_recovery.rs
 @@ -0,0 +1,62 @@
@@ -16311,7 +17036,7 @@ index 000000000..2161eb555
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/input_recovery_tests.rs b/codex-rs/thread-store/src/remote_http/input_recovery_tests.rs
 new file mode 100644
-index 000000000..d6957bb49
+index 0000000000000000000000000000000000000000..d6957bb497e9bed785372c29138501adffb1e0ba
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/input_recovery_tests.rs
 @@ -0,0 +1,47 @@
@@ -16364,7 +17089,7 @@ index 000000000..d6957bb49
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/retry.rs b/codex-rs/thread-store/src/remote_http/retry.rs
 new file mode 100644
-index 000000000..005401005
+index 0000000000000000000000000000000000000000..005401005c23cd9d65cd04dea0acd8c57d23f701
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry.rs
 @@ -0,0 +1,89 @@
@@ -16459,7 +17184,7 @@ index 000000000..005401005
 +mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 000000000..cddf95e97
+index 0000000000000000000000000000000000000000..cddf95e976c5117f9c649ef3af001bf860a9be45
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 @@ -0,0 +1,672 @@
@@ -17137,7 +17862,7 @@ index 000000000..cddf95e97
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/uploads.rs b/codex-rs/thread-store/src/remote_http/uploads.rs
 new file mode 100644
-index 000000000..2bca71778
+index 0000000000000000000000000000000000000000..2bca717789b43a428f301b079d5eaa2e4eb8fac1
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/uploads.rs
 @@ -0,0 +1,146 @@
@@ -17289,7 +18014,7 @@ index 000000000..2bca71778
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/writer.rs b/codex-rs/thread-store/src/remote_http/writer.rs
 new file mode 100644
-index 000000000..da88ca449
+index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacfdb59140c
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/writer.rs
 @@ -0,0 +1,330 @@
@@ -17624,7 +18349,7 @@ index 000000000..da88ca449
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
-index 27359fd5c..ae17f5d70 100644
+index 27359fd5c598bc2656d34ca97b926c4c1db559cb..ae17f5d70f9c8132b2303defc597e42de17d684e 100644
 --- a/codex-rs/tui/src/app/app_server_event_targets.rs
 +++ b/codex-rs/tui/src/app/app_server_event_targets.rs
 @@ -48,6 +48,9 @@ pub(super) fn server_notification_thread_target(
@@ -17638,7 +18363,7 @@ index 27359fd5c..ae17f5d70 100644
              Some(notification.thread_id.as_str())
          }
 diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
-index 48083eb29..9231e72f1 100644
+index 48083eb29376c3a2cc21d657b051998e6235e60a..9231e72f154dd716d51a1f103126f8205921f977 100644
 --- a/codex-rs/tui/src/chatwidget/protocol.rs
 +++ b/codex-rs/tui/src/chatwidget/protocol.rs
 @@ -218,6 +218,7 @@ impl ChatWidget {
