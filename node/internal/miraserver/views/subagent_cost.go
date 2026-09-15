@@ -45,24 +45,31 @@ func (sum *costSum) estimate() map[string]any {
 
 // Sum each thread's own canonical usage once, including archived descendants.
 // Do not sum already-aggregated child estimates or copied pre-fork requests.
-func (service *Service) includeSubagentCosts(ctx context.Context, storeID string, root Thread, own *CostProjection) (map[string]any, error) {
+func (service *Service) includeSubagentCosts(ctx context.Context, storeID string, root Thread, own *CostProjection) (ThreadStatistics, error) {
 	self := CostEstimate(own, root)
 	var total, children costSum
 	total.add(own, self)
+	var selfTokens, totalTokens, childTokens tokenSum
+	ownUsage := ownTokenUsage(own, root)
+	selfTokens.add(ownUsage)
+	totalTokens.add(ownUsage)
 	count, after := 0, ""
 	for {
 		page, err := service.costDescendants(ctx, storeID, root.ThreadID, after)
 		if err != nil {
-			return nil, err
+			return ThreadStatistics{}, err
 		}
 		for _, child := range page {
 			state, err := service.costProjection(ctx, storeID, child)
 			if err != nil {
-				return nil, err
+				return ThreadStatistics{}, err
 			}
 			estimate := CostEstimate(state, child)
 			total.add(state, estimate)
 			children.add(state, estimate)
+			usage := ownTokenUsage(state, child)
+			totalTokens.add(usage)
+			childTokens.add(usage)
 			count++
 			after = child.ThreadID
 		}
@@ -70,16 +77,19 @@ func (service *Service) includeSubagentCosts(ctx context.Context, storeID string
 			break
 		}
 	}
-	if count == 0 {
-		return self, nil
+	estimate := self
+	if count > 0 {
+		estimate = total.estimate()
+		estimate["scope"] = self["scope"]
+		estimate["includesSubagents"] = true
+		estimate["subagentCount"] = count
+		estimate["selfAmount"] = self["amount"]
+		estimate["subagentAmount"] = children.estimate()["amount"]
 	}
-	estimate := total.estimate()
-	estimate["scope"] = self["scope"]
-	estimate["includesSubagents"] = true
-	estimate["subagentCount"] = count
-	estimate["selfAmount"] = self["amount"]
-	estimate["subagentAmount"] = children.estimate()["amount"]
-	return estimate, nil
+	return ThreadStatistics{CostEstimate: estimate, TokenUsageSummary: map[string]any{
+		"total": totalTokens.summary(), "self": selfTokens.summary(), "subagents": childTokens.summary(),
+		"includesSubagents": count > 0, "subagentCount": count, "scope": self["scope"],
+	}}, nil
 }
 
 func (service *Service) costDescendants(ctx context.Context, storeID, rootID, after string) ([]Thread, error) {

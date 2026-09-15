@@ -84,20 +84,24 @@ func TestPostgresCostCacheRetainsLargeSubagentTree(t *testing.T) {
 	appendTo(nil, 1, 2, usageRecord(usage(100000, 80000, 1000), usage(100000, 80000, 1000), "turn"))
 	service := New(pool)
 	root := Thread{ThreadID: "thread-0", Generation: 1, ItemCount: 2}
-	check := func(amount float64) {
+	check := func(amount float64, inputTokens int64) {
 		t.Helper()
-		estimate, err := service.GetThreadCost(ctx, store, root)
+		statistics, err := service.GetThreadStatistics(ctx, store, root)
+		estimate := statistics.CostEstimate
 		if err != nil || estimate["status"] != "complete" || estimate["subagentCount"] != 180 || !closeFloat(estimate["amount"].(float64), amount) {
 			t.Fatalf("cost: %#v %v", estimate, err)
 		}
+		if total := object(statistics.TokenUsageSummary["total"]); total["inputTokens"] != inputTokens || total["status"] != "complete" {
+			t.Fatalf("stale token total: %#v", statistics.TokenUsageSummary)
+		}
 	}
-	check(181 * .33)
+	check(181*.33, 18100000)
 	scans := counter.queries.Load()
 	if scans < 181 {
 		t.Fatal("cold request did not scan the entire tree")
 	}
-	check(181 * .33)
-	check(181 * .33)
+	check(181*.33, 18100000)
+	check(181*.33, 18100000)
 	if counter.queries.Load() != scans {
 		t.Fatalf("unchanged large tree rescanned: cold=%d warm=%d", scans, counter.queries.Load())
 	}
@@ -105,12 +109,12 @@ func TestPostgresCostCacheRetainsLargeSubagentTree(t *testing.T) {
 	appendTo(&child, 1, 3, usageRecord(usage(200000, 160000, 2000), usage(100000, 80000, 1000), "turn"))
 	advanced, _ := json.Marshal(map[string]any{"metadata": map[string]any{"token_usage": usage(200000, 160000, 2000)}})
 	exec(`UPDATE codex_thread_projections SET item_count=3,state=$3::jsonb WHERE store_id=$1 AND thread_id=$2`, store, child, string(advanced))
-	check(182 * .33)
+	check(182*.33, 18200000)
 	if counter.queries.Load() != scans+1 {
 		t.Fatal("child append did not read exactly its new history")
 	}
 	appendTo(&child, 2, 1, contextRecord("gpt-5.6-sol", "new-turn"))
 	appendTo(&child, 2, 2, usageRecord(usage(100000, 80000, 1000), usage(100000, 80000, 1000), "new-turn"))
 	exec(`UPDATE codex_thread_projections SET active_generation=2,item_count=2,state=$3::jsonb WHERE store_id=$1 AND thread_id=$2`, store, child, string(metadata))
-	check(180*.33 + .132)
+	check(180*.33+.132, 18100000)
 }

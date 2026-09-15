@@ -46,6 +46,8 @@ type CostProjection struct {
 	turnLimit         int
 	awaitForkBoundary bool
 	scopeStarted      bool
+	forkUsageBaseline [4]int64
+	forkUsageReset    bool
 }
 
 type cachedCost struct {
@@ -203,6 +205,7 @@ func ApplyCostRecord(state *CostProjection, record map[string]any, threadID stri
 		state.model = stringValue(object(payload["thread_settings"])["model"])
 		if state.awaitForkBoundary && !state.scopeStarted && stringValue(payload["thread_id"]) == threadID {
 			state.scopeStarted = true
+			state.forkUsageBaseline = state.last
 			state.turnID = stringValue(payload["turn_id"])
 		}
 		return
@@ -243,6 +246,9 @@ func ApplyCostRecord(state *CostProjection, record map[string]any, threadID stri
 	delta := [4]int64{}
 	for index := range delta {
 		delta[index] = total[index] - state.last[index]
+		if state.awaitForkBoundary && state.scopeStarted && delta[index] < 0 {
+			state.forkUsageReset = true
+		}
 	}
 	state.last = total
 	if !state.scopeStarted || equalCounts(total, [4]int64{}) {
@@ -473,9 +479,16 @@ func (service *Service) costProjection(ctx context.Context, storeID string, thre
 }
 
 func (service *Service) GetThreadCost(ctx context.Context, storeID string, thread Thread) (map[string]any, error) {
+	statistics, err := service.GetThreadStatistics(ctx, storeID, thread)
+	return statistics.CostEstimate, err
+}
+
+// GetThreadStatistics shares the bounded history projection and descendant walk
+// between token totals and prices. Canonical cumulative counters stay unchanged.
+func (service *Service) GetThreadStatistics(ctx context.Context, storeID string, thread Thread) (ThreadStatistics, error) {
 	state, err := service.costProjection(ctx, storeID, thread)
 	if err != nil {
-		return nil, err
+		return ThreadStatistics{}, err
 	}
 	return service.includeSubagentCosts(ctx, storeID, thread, state)
 }

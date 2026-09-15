@@ -11,6 +11,17 @@ import (
 // ListThreads returns Web thread summaries enriched from canonical lifecycle,
 // read-position, token-usage, model, and reasoning-effort records.
 func (service *Service) ListThreads(ctx context.Context, storeID string, limit int, threadID *string, archived *bool) ([]Thread, error) {
+	return service.listThreadSelection(ctx, storeID, limit, threadID, archived, nil)
+}
+
+func (service *Service) listThreadIDs(ctx context.Context, storeID string, ids []string) ([]Thread, error) {
+	if len(ids) == 0 {
+		return []Thread{}, nil
+	}
+	return service.listThreadSelection(ctx, storeID, len(ids), nil, nil, ids)
+}
+
+func (service *Service) listThreadSelection(ctx context.Context, storeID string, limit int, threadID *string, archived *bool, ids []string) ([]Thread, error) {
 	if !safeStorePattern.MatchString(storeID) {
 		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "invalid store id"}
 	}
@@ -29,7 +40,10 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
             projections.active_generation::text, activity.updated_at,
             imports.import_id::text, imports.source_node_id::text, imports.source_codex_version, imports.source_item_count::text,
             imports.created_at AS imported_at, runtimes.node_id::text AS runtime_node_id,
-            runtimes.bound_at AS runtime_bound_at, runtimes.node_account_id::text
+            runtimes.bound_at AS runtime_bound_at, runtimes.node_account_id::text,
+            EXISTS(SELECT 1 FROM codex_thread_projections child
+                   WHERE child.store_id=projections.store_id AND child.parent_thread_id=projections.thread_id
+                     AND child.thread_id<>projections.thread_id) AS has_subagents
      FROM codex_thread_projections projections
      CROSS JOIN LATERAL jsonb_to_record(projections.state)
        AS summary(name text, metadata jsonb, "createdThread" jsonb)
@@ -58,8 +72,9 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
      LEFT JOIN mira_codex_thread_runtimes runtimes
        ON runtimes.store_id = projections.store_id AND runtimes.thread_id = projections.thread_id
      WHERE projections.store_id = $1 AND ($3::text IS NULL OR projections.thread_id = $3)
+       AND ($5::text[] IS NULL OR projections.thread_id=ANY($5))
        AND ($4::boolean IS NULL OR COALESCE(actions.action='archive',false)=$4)
-     ORDER BY activity.updated_at DESC NULLS LAST, projections.thread_id DESC LIMIT $2`, storeID, limit, threadID, archived)
+     ORDER BY activity.updated_at DESC NULLS LAST, projections.thread_id DESC LIMIT $2`, storeID, limit, threadID, archived, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +90,7 @@ func (service *Service) ListThreads(ctx context.Context, storeID string, limit i
 			&thread.ThreadID, &thread.ParentThreadID, &thread.SourceKind, &thread.Title, &thread.Name,
 			&thread.Archived, &thread.Cwd, &itemCount, &usageRaw, &modelRaw, &thread.ForkedFromID,
 			&thread.CreatedAt, &generation, &updatedAt, &thread.ImportID, &thread.SourceNodeID,
-			&thread.SourceCodexVersion, &importedCount, &importedAt, &thread.RuntimeNodeID, &runtimeBoundAt, &thread.NodeAccountID,
+			&thread.SourceCodexVersion, &importedCount, &importedAt, &thread.RuntimeNodeID, &runtimeBoundAt, &thread.NodeAccountID, &thread.HasSubagents,
 		); err != nil {
 			return nil, err
 		}

@@ -19,11 +19,16 @@ export function compactTokenCount(value) {
 
 export function compactTokenUsage(usage) {
   const input = compactTokenCount(usage?.inputTokens), output = compactTokenCount(usage?.outputTokens);
-  return input !== null && output !== null ? `${input} in · ${output} out` : "";
+  return input !== null && output !== null ? `${input} in · ${output} out${usage?.status === "partial" ? "*" : ""}` : "";
 }
 
-export function tokenUsageTitle(usage) {
-  return `累计输入 ${tokenCount(usage?.inputTokens)} Token（含缓存）\n缓存输入 ${tokenCount(usage?.cachedInputTokens)} Token\n累计输出 ${tokenCount(usage?.outputTokens)} Token`;
+export function tokenUsageTitle(usage, summary) {
+  return [`累计输入 ${tokenCount(usage?.inputTokens)} Token（含缓存）`,
+    `缓存输入 ${tokenCount(usage?.cachedInputTokens)} Token`, `累计输出 ${tokenCount(usage?.outputTokens)} Token`,
+    summary?.includesSubagents ? `包含自身及 ${summary.subagentCount} 个子 Agent（含下级及已归档）` : "",
+    summary?.scope === "fork" ? "仅统计分支创建后新增的用量" : "",
+    usage?.status === "partial" ? "* 部分用量缺失，显示已统计部分" : "",
+  ].filter(Boolean).join("\n");
 }
 
 const moneyFormat = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });

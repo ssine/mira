@@ -4,7 +4,22 @@ Conversation list/detail responses expose `tokenUsage` with `inputTokens`, `cach
 `outputTokens`. The source is the existing canonical `metadata_updates/<threadId>/token_usage`
 projection, which Codex updates from `TokenCount.info.total_token_usage`. These are cumulative
 provider-reported counters for that thread. Cached input is included in input, not added to it.
-Counts follow upstream thread/fork history semantics; separate subagents are not summed into parents.
+This compatibility field follows upstream thread/fork history semantics and remains local to the
+thread. The Web display instead uses the server's `tokenUsageSummary`: its `total`, `self` and
+`subagents` values include each thread's own usage exactly once, across all descendant levels and
+including archived children. This is independent of which rows the browser has loaded or expanded.
+`hasSubagents` on list rows signals that the Web must wait for the aggregate instead of briefly
+presenting the parent's local counters as its total.
+
+The summary arrives with the opt-in cost/statistics response. Token and cost totals share one bounded
+descendant walk and the same incremental history projection; ordinary list reads do not calculate
+whole-tree statistics. Fork counters subtract the inherited cumulative baseline at the durable
+child-owned `thread_settings_applied` boundary. A missing boundary or a counter reset makes those
+counts unavailable rather than counting copied history again. Token aggregation uses cumulative
+counters independently of pricing, so an unknown model or missing per-request price does not discard
+known token usage. Metadata-only cumulative updates remain visible. Each component preserves zero,
+partial and unavailable values; partial totals carry a marker and sums beyond JavaScript's exact
+integer range remain unavailable instead of being rounded.
 
 Older imported histories may not have a metadata projection. The read-only fallback selects the
 latest usable canonical `event_msg/token_count` cumulative snapshot in the active generation and
@@ -18,7 +33,8 @@ contains escaped NUL. Its cache is bounded and keyed by store, thread, generatio
 count. Metadata updates bypass that cache, so updates without new history items still become visible.
 All values can be reconstructed from existing canonical metadata/history after a projection rebuild.
 
-The conversation details panel shows all three exact numbers. The sidebar's existing second line
+The conversation details panel shows all three exact aggregate numbers and an own/descendant
+breakdown. The sidebar's existing second line
 shows a compact `125k in · 8k out` summary when the row has enough width; its hover text includes the
 exact cached-input count. Narrow rows hide only the compact summary. Polling updates text in place,
 keeps selection/status and row height stable, and rejects older generation/item-count responses.
@@ -53,13 +69,15 @@ turns. Neither changes the Node's saved config. Each compatible Node card owns t
 "刷新模型" action, which invalidates that Node's browser catalog and can prepare its stopped runtime.
 Node/project changes discard stale responses.
 
-`GET /v1/codex/threads/:id?storeId=personal&includeCost=1` opts into `costEstimate`; ordinary list reads
+`GET /v1/codex/threads/:id?storeId=personal&includeCost=1` opts into `costEstimate` and
+`tokenUsageSummary`; ordinary list reads
 do not scan cost history. The sidebar requests the same opt-in detail endpoint only for visible rows,
 with at most two concurrent reads, bounded browser caching, and a ten-second refresh floor for an
-advancing thread. Unchanged history is not repeatedly fetched. The detail panel requests this while open and refreshes on usage/history
-changes. Its server projection reads canonical events in pages of 256, coalesces identical requests,
-and incrementally processes appended events in a bounded cache. Separate subagents retain separate
-estimates. A fork remains its own thread but contains a copied history prefix so Codex can continue
+thread. Descendant-only changes refresh both aggregate token counts and costs even when the parent's
+own counters stay fixed. Unchanged history is not repeatedly scanned. The detail panel requests this while open and refreshes on usage/history
+changes. Its server projection reads canonical events in pages of 256
+and incrementally processes appended events in a bounded cache. Each subagent retains its own
+contribution; parent estimates include the entire descendant tree. A fork remains its own thread but contains a copied history prefix so Codex can continue
 with the same context. Its cost projection reads inherited cumulative counters only as a baseline and
 starts pricing after the child-owned `thread_settings_applied` boundary appended by `thread/fork`.
 The inherited prefix therefore contributes context/token totals but no estimated spend to the child.

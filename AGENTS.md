@@ -163,9 +163,12 @@ items. Render them independently of tool details, ordered and keyed by raw recor
 content position, and lazily load their saved data from PostgreSQL in the active generation.
 Do not reconstruct historical images from tool arguments, event notifications or current Node files.
 Expanded tool detail updates must preserve existing bodies and the user's reading position.
-Conversation cost estimates sum each thread's own requests and all descendant subagent threads from
+The Web sidebar paginates root conversations per project and loads direct subagent children on
+expansion. Preserve the complete project directory, merge loaded pages during refresh, and keep
+Token/cost totals independent of which rows are loaded. See `docs/thread-list-pagination.md`.
+Conversation token totals and cost estimates include each thread's own usage and all descendant subagent threads from
 PostgreSQL, including archived children, without counting copied pre-fork history again. Show self
-and descendant amounts separately, preserve partial/unavailable estimates, and refresh child costs
+and descendant amounts separately, preserve partial/unavailable statistics, and refresh child usage and costs
 even when the parent history is unchanged. Per-turn cost remains local to that thread's requests.
 
 ## Protocol and upgrade policy
