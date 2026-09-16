@@ -1,8 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { accountGroups } from "../server/public/codex-accounts.js";
-import { spendingSeries } from "../server/public/account-spend.js";
+import { spendingSeries, spendProjectionStatus, spendCacheLifetime } from "../server/public/account-spend.js";
 import { AccountSidebar } from "../server/public/account-status.js";
+
+test("backfill is visible and follows the server's short refresh deadline", () => {
+  const data = { projection: { status: "updating", processedItems: 25, totalItems: 100 },
+    cache: { expiresAt: new Date(Date.now() + 5000).toISOString() } };
+  assert.equal(spendProjectionStatus(data), "正在汇总用量 25%");
+  assert.ok(spendCacheLifetime(data) <= 5000);
+  data.projection.status = "retrying";
+  assert.match(spendProjectionStatus(data), /失败.*重试/);
+  data.projection.status = "ready";
+  assert.equal(spendProjectionStatus(data), "");
+});
 
 test("account names combine every Node and keep the freshest valid balance, including zero", () => {
   const account = (id, name, remaining, observedAt) => ({ nodeAccountId: id, name, observedAt,

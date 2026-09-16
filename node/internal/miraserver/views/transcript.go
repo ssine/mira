@@ -221,7 +221,16 @@ func (service *Service) contextBefore(ctx context.Context, storeID, threadID str
 	return nil, nil
 }
 
+type timestampReader interface {
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
 func (service *Service) restoreImportedTimestamps(ctx context.Context, storeID, threadID string, rows []transcriptRow) (map[int64]string, error) {
+	return restoreImportedTimestampsFrom(ctx, service.pool, storeID, threadID, rows)
+}
+
+func restoreImportedTimestampsFrom(ctx context.Context, reader timestampReader, storeID, threadID string, rows []transcriptRow) (map[int64]string, error) {
 	recorded := map[int64]string{}
 	for _, row := range rows {
 		if row.createdAt != nil {
@@ -229,7 +238,7 @@ func (service *Service) restoreImportedTimestamps(ctx context.Context, storeID, 
 		}
 	}
 	var importID, sourceCount string
-	err := service.pool.QueryRow(ctx, `SELECT import_id::text,source_item_count::text FROM mira_codex_session_imports
+	err := reader.QueryRow(ctx, `SELECT import_id::text,source_item_count::text FROM mira_codex_session_imports
 		WHERE store_id=$1 AND thread_id=$2 AND status='imported' ORDER BY store_event_seq DESC,created_at DESC LIMIT 1`, storeID, threadID).Scan(&importID, &sourceCount)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return recorded, nil
@@ -242,7 +251,7 @@ func (service *Service) restoreImportedTimestamps(ctx context.Context, storeID, 
 		first, count int64
 	}
 	segments := []segment{}
-	segmentRows, err := service.pool.Query(ctx, `SELECT source_import_id::text,first_line_seq::text,item_count::text
+	segmentRows, err := reader.Query(ctx, `SELECT source_import_id::text,first_line_seq::text,item_count::text
 		FROM mira_codex_session_import_segments WHERE import_id=$1 ORDER BY segment_index`, importID)
 	if err != nil {
 		return nil, err
@@ -289,7 +298,7 @@ func (service *Service) restoreImportedTimestamps(ctx context.Context, storeID, 
 			}
 		}
 		if len(lines) > 0 {
-			rawRows, err := service.pool.Query(ctx, `SELECT line_seq::text,raw_record FROM mira_codex_session_import_records WHERE import_id=$1 AND line_seq=ANY($2::bigint[])`, part.importID, lines)
+			rawRows, err := reader.Query(ctx, `SELECT line_seq::text,raw_record FROM mira_codex_session_import_records WHERE import_id=$1 AND line_seq=ANY($2::bigint[])`, part.importID, lines)
 			if err != nil {
 				return nil, err
 			}

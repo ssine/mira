@@ -2,61 +2,87 @@ package views
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"strings"
 	"time"
-	_ "time/tzdata" // Calendar-day views also work on hosts without zoneinfo.
+	_ "time/tzdata"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 )
 
-const accountCostPredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|turn_context|thread_settings_applied|token_count)"'`
+// Ownership is a cheap relational read over execution metadata, independent of
+// token parsing. Late turn events, account renames and provider ambiguity take
+// effect without replaying canonical history or freezing today's account into
+// yesterday's charges. Exact turn identity wins over timestamp intervals.
+const accountCostOwnersSQL = `identities AS (
+ SELECT btrim(name) AS name,provider FROM mira_codex_accounts
+ UNION SELECT btrim(a.name),b.reported#>>'{provider,id}' FROM mira_codex_accounts a JOIN mira_node_codex_accounts b USING(account_id)
+ UNION SELECT btrim(a.name),n.reported_app_server#>>'{provider,id}' FROM mira_codex_accounts a
+ JOIN mira_node_codex_accounts b USING(account_id) JOIN codex_nodes n USING(node_id) WHERE b.is_default),
+ aliases AS (SELECT provider,min(name) AS name FROM identities WHERE provider<>'' GROUP BY provider HAVING count(DISTINCT name)=1),
+ turns AS (SELECT DISTINCT ON(e.store_id,e.thread_id,e.generation,e.turn_id)
+ e.store_id,e.thread_id,e.generation,e.turn_id,btrim(a.name) AS name
+ FROM mira_codex_execution_events e JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
+ WHERE e.kind IN ('turn/started','turn/completed') AND e.turn_id<>''
+ ORDER BY e.store_id,e.thread_id,e.generation,e.turn_id,e.event_seq DESC),
+ bindings AS (SELECT e.store_id,e.thread_id,e.generation,btrim(a.name) AS name,e.created_at,
+ lead(e.created_at) OVER(PARTITION BY e.store_id,e.thread_id,e.generation ORDER BY e.created_at,e.event_seq) AS until
+ FROM mira_codex_execution_events e JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
+ WHERE e.kind IN ('bound','turn_requested'))`
 
-// AccountCostHistory is a read projection. Account names combine Node bindings,
-// while every canonical request is priced only once in its own generation.
 func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName, zone string) (map[string]any, error) {
 	name = strings.TrimSpace(name)
 	if rangeName == "" {
 		rangeName = "7d"
 	}
-	count := map[string]int{"24h": 1, "7d": 7, "30d": 30}[rangeName]
 	if zone == "" {
 		zone = "UTC"
 	}
+	count := map[string]int{"24h": 1, "7d": 7, "30d": 30}[rangeName]
 	location, err := time.LoadLocation(zone)
 	if name == "" || len(name) > 128 || count == 0 || err != nil {
 		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "name, range (24h, 7d, 30d) and a valid timezone are required"}
 	}
-	// Older history predates named execution accounts. Only an unambiguous
-	// provider-to-name mapping can recover its ownership; never use today's route.
-	providers := []string{}
-	providerRows, err := service.pool.Query(ctx, `WITH identities AS (
-	 SELECT btrim(name) AS name,provider FROM mira_codex_accounts
-	 UNION SELECT btrim(a.name),b.reported#>>'{provider,id}' FROM mira_codex_accounts a JOIN mira_node_codex_accounts b USING(account_id)
-	 UNION SELECT btrim(a.name),n.reported_app_server#>>'{provider,id}' FROM mira_codex_accounts a
-	 JOIN mira_node_codex_accounts b USING(account_id) JOIN codex_nodes n USING(node_id) WHERE b.is_default)
-	 SELECT provider FROM identities WHERE provider<>'' GROUP BY provider HAVING count(DISTINCT name)=1 AND min(name)=$1`, name)
-	if err != nil {
-		return nil, err
-	}
-	for providerRows.Next() {
-		var provider string
-		if err := providerRows.Scan(&provider); err != nil {
-			providerRows.Close()
-			return nil, err
-		}
-		providers = append(providers, provider)
-	}
-	err = providerRows.Err()
-	providerRows.Close()
-	if err != nil {
-		return nil, err
-	}
 	now := service.now().In(location)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
 	from := today.AddDate(0, 0, 1-count)
+	// Progress and amounts come from one MVCC snapshot, so a concurrent page
+	// commit or generation replacement cannot produce a false complete result.
+	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(context.Background())
+	var totalThreads, pendingThreads, failedThreads, processedItems, totalItems int64
+	err = tx.QueryRow(ctx, `WITH sources AS (`+accountCostSourcesSQL+`)
+ SELECT count(*),count(*) FILTER(WHERE c.thread_id IS NULL OR c.generation<>s.active_generation OR c.revision<>$1 OR c.source_key<>s.source_key OR c.item_seq<>s.item_count),
+ count(*) FILTER(WHERE c.error_code IS NOT NULL),
+ coalesce(sum(CASE WHEN c.generation=s.active_generation AND c.revision=$1 AND c.source_key=s.source_key THEN least(c.item_seq,s.item_count) ELSE 0 END),0)::bigint,
+ coalesce(sum(s.item_count),0)::bigint
+ FROM sources s LEFT JOIN mira_account_cost_checkpoints c USING(store_id,thread_id)`, accountCostRevision).
+		Scan(&totalThreads, &pendingThreads, &failedThreads, &processedItems, &totalItems)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `WITH sources AS (`+accountCostSourcesSQL+`),`+accountCostOwnersSQL+`, facts AS (
+ SELECT f.*,t.name IS NULL AND b.name IS NULL AS historical,
+ to_char(f.happened_at AT TIME ZONE $5,'YYYY-MM-DD') AS day,
+ date_trunc('hour',f.happened_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS hour
+ FROM mira_account_cost_entries f JOIN mira_account_cost_checkpoints c USING(store_id,thread_id)
+ JOIN sources s USING(store_id,thread_id)
+ LEFT JOIN turns t ON t.store_id=f.store_id AND t.thread_id=f.thread_id AND t.generation=c.generation AND t.turn_id=f.turn_id
+ LEFT JOIN bindings b ON t.name IS NULL AND b.store_id=f.store_id AND b.thread_id=f.thread_id AND b.generation=c.generation
+ AND f.happened_at>=b.created_at AND (b.until IS NULL OR f.happened_at<b.until)
+ LEFT JOIN aliases a ON a.provider=f.provider
+ WHERE c.generation=s.active_generation AND c.revision=$1 AND c.source_key=s.source_key AND f.item_seq<=s.item_count
+ AND f.happened_at>=$3 AND f.happened_at<=$4 AND coalesce(t.name,b.name,a.name)=$2)
+ SELECT day,hour,historical,models,reasons,bool_or(observed),sum(priced)::bigint,sum(unpriced)::bigint,sum(long_requests)::bigint,
+ sum(input)::text,sum(cached)::text,sum(write)::text,sum(output)::text
+ FROM facts GROUP BY day,hour,historical,models,reasons`, accountCostRevision, name, from, now, zone)
+	if err != nil {
+		return nil, err
+	}
 	days := make([]map[string]any, count)
 	totals := make([]costTotals, count)
 	hours := make([]map[int64]*costTotals, count)
@@ -65,87 +91,81 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 		days[i] = map[string]any{"date": start.Format("2006-01-02"), "at": start.UnixMilli(), "end": start.AddDate(0, 0, 1).UnixMilli()}
 		hours[i] = map[int64]*costTotals{}
 	}
-	afterStore, afterThread := "", ""
-	for {
-		rows, err := service.pool.Query(ctx, `SELECT p.store_id,p.thread_id,p.active_generation,p.item_count,p.state #>> '{createdThread,forked_from_id}'
-		 FROM codex_thread_projections p WHERE (p.store_id,p.thread_id)>($2,$3) AND EXISTS(
-		 SELECT 1 FROM mira_codex_execution_events e JOIN mira_node_codex_accounts b USING(node_account_id)
-		 JOIN mira_codex_accounts a USING(account_id) WHERE e.store_id=p.store_id AND e.thread_id=p.thread_id
-		 AND e.generation=p.active_generation AND btrim(a.name)=$1)
-		 OR (p.store_id,p.thread_id)>($2,$3) AND cardinality($4::text[])>0 AND EXISTS(
-		 SELECT 1 FROM codex_thread_events h WHERE h.store_id=p.store_id AND h.thread_id=p.thread_id AND h.generation=p.active_generation
-		 AND h.payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|thread_settings_applied)"'
-		 AND EXISTS(SELECT 1 FROM unnest($4::text[]) provider WHERE strpos(h.payload::text,to_json(provider)::text)>0))
-		 ORDER BY p.store_id,p.thread_id LIMIT 128`, name, afterStore, afterThread, providers)
-		if err != nil {
+	for rows.Next() {
+		var day string
+		var hour time.Time
+		var historical bool
+		var numbers accountCostNumbers
+		if err := rows.Scan(&day, &hour, &historical, &numbers.Models, &numbers.Reasons, &numbers.Observed, &numbers.Priced, &numbers.Unpriced, &numbers.LongRequests,
+			&numbers.Input, &numbers.Cached, &numbers.Write, &numbers.Output); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		type candidate struct {
-			store  string
-			thread Thread
-		}
-		page := []candidate{}
-		for rows.Next() {
-			var value candidate
-			if err := rows.Scan(&value.store, &value.thread.ThreadID, &value.thread.Generation, &value.thread.ItemCount, &value.thread.ForkedFromID); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			page = append(page, value)
-		}
-		err = rows.Err()
-		rows.Close()
+		delta, err := numbers.totals()
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
-		for _, value := range page {
-			state := NewCostProjection(value.thread.ForkedFromID != nil && *value.thread.ForkedFromID != "", []string{})
-			err := service.accountCostRecords(ctx, value.store, value.thread, state, name, providers, from, now, func(at time.Time, delta costTotals) {
-				date := at.In(location).Format("2006-01-02")
-				for i, day := range days {
-					if day["date"] != date {
-						continue
-					}
-					mergeAccountCost(&totals[i], delta)
-					// Hour buckets keep responses bounded, including long conversations.
-					bucket := at.Truncate(time.Hour).Add(time.Hour)
-					if end := time.UnixMilli(day["end"].(int64)); bucket.After(end) {
-						bucket = end
-					}
-					if bucket.After(now) {
-						bucket = now
-					}
-					key := bucket.UnixMilli()
-					if hours[i][key] == nil {
-						hours[i][key] = &costTotals{}
-					}
-					mergeAccountCost(hours[i][key], delta)
-					break
-				}
-			})
-			if err != nil {
-				return nil, err
-			}
-			afterStore, afterThread = value.store, value.thread.ThreadID
+		if historical {
+			incomplete(&delta, "historical_provider_attribution")
 		}
-		if len(page) < 128 {
+		for i, value := range days {
+			if value["date"] != day {
+				continue
+			}
+			mergeAccountCost(&totals[i], delta)
+			bucket := hour.Add(time.Hour)
+			if end := time.UnixMilli(value["end"].(int64)); bucket.After(end) {
+				bucket = end
+			}
+			if bucket.After(now) {
+				bucket = now
+			}
+			key := bucket.UnixMilli()
+			if hours[i][key] == nil {
+				hours[i][key] = &costTotals{}
+			}
+			mergeAccountCost(hours[i][key], delta)
 			break
 		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
 	}
 	points := []map[string]any{}
 	var total costTotals
 	for i := range days {
+		if pendingThreads > 0 {
+			incomplete(&totals[i], "projection_pending")
+		}
 		estimate := pricedEstimate(&totals[i])
 		days[i]["amount"], days[i]["status"] = estimate["amount"], estimate["status"]
 		mergeAccountCost(&total, totals[i])
 		for at, value := range hours[i] {
-			point := pricedEstimate(value)
-			points = append(points, map[string]any{"at": at, "amount": point["amount"], "status": point["status"], "date": days[i]["date"]})
+			if pendingThreads > 0 {
+				incomplete(value, "projection_pending")
+			}
+			estimate := pricedEstimate(value)
+			points = append(points, map[string]any{"at": at, "amount": estimate["amount"], "status": estimate["status"], "date": days[i]["date"]})
 		}
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i]["at"].(int64) < points[j]["at"].(int64) })
+	status := "ready"
+	if pendingThreads > 0 {
+		status = "updating"
+	}
+	if failedThreads > 0 {
+		status = "retrying"
+	}
 	return map[string]any{"name": name, "range": rangeName, "timezone": zone, "from": from.UnixMilli(), "to": now.UnixMilli(),
-		"days": days, "points": points, "estimate": pricedEstimate(&total), "basis": "standard", "currency": "USD"}, nil
+		"days": days, "points": points, "estimate": pricedEstimate(&total), "basis": "standard", "currency": "USD",
+		"projection": map[string]any{"status": status, "pendingThreads": pendingThreads, "totalThreads": totalThreads, "failedThreads": failedThreads,
+			"processedItems": processedItems, "totalItems": totalItems}}, nil
 }
 
 func mergeAccountCost(target *costTotals, value costTotals) {
@@ -179,121 +199,4 @@ func accountCostDelta(before costTotals, after costTotals) costTotals {
 		delta.reasons = after.reasons
 	}
 	return delta
-}
-
-func (service *Service) accountCostRecords(ctx context.Context, store string, thread Thread, state *CostProjection, name string, providers []string, from, to time.Time, consume func(time.Time, costTotals)) error {
-	cursor := int64(0)
-	var cachedTurn string
-	var cachedOwner, bindingOwner *string
-	var cachedTurnSet, bindingCached bool
-	var bindingFrom, bindingUntil *time.Time
-	var provider string
-	var hasExecution bool
-	if err := service.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_execution_events WHERE store_id=$1 AND thread_id=$2 AND generation=$3)`, store, thread.ThreadID, thread.Generation).Scan(&hasExecution); err != nil {
-		return err
-	}
-	for cursor < thread.ItemCount {
-		rows, err := service.pool.Query(ctx, `SELECT item_seq,payload,created_at FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2 AND generation=$3
-		 AND item_seq>$4 AND item_seq<=$5 AND `+accountCostPredicate+` ORDER BY item_seq LIMIT 256`, store, thread.ThreadID, thread.Generation, cursor, thread.ItemCount)
-		if err != nil {
-			return err
-		}
-		page := []transcriptRow{}
-		for rows.Next() {
-			var raw []byte
-			var created time.Time
-			if err := rows.Scan(&cursor, &raw, &created); err != nil {
-				rows.Close()
-				return err
-			}
-			record, err := decodeObject(raw)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			page = append(page, transcriptRow{cursor, record, &created})
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		recordedAt, err := service.restoreImportedTimestamps(ctx, store, thread.ThreadID, page)
-		if err != nil {
-			return err
-		}
-		for _, row := range page {
-			record := row.payload
-			payload := object(record["payload"])
-			if stringValue(record["type"]) == "session_meta" {
-				provider = stringValue(payload["model_provider"])
-			} else if stringValue(record["type"]) == "event_msg" && stringValue(payload["type"]) == "thread_settings_applied" {
-				if value := stringValue(object(payload["thread_settings"])["model_provider_id"]); value != "" {
-					provider = value
-				}
-			}
-			before := cloneCostTotals(state.costTotals)
-			ApplyCostRecord(state, record, thread.ThreadID)
-			if !state.scopeStarted {
-				continue
-			}
-			delta := accountCostDelta(before, state.costTotals)
-			if !delta.observed && len(delta.reasons) == 0 {
-				continue
-			}
-			timestamp := recordTimestamp(record)
-			if timestamp == "" {
-				timestamp = recordedAt[row.sequence]
-			}
-			at, err := time.Parse(time.RFC3339Nano, timestamp)
-			if err != nil || at.Before(from) || at.After(to) {
-				continue
-			}
-			// Exact turn ownership survives account switches and clock skew. A
-			// timestamp fallback is only for bound child runtimes lacking turn events.
-			var owner *string
-			if hasExecution {
-				if !cachedTurnSet || cachedTurn != state.turnID {
-					cachedTurn, cachedTurnSet, cachedOwner = state.turnID, true, nil
-					err = service.pool.QueryRow(ctx, `SELECT btrim(a.name) FROM mira_codex_execution_events e
-				 JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
-				 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.generation=$3 AND e.turn_id=$4 AND $4<>''
-				 AND e.kind IN ('turn/started','turn/completed') ORDER BY e.event_seq DESC LIMIT 1`,
-						store, thread.ThreadID, thread.Generation, state.turnID).Scan(&cachedOwner)
-					if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-						return err
-					}
-				}
-				owner = cachedOwner
-				if owner == nil {
-					if !bindingCached || bindingFrom != nil && at.Before(*bindingFrom) || bindingUntil != nil && !at.Before(*bindingUntil) {
-						err = service.pool.QueryRow(ctx, `SELECT previous.name,previous.created_at,following.created_at FROM (SELECT 1) seed
-					 LEFT JOIN LATERAL (SELECT btrim(a.name) AS name,e.created_at FROM mira_codex_execution_events e
-					 JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
-					 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.generation=$3 AND e.kind IN ('bound','turn_requested') AND e.created_at<=$4
-					 ORDER BY e.created_at DESC,e.event_seq DESC LIMIT 1) previous ON true
-					 LEFT JOIN LATERAL (SELECT min(created_at) AS created_at FROM mira_codex_execution_events
-					 WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND kind IN ('bound','turn_requested') AND created_at>$4) following ON true`,
-							store, thread.ThreadID, thread.Generation, at).Scan(&bindingOwner, &bindingFrom, &bindingUntil)
-						if err != nil {
-							return err
-						}
-						bindingCached = true
-					}
-					owner = bindingOwner
-				}
-			}
-			if owner == nil && includes(providers, provider) {
-				owner = &name
-				incomplete(&delta, "historical_provider_attribution")
-			}
-			if owner != nil && *owner == name {
-				consume(at, delta)
-			}
-		}
-		if len(page) < 256 {
-			break
-		}
-	}
-	return nil
 }

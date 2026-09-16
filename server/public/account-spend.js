@@ -3,6 +3,13 @@ import { AccountHistory } from "./account-history.js";
 const money = value => `$${value.toFixed(2)}`;
 const ns = "http://www.w3.org/2000/svg";
 
+export function spendProjectionStatus(data) {
+  const progress = data?.projection;
+  if (!progress || progress.status === "ready") return "";
+  const percent = progress.totalItems > 0 ? Math.min(99, Math.floor(progress.processedItems / progress.totalItems * 100)) : 0;
+  return progress.status === "retrying" ? "部分用量汇总失败，后台正在重试" : `正在汇总用量 ${percent}%`;
+}
+
 export function spendCacheLifetime(data, fallback = 5 * 60_000) {
   if (data?.cache?.stale) return data.cache.refreshing ? 2_000 : 30_000;
   const expiresAt = Date.parse(data?.cache?.expiresAt);
@@ -65,8 +72,9 @@ export class AccountSpend extends AccountHistory {
     const data = this.data;
     const freshness = this.root.querySelector("[data-spend-freshness]");
     if (freshness) {
-      freshness.hidden = !data?.cache?.updatedAt;
-      freshness.textContent = data?.cache?.updatedAt ? `统计更新于 ${new Date(data.cache.updatedAt).toLocaleString()}${data.cache.stale ? data.cache.refreshing ? " · 正在更新，暂显示上次统计" : " · 更新暂不可用，显示上次统计" : ""}` : "";
+      const progress = spendProjectionStatus(data);
+      freshness.hidden = !data?.cache?.updatedAt && !progress;
+      freshness.textContent = [data?.cache?.updatedAt ? `统计更新于 ${new Date(data.cache.updatedAt).toLocaleString()}${data.cache.stale ? data.cache.refreshing ? " · 正在更新，暂显示上次统计" : " · 更新暂不可用，显示上次统计" : ""}` : "", progress].filter(Boolean).join(" · ");
     }
     const attribution = this.root.querySelector("[data-spend-attribution]");
     if (attribution) attribution.hidden = !data?.estimate?.reasons?.includes("historical_provider_attribution");
@@ -76,7 +84,7 @@ export class AccountSpend extends AccountHistory {
     this.svg.classList.toggle("hidden", !this.valid.length);
     const empty = this.root.querySelector("[data-history-empty]");
     empty.hidden = this.valid.length > 0;
-    empty.textContent = this.message || (this.controller ? "正在读取费用…" : "这个时间段暂无可归属、可定价的用量记录");
+    empty.textContent = this.message || spendProjectionStatus(data) || (this.controller ? "正在读取费用…" : "这个时间段暂无可归属、可定价的用量记录");
     this.root.querySelector("[data-history-legend]").hidden = !this.valid.length;
     this.svg.setAttribute("aria-label", "每日估算费用柱状图与日内累计曲线，左右方向键查看费用。");
     if (!this.valid.length) return;

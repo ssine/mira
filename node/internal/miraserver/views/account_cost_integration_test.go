@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"reflect"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -98,7 +101,11 @@ func TestAccountDailyCost(t *testing.T) {
 	bind("zero", "zero", a, 1)
 	service := New(pool)
 	service.now = func() time.Time { value, _ := time.Parse(time.RFC3339, "2026-09-12T09:00:00Z"); return value }
-	result, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	initial, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	if err != nil || initial["projection"].(map[string]any)["status"] != "updating" || initial["estimate"].(map[string]any)["amount"] != nil {
+		t.Fatalf("cold read must expose pending projection without replaying history: %v %v", initial, err)
+	}
+	result, err := projectedAccountCost(t, service, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,16 +116,16 @@ func TestAccountDailyCost(t *testing.T) {
 	if total := result["estimate"].(map[string]any); !closeFloat(total["amount"].(float64), .66) {
 		t.Fatalf("duplicate requests or inherited history counted: %#v", total)
 	}
-	other, err := service.AccountCostHistory(ctx, "Other cost fixture", "24h", "Asia/Shanghai")
+	other, err := projectedAccountCost(t, service, ctx, "Other cost fixture", "24h", "Asia/Shanghai")
 	if err != nil || !closeFloat(other["estimate"].(map[string]any)["amount"].(float64), .33) {
 		t.Fatalf("handoff: %#v %v", other, err)
 	}
 	for _, zone := range []string{"America/New_York", "Asia/Kathmandu"} {
-		if _, err := service.AccountCostHistory(ctx, "Shared cost fixture", "30d", zone); err != nil {
+		if _, err := projectedAccountCost(t, service, ctx, "Shared cost fixture", "30d", zone); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "invalid-zone"); err == nil {
+	if _, err := projectedAccountCost(t, service, ctx, "Shared cost fixture", "7d", "invalid-zone"); err == nil {
 		t.Fatal("invalid timezone accepted")
 	}
 
@@ -164,7 +171,7 @@ func TestAccountDailyCost(t *testing.T) {
 		raw, _ := json.Marshal(original)
 		exec(`INSERT INTO mira_codex_session_import_records(import_id,line_seq,raw_record,raw_sha256) VALUES($1::uuid,$2,$3::json,'fixture')`, importID, i+2, raw)
 	}
-	backfilled, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	backfilled, err := projectedAccountCost(t, service, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,14 +181,168 @@ func TestAccountDailyCost(t *testing.T) {
 			t.Fatalf("backfill day: %#v", day)
 		}
 	}
-	other, err = service.AccountCostHistory(ctx, "Other cost fixture", "7d", "Asia/Shanghai")
+	other, err = projectedAccountCost(t, service, ctx, "Other cost fixture", "7d", "Asia/Shanghai")
 	if err != nil || !closeFloat(other["estimate"].(map[string]any)["amount"].(float64), .66) {
 		t.Fatalf("historical provider switch: %#v %v", other, err)
 	}
 	exec(`UPDATE mira_codex_accounts SET provider='fixture-history-shared' WHERE account_id=$1::uuid`, c)
 	exec(`UPDATE mira_node_codex_accounts SET reported='{"provider":{"id":"fixture-legacy-shared"}}' WHERE node_account_id=$1::uuid`, c)
-	ambiguous, err := service.AccountCostHistory(ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	ambiguous, err := projectedAccountCost(t, service, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
 	if err != nil || !closeFloat(ambiguous["estimate"].(map[string]any)["amount"].(float64), 2.64) {
 		t.Fatalf("ambiguous historical provider was guessed: %#v %v", ambiguous, err)
 	}
+
+	// A large thread crosses durable page boundaries. Process restart,
+	// cancellation and concurrent retries must not duplicate or lose a request.
+	longItems := []map[string]any{contextRecord("gpt-6-astra", "long-turn")}
+	for i := int64(1); i <= 2*accountCostPageSize+3; i++ {
+		longItems = append(longItems, request(i*100000, "long-turn", "2026-09-11T18:00:00Z"))
+	}
+	insert("long", "", 1, longItems...)
+	bind("long", "long-turn", a, 1)
+	loadSource := func(id string) accountCostSource {
+		t.Helper()
+		var s accountCostSource
+		if err := pool.QueryRow(ctx, `WITH s AS (`+accountCostSourcesSQL+`) SELECT * FROM s WHERE store_id=$1 AND thread_id=$2`, store, id).
+			Scan(&s.store, &s.thread, &s.generation, &s.count, &s.fork, &s.key); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	source := loadSource("long")
+	if err := service.projectAccountCostPage(ctx, source); err != nil {
+		t.Fatal(err)
+	}
+	var cursor int64
+	readCursor := func() int64 {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `SELECT item_seq FROM mira_account_cost_checkpoints WHERE store_id=$1 AND thread_id='long'`, store).Scan(&cursor); err != nil {
+			t.Fatal(err)
+		}
+		return cursor
+	}
+	if readCursor() != accountCostPageSize {
+		t.Fatalf("page cursor: %d", cursor)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := service.projectAccountCostPage(cancelled, source); err == nil || readCursor() != accountCostPageSize {
+		t.Fatalf("cancelled page advanced: %d %v", cursor, err)
+	}
+	restarted := New(pool)
+	restarted.now = service.now
+	var concurrent sync.WaitGroup
+	for range 2 {
+		concurrent.Add(1)
+		go func() {
+			defer concurrent.Done()
+			if err := restarted.projectAccountCostPage(ctx, source); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	concurrent.Wait()
+	projectedAccountCost(t, restarted, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+	var entryCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mira_account_cost_entries WHERE store_id=$1 AND thread_id='long'`, store).Scan(&entryCount); err != nil || entryCount != len(longItems)-1 {
+		t.Fatalf("page replay count: %d, %v", entryCount, err)
+	}
+	// Late ownership changes reattribute existing projected entries without
+	// changing their cursor or re-reading the raw payloads.
+	bind("long", "long-turn", c, 1)
+	projectedAccountCost(t, restarted, ctx, "Other cost fixture", "7d", "Asia/Shanghai")
+	if readCursor() != int64(len(longItems)) {
+		t.Fatal("ownership update reset cursor")
+	}
+
+	// Generation replacement hides the old ledger immediately, before backfill.
+	insert("long", "", 2, contextRecord("gpt-6-astra", "replacement"), request(100000, "replacement", "2026-09-11T18:00:00Z"))
+	bind("long", "replacement", a, 2)
+	pending, err := restarted.AccountCostHistory(ctx, "Other cost fixture", "7d", "Asia/Shanghai")
+	if err != nil || pending["projection"].(map[string]any)["status"] != "updating" || pending["estimate"].(map[string]any)["amount"].(float64) > 10 {
+		t.Fatalf("stale generation leaked: %v %v", pending, err)
+	}
+	projectedAccountCost(t, restarted, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+
+	// Provenance can publish after native history has already been projected.
+	// A different immutable import invalidates timestamps without changing the
+	// canonical generation or count. Missing source times remain unpriced.
+	const laterImport = "30000000-0000-4000-8000-000000009002"
+	exec(`INSERT INTO mira_codex_session_imports(import_id,store_id,thread_id,source_node_id,source_path,source_sha256,source_size_bytes,source_item_count,store_event_seq,status)
+ VALUES($1::uuid,$2,'imported',$3::uuid,'later-fixture-rollout','later-fixture-sha',1,4,2,'imported')`, laterImport, store, nodeA)
+	for i, item := range imported {
+		original := cloneMap(item)
+		if i < 3 {
+			original["timestamp"] = "2026-09-09T10:00:00Z"
+		}
+		raw, _ := json.Marshal(original)
+		exec(`INSERT INTO mira_codex_session_import_records(import_id,line_seq,raw_record,raw_sha256) VALUES($1::uuid,$2,$3::json,'fixture')`, laterImport, i+1, raw)
+	}
+	projectedAccountCost(t, restarted, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
+
+	// Erasing canonical projections also erases all derived cost state.
+	exec(`DELETE FROM codex_thread_events WHERE store_id=$1 AND thread_id='long'`, store)
+	exec(`DELETE FROM codex_thread_projections WHERE store_id=$1 AND thread_id='long'`, store)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mira_account_cost_entries WHERE store_id=$1 AND thread_id='long'`, store).Scan(&entryCount); err != nil || entryCount != 0 {
+		t.Fatalf("erasure retained ledger: %d %v", entryCount, err)
+	}
+}
+
+// Build through independently committed pages, then compare the public read
+// against the previous canonical scanner on the same fixture.
+func projectedAccountCost(t *testing.T, service *Service, ctx context.Context, name, span, zone string) (map[string]any, error) {
+	t.Helper()
+	for {
+		n, err := service.projectAccountCosts(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	result, err := service.AccountCostHistory(ctx, name, span, zone)
+	if err != nil {
+		return result, err
+	}
+	previous, err := service.scanAccountCostHistory(ctx, name, span, zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"days", "points", "estimate"} {
+		// Model/reason order is presentation-only; SQL aggregation is unordered.
+		actual := normalizeAccountCost(result[key])
+		expected := normalizeAccountCost(previous[key])
+		if !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("%s mismatch: new=%s old=%s", key, actual, expected)
+		}
+	}
+	return result, nil
+}
+
+func normalizeAccountCost(value any) string {
+	raw, _ := json.Marshal(value)
+	var decoded any
+	_ = json.Unmarshal(raw, &decoded)
+	var normalize func(any)
+	normalize = func(v any) {
+		switch v := v.(type) {
+		case map[string]any:
+			for key, item := range v {
+				if key == "models" || key == "reasons" {
+					if list, ok := item.([]any); ok {
+						sort.Slice(list, func(i, j int) bool { return list[i].(string) < list[j].(string) })
+					}
+				}
+				normalize(item)
+			}
+		case []any:
+			for _, item := range v {
+				normalize(item)
+			}
+		}
+	}
+	normalize(decoded)
+	raw, _ = json.Marshal(decoded)
+	return string(raw)
 }

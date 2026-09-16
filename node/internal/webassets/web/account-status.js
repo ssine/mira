@@ -1,7 +1,7 @@
 import { accountQuery, accountNode, accountGroups } from "./codex-accounts.js";
 import { weeklyQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
-import { AccountSpend, spendCacheLifetime } from "./account-spend.js";
+import { AccountSpend, spendCacheLifetime, spendProjectionStatus } from "./account-spend.js";
 export { weeklyQuota } from "./account-quota.js";
 
 export function resetTime(timestamp, now = Date.now()) {
@@ -88,8 +88,9 @@ export class AccountSidebar {
       row.firstChild.textContent = group.name;
       const summary = this.summaries.get(group.name), estimate = summary?.data?.estimate;
       const cost = Number.isFinite(estimate?.amount) ? `7 天 ${estimate.status === "partial" ? "≥ " : ""}$${estimate.amount.toFixed(2)}`
-        : summary?.message || (summary ? "7 天暂无可估费用" : "7 天费用…");
+        : spendProjectionStatus(summary?.data) || summary?.message || (summary ? "7 天暂无可估费用" : "7 天费用…");
       row.lastChild.textContent = quota.remaining === null ? cost : `剩余 ${Number(quota.remaining.toFixed(1))}%`;
+      if (quota.remaining === null && Number.isFinite(estimate?.amount) && spendProjectionStatus(summary?.data)) row.lastChild.textContent += " · 汇总中";
       if (quota.remaining === null && summary?.data?.cache?.stale) row.lastChild.textContent += " · 上次统计";
       row.title = `${group.name} · ${[...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join("、")}${node.status !== "online" ? " · 上次记录" : ""}`;
       if (quota.remaining === null) row.title += " · 最近 7 天标准 API 价格估算，点击查看每日费用";

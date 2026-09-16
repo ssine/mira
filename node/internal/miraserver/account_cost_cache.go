@@ -148,7 +148,11 @@ func (cache *accountCostCache) refresh(key accountCostKey, entry *accountCostEnt
 		defer cache.mu.Unlock()
 		if err == nil {
 			entry.data, entry.updatedAt = data, cache.now()
-			entry.expiresAt = entry.updatedAt.Add(5 * time.Minute)
+			lifetime := time.Minute
+			if projection, ok := data["projection"].(map[string]any); ok && projection["status"] != "ready" {
+				lifetime = 5 * time.Second
+			}
+			entry.expiresAt = entry.updatedAt.Add(lifetime)
 			entry.retryAt = time.Time{}
 		} else {
 			// Keep an earlier successful amount; never replace it with zero.
