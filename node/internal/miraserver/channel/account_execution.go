@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
@@ -263,6 +264,16 @@ func readExecutionFamily(ctx context.Context, tx pgx.Tx, storeID, threadID strin
 }
 
 func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member executionMember, turn bool, root string) (int64, error) {
+	// The family was read before acquiring this member's storage lock. A
+	// concurrent delete may have won the lock; do not reserve a turn from that
+	// stale read after the deletion committed.
+	var deleted bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$2 AND action='delete')`, proxy.storeID, member.ID).Scan(&deleted); err != nil {
+		return 0, err
+	}
+	if deleted {
+		return 0, channelError("此会话已永久删除，不能继续写入或恢复。", http.StatusGone, "thread_deleted")
+	}
 	previous := member.Previous
 	exists := previous.Binding != ""
 	changed := !exists || previous.Binding != proxy.nodeAccountID || previous.Runtime != proxy.runtimeID || previous.Generation != member.Generation

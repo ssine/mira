@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `4b98e20f8`
+- Patch source commit: `d57edfaaaa24`
 
 Apply it to a clean checkout:
 
@@ -108,3 +108,17 @@ usage/quota/billing failures remain terminal. This targeted model-request fix
 does not replay completed tools or alter ThreadStore persistence. No provider
 configuration changes are required; the new runtime must be installed and the
 account App Server must load it before existing conversations benefit.
+
+Runtime revision `0.153.1-mira.15` confines a locally generated `ThreadNotFound`
+write failure to the affected thread. A deleted thread missing from a successful
+scoped head response previously latched a global error and disabled unrelated
+reads, appends and thread creation until restart. The deleted thread stays fenced;
+other conversations and subagents keep working. Regression coverage reproduces
+this response path and verifies existing writes, new roots and child creation.
+It also replaces the account-wide operation queue with bounded independent
+thread scopes, retaining parent/child and graph ordering and cancellation-safe
+durability barriers. Scoped memory caches reuse histories across unrelated writes
+and metadata changes, and extend acknowledged local appends. Generation changes
+and deletion invalidate cached histories. Regression tests hold a history read or
+parent write open while unrelated creation/flush succeeds, and verify cache
+reuse and generation isolation. See `docs/runtime-reliability.md` for cache bounds.

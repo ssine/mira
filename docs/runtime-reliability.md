@@ -32,22 +32,35 @@ failures retain their existing retry policies.
   `Retry-After` is respected up to 60 seconds. Transient failures keep retrying
   while the runtime is alive, with diagnostic warnings. This is storage retry,
   **not** a retry of a model request or a tool execution.
-- Started writes are serialized independently of the requesting task's lifetime.
+- Started operations are ordered per affected thread independently of the requesting task's lifetime.
   Cancelling a turn stops its work but does not discard an already-started write.
   A flush waits for earlier queued writes, including cancelled callers, and only
   succeeds after acknowledgement. It does not download the whole store again.
+  Revision `0.153.1-mira.15` permits up to eight independent scopes concurrently.
+  A large history read or upload cannot monopolize the account's writer. Parent
+  creation, child creation and graph writes retain their shared-thread ordering;
+  a store-wide operation remains a barrier. Slow queue waits and operations emit
+  diagnostic timings without message contents.
 - Authorization/validation failures, incompatible responses and actual optimistic
   conflicts are not blindly retried. Authorization/protocol failures latch a
   runtime storage error; optimistic conflicts and thread request rejections
   (HTTP 404/410/413) fence writes and durability barriers for the affected thread
   only. Unrelated threads (including subagents) can continue, and canonical history
   remains readable after a thread conflict.
+  Runtime revision `0.153.1-mira.15` also scopes a locally generated
+  `ThreadNotFound` to its thread. A successful head response omitting a deleted
+  thread must not disable reads, appends or thread creation across the account.
   Resolve the conflict, then restart the affected runtime; unknown-outcome commits
   must be inspected before resubmitting work. There is no automatic tool replay.
 - Resuming an existing thread only reopens persistence for future appends. The
   caller's replay history cannot replace canonical records or recreate a thread
   deleted while the history request was in flight. Check existence against the
   current scoped metadata before applying resume metadata.
+- Administrator deletion checks managed execution reservations on the Server,
+  including `starting` before `turn/started` reaches a browser. The check shares
+  the turn-start storage lock, and execution claims recheck deletion after taking
+  that lock. A stopped or replaced runtime does not leave a stale reservation
+  blocking deletion. Late writes from a deleted thread remain rejected.
 - Keep the raw canonical state alongside the typed in-memory projection. Determine
   intended leaf changes from the typed before/after snapshots, but build CAS
   expectations from the original raw JSON. Missing optional fields are different
@@ -76,6 +89,15 @@ They do not claim end-to-end recovery of every subagent orchestration pattern.
 Metadata-only thread reads retain their thread scope independently of whether
 history is requested. Restoring a tree of subagents must not download the whole
 store for every child. History reads retain generation/version validation.
+
+The remote adapter retains up to eight scoped in-memory projections with a
+256 MiB serialized-payload retention budget. Every reuse validates the current
+canonical head. Unrelated global version changes and metadata-only changes retain
+unchanged histories; acknowledged local appends extend a validated cached prefix.
+A changed generation, deleted thread or externally changed history boundary
+requires a fresh canonical read. Cache eviction never limits conversation size
+and does not create a local durable history store. The budget describes serialized
+payloads, not an exact bound on process heap usage.
 
 Web resume keeps one request per thread/socket until acknowledgement or
 disconnect. Elapsed time changes the visible waiting message instead of dropping

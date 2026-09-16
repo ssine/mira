@@ -257,3 +257,34 @@ func TestAccountExecutionHandoffMovesWholeCurrentGenerationTree(t *testing.T) {
 	}
 	assertBindings(true)
 }
+
+func TestExecutionClaimRejectsThreadDeletedAfterFamilyRead(t *testing.T) {
+	pool := executionTestDatabase(t)
+	ctx := context.Background()
+	const store, thread = "delete-race", "deleted-thread"
+	operation, err := randomUUID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = pool.Exec(ctx, `INSERT INTO mira_thread_actions(store_id,thread_id,action,operation_id,generation,item_count) VALUES($1,$2,'delete',$3,1,1)`, store, thread, operation); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	// Simulate the family snapshot obtained before deletion won the storage lock.
+	key := `["mira-thread","delete-race","deleted-thread"]`
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, key); err != nil {
+		t.Fatal(err)
+	}
+	_, err = writeExecutionRoute(ctx, tx, &proxy{storeID: store}, executionMember{ID: thread, Generation: 1}, true, thread)
+	if rejection, ok := err.(*Error); !ok || rejection.Code != "thread_deleted" {
+		t.Fatalf("deleted thread claim: %v", err)
+	}
+	var writes int
+	if err := tx.QueryRow(ctx, `SELECT (SELECT count(*) FROM mira_codex_execution_routes WHERE store_id=$1)+(SELECT count(*) FROM mira_codex_execution_events WHERE store_id=$1)`, store).Scan(&writes); err != nil || writes != 0 {
+		t.Fatalf("deleted thread acquired execution: %d %v", writes, err)
+	}
+}

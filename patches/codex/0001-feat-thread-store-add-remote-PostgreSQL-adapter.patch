@@ -1,4 +1,4 @@
-From 4b98e20f8efb2b888baecef8a46245410da9a7fe Mon Sep 17 00:00:00 2001
+From d57edfaaaa24ca5dceb96e0771cf347920c5dc6c Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Sat, 12 Sep 2026 05:14:26 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
@@ -45,25 +45,28 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  codex-rs/core/src/thread_manager_tests.rs     |   45 +
  codex-rs/core/tests/suite/guardian_history.rs |    3 +
  codex-rs/core/tests/suite/mod.rs              |    1 +
- codex-rs/core/tests/suite/rate_limit_retry.rs |  205 ++++
+ codex-rs/core/tests/suite/rate_limit_retry.rs |  205 +++
  codex-rs/core/tests/suite/retry_after.rs      |  152 +--
  ...uite__rate_limit_retry__http_429_wait.snap |    6 +
  codex-rs/protocol/src/error.rs                |   12 +-
  codex-rs/protocol/src/error_tests.rs          |    2 +-
  codex-rs/thread-store/Cargo.toml              |    1 +
- codex-rs/thread-store/src/in_memory.rs        |   86 +-
+ codex-rs/thread-store/src/in_memory.rs        |   94 +-
  codex-rs/thread-store/src/lib.rs              |    4 +
- codex-rs/thread-store/src/remote_http.rs      | 1043 +++++++++++++++++
+ codex-rs/thread-store/src/remote_http.rs      | 1097 +++++++++++++++++
  .../src/remote_http/agent_graph.rs            |   35 +
+ .../thread-store/src/remote_http/cache.rs     |   71 ++
+ .../src/remote_http/concurrency_tests.rs      |  333 +++++
  .../src/remote_http/input_recovery.rs         |   62 +
  .../src/remote_http/input_recovery_tests.rs   |   47 +
+ .../thread-store/src/remote_http/queue.rs     |  101 ++
  .../thread-store/src/remote_http/retry.rs     |   89 ++
- .../src/remote_http/retry_tests.rs            |  672 +++++++++++
+ .../src/remote_http/retry_tests.rs            |  789 ++++++++++++
  .../thread-store/src/remote_http/uploads.rs   |  146 +++
- .../thread-store/src/remote_http/writer.rs    |  330 ++++++
+ .../thread-store/src/remote_http/writer.rs    |  350 ++++++
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
- 58 files changed, 4046 insertions(+), 359 deletions(-)
+ 61 files changed, 4750 insertions(+), 359 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
@@ -73,8 +76,11 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  create mode 100644 codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap
  create mode 100644 codex-rs/thread-store/src/remote_http.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/agent_graph.rs
+ create mode 100644 codex-rs/thread-store/src/remote_http/cache.rs
+ create mode 100644 codex-rs/thread-store/src/remote_http/concurrency_tests.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/input_recovery.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/input_recovery_tests.rs
+ create mode 100644 codex-rs/thread-store/src/remote_http/queue.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/retry.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/retry_tests.rs
  create mode 100644 codex-rs/thread-store/src/remote_http/uploads.rs
@@ -15742,7 +15748,7 @@ index b0d2b155682a5458c2b9bcb94e72d15e701c5e97..64cb882f286d601b3e4f3fb12cdc4c7b
  serde_json = { workspace = true }
  sqlx = { workspace = true }
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..8b4213c44f823a7ef68e14be847b6b3125b3927c 100644
+index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..9fa56b9c37305c798e27ec47a40b833abd0dccb1 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -20,6 +20,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
@@ -15766,7 +15772,7 @@ index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..8b4213c44f823a7ef68e14be847b6b31
      calls: InMemoryThreadStoreCalls,
      created_threads: HashMap<ThreadId, CreateThreadParams>,
      histories: HashMap<ThreadId, Vec<RolloutItem>>,
-@@ -512,7 +516,87 @@ struct InMemoryThreadStoreState {
+@@ -512,7 +516,95 @@ struct InMemoryThreadStoreState {
      rollout_paths: HashMap<PathBuf, ThreadId>,
  }
  
@@ -15851,6 +15857,14 @@ index 9ea7e2bdef18f0c4e89d98d2740b9fbb08e44df7..8b4213c44f823a7ef68e14be847b6b31
 +        Ok(())
 +    }
 +
++    /// Move a validated canonical prefix between ephemeral metadata projections.
++    pub(crate) async fn move_history_from(&self, previous: &Self, thread_id: ThreadId) {
++        let history = previous.state.lock().await.histories.remove(&thread_id);
++        if let Some(history) = history {
++            self.state.lock().await.histories.insert(thread_id, history);
++        }
++    }
++
      /// Returns the store associated with `id`, creating it if needed.
      pub fn for_id(id: impl Into<String>) -> Arc<Self> {
          let id = id.into();
@@ -15878,10 +15892,10 @@ index a8b6a366506829c9b5e291d20ae852a5c98f1588..1b94e25db98d51e996ee6a076f6bbad7
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c33965b67c877
+index 0000000000000000000000000000000000000000..a37e820e02f26b0cd8c43098abb40ae88d085061
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,1043 @@
+@@ -0,0 +1,1097 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
@@ -15920,6 +15934,10 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +
 +mod agent_graph;
 +
++mod cache;
++#[cfg(test)]
++mod concurrency_tests;
++mod queue;
 +mod retry;
 +mod uploads;
 +mod writer;
@@ -15942,7 +15960,7 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +    history_manifest: HashMap<String, HistoryManifestEntry>,
 +}
 +
-+#[derive(Clone, Deserialize, Serialize)]
++#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 +#[serde(rename_all = "camelCase")]
 +struct HistoryManifestEntry {
 +    generation: u64,
@@ -16015,6 +16033,7 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +    canonical_state: serde_json::Value,
 +    history_manifest: HashMap<String, HistoryManifestEntry>,
 +    loaded_histories: HashSet<ThreadId>,
++    history_bytes: HashMap<ThreadId, usize>,
 +    store: InMemoryThreadStore,
 +}
 +
@@ -16032,10 +16051,10 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +    bearer_token: String,
 +    input_recoveries: Arc<std::sync::Mutex<HashMap<ThreadId, InputRecovery>>>,
 +    operation_gate: Arc<tokio::sync::Semaphore>,
-+    cache: Arc<std::sync::Mutex<Option<CachedStore>>>,
++    cache: Arc<std::sync::Mutex<cache::StoreCaches>>,
 +    write_error: Arc<std::sync::Mutex<Option<String>>>,
 +    thread_write_errors: Arc<std::sync::Mutex<HashMap<ThreadId, String>>>,
-+    write_tail: Arc<std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>>,
++    operation_queue: Arc<std::sync::Mutex<queue::OperationQueue>>,
 +}
 +
 +impl RemoteHttpThreadStore {
@@ -16068,11 +16087,11 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +            input_recoveries: Arc::new(std::sync::Mutex::new(HashMap::new())),
 +            store_url: format!("{}/v2/stores/{store_id}", endpoint.trim_end_matches('/')),
 +            bearer_token: bearer_token.into(),
-+            operation_gate: Arc::new(tokio::sync::Semaphore::new(1)),
-+            cache: Arc::new(std::sync::Mutex::new(None)),
++            operation_gate: Arc::new(tokio::sync::Semaphore::new(8)),
++            cache: Arc::new(std::sync::Mutex::new(cache::StoreCaches::default())),
 +            write_error: Arc::new(std::sync::Mutex::new(None)),
 +            thread_write_errors: Arc::new(std::sync::Mutex::new(HashMap::new())),
-+            write_tail: Arc::new(std::sync::Mutex::new(None)),
++            operation_queue: Arc::new(std::sync::Mutex::new(queue::OperationQueue::default())),
 +        }
 +    }
 +
@@ -16104,18 +16123,20 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +        thread
 +    }
 +
-+    fn take_cache(&self) -> Option<CachedStore> {
++    fn take_cache(&self, scope: Option<ThreadId>) -> Option<CachedStore> {
 +        self.cache
 +            .lock()
 +            .unwrap_or_else(std::sync::PoisonError::into_inner)
-+            .take()
++            .take(scope)
 +    }
 +
 +    fn replace_cache(&self, cache: Option<CachedStore>) {
-+        *self
-+            .cache
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner) = cache;
++        if let Some(cache) = cache {
++            self.cache
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .put(cache);
++        }
 +    }
 +
 +    async fn head_for_thread(&self, scope: Option<ThreadId>) -> ThreadStoreResult<HeadResponse> {
@@ -16156,6 +16177,7 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +            canonical_state: state,
 +            history_manifest,
 +            loaded_histories: HashSet::new(),
++            history_bytes: HashMap::new(),
 +            store: InMemoryThreadStore::from_snapshot(Some(serde_json::Value::Object(snapshot)))?,
 +        })
 +    }
@@ -16198,6 +16220,9 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +                }
 +            }
 +            cached
++                .history_bytes
++                .insert(thread_id, cache::serialized_size(&history.items));
++            cached
 +                .store
 +                .install_history(thread_id, history.items)
 +                .await?;
@@ -16212,14 +16237,50 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +        scope: Option<ThreadId>,
 +    ) -> ThreadStoreResult<()> {
 +        let head = self.head_for_thread(scope).await?;
++        self.refresh_from_head(cache, scope, head).await
++    }
++
++    async fn refresh_from_head(
++        &self,
++        cache: &mut Option<CachedStore>,
++        scope: Option<ThreadId>,
++        head: HeadResponse,
++    ) -> ThreadStoreResult<()> {
 +        if cache
 +            .as_ref()
 +            .is_some_and(|cached| cached.version == head.version && cached.scope == scope)
 +        {
 +            return Ok(());
 +        }
++        // Other conversations advance the global version without changing this
++        // scoped projection or its immutable history prefix.
++        if let Some(cached) = cache.as_mut()
++            && cached.scope == scope
++            && cached.canonical_state == head.state
++            && cached.history_manifest == head.history_manifest
++        {
++            cached.version = head.version;
++            return Ok(());
++        }
 +        let mut loaded = self.load(head).await?;
 +        loaded.scope = scope;
++        if let Some(previous) = cache.take() {
++            for thread_id in &previous.loaded_histories {
++                let key = thread_id.to_string();
++                if let Some(entry) = loaded.history_manifest.get(&key)
++                    && previous.history_manifest.get(&key) == Some(entry)
++                {
++                    loaded
++                        .store
++                        .move_history_from(&previous.store, *thread_id)
++                        .await;
++                    loaded.loaded_histories.insert(*thread_id);
++                    if let Some(bytes) = previous.history_bytes.get(thread_id) {
++                        loaded.history_bytes.insert(*thread_id, *bytes);
++                    }
++                }
++            }
++        }
 +        *cache = Some(loaded);
 +        Ok(())
 +    }
@@ -16331,18 +16392,34 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +        Ok(())
 +    }
 +
-+    async fn read<T: Send>(
++    async fn read<T: Send + 'static>(
++        &self,
++        scope: ReadScope,
++        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T>
++        + Send
++        + 'static,
++    ) -> ThreadStoreResult<T> {
++        let thread_id = match scope {
++            ReadScope::Store => None,
++            ReadScope::Thread(id) | ReadScope::ThreadWithHistory(id) => Some(id),
++        };
++        self.enqueue_operation(thread_id.into_iter().collect(), move |store| {
++            Box::pin(async move { store.read_inner(scope, operation).await })
++        })
++        .await
++    }
++
++    async fn read_inner<T: Send>(
 +        &self,
 +        scope: ReadScope,
 +        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
 +    ) -> ThreadStoreResult<T> {
-+        let _permit = self
-+            .operation_gate
-+            .acquire()
-+            .await
-+            .map_err(|_| operation_gate_closed())?;
 +        self.check_write_error()?;
-+        let mut cache = self.take_cache();
++        let thread_id = match scope {
++            ReadScope::Store => None,
++            ReadScope::Thread(id) | ReadScope::ThreadWithHistory(id) => Some(id),
++        };
++        let mut cache = self.take_cache(thread_id);
 +        let result = async {
 +            let thread_id = match scope {
 +                ReadScope::Store => None,
@@ -16577,9 +16654,16 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +
 +    fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreFuture<'_, ()> {
 +        let thread_id = params.thread_id;
-+        Box::pin(self.mutate(vec![thread_id], move |store| {
-+            ThreadStore::create_thread(store, params)
-+        }))
++        let dependencies = params
++            .parent_thread_id
++            .into_iter()
++            .chain(params.forked_from_id)
++            .collect();
++        Box::pin(
++            self.mutate_after(vec![thread_id], dependencies, move |store| {
++                ThreadStore::create_thread(store, params)
++            }),
++        )
 +    }
 +
 +    fn resume_thread(&self, mut params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
@@ -16628,27 +16712,11 @@ index 0000000000000000000000000000000000000000..5b1d2cc37a5586c4239ef078677c3396
 +
 +    fn flush_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
 +        Box::pin(async move {
-+            // Mutations are acknowledged synchronously. This is a cheap ordered durability
-+            // barrier, including writes whose callers were cancelled, not another head download.
-+            let pending = self
-+                .write_tail
-+                .lock()
-+                .unwrap_or_else(std::sync::PoisonError::into_inner)
-+                .clone();
-+            if let Some(mut pending) = pending {
-+                pending.wait_for(|finished| *finished).await.map_err(|_| {
-+                    ThreadStoreError::Internal {
-+                        message: "remote thread-store write worker stopped before acknowledgement"
-+                            .to_string(),
-+                    }
-+                })?;
-+            }
-+            let _permit = self
-+                .operation_gate
-+                .acquire()
-+                .await
-+                .map_err(|_| operation_gate_closed())?;
-+            self.check_thread_write_errors(&[thread_id])
++            // An ordered barrier for this thread, including cancelled callers.
++            self.enqueue_operation(vec![thread_id], move |store| {
++                Box::pin(async move { store.check_thread_write_errors(&[thread_id]) })
++            })
++            .await
 +        })
 +    }
 +
@@ -16966,6 +17034,422 @@ index 0000000000000000000000000000000000000000..4c4610e21b9bffaa288920b1ae88739c
 +        .await
 +    }
 +}
+diff --git a/codex-rs/thread-store/src/remote_http/cache.rs b/codex-rs/thread-store/src/remote_http/cache.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c1e0bf8dc3a7c85bdbcd53e82a0677265244f035
+--- /dev/null
++++ b/codex-rs/thread-store/src/remote_http/cache.rs
+@@ -0,0 +1,71 @@
++use std::collections::VecDeque;
++use std::io::Write;
++
++use codex_protocol::ThreadId;
++use serde::Serialize;
++
++use super::CachedStore;
++
++const MAX_CACHED_SCOPES: usize = 8;
++// Serialized payload budget, not a limit on canonical history or downloads.
++const MAX_CACHED_BYTES: usize = 256 * 1024 * 1024;
++
++#[derive(Default)]
++pub(super) struct StoreCaches {
++    entries: VecDeque<(CachedStore, usize)>,
++    bytes: usize,
++}
++
++impl StoreCaches {
++    pub(super) fn take(&mut self, scope: Option<ThreadId>) -> Option<CachedStore> {
++        let index = self
++            .entries
++            .iter()
++            .position(|(cache, _)| cache.scope == scope)?;
++        let (cache, size) = self.entries.remove(index)?;
++        self.bytes -= size;
++        Some(cache)
++    }
++
++    pub(super) fn put(&mut self, cache: CachedStore) {
++        self.take(cache.scope);
++        let size = cache
++            .history_bytes
++            .values()
++            .fold(serialized_size(&cache.canonical_state), |total, bytes| {
++                total.saturating_add(*bytes)
++            });
++        if size > MAX_CACHED_BYTES {
++            return;
++        }
++        while self.entries.len() >= MAX_CACHED_SCOPES
++            || self.bytes.saturating_add(size) > MAX_CACHED_BYTES
++        {
++            let Some((_, bytes)) = self.entries.pop_front() else {
++                break;
++            };
++            self.bytes -= bytes;
++        }
++        self.bytes += size;
++        self.entries.push_back((cache, size));
++    }
++}
++
++// Count without allocating another serialized copy of a potentially large history.
++pub(super) fn serialized_size(value: &impl Serialize) -> usize {
++    struct Counter(usize);
++    impl Write for Counter {
++        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
++            self.0 = self.0.saturating_add(bytes.len());
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> std::io::Result<()> {
++            Ok(())
++        }
++    }
++    let mut counter = Counter(0);
++    match serde_json::to_writer(&mut counter, value) {
++        Ok(()) => counter.0,
++        Err(_) => usize::MAX,
++    }
++}
+diff --git a/codex-rs/thread-store/src/remote_http/concurrency_tests.rs b/codex-rs/thread-store/src/remote_http/concurrency_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..55737d61f7fe089aecbf1c6f905158491f57bd95
+--- /dev/null
++++ b/codex-rs/thread-store/src/remote_http/concurrency_tests.rs
+@@ -0,0 +1,333 @@
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++use tokio::io::AsyncReadExt;
++use tokio::io::AsyncWriteExt;
++use tokio::sync::mpsc;
++use tokio::sync::oneshot;
++
++use super::RemoteHttpThreadStore;
++use super::retry::tests::create;
++use crate::ReadThreadParams;
++use crate::ThreadStore;
++
++struct Request {
++    raw: String,
++    reply: oneshot::Sender<serde_json::Value>,
++}
++
++struct Server {
++    requests: mpsc::UnboundedReceiver<Request>,
++    task: tokio::task::JoinHandle<()>,
++}
++
++impl Drop for Server {
++    fn drop(&mut self) {
++        self.task.abort();
++    }
++}
++
++impl Server {
++    async fn new() -> (RemoteHttpThreadStore, Self) {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++        let store = RemoteHttpThreadStore::new(
++            format!("http://{}", listener.local_addr().unwrap()),
++            "test",
++            "test-token",
++        );
++        let (tx, requests) = mpsc::unbounded_channel();
++        let task = tokio::spawn(async move {
++            let mut connections = tokio::task::JoinSet::new();
++            loop {
++                let (mut stream, _) = listener.accept().await.unwrap();
++                let tx = tx.clone();
++                connections.spawn(async move {
++                    let mut bytes = Vec::new();
++                    loop {
++                        let mut buffer = [0; 4096];
++                        let count = stream.read(&mut buffer).await.unwrap();
++                        assert!(count > 0);
++                        bytes.extend_from_slice(&buffer[..count]);
++                        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
++                            let header = String::from_utf8_lossy(&bytes[..end]).to_lowercase();
++                            let length = header.lines()
++                                .find_map(|line| line.strip_prefix("content-length: "))
++                                .map(|value| value.parse::<usize>().unwrap()).unwrap_or(0);
++                            if bytes.len() >= end + 4 + length { break; }
++                        }
++                    }
++                    let (reply, result) = oneshot::channel();
++                    if tx.send(Request { raw: String::from_utf8(bytes).unwrap(), reply }).is_err() { return; }
++                    let Ok(body) = result.await else { return; };
++                    let body = body.to_string();
++                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
++                    let _ = stream.write_all(response.as_bytes()).await;
++                });
++                while connections.try_join_next().is_some() {}
++            }
++        });
++        (store, Self { requests, task })
++    }
++
++    async fn next(&mut self, prefix: &str) -> Request {
++        let request = tokio::time::timeout(Duration::from_secs(2), self.requests.recv())
++            .await
++            .expect("unrelated operation was blocked")
++            .unwrap();
++        assert!(
++            request.raw.starts_with(prefix),
++            "unexpected request: {}",
++            request.raw.lines().next().unwrap()
++        );
++        request
++    }
++
++    async fn create(&mut self, id: ThreadId, version: u64) {
++        self.next(&format!("GET /v2/stores/test?threadId={id} "))
++            .await
++            .reply
++            .send(json!({"version":version,"state":{},"historyManifest":{}}))
++            .unwrap();
++        self.next("POST /v2/stores/test/commits ")
++            .await
++            .reply
++            .send(json!({"version":version+1,"historyManifest":{}}))
++            .unwrap();
++    }
++}
++
++#[tokio::test]
++async fn slow_history_does_not_block_unrelated_creation_or_flush() {
++    let (store, mut server) = Server::new().await;
++    let large = ThreadId::new();
++    let reader = {
++        let store = store.clone();
++        tokio::spawn(async move {
++            store
++                .read_thread(ReadThreadParams {
++                    thread_id: large,
++                    include_archived: true,
++                    include_history: true,
++                })
++                .await
++        })
++    };
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(json!({"version":1,
++        "state":{"created_threads":{large.to_string():create(large, None)}},
++        "historyManifest":{large.to_string():{"generation":1,"itemCount":0}}}))
++        .unwrap();
++    let history = server
++        .next(&format!("GET /v2/stores/test/threads/{large}/history?"))
++        .await;
++    let fresh = ThreadId::new();
++    let writer = {
++        let store = store.clone();
++        tokio::spawn(async move {
++            store.create_thread(create(fresh, None)).await?;
++            store.flush_thread(fresh).await
++        })
++    };
++    server.create(fresh, 1).await;
++    tokio::time::timeout(Duration::from_secs(2), writer)
++        .await
++        .unwrap()
++        .unwrap()
++        .unwrap();
++    assert!(!reader.is_finished());
++    history
++        .reply
++        .send(json!({"generation":1,"itemCount":0,"items":[]}))
++        .unwrap();
++    reader.await.unwrap().unwrap();
++}
++
++#[tokio::test]
++async fn cancelled_parent_write_blocks_its_child_but_not_another_root() {
++    let (store, mut server) = Server::new().await;
++    let parent = ThreadId::new();
++    let writer = {
++        let store = store.clone();
++        tokio::spawn(async move { store.create_thread(create(parent, None)).await })
++    };
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(json!({"version":0,"state":{},"historyManifest":{}}))
++        .unwrap();
++    let pending = server.next("POST ").await;
++    writer.abort();
++    let child = ThreadId::new();
++    let child_writer = {
++        let store = store.clone();
++        tokio::spawn(async move { store.create_thread(create(child, Some(parent))).await })
++    };
++    let fresh = ThreadId::new();
++    let other = {
++        let store = store.clone();
++        tokio::spawn(async move {
++            store.create_thread(create(fresh, None)).await?;
++            store.flush_thread(fresh).await
++        })
++    };
++    server.create(fresh, 0).await;
++    tokio::time::timeout(Duration::from_secs(2), other)
++        .await
++        .unwrap()
++        .unwrap()
++        .unwrap();
++    assert!(!child_writer.is_finished());
++    assert!(
++        tokio::time::timeout(Duration::from_millis(50), store.flush_thread(parent))
++            .await
++            .is_err()
++    );
++    pending
++        .reply
++        .send(json!({"version":2,"historyManifest":{}}))
++        .unwrap();
++    server.create(child, 2).await;
++    child_writer.await.unwrap().unwrap();
++    store.flush_thread(parent).await.unwrap();
++    assert!(server.requests.try_recv().is_err());
++}
++
++fn head(id: ThreadId, version: u64, generation: u64, count: usize) -> serde_json::Value {
++    json!({"version":version,"state":{"created_threads":{id.to_string():create(id, None)}},
++        "historyManifest":{id.to_string():{"generation":generation,"itemCount":count}}})
++}
++
++fn message(text: &str) -> serde_json::Value {
++    json!({"type":"response_item","payload":{"type":"message","role":"assistant",
++        "content":[{"type":"output_text","text":text}]}})
++}
++
++async fn read(
++    store: RemoteHttpThreadStore,
++    id: ThreadId,
++) -> crate::ThreadStoreResult<crate::StoredThreadHistory> {
++    store
++        .load_history(crate::LoadThreadHistoryParams {
++            thread_id: id,
++            include_archived: true,
++        })
++        .await
++}
++
++#[tokio::test]
++async fn cached_history_survives_other_scopes_metadata_and_acknowledged_appends() {
++    let (store, mut server) = Server::new().await;
++    let a = ThreadId::new();
++    let b = ThreadId::new();
++    let heads = [head(a, 1, 1, 1), head(b, 2, 1, 1)];
++    for (id, head) in [a, b].into_iter().zip(&heads) {
++        let reader = tokio::spawn(read(store.clone(), id));
++        server.next("GET ").await.reply.send(head.clone()).unwrap();
++        server
++            .next(&format!("GET /v2/stores/test/threads/{id}/history?"))
++            .await
++            .reply
++            .send(json!({"generation":1,"itemCount":1,"items":[message("original")]}))
++            .unwrap();
++        assert_eq!(reader.await.unwrap().unwrap().items.len(), 1);
++    }
++    // Change metadata and global version, retaining the exact history boundary.
++    let mut changed = heads[0].clone();
++    changed["version"] = json!(3);
++    changed["state"]["names"] = json!({a.to_string():"renamed"});
++    let reader = tokio::spawn(read(store.clone(), a));
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(changed.clone())
++        .unwrap();
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(2), reader)
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap()
++            .items
++            .len(),
++        1
++    );
++
++    let append = {
++        let store = store.clone();
++        tokio::spawn(async move {
++            store
++                .append_items(crate::AppendThreadItemsParams {
++                    thread_id: a,
++                    items: vec![serde_json::from_value(message("acknowledged")).unwrap()],
++                })
++                .await
++        })
++    };
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(changed.clone())
++        .unwrap();
++    let commit = server.next("POST ").await;
++    assert!(!append.is_finished());
++    commit
++        .reply
++        .send(json!({"version":4,"historyManifest":{a.to_string():{"generation":1,"itemCount":2}}}))
++        .unwrap();
++    append.await.unwrap().unwrap();
++    changed["version"] = json!(4);
++    changed["historyManifest"][a.to_string()]["itemCount"] = json!(2);
++    let reader = tokio::spawn(read(store.clone(), a));
++    server.next("GET ").await.reply.send(changed).unwrap();
++    let history = tokio::time::timeout(Duration::from_secs(2), reader)
++        .await
++        .unwrap()
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        serde_json::to_value(history.items).unwrap(),
++        json!([message("original"), message("acknowledged")])
++    );
++    assert!(server.requests.try_recv().is_err());
++}
++
++#[tokio::test]
++async fn cache_never_combines_generations_or_returns_a_deleted_thread() {
++    let (store, mut server) = Server::new().await;
++    let id = ThreadId::new();
++    let mut current = head(id, 1, 1, 1);
++    for generation in [1, 2] {
++        current["version"] = json!(generation);
++        current["historyManifest"][id.to_string()]["generation"] = json!(generation);
++        let reader = tokio::spawn(read(store.clone(), id));
++        server
++            .next("GET ")
++            .await
++            .reply
++            .send(current.clone())
++            .unwrap();
++        server.next(&format!("GET /v2/stores/test/threads/{id}/history?generation={generation}&")).await.reply
++            .send(json!({"generation":generation,"itemCount":1,"items":[message(&generation.to_string())]})).unwrap();
++        assert_eq!(
++            serde_json::to_value(reader.await.unwrap().unwrap().items).unwrap(),
++            json!([message(&generation.to_string())])
++        );
++    }
++    let reader = tokio::spawn(read(store.clone(), id));
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(json!({"version":3,"state":{},"historyManifest":{}}))
++        .unwrap();
++    assert!(reader.await.unwrap().is_err());
++    assert!(server.requests.try_recv().is_err());
++}
 diff --git a/codex-rs/thread-store/src/remote_http/input_recovery.rs b/codex-rs/thread-store/src/remote_http/input_recovery.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..2161eb555cd3dcebaee813d1c390c0708579857e
@@ -17087,9 +17571,116 @@ index 0000000000000000000000000000000000000000..d6957bb497e9bed785372c29138501ad
 +    assert!(result.is_err());
 +    assert_eq!(items.len(), 0);
 +}
+diff --git a/codex-rs/thread-store/src/remote_http/queue.rs b/codex-rs/thread-store/src/remote_http/queue.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..334696ce689b0f17afb2e5e50ffa8e16a158cc25
+--- /dev/null
++++ b/codex-rs/thread-store/src/remote_http/queue.rs
+@@ -0,0 +1,101 @@
++use std::collections::HashMap;
++use std::panic::AssertUnwindSafe;
++
++use codex_protocol::ThreadId;
++use futures::FutureExt;
++use tokio::sync::watch;
++
++use super::RemoteHttpThreadStore;
++use super::operation_gate_closed;
++use crate::ThreadStoreError;
++use crate::ThreadStoreFuture;
++use crate::ThreadStoreResult;
++
++#[derive(Default)]
++pub(super) struct OperationQueue {
++    store: Option<watch::Receiver<bool>>,
++    threads: HashMap<ThreadId, watch::Receiver<bool>>,
++}
++
++impl OperationQueue {
++    fn enqueue(
++        &mut self,
++        thread_ids: &[ThreadId],
++        tail: watch::Receiver<bool>,
++    ) -> Vec<watch::Receiver<bool>> {
++        // Completed entries are not a durable per-thread registry.
++        self.threads.retain(|_, tail| !*tail.borrow());
++        if self.store.as_ref().is_some_and(|tail| *tail.borrow()) {
++            self.store = None;
++        }
++        let mut previous = self.store.iter().cloned().collect::<Vec<_>>();
++        if thread_ids.is_empty() {
++            // Store-wide operations are barriers for all preceding/following scopes.
++            previous.extend(self.threads.drain().map(|(_, tail)| tail));
++            self.store = Some(tail);
++        } else {
++            for thread_id in thread_ids {
++                if let Some(prior) = self.threads.insert(*thread_id, tail.clone()) {
++                    previous.push(prior);
++                }
++            }
++        }
++        previous
++    }
++}
++
++impl RemoteHttpThreadStore {
++    pub(super) async fn enqueue_operation<T: Send + 'static>(
++        &self,
++        mut thread_ids: Vec<ThreadId>,
++        operation: impl FnOnce(Self) -> ThreadStoreFuture<'static, T> + Send + 'static,
++    ) -> ThreadStoreResult<T> {
++        let mut unique = std::collections::HashSet::new();
++        thread_ids.retain(|id| unique.insert(*id));
++        let store = self.clone();
++        let queued_at = std::time::Instant::now();
++        let (done, receiver) = watch::channel(false);
++        let previous = store
++            .operation_queue
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .enqueue(&thread_ids, receiver);
++        // The dependency ticket and work survive cancellation together. Dropping a
++        // queued caller must neither lose a write nor let its successor overtake it.
++        tokio::spawn(async move {
++            let result = AssertUnwindSafe(async {
++                for mut prior in previous {
++                    prior.wait_for(|finished| *finished).await.map_err(|_| ThreadStoreError::Internal {
++                        message: "remote thread-store operation stopped before acknowledgement".to_string(),
++                    })?;
++                }
++                // Acquire capacity only after dependencies: a busy thread cannot
++                // consume every permit with operations waiting on its own tail.
++                let _permit = store.operation_gate.acquire().await.map_err(|_| operation_gate_closed())?;
++                let waited = queued_at.elapsed();
++                if waited >= std::time::Duration::from_secs(1) {
++                    tracing::warn!(thread_ids = ?thread_ids, wait_ms = waited.as_millis(), "remote thread-store operation waited for predecessors or capacity");
++                }
++                let started = std::time::Instant::now();
++                let result = operation(store.clone()).await;
++                let elapsed = started.elapsed();
++                if elapsed >= std::time::Duration::from_secs(1) {
++                    tracing::warn!(thread_ids = ?thread_ids, elapsed_ms = elapsed.as_millis(), failed = result.is_err(), "remote thread-store operation completed slowly");
++                }
++                result
++            }).catch_unwind().await;
++            let result = match result {
++                Ok(result) => result,
++                Err(_) => {
++                    let error = ThreadStoreError::Internal { message: "remote thread-store write worker failed".to_string() };
++                    store.record_write_error(&error, &[]);
++                    Err(error)
++                }
++            };
++            done.send_replace(true);
++            result
++        }).await.map_err(|_| ThreadStoreError::Internal {
++            message: "remote thread-store write worker failed".to_string(),
++        })?
++    }
++}
 diff --git a/codex-rs/thread-store/src/remote_http/retry.rs b/codex-rs/thread-store/src/remote_http/retry.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..005401005c23cd9d65cd04dea0acd8c57d23f701
+index 0000000000000000000000000000000000000000..5c174f3f87a17bd68dcdde85126009a7ae13d8ed
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry.rs
 @@ -0,0 +1,89 @@
@@ -17181,13 +17772,13 @@ index 0000000000000000000000000000000000000000..005401005c23cd9d65cd04dea0acd8c5
 +
 +#[cfg(test)]
 +#[path = "retry_tests.rs"]
-+mod tests;
++pub(super) mod tests;
 diff --git a/codex-rs/thread-store/src/remote_http/retry_tests.rs b/codex-rs/thread-store/src/remote_http/retry_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..cddf95e976c5117f9c649ef3af001bf860a9be45
+index 0000000000000000000000000000000000000000..0fc35024c683467626426c14627f79757e53c7e8
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/retry_tests.rs
-@@ -0,0 +1,672 @@
+@@ -0,0 +1,789 @@
 +use std::sync::Arc;
 +use std::time::Duration;
 +
@@ -17266,7 +17857,7 @@ index 0000000000000000000000000000000000000000..cddf95e976c5117f9c649ef3af001bf8
 +            },
 +        ))],
 +    };
-+    let permit = store.operation_gate.acquire().await.unwrap();
++    let permit = store.operation_gate.acquire_many(8).await.unwrap();
 +    tokio::time::timeout(Duration::from_secs(1), async {
 +        for _ in 0..2_000 {
 +            store.append_items(append()).await.unwrap();
@@ -17330,7 +17921,10 @@ index 0000000000000000000000000000000000000000..cddf95e976c5117f9c649ef3af001bf8
 +    (url, rx, handle)
 +}
 +
-+fn create(thread_id: ThreadId, parent_thread_id: Option<ThreadId>) -> CreateThreadParams {
++pub(in crate::remote_http) fn create(
++    thread_id: ThreadId,
++    parent_thread_id: Option<ThreadId>,
++) -> CreateThreadParams {
 +    use codex_protocol::models::BaseInstructions;
 +    use codex_protocol::protocol::SessionSource;
 +    use codex_protocol::protocol::ThreadHistoryMode;
@@ -17552,6 +18146,120 @@ index 0000000000000000000000000000000000000000..cddf95e976c5117f9c649ef3af001bf8
 +            "rejected writes must never be retried or replay the failed operation"
 +        );
 +    }
++}
++
++#[tokio::test]
++async fn missing_thread_append_fences_only_that_thread() {
++    let missing = ThreadId::new();
++    let existing = ThreadId::new();
++    let new_root = ThreadId::new();
++    let child = ThreadId::new();
++    let empty_head = |version| {
++        Some((
++            200,
++            json!({"version": version, "state": {}, "historyManifest": {}}).to_string(),
++        ))
++    };
++    let existing_head = Some((
++        200,
++        json!({"version": 40, "state": {
++        "created_threads": {existing.to_string(): create(existing, /*parent_thread_id*/ None)}
++    }, "historyManifest": {existing.to_string(): {"generation": 3, "itemCount": 8}}})
++        .to_string(),
++    ));
++    let commit = |version| {
++        Some((
++            200,
++            json!({"version": version, "historyManifest": {}}).to_string(),
++        ))
++    };
++    // A successful scoped head read omits a deleted thread. This produces a
++    // typed ThreadNotFound locally, unlike the HTTP 404 rejection tests above.
++    let (url, mut requests, handle) = server(vec![
++        empty_head(40),
++        existing_head.clone(),
++        existing_head,
++        commit(41),
++        empty_head(41),
++        commit(42),
++        empty_head(42),
++        commit(43),
++    ])
++    .await;
++    let store = RemoteHttpThreadStore::new(url, "test", "test-token");
++    let item: RolloutItem = serde_json::from_value(json!({
++        "type": "response_item", "payload": {"type": "message", "role": "assistant",
++            "content": [{"type": "output_text", "text": "durable result"}]}
++    }))
++    .unwrap();
++    let append = |thread_id| AppendThreadItemsParams {
++        thread_id,
++        items: vec![item.clone()],
++    };
++    let error = store.append_items(append(missing)).await.unwrap_err();
++    assert!(
++        matches!(error, ThreadStoreError::ThreadNotFound { thread_id } if thread_id == missing)
++    );
++    assert!(
++        store
++            .flush_thread(missing)
++            .await
++            .unwrap_err()
++            .to_string()
++            .contains("paused")
++    );
++    assert!(store.append_items(append(missing)).await.is_err());
++    assert!(store.shutdown_thread(missing).await.is_err());
++    // Failed writes stay fenced even when their items take the transient path.
++    assert!(
++        store
++            .append_items(AppendThreadItemsParams {
++                thread_id: missing,
++                items: Vec::new(),
++            })
++            .await
++            .is_err()
++    );
++
++    store
++        .read_thread(crate::ReadThreadParams {
++            thread_id: existing,
++            include_archived: true,
++            include_history: false,
++        })
++        .await
++        .unwrap();
++    store.append_items(append(existing)).await.unwrap();
++    store
++        .create_thread(create(new_root, /*parent_thread_id*/ None))
++        .await
++        .unwrap();
++    store
++        .create_thread(create(child, Some(new_root)))
++        .await
++        .unwrap();
++    for thread in [existing, new_root, child] {
++        store.flush_thread(thread).await.unwrap();
++        store.shutdown_thread(thread).await.unwrap();
++    }
++    assert!(store.flush_thread(missing).await.is_err());
++    handle.await.unwrap();
++    let first = requests.recv().await.unwrap();
++    assert!(first.starts_with(&format!("GET /v2/stores/test?threadId={missing} ")));
++    let mut commits = Vec::new();
++    while let Some(request) = requests.recv().await {
++        assert!(
++            !request.contains(&missing.to_string()),
++            "deleted thread must never be retried or recreated"
++        );
++        if request.starts_with("POST ") {
++            commits.push(request);
++        }
++    }
++    assert_eq!(commits.len(), 3);
++    assert!(commits[0].contains(&existing.to_string()));
++    assert!(commits[1].contains(&new_root.to_string()));
++    assert!(commits[2].contains(&format!("\"parent_thread_id\":\"{new_root}\"")));
 +}
 +
 +#[tokio::test]
@@ -17779,7 +18487,7 @@ index 0000000000000000000000000000000000000000..cddf95e976c5117f9c649ef3af001bf8
 +    let mut expected = serde_json::to_value(original).unwrap();
 +    expected["model_provider"] = json!("provider-b");
 +    assert_eq!(serde_json::to_value(projected).unwrap(), expected);
-+    let cached = remote.take_cache().unwrap();
++    let cached = remote.take_cache(Some(id)).unwrap();
 +    assert_eq!(cached.canonical_state, state);
 +    assert_eq!(
 +        cached
@@ -18014,22 +18722,20 @@ index 0000000000000000000000000000000000000000..2bca717789b43a428f301b079d5eaa2e
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/writer.rs b/codex-rs/thread-store/src/remote_http/writer.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacfdb59140c
+index 0000000000000000000000000000000000000000..131419f3ae8e7f32bcba656203f30a27fb829970
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/writer.rs
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,350 @@
 +use std::collections::HashSet;
-+use std::panic::AssertUnwindSafe;
 +
 +use codex_protocol::ThreadId;
-+use futures::FutureExt;
 +
 +use super::CommitRequest;
 +use super::CommitResponse;
 +use super::HistoryChange;
 +use super::RemoteHttpThreadStore;
++use super::cache;
 +use super::cache_missing;
-+use super::operation_gate_closed;
 +use super::request_json;
 +use crate::AppendThreadItemsParams;
 +use crate::InMemoryThreadStore;
@@ -18040,7 +18746,7 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +use codex_rollout::persisted_rollout_items;
 +use std::time::Duration;
 +
-+// The serialized writer outlives cancelled callers, but has no local durable outbox.
++// Per-thread writers outlive cancelled callers, but have no local durable outbox.
 +impl RemoteHttpThreadStore {
 +    /// Graph mutations share the history writer queue and survive caller cancellation.
 +    pub async fn write_agent_graph(
@@ -18068,6 +18774,25 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +        + 'static,
 +    ) -> ThreadStoreResult<T> {
 +        self.mutate_scoped(thread_ids, true, operation).await
++    }
++
++    pub(super) async fn mutate_after<T: Send + 'static>(
++        &self,
++        thread_ids: Vec<ThreadId>,
++        mut dependencies: Vec<ThreadId>,
++        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T>
++        + Send
++        + 'static,
++    ) -> ThreadStoreResult<T> {
++        dependencies.extend_from_slice(&thread_ids);
++        self.enqueue_operation(dependencies, move |store| {
++            Box::pin(async move {
++                // Ordering on a parent does not inherit a parent's scoped fence.
++                store.check_thread_write_errors(&thread_ids)?;
++                store.mutate_inner(thread_ids, true, operation).await
++            })
++        })
++        .await
 +    }
 +
 +    pub(super) async fn mutate_metadata<T: Send + 'static>(
@@ -18103,47 +18828,13 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +        thread_ids: Vec<ThreadId>,
 +        operation: impl FnOnce(Self) -> ThreadStoreFuture<'static, T> + Send + 'static,
 +    ) -> ThreadStoreResult<T> {
-+        let store = self.clone();
-+        let (done, receiver) = tokio::sync::watch::channel(false);
-+        let previous = store
-+            .write_tail
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner)
-+            .replace(receiver);
-+        // Dropping the caller (e.g. turn/interrupt) must not drop a completed tool's result.
-+        // Only process shutdown can abandon this in-memory, unacknowledged operation.
-+        tokio::spawn(async move {
-+            if let Some(mut previous) = previous {
-+                let _ = previous.wait_for(|finished| *finished).await;
-+            }
-+            let _permit = store
-+                .operation_gate
-+                .acquire()
-+                .await
-+                .map_err(|_| operation_gate_closed())?;
-+            let result = match AssertUnwindSafe(async {
++        self.enqueue_operation(thread_ids.clone(), move |store| {
++            Box::pin(async move {
 +                store.check_thread_write_errors(&thread_ids)?;
 +                operation(store.clone()).await
 +            })
-+            .catch_unwind()
-+            .await
-+            {
-+                Ok(result) => result,
-+                Err(_) => {
-+                    let error = ThreadStoreError::Internal {
-+                        message: "remote thread-store write worker failed".to_string(),
-+                    };
-+                    store.record_write_error(&error, &[]);
-+                    Err(error)
-+                }
-+            };
-+            done.send_replace(true);
-+            result
 +        })
 +        .await
-+        .map_err(|_| ThreadStoreError::Internal {
-+            message: "remote thread-store write worker failed".to_string(),
-+        })?
 +    }
 +
 +    pub(super) async fn append_records(
@@ -18190,7 +18881,7 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +                        }],
 +                    };
 +                    store.stage_large_histories(&mut request).await?;
-+                    let _: CommitResponse = request_json(
++                    let committed: CommitResponse = request_json(
 +                        store
 +                            .client
 +                            .post(format!("{}/commits", store.store_url))
@@ -18198,17 +18889,41 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +                            .bearer_auth(&store.bearer_token)
 +                            .header("x-codex-operation-id", ThreadId::new().to_string())
 +                            .header("x-codex-version", env!("CARGO_PKG_VERSION"))
-+                            .header("x-mira-thread-scope", key)
++                            .header("x-mira-thread-scope", key.clone())
 +                            .timeout(Duration::from_secs(120))
 +                            .json(&request),
 +                    )
 +                    .await?;
++                    // Extend only a prefix validated by this scoped head, and
++                    // only after canonical acknowledgement.
++                    let expected = super::HistoryManifestEntry {
++                        generation: entry.generation,
++                        item_count: entry.item_count + items.len(),
++                    };
++                    if let Some(mut cached) = store.take_cache(Some(thread_id))
++                        && cached.loaded_histories.contains(&thread_id)
++                        && cached.history_manifest.get(&key) == Some(entry)
++                        && committed.history_manifest.get(&key) == Some(&expected)
++                    {
++                        let bytes = cache::serialized_size(&items);
++                        crate::ThreadStore::append_items(
++                            &cached.store,
++                            AppendThreadItemsParams { thread_id, items },
++                        )
++                        .await?;
++                        let previous = cached.history_bytes.entry(thread_id).or_default();
++                        *previous = previous.saturating_add(bytes);
++                        // Force metadata validation even if rebase included a
++                        // concurrent metadata change, retaining only this prefix.
++                        cached.version = 0;
++                        cached.history_manifest.insert(key, expected);
++                        store.replace_cache(Some(cached));
++                    }
 +                    Ok(())
 +                }
 +                .await;
-+                // Metadata/history caches may describe the prefix before this commit.
-+                store.replace_cache(None);
 +                if let Err(error) = &result {
++                    store.take_cache(Some(thread_id));
 +                    store.record_write_error(error, &[thread_id]);
 +                }
 +                result
@@ -18217,10 +18932,15 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +        .await
 +    }
 +
-+    fn record_write_error(&self, error: &ThreadStoreError, thread_ids: &[ThreadId]) {
++    pub(super) fn record_write_error(&self, error: &ThreadStoreError, thread_ids: &[ThreadId]) {
++        // A deleted thread can be absent from a successful scoped head response,
++        // producing ThreadNotFound locally instead of an HTTP request rejection.
++        // Fence its writes just like a 404, without poisoning the shared runtime.
 +        if matches!(
 +            error,
-+            ThreadStoreError::Conflict { .. } | ThreadStoreError::InvalidRequest { .. }
++            ThreadStoreError::Conflict { .. }
++                | ThreadStoreError::InvalidRequest { .. }
++                | ThreadStoreError::ThreadNotFound { .. }
 +        ) && !thread_ids.is_empty()
 +        {
 +            let mut failures = self
@@ -18286,7 +19006,8 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +        load_histories: bool,
 +        operation: impl for<'a> FnOnce(&'a InMemoryThreadStore) -> ThreadStoreFuture<'a, T> + Send,
 +    ) -> ThreadStoreResult<T> {
-+        let mut cache = self.take_cache();
++        let scope = (thread_ids.len() == 1).then(|| thread_ids[0]);
++        let mut cache = self.take_cache(scope);
 +        let mut invalidate_cache = false;
 +        let result = async {
 +            self.refresh_scoped(&mut cache, (thread_ids.len() == 1).then(|| thread_ids[0]))
@@ -18312,6 +19033,13 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +                }
 +            };
 +            let after = cached.store.snapshot_for_threads(&selected).await?;
++            for thread_id in &selected {
++                if let Some(history) = after.pointer(&format!("/histories/{thread_id}")) {
++                    cached
++                        .history_bytes
++                        .insert(*thread_id, cache::serialized_size(history));
++                }
++            }
 +            match self
 +                .save(
 +                    cached.version,
@@ -18324,12 +19052,12 @@ index 0000000000000000000000000000000000000000..da88ca449b0461d14a4e2259a401cacf
 +                .await
 +            {
 +                Ok(Some(committed)) => {
-+                    if committed.rebased {
-+                        invalidate_cache = true;
++                    cached.version = if committed.rebased {
++                        0
 +                    } else {
-+                        cached.version = committed.version;
-+                        cached.history_manifest = committed.history_manifest;
-+                    }
++                        committed.version
++                    };
++                    cached.history_manifest = committed.history_manifest;
 +                }
 +                Ok(None) => {}
 +                Err(error) => {

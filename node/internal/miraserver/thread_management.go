@@ -270,6 +270,28 @@ func ManageThread(ctx context.Context, pool *pgxpool.Pool, storeID, threadID, ac
 	if entry.Generation != generation || (action == "delete" && entry.ItemCount != itemCount) {
 		return operationResponse{Status: 409, Body: map[string]any{"error": "会话内容已变化，请等当前运行结束后重新操作。", "code": "thread_changed"}}, nil
 	}
+	if action == "delete" {
+		// turn/start reserves execution before Codex emits turn/started. Check
+		// that reservation under the same thread lock as claimExecution; a
+		// browser's local active-turn map cannot protect this interval.
+		var busy bool
+		err := tx.QueryRow(ctx, `SELECT EXISTS(
+          SELECT 1 FROM mira_codex_execution_routes route
+          JOIN mira_node_codex_accounts account USING(node_account_id)
+          JOIN codex_nodes node ON node.node_id=account.node_id
+          CROSS JOIN LATERAL (SELECT CASE WHEN account.is_default THEN node.reported_app_server ELSE account.reported END AS value) report
+          WHERE route.store_id=$1 AND route.thread_id=$2 AND route.generation=$3
+            AND route.state IN ('starting','running')
+            AND COALESCE(report.value->>'status','')<>'stopped'
+            AND (COALESCE(report.value->>'runtimeId','')='' OR report.value->>'runtimeId'=route.runtime_id)
+        )`, storeID, threadID, generation).Scan(&busy)
+		if err != nil {
+			return operationResponse{}, err
+		}
+		if busy {
+			return operationResponse{Status: 409, Body: map[string]any{"error": "此对话正在启动或运行，请先停止并等待运行结束后再删除。", "code": "thread_busy"}}, nil
+		}
+	}
 	var actionSeq int64
 	var count any
 	if action == "delete" {
