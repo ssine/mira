@@ -59,8 +59,11 @@ func (service *Service) includeSubagentCosts(ctx context.Context, storeID string
 		if err != nil {
 			return ThreadStatistics{}, err
 		}
+		if err := service.loadStatisticsCheckpoints(ctx, storeID, page); err != nil {
+			return ThreadStatistics{}, err
+		}
 		for _, child := range page {
-			state, err := service.costProjection(ctx, storeID, child)
+			state, err := service.projectCost(ctx, storeID, child, true)
 			if err != nil {
 				return ThreadStatistics{}, err
 			}

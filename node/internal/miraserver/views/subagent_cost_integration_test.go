@@ -102,6 +102,22 @@ func TestSubagentCostTree(t *testing.T) {
 	}
 	checkUsage(root, 250000, 100000, 150000, 3, "complete")
 	checkUsage(child, 150000, 50000, 100000, 1, "complete")
+	// Reusing durable totals must preserve fork exclusion, zero usage and
+	// descendant scope exactly, including after the in-memory cache is lost.
+	for _, source := range []accountCostSource{
+		{store: store, thread: "root", generation: 1, count: 2, key: `["", null]`},
+		{store: store, thread: "child", generation: 1, count: 4, fork: "root", key: `["root", null]`},
+		{store: store, thread: "grandchild", generation: 1, count: 2, key: `["", null]`},
+		{store: store, thread: "archived", generation: 1, count: 2, key: `["", null]`},
+	} {
+		if err := service.projectAccountCostPage(ctx, source); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service = New(pool)
+	check(root, .726, .33, .396, 3, "complete")
+	checkUsage(root, 250000, 100000, 150000, 3, "complete")
+	check(child, .396, .066, .33, 1, "complete")
 	listed, err := service.ListThreads(ctx, store, 1, &root.ThreadID, nil)
 	if err != nil || len(listed) != 1 || !listed[0].HasSubagents || listed[0].TokenUsageSummary != nil {
 		t.Fatalf("list must signal lazy totals without loading descendants: %#v %v", listed, err)

@@ -105,6 +105,27 @@ func TestPostgresCostCacheRetainsLargeSubagentTree(t *testing.T) {
 	if counter.queries.Load() != scans {
 		t.Fatalf("unchanged large tree rescanned: cold=%d warm=%d", scans, counter.queries.Load())
 	}
+	// Background account parsing must also survive a cold conversation cache.
+	// Restoring one checkpoint per thread avoids replaying the whole tree after
+	// a Server restart, without losing historical per-turn buckets.
+	for i := range 181 {
+		if err := service.projectAccountCostPage(ctx, accountCostSource{
+			store: store, thread: "thread-" + strconv.Itoa(i), generation: 1, count: 2, key: `["", null]`,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	scans = counter.queries.Load()
+	service = New(pool)
+	check(181*.33, 18100000)
+	if counter.queries.Load() != scans {
+		t.Fatal("cold statistics replayed history already parsed by the account projector")
+	}
+	turns, err := service.GetTurnCosts(ctx, store, root, []string{"turn"})
+	if err != nil || !closeFloat(turns["turn"]["amount"].(float64), .33) {
+		t.Fatalf("checkpoint restoration lost historical turn costs: %#v %v", turns, err)
+	}
+	scans = counter.queries.Load()
 	child := "thread-1"
 	appendTo(&child, 1, 3, usageRecord(usage(200000, 160000, 2000), usage(100000, 80000, 1000), "turn"))
 	advanced, _ := json.Marshal(map[string]any{"metadata": map[string]any{"token_usage": usage(200000, 160000, 2000)}})

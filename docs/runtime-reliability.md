@@ -132,6 +132,14 @@ Cached totals bypass the slots; cancelled queued requests never acquire a databa
 connection. This keeps statistics from filling the ten-connection pool needed by
 conversation reads, writes and health checks. The cost-capacity PostgreSQL test
 holds both scans open while a separate request still obtains a connection.
+Conversation totals restore compatible account-cost checkpoints in bounded
+descendant batches and scan only the remaining tail. This avoids replaying an
+entire subagent tree after a restart or cache eviction. Every completed scan page
+also retains its parser state and cursor in the bounded memory cache, so a later
+request cancellation does not force that thread to restart from zero. Checkpoints
+must match the generation, pricing/parser revision and fork/import source, and
+cannot be ahead of the requested snapshot. Per-turn buckets use a separate cache
+because the durable account checkpoint stores aggregate parser state only.
 
 Messages arrive over the App Server WebSocket. The 25-second connection probe
 does not download history. Initial selection, reconnection/foreground recovery,

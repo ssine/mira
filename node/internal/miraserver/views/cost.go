@@ -418,6 +418,10 @@ func CostEstimate(state *CostProjection, thread Thread) map[string]any {
 }
 
 func (service *Service) applyCostRows(ctx context.Context, storeID string, thread Thread, state *CostProjection, after int64) error {
+	return service.scanCostRows(ctx, storeID, thread, state, after, nil)
+}
+
+func (service *Service) scanCostRows(ctx context.Context, storeID string, thread Thread, state *CostProjection, after int64, checkpoint func(int64)) error {
 	if after >= thread.ItemCount {
 		return nil
 	}
@@ -465,24 +469,47 @@ func (service *Service) applyCostRows(ctx context.Context, storeID string, threa
 		}
 		rows.Close()
 		if count < 256 {
-			break
+			cursor = thread.ItemCount
+		}
+		// Publish only fully read pages. A cancelled later page must not discard
+		// earlier progress or mark unprocessed history as complete.
+		if checkpoint != nil {
+			checkpoint(cursor)
 		}
 	}
 	return nil
 }
 
 func (service *Service) costProjection(ctx context.Context, storeID string, thread Thread) (*CostProjection, error) {
+	return service.projectCost(ctx, storeID, thread, false)
+}
+
+func costProjectionKey(storeID string, thread Thread, statistics bool) string {
 	key := storeID + "\x00" + thread.ThreadID + "\x00" + strconv.FormatInt(thread.Generation, 10) + "\x00"
 	if thread.ForkedFromID != nil {
 		key += *thread.ForkedFromID
 	}
+	if statistics {
+		key += "\x00statistics"
+	}
+	return key
+}
+
+func (service *Service) projectCost(ctx context.Context, storeID string, thread Thread, statistics bool) (*CostProjection, error) {
+	key := costProjectionKey(storeID, thread, statistics)
 	entry, ok := service.cachedCostProjection(key)
 	start := int64(0)
-	state := NewCostProjection(thread.ForkedFromID != nil, nil)
+	var turns []string
+	if statistics {
+		turns = []string{}
+	}
+	state := NewCostProjection(thread.ForkedFromID != nil, turns)
 	if ok && entry.itemCount <= thread.ItemCount {
 		start, state = entry.itemCount, entry.state.clone()
 	}
-	if err := service.applyCostRows(ctx, storeID, thread, state, start); err != nil {
+	if err := service.scanCostRows(ctx, storeID, thread, state, start, func(cursor int64) {
+		service.rememberCostProjection(key, cursor, state)
+	}); err != nil {
 		return nil, err
 	}
 	service.rememberCostProjection(key, thread.ItemCount, state)
@@ -497,7 +524,10 @@ func (service *Service) GetThreadCost(ctx context.Context, storeID string, threa
 // GetThreadStatistics shares the bounded history projection and descendant walk
 // between token totals and prices. Canonical cumulative counters stay unchanged.
 func (service *Service) GetThreadStatistics(ctx context.Context, storeID string, thread Thread) (ThreadStatistics, error) {
-	state, err := service.costProjection(ctx, storeID, thread)
+	if err := service.loadStatisticsCheckpoints(ctx, storeID, []Thread{thread}); err != nil {
+		return ThreadStatistics{}, err
+	}
+	state, err := service.projectCost(ctx, storeID, thread, true)
 	if err != nil {
 		return ThreadStatistics{}, err
 	}
