@@ -4,6 +4,7 @@ import { interruptThread } from '../server/public/thread-interrupt.js';
 
 function runtime(t, { turn = { id: 'turn-1', status: 'inProgress' }, failAt, holdAt } = {}) {
   const originalSocket = globalThis.WebSocket, originalLocation = globalThis.location;
+  const originalFetch = globalThis.fetch;
   const requests = [], sockets = [];
   class Socket extends EventTarget {
     static OPEN = 1;
@@ -17,7 +18,7 @@ function runtime(t, { turn = { id: 'turn-1', status: 'inProgress' }, failAt, hol
       if (request.id === undefined || holdAt === request.method) return;
       queueMicrotask(() => {
         if (failAt === request.method) { this.close(); return; }
-        const result = request.method === 'thread/turns/list' ? { data: turn ? [turn] : [] } : {};
+        const result = {};
         this.dispatchEvent(new MessageEvent('message', { data: JSON.stringify({ id: request.id, result }) }));
       });
     }
@@ -25,7 +26,14 @@ function runtime(t, { turn = { id: 'turn-1', status: 'inProgress' }, failAt, hol
   }
   globalThis.WebSocket = Socket;
   globalThis.location = { host: 'mira.test', protocol: 'https:' };
-  t.after(() => { globalThis.WebSocket = originalSocket; globalThis.location = originalLocation; });
+  globalThis.fetch = async (url, { signal }) => {
+    assert.equal(url, '/v1/codex/threads/thread-1?storeId=personal');
+    if (holdAt === 'activity') return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason)));
+    return { ok: true, json: async () => ({ activity: turn && {
+      turnId: turn.id, state: { inProgress: 'running', completed: 'idle' }[turn.status] ?? turn.status,
+    } }) };
+  };
+  t.after(() => { globalThis.WebSocket = originalSocket; globalThis.location = originalLocation; globalThis.fetch = originalFetch; });
   return { requests, sockets, stop: () => interruptThread({ nodeId: 'original-node', nodeAccountId: 'original-account', threadId: 'thread-1', turnId: 'turn-1', timeoutMs: 100 }) };
 }
 
@@ -33,9 +41,8 @@ test('a reader can stop the recorded runtime without loading or resuming a threa
   const { stop, requests, sockets } = runtime(t);
   assert.deepEqual(await stop(), { interrupted: true });
   assert.match(sockets[0].url, /\/nodes\/original-node\/app-server\?.*nodeAccountId=original-account/);
-  assert.deepEqual(requests.map(r => r.method), ['initialize', 'initialized', 'thread/turns/list', 'turn/interrupt']);
+  assert.deepEqual(requests.map(r => r.method), ['initialize', 'initialized', 'turn/interrupt']);
   assert.deepEqual(requests.at(-1).params, { threadId: 'thread-1', turnId: 'turn-1' });
-  assert.equal(requests[2].params.itemsView, 'notLoaded');
   assert.equal(sockets[0].readyState, 3);
 });
 
@@ -52,7 +59,7 @@ test('a stale stop never targets a newer turn', async t => {
   assert.equal(sockets[0].readyState, 3);
 });
 
-for (const phase of ['open', 'initialize', 'thread/turns/list', 'turn/interrupt']) test(`timeout during ${phase} closes the connection`, async t => {
+for (const phase of ['open', 'initialize', 'activity', 'turn/interrupt']) test(`timeout during ${phase} closes the connection`, async t => {
   const { stop, sockets } = runtime(t, { holdAt: phase });
   await assert.rejects(stop(), /超时/);
   assert.equal(sockets[0].readyState, 3);

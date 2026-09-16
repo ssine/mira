@@ -91,8 +91,8 @@ history is requested. Restoring a tree of subagents must not download the whole
 store for every child. History reads retain generation/version validation.
 
 The remote adapter retains up to eight scoped in-memory projections with a
-256 MiB serialized-payload retention budget. Every reuse validates the current
-canonical head. Unrelated global version changes and metadata-only changes retain
+2 GiB serialized-payload retention budget (since `0.153.1-mira.17`). Every reuse
+validates the current canonical head. Unrelated global version changes and metadata-only changes retain
 unchanged histories; acknowledged local appends extend a validated cached prefix.
 A changed generation, deleted thread or externally changed history boundary
 requires a fresh canonical read. Cache eviction never limits conversation size
@@ -118,6 +118,11 @@ capacity bounds retained sockets. A ten-second deadline cannot safely discard
 these acknowledgements: slow resumes can still be executing after that deadline.
 An actual local transport failure retains unknown requests and continues to
 block handoff; it does not infer success from an idle thread observation.
+
+Active-turn reconciliation and stop checks read the Server activity projection
+rather than Codex `thread/turns/list`, whose legacy implementation reconstructs
+full history even with `itemsView: notLoaded`. The native interrupt still validates
+the expected turn ID.
 
 Messages arrive over the App Server WebSocket. The 25-second connection probe
 does not download history. Initial selection, reconnection/foreground recovery,
@@ -279,3 +284,4 @@ release: packaging/promotion still require all platform jobs to pass. This avoid
 losing the evidence needed to diagnose a post-compilation failure.
 `tests/compiler_cache_snapshot_e2e.mjs` verifies a cold native compile, an archived-cache
 restore hit and invalidation after a header change (GCC on Linux, MSVC on Windows).
+

@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `75d51f2ce6fb`
+- Patch source commit: `4e92d9c3ca73`
 
 Apply it to a clean checkout:
 
@@ -128,3 +128,7 @@ shutdown. Confirmed account input-recovery policies can change without a
 canonical version change; a subsequent resume must reload that policy while
 other active threads keep their cached histories. Regression coverage includes
 267 thread-store tests and the real account runtime recovery/handoff scenario.
+
+Runtime revision `0.153.1-mira.17` raises scoped in-memory history retention to
+2 GiB of serialized payload, allocated on demand. Canonical validation and the
+eight-scope bound remain unchanged.

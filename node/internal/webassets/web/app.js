@@ -500,7 +500,8 @@ function acceptThreadActivity(thread, checkedAt = Date.now()) {
     agent.activeTurns.set(thread.threadId, current.turnId);
     agent.turnThreads.set(current.turnId, thread.threadId);
   } else if (["idle", "interrupted", "failed"].includes(current.state) && current.turnId &&
-    agent.activeTurns.get(thread.threadId) === current.turnId) {
+    agent.activeTurns.has(thread.threadId) && (!agent.activeTurns.get(thread.threadId) ||
+      agent.activeTurns.get(thread.threadId) === current.turnId)) {
     agent.activeTurns.delete(thread.threadId);
     agent.turnThreads.delete(current.turnId);
     agent.turnTimings.set(current.turnId, { ...agent.turnTimings.get(current.turnId), completedAt: Date.now() });
@@ -2329,7 +2330,6 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
         await startAgentRuntime({ allowStart: false });
         if (epoch !== agent.selectionEpoch || !agentRecoveryAllowed()) return;
         if (threadId && agent.resumeRequestedThreadId === threadId && !agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
-        else if (threadId && agent.activeTurns.has(threadId)) await refreshActiveTurn(threadId, agent.socket);
       })();
       const results = await Promise.allSettled([history, connection]);
       const failure = results.find((result) => result.status === "rejected");
@@ -5326,26 +5326,17 @@ async function refreshActiveTurn(threadId, socket) {
   if (pending?.socket === socket) return pending.promise;
   const revision = agent.liveRevision;
   const epoch = agent.selectionEpoch;
+  const checkedAt = Date.now();
   const operation = (async () => {
     try {
-      // Only the latest turn's metadata is needed, never its messages or tools.
-      const result = await rpc("thread/turns/list", { threadId, limit: 1, sortDirection: "desc", itemsView: "notLoaded" }, 15_000);
+      // Legacy Codex turns/list reconstructs the full history even with
+      // itemsView=notLoaded. The Server projection already carries turn state.
+      const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal: AbortSignal.timeout(12_000) });
       if (agent.socket !== socket || agent.threadId !== threadId || agent.selectionEpoch !== epoch || agent.liveRevision !== revision) return;
-      const turn = result.data?.[0];
-      if (turn?.status === "inProgress" && !agent.turnTimings.get(turn.id)?.completedAt) {
-        agent.activeTurns.set(threadId, turn.id);
-        recordLiveActivity(threadId, turn.id, "running");
-        agent.turnThreads.set(turn.id, threadId);
-      } else if (turn && ["completed", "failed", "interrupted"].includes(turn.status) &&
-          (!agent.activeTurns.get(threadId) || agent.activeTurns.get(threadId) === turn.id)) {
-        agent.activeTurns.delete(threadId);
-        recordLiveActivity(threadId, turn.id, turn.status === "completed" ? "idle" : turn.status);
-        agent.turnThreads.delete(turn.id);
-        const timing = agent.turnTimings.get(turn.id) ?? {};
-        timing.completedAt ??= Date.now();
-        agent.turnTimings.set(turn.id, timing);
-        void refreshCompletedTranscript(threadId);
-      }
+      agent.activityCheckedAt = Date.now();
+      const wasActive = agent.activeTurns.has(threadId);
+      acceptThreadActivity(thread, checkedAt);
+      if (wasActive && !agent.activeTurns.has(threadId)) void refreshCompletedTranscript(threadId);
       syncActiveTurnUi();
     } catch { /* Preserve the last known active state until it can be confirmed. */ }
   })();

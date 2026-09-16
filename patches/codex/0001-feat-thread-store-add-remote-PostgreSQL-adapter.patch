@@ -1,4 +1,4 @@
-From 75d51f2ce6fb9fc338653105b3d68537bf2a9245 Mon Sep 17 00:00:00 2001
+From 4e92d9c3ca7396903f2ee0c44a47e3fafbffa23e Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Thu, 17 Sep 2026 03:19:48 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with scoped
@@ -17052,7 +17052,7 @@ index 0000000000000000000000000000000000000000..4c4610e21b9bffaa288920b1ae88739c
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/cache.rs b/codex-rs/thread-store/src/remote_http/cache.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..433dfbf2878fbf44aecb44d0060eb9b0a066aafa
+index 0000000000000000000000000000000000000000..53704b89b515bb1cfcf208fb9a07f791ebd94bab
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/cache.rs
 @@ -0,0 +1,82 @@
@@ -17066,7 +17066,7 @@ index 0000000000000000000000000000000000000000..433dfbf2878fbf44aecb44d0060eb9b0
 +
 +const MAX_CACHED_SCOPES: usize = 8;
 +// Serialized payload budget, not a limit on canonical history or downloads.
-+const MAX_CACHED_BYTES: usize = 256 * 1024 * 1024;
++const MAX_CACHED_BYTES: usize = 2 * 1024 * 1024 * 1024;
 +
 +#[derive(Default)]
 +pub(super) struct StoreCaches {

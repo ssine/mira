@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 const { WebSocketServer } = await import("ws").catch(() => import("../server/node_modules/ws/wrapper.mjs"));
 
-export async function startDraftFixture({ port = 0, forkTest = false, resumeTest = false } = {}) {
+export async function startDraftFixture({ port = 0, forkTest = false, resumeTest = false, activityTest = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001";
   const ids = ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000b2"];
   const node = { nodeId, hostname: "Draft fixture", platform: "linux", status: "online", approvalStatus: "approved", capabilities: { appServer: true, files: true }, reportedAppServer: { status: "running" }, desiredAppServer: { defaultCwd: "/work" } };
@@ -17,6 +17,8 @@ export async function startDraftFixture({ port = 0, forkTest = false, resumeTest
   const forkEvents = [];
   const resumes = [];
   let turns = 0;
+  const rpcMethods = [];
+  const interrupts = [];
 
   const assetSource = await fs.readFile(new URL("../node/internal/webassets/webassets.go", import.meta.url), "utf8");
   const csp = assetSource.match(/const contentSecurityPolicy = "([^"]+)"/)[1];
@@ -24,12 +26,18 @@ export async function startDraftFixture({ port = 0, forkTest = false, resumeTest
     const url = new URL(request.url, "http://localhost"), path = url.pathname;
     const json = value => { response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); };
     let body = ""; for await (const chunk of request) body += chunk;
+    if (activityTest && path === "/__test/activity") {
+      if (request.method === "GET") return json({ rpcMethods, interrupts });
+      const activity = JSON.parse(body);
+      rows[0].activity = { generation: 1, itemCount: activity.itemCount ?? 1, ...activity };
+      return json({});
+    }
     if (resumeTest && path === "/__test/resume") {
       if (request.method === "GET") return json({ requests: resumes.length, turns, open: resumes.map(value => value.socket.readyState === 1) });
-      const { index = resumes.length - 1, fail = false } = JSON.parse(body);
+      const { index = resumes.length - 1, fail = false, active = false } = JSON.parse(body);
       const pending = resumes[index];
       if (pending?.socket.readyState === 1) pending.socket.send(JSON.stringify({ id: pending.request.id,
-        ...(fail ? { error: { message: "fixture resume failed" } } : { result: { thread: { id: pending.request.params.threadId, status: { type: "idle" } }, cwd: "/work", model: "fixture" } }) }));
+        ...(fail ? { error: { message: "fixture resume failed" } } : { result: { thread: { id: pending.request.params.threadId, status: { type: active ? "active" : "idle" } }, cwd: "/work", model: "fixture" } }) }));
       return json({});
     }
     if (forkTest && path === "/__test/fork") {
@@ -86,6 +94,8 @@ export async function startDraftFixture({ port = 0, forkTest = false, resumeTest
   const sockets = new WebSocketServer({ server });
   sockets.on("connection", socket => socket.on("message", async data => {
     const request = JSON.parse(data); if (request.id === undefined) return;
+    if (activityTest) rpcMethods.push(request.method);
+    if (activityTest && request.method === "turn/interrupt") interrupts.push(request.params);
     const reply = result => socket.readyState === 1 && socket.send(JSON.stringify({ id: request.id, result }));
     const error = message => socket.readyState === 1 && socket.send(JSON.stringify({ id: request.id, error: { message } }));
     if (request.method === "initialize") {
