@@ -48,8 +48,9 @@ export class AccountSpend extends AccountHistory {
 
   scheduleRefresh() {
     clearTimeout(this.refreshTimer);
-    if (this.key && !this.controller && this.data?.cache?.stale) {
-      this.refreshTimer = setTimeout(() => this.select(this.node, this.account, true, true), this.cacheLifetime(this.data));
+    if (this.key && !this.controller && this.cache.has(this.key)) {
+      const delay = Math.max(1_000, this.cache.get(this.key).expiresAt - Date.now());
+      this.refreshTimer = setTimeout(() => this.select(this.node, this.account, true, true), delay);
     }
   }
 
