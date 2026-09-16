@@ -99,6 +99,12 @@ requires a fresh canonical read. Cache eviction never limits conversation size
 and does not create a local durable history store. The budget describes serialized
 payloads, not an exact bound on process heap usage.
 
+Revision `0.153.1-mira.16` invalidates the selected thread's cache when its
+session shuts down. Account input-recovery consent changes independently of the
+canonical history version, so the next resume reloads the history response and
+its current input policy. Other threads retain their caches, and canonical
+encrypted records remain unchanged.
+
 Web resume keeps one request per thread/socket until acknowledgement or
 disconnect. Elapsed time changes the visible waiting message instead of dropping
 the request and queuing another resume. Users can cancel the wait while retaining

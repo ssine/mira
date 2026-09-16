@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `d57edfaaaa24`
+- Patch source commit: `75d51f2ce6fb`
 
 Apply it to a clean checkout:
 
@@ -122,3 +122,9 @@ and metadata changes, and extend acknowledged local appends. Generation changes
 and deletion invalidate cached histories. Regression tests hold a history read or
 parent write open while unrelated creation/flush succeeds, and verify cache
 reuse and generation isolation. See `docs/runtime-reliability.md` for cache bounds.
+
+Runtime revision `0.153.1-mira.16` also invalidates a thread's cache on session
+shutdown. Confirmed account input-recovery policies can change without a
+canonical version change; a subsequent resume must reload that policy while
+other active threads keep their cached histories. Regression coverage includes
+267 thread-store tests and the real account runtime recovery/handoff scenario.

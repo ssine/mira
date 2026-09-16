@@ -1,8 +1,8 @@
-From d57edfaaaa24ca5dceb96e0771cf347920c5dc6c Mon Sep 17 00:00:00 2001
+From 75d51f2ce6fb9fc338653105b3d68537bf2a9245 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
-Date: Sat, 12 Sep 2026 05:14:26 +0800
-Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
- account-scoped input recovery
+Date: Thu, 17 Sep 2026 03:19:48 +0800
+Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with scoped
+ cache invalidation
 
 ---
  codex-rs/Cargo.lock                           |  299 ++---
@@ -24,7 +24,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  codex-rs/app-server/src/request_processors.rs |    1 +
  .../src/request_processors/thread_handoff.rs  |  129 ++
  .../request_processors/thread_lifecycle.rs    |    9 +-
- .../request_processors/thread_processor.rs    |  138 ++-
+ .../request_processors/thread_processor.rs    |  138 +-
  codex-rs/app-server/src/thread_state.rs       |   15 +-
  .../tests/suite/v2/thread_unsubscribe.rs      |   65 +
  codex-rs/codex-api/src/api_bridge.rs          |   41 +-
@@ -53,10 +53,10 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  codex-rs/thread-store/Cargo.toml              |    1 +
  codex-rs/thread-store/src/in_memory.rs        |   94 +-
  codex-rs/thread-store/src/lib.rs              |    4 +
- codex-rs/thread-store/src/remote_http.rs      | 1097 +++++++++++++++++
+ codex-rs/thread-store/src/remote_http.rs      | 1113 +++++++++++++++++
  .../src/remote_http/agent_graph.rs            |   35 +
- .../thread-store/src/remote_http/cache.rs     |   71 ++
- .../src/remote_http/concurrency_tests.rs      |  333 +++++
+ .../thread-store/src/remote_http/cache.rs     |   82 ++
+ .../src/remote_http/concurrency_tests.rs      |  412 ++++++
  .../src/remote_http/input_recovery.rs         |   62 +
  .../src/remote_http/input_recovery_tests.rs   |   47 +
  .../thread-store/src/remote_http/queue.rs     |  101 ++
@@ -66,7 +66,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter with
  .../thread-store/src/remote_http/writer.rs    |  350 ++++++
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
- 61 files changed, 4750 insertions(+), 359 deletions(-)
+ 61 files changed, 4856 insertions(+), 359 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
@@ -15892,10 +15892,10 @@ index a8b6a366506829c9b5e291d20ae852a5c98f1588..1b94e25db98d51e996ee6a076f6bbad7
  pub use store::ThreadStoreFuture;
 diff --git a/codex-rs/thread-store/src/remote_http.rs b/codex-rs/thread-store/src/remote_http.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a37e820e02f26b0cd8c43098abb40ae88d085061
+index 0000000000000000000000000000000000000000..a10decba1147ca8185ad0d1cdd9a908d3620947d
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http.rs
-@@ -0,0 +1,1097 @@
+@@ -0,0 +1,1113 @@
 +use std::collections::HashMap;
 +use std::collections::HashSet;
 +use std::sync::Arc;
@@ -16721,7 +16721,23 @@ index 0000000000000000000000000000000000000000..a37e820e02f26b0cd8c43098abb40ae8
 +    }
 +
 +    fn shutdown_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
-+        self.flush_thread(thread_id)
++        Box::pin(async move {
++            self.enqueue_operation(vec![thread_id], move |store| {
++                Box::pin(async move {
++                    store.check_thread_write_errors(&[thread_id])?;
++                    // Account input-recovery consent changes after unload without
++                    // changing canonical history or the store version. Reload its
++                    // history response (including the projection) on the next resume.
++                    store
++                        .cache
++                        .lock()
++                        .unwrap_or_else(std::sync::PoisonError::into_inner)
++                        .invalidate_thread(thread_id);
++                    Ok(())
++                })
++            })
++            .await
++        })
 +    }
 +
 +    fn discard_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
@@ -17036,10 +17052,10 @@ index 0000000000000000000000000000000000000000..4c4610e21b9bffaa288920b1ae88739c
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/cache.rs b/codex-rs/thread-store/src/remote_http/cache.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c1e0bf8dc3a7c85bdbcd53e82a0677265244f035
+index 0000000000000000000000000000000000000000..433dfbf2878fbf44aecb44d0060eb9b0a066aafa
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/cache.rs
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,82 @@
 +use std::collections::VecDeque;
 +use std::io::Write;
 +
@@ -17059,6 +17075,17 @@ index 0000000000000000000000000000000000000000..c1e0bf8dc3a7c85bdbcd53e82a067726
 +}
 +
 +impl StoreCaches {
++    pub(super) fn invalidate_thread(&mut self, thread_id: ThreadId) {
++        self.entries.retain(|(cache, size)| {
++            if cache.scope == Some(thread_id) || cache.loaded_histories.contains(&thread_id) {
++                self.bytes -= size;
++                false
++            } else {
++                true
++            }
++        });
++    }
++
 +    pub(super) fn take(&mut self, scope: Option<ThreadId>) -> Option<CachedStore> {
 +        let index = self
 +            .entries
@@ -17113,10 +17140,10 @@ index 0000000000000000000000000000000000000000..c1e0bf8dc3a7c85bdbcd53e82a067726
 +}
 diff --git a/codex-rs/thread-store/src/remote_http/concurrency_tests.rs b/codex-rs/thread-store/src/remote_http/concurrency_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..55737d61f7fe089aecbf1c6f905158491f57bd95
+index 0000000000000000000000000000000000000000..2b14b4b15a7552426f1286d9cf6e4ea2147d09c8
 --- /dev/null
 +++ b/codex-rs/thread-store/src/remote_http/concurrency_tests.rs
-@@ -0,0 +1,333 @@
+@@ -0,0 +1,412 @@
 +use std::time::Duration;
 +
 +use codex_protocol::ThreadId;
@@ -17337,6 +17364,85 @@ index 0000000000000000000000000000000000000000..55737d61f7fe089aecbf1c6f90515849
 +            include_archived: true,
 +        })
 +        .await
++}
++
++#[tokio::test]
++async fn shutdown_revalidates_input_recovery_without_invalidating_other_threads() {
++    let (store, mut server) = Server::new().await;
++    let a = ThreadId::new();
++    let b = ThreadId::new();
++    let reasoning = json!({"type":"response_item","payload":{"type":"reasoning",
++        "id":"rs-old","summary":[],"content":null,"encrypted_content":"old-reasoning"}});
++    let items = json!([reasoning, message("preserved")]);
++    for id in [a, b] {
++        let reader = tokio::spawn(read(store.clone(), id));
++        server
++            .next("GET ")
++            .await
++            .reply
++            .send(head(id, 1, 1, 2))
++            .unwrap();
++        server
++            .next(&format!("GET /v2/stores/test/threads/{id}/history?"))
++            .await
++            .reply
++            .send(json!({"generation":1,"itemCount":2,"items":items}))
++            .unwrap();
++        assert_eq!(reader.await.unwrap().unwrap().items.len(), 2);
++    }
++    store.shutdown_thread(a).await.unwrap();
++    let reader = tokio::spawn(read(store.clone(), b));
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(head(b, 1, 1, 2))
++        .unwrap();
++    assert_eq!(reader.await.unwrap().unwrap().items.len(), 2);
++    assert!(server.requests.try_recv().is_err());
++
++    let reader = {
++        let store = store.clone();
++        tokio::spawn(async move {
++            store
++                .load_latest_model_context(crate::LoadThreadHistoryParams {
++                    thread_id: a,
++                    include_archived: true,
++                })
++                .await
++        })
++    };
++    // Consent is account metadata: canonical version and boundary are unchanged.
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(head(a, 1, 1, 2))
++        .unwrap();
++    server
++        .next(&format!("GET /v2/stores/test/threads/{a}/history?"))
++        .await
++        .reply
++        .send(json!({"generation":1,"itemCount":2,"items":items,
++            "inputRecovery":{"throughItemSeq":2,"policy":"omitReasoning"}}))
++        .unwrap();
++    let context = reader.await.unwrap().unwrap();
++    assert_eq!(
++        serde_json::to_value(context.items).unwrap(),
++        json!([message("preserved")])
++    );
++    let reader = tokio::spawn(read(store.clone(), a));
++    server
++        .next("GET ")
++        .await
++        .reply
++        .send(head(a, 1, 1, 2))
++        .unwrap();
++    assert_eq!(
++        serde_json::to_value(reader.await.unwrap().unwrap().items).unwrap(),
++        items
++    );
++    assert!(server.requests.try_recv().is_err());
 +}
 +
 +#[tokio::test]
