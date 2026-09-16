@@ -418,6 +418,17 @@ func CostEstimate(state *CostProjection, thread Thread) map[string]any {
 }
 
 func (service *Service) applyCostRows(ctx context.Context, storeID string, thread Thread, state *CostProjection, after int64) error {
+	if after >= thread.ItemCount {
+		return nil
+	}
+	// Cold cost projections scan raw history. Bound this across all browsers so
+	// statistics cannot occupy the whole pool needed by live conversation I/O.
+	select {
+	case service.costReadSlots <- struct{}{}:
+		defer func() { <-service.costReadSlots }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 	cursor := after
 	for cursor < thread.ItemCount {
 		rows, err := service.pool.Query(ctx, `SELECT events.item_seq::text,events.payload FROM codex_thread_events AS events

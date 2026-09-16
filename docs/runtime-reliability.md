@@ -127,6 +127,12 @@ resume, repeated heartbeats, stop targeting and completion reconciliation withou
 runtime history queries; `tests/thread_interrupt_test.mjs` covers stale turns and
 request deadlines.
 
+Cold per-thread cost scans share two Server-wide reader slots across all clients.
+Cached totals bypass the slots; cancelled queued requests never acquire a database
+connection. This keeps statistics from filling the ten-connection pool needed by
+conversation reads, writes and health checks. The cost-capacity PostgreSQL test
+holds both scans open while a separate request still obtains a connection.
+
 Messages arrive over the App Server WebSocket. The 25-second connection probe
 does not download history. Initial selection, reconnection/foreground recovery,
 older-page scrolling and completion reconciliation can fetch canonical history.

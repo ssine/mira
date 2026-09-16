@@ -16,9 +16,10 @@ type Service struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
 
-	costMu    sync.Mutex
-	costCache map[string]*list.Element
-	costLRU   list.List
+	costMu        sync.Mutex
+	costCache     map[string]*list.Element
+	costLRU       list.List
+	costReadSlots chan struct{}
 
 	historyMu    sync.Mutex
 	historyCache map[historyKey]*list.Element
@@ -33,7 +34,7 @@ type Service struct {
 }
 
 func New(pool *pgxpool.Pool) *Service {
-	return &Service{pool: pool, now: time.Now, costCache: map[string]*list.Element{}, historyCache: map[historyKey]*list.Element{}}
+	return &Service{pool: pool, now: time.Now, costCache: map[string]*list.Element{}, costReadSlots: make(chan struct{}, 2), historyCache: map[historyKey]*list.Element{}}
 }
 
 type Result struct {
