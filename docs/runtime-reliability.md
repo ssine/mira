@@ -122,7 +122,10 @@ block handoff; it does not infer success from an idle thread observation.
 Active-turn reconciliation and stop checks read the Server activity projection
 rather than Codex `thread/turns/list`, whose legacy implementation reconstructs
 full history even with `itemsView: notLoaded`. The native interrupt still validates
-the expected turn ID.
+the expected turn ID. `tests/active_turn_resume_browser.mjs` exercises warm
+resume, repeated heartbeats, stop targeting and completion reconciliation without
+runtime history queries; `tests/thread_interrupt_test.mjs` covers stale turns and
+request deadlines.
 
 Messages arrive over the App Server WebSocket. The 25-second connection probe
 does not download history. Initial selection, reconnection/foreground recovery,
@@ -284,4 +287,3 @@ release: packaging/promotion still require all platform jobs to pass. This avoid
 losing the evidence needed to diagnose a post-compilation failure.
 `tests/compiler_cache_snapshot_e2e.mjs` verifies a cold native compile, an archived-cache
 restore hit and invalidation after a header change (GCC on Linux, MSVC on Windows).
-
