@@ -1,8 +1,8 @@
-From 1119632bf9482d9b1d9ba35c801f7b734d20cf88 Mon Sep 17 00:00:00 2001
+From 513bc9431140b27c71771e855db9512ff1ba3aa8 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Thu, 17 Sep 2026 03:19:48 +0800
-Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and opt-in
- plaintext agent messages
+Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
+ compatibility
 
 ---
  codex-rs/Cargo.lock                           |  299 ++---
@@ -30,6 +30,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and opt-in
  .../tests/suite/v2/thread_unsubscribe.rs      |   65 +
  codex-rs/codex-api/src/api_bridge.rs          |   41 +-
  codex-rs/codex-api/src/api_bridge_tests.rs    |   85 ++
+ codex-rs/codex-api/src/sse/responses.rs       |  192 +--
  codex-rs/config/src/config_toml.rs            |    5 +
  codex-rs/config/src/thread_config.rs          |    1 +
  codex-rs/config/src/thread_config/remote.rs   |    4 +
@@ -37,7 +38,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and opt-in
  codex-rs/core/src/codex_delegate.rs           |    2 +-
  codex-rs/core/src/codex_thread.rs             |    6 +
  codex-rs/core/src/config/mod.rs               |   17 +
- codex-rs/core/src/responses_retry.rs          |   45 +
+ codex-rs/core/src/responses_retry.rs          |   47 +
  codex-rs/core/src/session/mod.rs              |    9 +
  codex-rs/core/src/session/session.rs          |   16 +
  codex-rs/core/src/session/turn.rs             |    7 +
@@ -58,7 +59,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and opt-in
  codex-rs/core/tests/suite/guardian_history.rs |    3 +
  codex-rs/core/tests/suite/mod.rs              |    2 +
  .../tests/suite/plaintext_agent_messages.rs   |  217 ++++
- codex-rs/core/tests/suite/rate_limit_retry.rs |  205 +++
+ codex-rs/core/tests/suite/rate_limit_retry.rs |  247 ++++
  codex-rs/core/tests/suite/retry_after.rs      |  152 +--
  ...uite__rate_limit_retry__http_429_wait.snap |    6 +
  .../suite/stream_error_allows_next_turn.rs    |    1 +
@@ -85,7 +86,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and opt-in
  .../thread-store/src/remote_http/writer.rs    |  350 ++++++
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
- 80 files changed, 5253 insertions(+), 376 deletions(-)
+ 81 files changed, 5410 insertions(+), 455 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
@@ -14609,6 +14610,226 @@ index 666dea8..f82f600 100644
 +        }
 +    }
 +}
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index abef246..388014b 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -172,6 +172,10 @@ pub struct ResponsesStreamEvent {
+     pub(crate) headers: Option<Value>,
+     metadata: Option<Value>,
+     response: Option<Value>,
++    error: Option<Value>,
++    code: Option<String>,
++    message: Option<String>,
++    misalignment: Option<Value>,
+     item: Option<Value>,
+     item_id: Option<String>,
+     call_id: Option<String>,
+@@ -410,60 +414,70 @@ pub fn process_responses_event(
+                 return Ok(Some(ResponseEvent::Created {}));
+             }
+         }
+-        "response.failed" => {
+-            if let Some(resp_val) = event.response {
+-                let mut response_error = ApiError::Stream("response.failed event received".into());
+-                if let Some(error) = resp_val.get("error")
+-                    && let Ok(error) = serde_json::from_value::<Error>(error.clone())
+-                {
+-                    if is_context_window_error(&error) {
+-                        response_error = ApiError::ContextWindowExceeded;
+-                    } else if is_quota_exceeded_error(&error) {
+-                        response_error = ApiError::QuotaExceeded;
+-                    } else if is_usage_not_included(&error) {
+-                        response_error = ApiError::UsageNotIncluded;
+-                    } else if is_cyber_policy_error(&error) {
+-                        let message = cyber_policy_message(error.message);
+-                        response_error = ApiError::CyberPolicy { message };
+-                    } else if error.code.as_deref() == Some("misalignment_policy_violation") {
+-                        let message = error
+-                            .message
+-                            .filter(|message| !message.trim().is_empty())
+-                            .unwrap_or_else(|| {
+-                                "This request was blocked due to a misalignment policy violation."
+-                                    .to_string()
+-                            });
+-                        response_error = ApiError::MisalignmentPolicyViolation {
+-                            message,
+-                            misalignment: error.misalignment.and_then(|details| {
+-                                serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
+-                            }),
+-                        };
+-                    } else if matches!(error.code.as_deref(), Some("invalid_prompt" | "bio_policy"))
+-                    {
+-                        let message = error
+-                            .message
+-                            .unwrap_or_else(|| "Invalid request.".to_string());
+-                        response_error = ApiError::InvalidRequest { message };
+-                    } else if is_server_overloaded_error(&error) {
+-                        response_error = ApiError::ServerOverloaded;
+-                    } else {
+-                        let delay = try_parse_retry_after(&error);
+-                        let message = error.message.unwrap_or_default();
+-                        response_error = match error.code.as_deref() {
+-                            Some("rate_limit_exceeded") => {
+-                                ApiError::RateLimitExceeded { message, delay }
+-                            }
+-                            _ => ApiError::Retryable { message, delay },
+-                        };
+-                    }
++        "response.failed" | "error" => {
++            // Some compatible providers send a standalone SSE error after HTTP 200.
++            // Accept both the standard flat fields and the nested error envelope.
++            let error = if event.kind == "error" {
++                event.error.or_else(|| {
++                    (event.code.is_some() || event.message.is_some()).then(|| {
++                        serde_json::json!({
++                            "code": event.code,
++                            "message": event.message,
++                            "misalignment": event.misalignment,
++                        })
++                    })
++                })
++            } else {
++                event
++                    .response
++                    .and_then(|response| response.get("error").cloned())
++            };
++            let mut response_error = ApiError::Stream(format!("{} event received", event.kind));
++            if let Some(error) = error
++                && let Ok(error) = serde_json::from_value::<Error>(error)
++            {
++                if is_context_window_error(&error) {
++                    response_error = ApiError::ContextWindowExceeded;
++                } else if is_quota_exceeded_error(&error) {
++                    response_error = ApiError::QuotaExceeded;
++                } else if is_usage_not_included(&error) {
++                    response_error = ApiError::UsageNotIncluded;
++                } else if is_cyber_policy_error(&error) {
++                    let message = cyber_policy_message(error.message);
++                    response_error = ApiError::CyberPolicy { message };
++                } else if error.code.as_deref() == Some("misalignment_policy_violation") {
++                    let message = error
++                        .message
++                        .filter(|message| !message.trim().is_empty())
++                        .unwrap_or_else(|| {
++                            "This request was blocked due to a misalignment policy violation."
++                                .to_string()
++                        });
++                    response_error = ApiError::MisalignmentPolicyViolation {
++                        message,
++                        misalignment: error.misalignment.and_then(|details| {
++                            serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
++                        }),
++                    };
++                } else if matches!(error.code.as_deref(), Some("invalid_prompt" | "bio_policy")) {
++                    let message = error
++                        .message
++                        .unwrap_or_else(|| "Invalid request.".to_string());
++                    response_error = ApiError::InvalidRequest { message };
++                } else if is_server_overloaded_error(&error) {
++                    response_error = ApiError::ServerOverloaded;
++                } else {
++                    let delay = try_parse_retry_after(&error);
++                    let message = error.message.unwrap_or_default();
++                    response_error = match error.code.as_deref() {
++                        Some("rate_limit_exceeded") => {
++                            ApiError::RateLimitExceeded { message, delay }
++                        }
++                        _ => ApiError::Retryable { message, delay },
++                    };
+                 }
+-                return Err(ResponsesEventError::Api(response_error));
+             }
+-
+-            return Err(ResponsesEventError::Api(ApiError::Stream(
+-                "response.failed event received".into(),
+-            )));
++            return Err(ResponsesEventError::Api(response_error));
+         }
+         "response.incomplete" => {
+             let reason = event.response.as_ref().and_then(|response| {
+@@ -1115,34 +1129,54 @@ mod tests {
+                 "Rate limit reached. Please try again in 1s.",
+             ),
+         ] {
+-            let event = json!({
+-                "type": "response.failed",
+-                "response": { "error": { "code": code, "message": message } },
+-            });
+-            let sse = format!("event: response.failed\ndata: {event}\n\n");
+-            let events = collect_events(&[sse.as_bytes()]).await;
+-            match (code, events.as_slice()) {
+-                (
+-                    "rate_limit_exceeded",
+-                    [
+-                        Err(ApiError::RateLimitExceeded {
+-                            message: actual,
+-                            delay,
+-                        }),
+-                    ],
+-                )
+-                | (
+-                    "unknown_error",
+-                    [
+-                        Err(ApiError::Retryable {
+-                            message: actual,
+-                            delay,
+-                        }),
+-                    ],
+-                ) => {
+-                    assert_eq!((actual.as_str(), *delay), (message, None));
++            for event in [
++                json!({ "type": "response.failed", "response": { "error": { "code": code, "message": message } } }),
++                json!({ "type": "error", "error": { "code": code, "message": message } }),
++                json!({ "type": "error", "code": code, "message": message }),
++            ] {
++                let sse = format!("data: {event}\n\n");
++                let events = collect_events(&[sse.as_bytes()]).await;
++                match (code, events.as_slice()) {
++                    (
++                        "rate_limit_exceeded",
++                        [
++                            Err(ApiError::RateLimitExceeded {
++                                message: actual,
++                                delay,
++                            }),
++                        ],
++                    )
++                    | (
++                        "unknown_error",
++                        [
++                            Err(ApiError::Retryable {
++                                message: actual,
++                                delay,
++                            }),
++                        ],
++                    ) => {
++                        assert_eq!((actual.as_str(), *delay), (message, None));
++                    }
++                    _ => panic!("unexpected events for {code}: {events:?}"),
++                }
++            }
++        }
++    }
++
++    #[tokio::test]
++    async fn standalone_error_preserves_quota_and_context_failures() {
++        for code in ["insufficient_quota", "context_length_exceeded"] {
++            for event in [
++                json!({"type":"error", "error":{"code":code,"message":"Terminal failure"}}),
++                json!({"type":"error", "code":code,"message":"Terminal failure"}),
++            ] {
++                let sse = format!("data: {event}\n\n");
++                let events = collect_events(&[sse.as_bytes()]).await;
++                match (code, events.as_slice()) {
++                    ("insufficient_quota", [Err(ApiError::QuotaExceeded)])
++                    | ("context_length_exceeded", [Err(ApiError::ContextWindowExceeded)]) => {}
++                    _ => panic!("unexpected terminal error: {events:?}"),
+                 }
+-                _ => panic!("unexpected events for {code}: {events:?}"),
+             }
+         }
+     }
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
 index 5f0cc99..c318e24 100644
 --- a/codex-rs/config/src/config_toml.rs
@@ -14786,7 +15007,7 @@ index dca329a..ab6634c 100644
          None => ThreadStoreConfig::Local,
      }
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index fb05054..349cab2 100644
+index fb05054..9dffeaa 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
 @@ -1,5 +1,6 @@
@@ -14814,14 +15035,16 @@ index fb05054..349cab2 100644
          }
      }
  }
-@@ -55,6 +60,46 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -55,6 +60,48 @@ pub(crate) async fn handle_retryable_response_stream_error(
          ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
      };
  
-+    // HTTP/WS 429 rejects this inference request before output. Keep the same
++    // HTTP/WS 429 and typed SSE rate limits reject this inference request. Keep the same
 +    // turn and its completed tool results, with a separate unbounded retry budget.
 +    // Structured quota/usage failures are classified as terminal by the API bridge.
-+    if err.http_status_code_value() == Some(429) {
++    if err.http_status_code_value() == Some(429)
++        || matches!(err.details(), CodexErrorDetails::RateLimitExceeded(_))
++    {
 +        let base = err
 +            .retry_delay()
 +            .unwrap_or(retry_state.rate_limit_retry_delay);
@@ -15940,10 +16163,10 @@ index 0000000..4ec9176
 +}
 diff --git a/codex-rs/core/tests/suite/rate_limit_retry.rs b/codex-rs/core/tests/suite/rate_limit_retry.rs
 new file mode 100644
-index 0000000..8cf37e9
+index 0000000..1878ec2
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/rate_limit_retry.rs
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,247 @@
 +use anyhow::Result;
 +use codex_core::StartThreadOptions;
 +use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
@@ -15972,11 +16195,48 @@ index 0000000..8cf37e9
 +use wiremock::matchers::method;
 +use wiremock::matchers::path;
 +
-+#[test_case::test_case(SessionSource::Mcp; "root")]
-+#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Other("rate-limit-test".into())); "subagent")]
++#[derive(Clone, Copy)]
++enum RateLimitWire {
++    Http,
++    NestedEvent,
++    FlatEvent,
++    FailedResponse,
++}
++
++fn limited_response(wire: RateLimitWire, retry_after: &str) -> ResponseTemplate {
++    let error = json!({"code":"rate_limit_exceeded", "message":format!("Please try again in {retry_after}s.")});
++    let event = match wire {
++        RateLimitWire::Http => {
++            return ResponseTemplate::new(429)
++                .insert_header("Retry-After", retry_after)
++                .set_body_json(json!({"error":error}));
++        }
++        RateLimitWire::NestedEvent => json!({"type":"error", "error":error}),
++        RateLimitWire::FlatEvent => {
++            json!({"type":"error", "code":error["code"],"message":error["message"]})
++        }
++        RateLimitWire::FailedResponse => {
++            json!({"type":"response.failed", "response":{"error":error}})
++        }
++    };
++    responses::sse_response(responses::sse(vec![
++        responses::ev_response_created("limited"),
++        event,
++    ]))
++}
++
++#[test_case::test_case(SessionSource::Mcp, RateLimitWire::Http; "root_http")]
++#[test_case::test_case(SessionSource::Mcp, RateLimitWire::NestedEvent; "root_nested")]
++#[test_case::test_case(SessionSource::Mcp, RateLimitWire::FlatEvent; "root_flat")]
++#[test_case::test_case(SessionSource::Mcp, RateLimitWire::FailedResponse; "root_failed")]
++#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Other("rate-limit-test".into())), RateLimitWire::Http; "subagent_http")]
++#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Other("rate-limit-test".into())), RateLimitWire::NestedEvent; "subagent_nested")]
++#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Other("rate-limit-test".into())), RateLimitWire::FlatEvent; "subagent_flat")]
++#[test_case::test_case(SessionSource::SubAgent(SubAgentSource::Other("rate-limit-test".into())), RateLimitWire::FailedResponse; "subagent_failed")]
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn http_429_preserves_completed_tool_and_outlives_retry_budget(
++async fn rate_limit_preserves_completed_tool_and_outlives_retry_budget(
 +    source: SessionSource,
++    wire: RateLimitWire,
 +) -> Result<()> {
 +    skip_if_no_network!(Ok(()));
 +    let server = responses::start_mock_server().await;
@@ -15988,11 +16248,8 @@ index 0000000..8cf37e9
 +                responses::ev_function_call_with_namespace("write-once", "fixture", "write", "{}"),
 +                responses::ev_completed("tool"),
 +            ])),
-+            ResponseTemplate::new(429)
-+                .set_body_json(json!({"error":{"code":"rate_limit_exceeded"}})),
-+            ResponseTemplate::new(429)
-+                .insert_header("Retry-After", "7")
-+                .set_body_json(json!({"error":{"code":"rate_limit_exceeded"}})),
++            limited_response(wire, "0"),
++            limited_response(wire, "7"),
 +            responses::sse_response(responses::sse(vec![
 +                responses::ev_response_created("recovered"),
 +                responses::ev_assistant_message("answer", "done"),
@@ -16058,9 +16315,15 @@ index 0000000..8cf37e9
 +                    assert_eq!(
 +                        error.codex_error_info,
 +                        Some(CodexErrorInfo::ResponseStreamDisconnected {
-+                            http_status_code: Some(429),
++                            http_status_code: match wire {
++                                RateLimitWire::Http => Some(429),
++                                RateLimitWire::NestedEvent
++                                | RateLimitWire::FlatEvent
++                                | RateLimitWire::FailedResponse => None,
++                            },
 +                        })
 +                    );
++                    assert!(error.message.starts_with("Rate limited; retrying in "));
 +                    waits.push(Instant::now());
 +                }
 +                EventMsg::Error(error) => panic!("unexpected terminal error: {error:?}"),
@@ -16084,13 +16347,15 @@ index 0000000..8cf37e9
 +    Ok(())
 +}
 +
++#[test_case::test_case(RateLimitWire::Http; "http")]
++#[test_case::test_case(RateLimitWire::NestedEvent; "nested_sse")]
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn http_429_long_wait_is_cancellable() -> Result<()> {
++async fn rate_limit_long_wait_is_cancellable(wire: RateLimitWire) -> Result<()> {
 +    skip_if_no_network!(Ok(()));
 +    let server = responses::start_mock_server().await;
 +    Mock::given(method("POST"))
 +        .and(path("/v1/responses"))
-+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "3600"))
++        .respond_with(limited_response(wire, "3600"))
 +        .expect(1)
 +        .mount(&server)
 +        .await;

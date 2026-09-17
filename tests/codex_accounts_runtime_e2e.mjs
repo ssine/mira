@@ -39,6 +39,8 @@ async function waitFor(read, description, timeout = 60_000) {
 const encrypted = items => items.filter(item => item.encrypted_content);
 const importedEncrypted = new Set();
 const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES === "1";
+const sseRateLimit = process.env.MIRA_TEST_SSE_RATE_LIMIT === "1";
+let injectedRateLimit = false;
 const agentConfig = provider => ({ "features.multi_agent_v2": true,
   ...(plaintextMessages ? { [`model_providers.${provider}.plaintext_agent_messages`]: true } : {}) });
 const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
@@ -72,6 +74,16 @@ const mock = http.createServer(async (request, response) => {
   const spawnChild = prompt.includes("SPAWN_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "spawn-account-child");
   const followChild = prompt.includes("FOLLOWUP_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "follow-account-child");
   const sendChild = prompt.includes("SEND_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "send-account-child");
+  if (sseRateLimit && !injectedRateLimit && prompt.includes("SPAWN_ACCOUNT_CHILD") &&
+    body.input.some(item => item.type === "function_call_output" && item.call_id === "spawn-account-child")) {
+    injectedRateLimit = true;
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.end([
+      { type: "response.created", response: { id } },
+      { type: "error", error: { type: "too_many_requests", code: "rate_limit_exceeded", message: "Temporary provider limit." } },
+    ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
+    return;
+  }
   const items = spawnChild || followChild || sendChild ? [{ type: "function_call", namespace: plaintextMessages ? "mira_collaboration" : "collaboration",
     name: spawnChild ? "spawn_agent" : sendChild ? "send_message" : "followup_task",
     call_id: spawnChild ? "spawn-account-child" : sendChild ? "send-account-child" : "follow-account-child",
@@ -386,6 +398,15 @@ try {
         record.payload.namespace === "mira_collaboration" && record.payload.name === name), "canonical calls must retain aliases");
     }
     console.log("Plaintext spawn/send/followup and canonical aliases survived cold child resume");
+  }
+  if (sseRateLimit) {
+    assert(injectedRateLimit, "standalone SSE rate limit must be exercised");
+    const calls = (await history(parentId)).items.filter(record => record.type === "response_item" &&
+      record.payload.type === "function_call" && record.payload.call_id === "spawn-account-child");
+    assert.equal(calls.length, 1, "rate-limit retries must retain the completed spawn without repeating it");
+    assert(parentClient.events.some(event => event.method === "error" && event.params.willRetry &&
+      event.params.error?.message?.startsWith("Rate limited; retrying in ")), "App Server must surface a retrying rate limit");
+    console.log("HTTP 200 SSE rate limit recovered without repeating the persisted child spawn");
   }
   console.log("Subagent identity and followup survived parent account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);

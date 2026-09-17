@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `1119632bf948`
+- Patch source commit: `513bc9431140`
 
 Apply it to a clean checkout:
 
@@ -157,3 +157,15 @@ history replay and Code Mode alongside upstream encrypted-message regressions.
 Run `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1 node tests/codex_accounts_runtime_e2e.mjs`
 against a disposable local Server and the new runtime to cover canonical
 PostgreSQL history and cold subagent resume during account handoff.
+
+Runtime revision `0.153.1-mira.19` recognizes standalone Responses SSE `error`
+events, including flat fields and a nested `error` object sent after HTTP 200.
+It shares the existing `response.failed` classification, so temporary
+`rate_limit_exceeded` responses use the cancellable 5–60 second backoff already
+used for HTTP 429. The current turn and completed tool results remain intact;
+quota and context-window failures retain their terminal semantics. Unknown
+stream failures still use the ordinary bounded retry policy.
+
+Run `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1 MIRA_TEST_SSE_RATE_LIMIT=1 node tests/codex_accounts_runtime_e2e.mjs` against a disposable Server to verify an
+HTTP 200 rate-limit event after a persisted child spawn, followed by recovery and
+cold child handoff without repeating the spawn.
