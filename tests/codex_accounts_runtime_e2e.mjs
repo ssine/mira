@@ -38,6 +38,9 @@ async function waitFor(read, description, timeout = 60_000) {
 }
 const encrypted = items => items.filter(item => item.encrypted_content);
 const importedEncrypted = new Set();
+const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES === "1";
+const agentConfig = provider => ({ "features.multi_agent_v2": true,
+  ...(plaintextMessages ? { [`model_providers.${provider}.plaintext_agent_messages`]: true } : {}) });
 const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
 const isChildFollowup = body => body.input.some(item => item.type === "agent_message" &&
   item.recipient === "/root/account_child" && JSON.stringify(item.content).includes("ACCOUNT_CHILD_SECOND"));
@@ -68,10 +71,12 @@ const mock = http.createServer(async (request, response) => {
   const prompt = JSON.stringify(latestUser?.content ?? "");
   const spawnChild = prompt.includes("SPAWN_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "spawn-account-child");
   const followChild = prompt.includes("FOLLOWUP_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "follow-account-child");
-  const items = spawnChild || followChild ? [{ type: "function_call", namespace: "collaboration",
-    name: spawnChild ? "spawn_agent" : "followup_task", call_id: spawnChild ? "spawn-account-child" : "follow-account-child",
+  const sendChild = prompt.includes("SEND_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "send-account-child");
+  const items = spawnChild || followChild || sendChild ? [{ type: "function_call", namespace: plaintextMessages ? "mira_collaboration" : "collaboration",
+    name: spawnChild ? "spawn_agent" : sendChild ? "send_message" : "followup_task",
+    call_id: spawnChild ? "spawn-account-child" : sendChild ? "send-account-child" : "follow-account-child",
     arguments: JSON.stringify(spawnChild ? { task_name: "account_child", message: "ACCOUNT_CHILD_FIRST", fork_turns: "none" }
-      : { target: "/root/account_child", message: "ACCOUNT_CHILD_SECOND" }) }] : [
+      : { target: "/root/account_child", message: sendChild ? "ACCOUNT_CHILD_QUEUED" : "ACCOUNT_CHILD_SECOND" }) }] : [
     { type: "reasoning", id: `rs-${n}`, summary: [], encrypted_content: n === 1 ? "old-account-A" : "new-account-B" },
     { type: "message", id: `msg-${n}`, role: "assistant", content: [{ type: "output_text", text: isChildFollowup(body) ? "CHILD_FOLLOWUP_OK" : `ACCOUNTS_OK_${n}` }] },
   ];
@@ -339,7 +344,7 @@ try {
   }
   const parentClient = await connect(a);
   console.log("Testing persisted subagent handoff");
-  const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: { "features.multi_agent_v2": true }, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+  const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig("fixture"), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
   await turn(parentClient, parentId, "SPAWN_ACCOUNT_CHILD");
   const childId = await waitFor(async () => {
     const state = (await admin(`/v2/stores/${store}`)).state;
@@ -356,17 +361,32 @@ try {
     return true;
   }, "idle parent and child before handoff");
   const parentOnB = await connect(b);
-  await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: { "features.multi_agent_v2": true } });
+  await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: agentConfig("fixture_b") });
   console.log("Parent resumed on B");
   // Resume only the parent. The persisted child remains cold until the native
   // followup_task restores it; its route and provider must already belong to B.
   const childBeforeFollowup = await parentOnB.call("thread/read", { threadId: childId, includeTurns: false });
   assert.equal(childBeforeFollowup.thread.modelProvider, "fixture_b");
+  if (plaintextMessages) await turn(parentOnB, parentId, "SEND_ACCOUNT_CHILD");
   await turn(parentOnB, parentId, "FOLLOWUP_ACCOUNT_CHILD");
   await waitFor(async () => JSON.stringify((await history(childId)).items).includes("CHILD_FOLLOWUP_OK"), "child followup after account handoff");
   const childRequest = requests.findLast(request => isChildFollowup(request.body));
   assert.equal(childRequest.key, "Bearer synthetic-B");
   assert.equal(childRequest.path, "/B/v1/responses");
+  if (plaintextMessages) {
+    const messages = childRequest.body.input.filter(item => item.type === "agent_message" && item.recipient === "/root/account_child");
+    for (const payload of ["ACCOUNT_CHILD_FIRST", "ACCOUNT_CHILD_QUEUED", "ACCOUNT_CHILD_SECOND"]) {
+      const message = messages.find(item => JSON.stringify(item.content).includes(payload));
+      assert(message, `${payload} must reach the child`);
+      assert(message.content.every(part => part.type === "input_text"), "agent payloads must be plaintext after cold resume");
+    }
+    const parentHistory = (await history(parentId)).items;
+    for (const name of ["spawn_agent", "send_message", "followup_task"]) {
+      assert(parentHistory.some(record => record.type === "response_item" && record.payload.type === "function_call" &&
+        record.payload.namespace === "mira_collaboration" && record.payload.name === name), "canonical calls must retain aliases");
+    }
+    console.log("Plaintext spawn/send/followup and canonical aliases survived cold child resume");
+  }
   console.log("Subagent identity and followup survived parent account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);
   await fs.writeFile(path.join(cliHome, "config.toml"), [

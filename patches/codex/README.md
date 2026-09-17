@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `9856412`
-- Patch source commit: `4e92d9c3ca73`
+- Patch source commit: `1119632bf948`
 
 Apply it to a clean checkout:
 
@@ -132,3 +132,28 @@ other active threads keep their cached histories. Regression coverage includes
 Runtime revision `0.153.1-mira.17` raises scoped in-memory history retention to
 2 GiB of serialized payload, allocated on demand. Canonical validation and the
 eight-scope bound remain unchanged.
+
+Runtime revision `0.153.1-mira.18` adds an opt-in compatibility adapter for
+Responses providers that cannot replay encrypted inter-agent message payloads:
+
+```toml
+[model_providers.example]
+plaintext_agent_messages = true
+```
+
+The three message-bearing v2 tools (`spawn_agent`, `send_message`, `followup_task`)
+use the custom `mira_collaboration` namespace without encrypted parameters.
+Providers without namespace tools receive `mira_`-prefixed function names.
+The existing handlers retain spawning, delivery and scheduling semantics;
+direct calls and Code Mode both deliver readable message content even when the
+provider omits `encrypted_function_args`. Other tools retain their names.
+The adapter preserves the actual tool names and invocation provenance in history.
+Default provider behavior is unchanged. This does not recover ciphertext already
+stored by an incompatible provider: use a new conversation with verified handoff
+information and retain the original history for reference.
+
+Core integration coverage exercises plaintext delivery, queueing, follow-up,
+history replay and Code Mode alongside upstream encrypted-message regressions.
+Run `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1 node tests/codex_accounts_runtime_e2e.mjs`
+against a disposable local Server and the new runtime to cover canonical
+PostgreSQL history and cold subagent resume during account handoff.
