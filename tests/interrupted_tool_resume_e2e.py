@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import signal
 import subprocess
 import tempfile
 import threading
@@ -49,18 +50,24 @@ class Runtime:
         env.update(CODEX_HOME=str(home), RUST_LOG="warn")
         self.log = (home / "runtime.log").open("a")
         self.process = subprocess.Popen([os.environ["CODEX_TEST_BINARY"], "app-server", "--listen", "stdio://"],
-            cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1)
+            cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1,
+            start_new_session=os.name != "nt")
 
         def read():
             for line in self.process.stdout:
                 self.queue.put(json.loads(line))
             self.queue.put({"exited": True})
 
-        threading.Thread(target=read, daemon=True).start()
-        self.call("initialize", {"clientInfo": {"name": "interrupted_tool_fixture", "version": "1"},
-                                 "capabilities": {"experimentalApi": True}})
-        self.process.stdin.write('{"method":"initialized"}\n')
-        self.process.stdin.flush()
+        self.reader = threading.Thread(target=read, daemon=True)
+        self.reader.start()
+        try:
+            self.call("initialize", {"clientInfo": {"name": "interrupted_tool_fixture", "version": "1"},
+                                     "capabilities": {"experimentalApi": True}})
+            self.process.stdin.write('{"method":"initialized"}\n')
+            self.process.stdin.flush()
+        except BaseException:
+            self.close()
+            raise
 
     def wait(self, predicate):
         for event in self.events:
@@ -84,9 +91,34 @@ class Runtime:
         return result["result"]
 
     def close(self):
-        self.process.terminate()
-        self.process.wait(timeout=15)
-        self.log.close()
+        # The canonical entrypoint can launch a child runtime. Terminating only
+        # the launcher leaves that child holding runtime.log open on Windows.
+        try:
+            if os.name == "nt":
+                result = subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
+                                        capture_output=True, text=True, timeout=15)
+                if result.returncode and self.process.poll() is None:
+                    raise RuntimeError(f"fixture process tree cleanup failed: {result.stderr}")
+            else:
+                try:
+                    os.killpg(self.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+            try:
+                self.process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                if os.name != "nt":
+                    os.killpg(self.process.pid, signal.SIGKILL)
+                else:
+                    self.process.kill()
+                self.process.wait(timeout=15)
+            self.reader.join(timeout=15)
+            if self.reader.is_alive():
+                raise RuntimeError("fixture child retained stdout after shutdown")
+        finally:
+            self.process.stdin.close()
+            self.process.stdout.close()
+            self.log.close()
 
 
 def main():
