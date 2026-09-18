@@ -180,14 +180,15 @@ func StartThreadErasureWorker(ctx context.Context, pool *pgxpool.Pool, logger in
 				return
 			case <-timer.C:
 			}
-			if err := cleanupHistoryUploads(workerContext, pool); err != nil && workerContext.Err() == nil {
+			uploadProgress, err := cleanupHistoryUploads(workerContext, pool)
+			if err != nil && workerContext.Err() == nil {
 				logger.Printf("history upload cleanup failed: %v", err)
 			}
 			result, err := ProcessThreadErasureBatch(workerContext, pool, ErasureBatchOptions{})
 			if err != nil && workerContext.Err() == nil {
 				logger.Printf("thread erasure batch failed: %v", err)
 			}
-			if result != nil {
+			if result != nil || uploadProgress {
 				delay = 200 * time.Millisecond
 			} else {
 				delay = 3 * time.Second

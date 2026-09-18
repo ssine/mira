@@ -19,6 +19,12 @@ import (
 
 const historyChunkBytes = 4 * 1024 * 1024
 
+const (
+	historyCleanupChunkBatch = 8
+	historyCleanupItemBatch  = 1024
+	historyCleanupItemBytes  = 32 * 1024 * 1024
+)
+
 var historyUploadPattern = regexp.MustCompile(`^/v2/stores/([^/]+)/history-uploads/([0-9a-f-]{36})(/seal)?$`)
 
 func uploadError(status int, message string) error {
@@ -272,10 +278,11 @@ func planUploadedHistory(ctx context.Context, tx pgx.Tx, store string, entry *hi
 // Expiration is a staging retention period, never a limit on conversation size.
 // Remove bounded batches so a completed multi-gigabyte upload cannot monopolize
 // the erasure worker. A live upload updates its timestamp on every chunk.
-func cleanupHistoryUploads(ctx context.Context, pool *pgxpool.Pool) error {
+// Report committed progress so the worker drains a backlog without idle sleeps.
+func cleanupHistoryUploads(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback(ctx)
 	var store, id string
@@ -284,30 +291,44 @@ func cleanupHistoryUploads(ctx context.Context, pool *pgxpool.Pool) error {
  OR EXISTS(SELECT 1 FROM mira_thread_actions a WHERE a.store_id=mira_history_uploads.store_id AND a.thread_id=mira_history_uploads.thread_id AND a.action='delete')
   ORDER BY updated_at FOR UPDATE SKIP LOCKED LIMIT 1`).Scan(&store, &id)
 	if err == pgx.ErrNoRows {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE mira_history_uploads SET status='cancelled' WHERE store_id=$1 AND upload_id=$2 AND status NOT IN ('committed','cancelled')`, store, id); err != nil {
-		return err
+	// Rotate terminal uploads to the back of the queue. One enormous upload
+	// must not delay releasing the chunks or metadata of every newer upload.
+	if _, err = tx.Exec(ctx, `UPDATE mira_history_uploads SET
+  status=CASE WHEN status='committed' THEN status ELSE 'cancelled' END,updated_at=NOW()
+  WHERE store_id=$1 AND upload_id=$2`, store, id); err != nil {
+		return false, err
 	}
-	result, err := tx.Exec(ctx, `DELETE FROM mira_history_upload_chunks WHERE store_id=$1 AND upload_id=$2 AND byte_offset IN
-  (SELECT byte_offset FROM mira_history_upload_chunks WHERE store_id=$1 AND upload_id=$2 ORDER BY byte_offset LIMIT 8)`, store, id)
+	_, err = tx.Exec(ctx, `DELETE FROM mira_history_upload_chunks WHERE store_id=$1 AND upload_id=$2 AND byte_offset IN
+  (SELECT byte_offset FROM mira_history_upload_chunks WHERE store_id=$1 AND upload_id=$2 ORDER BY byte_offset LIMIT $3)`, store, id, historyCleanupChunkBatch)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if result.RowsAffected() == 0 {
-		result, err = tx.Exec(ctx, `DELETE FROM mira_history_upload_items WHERE store_id=$1 AND upload_id=$2 AND item_seq IN
-   (SELECT item_seq FROM mira_history_upload_items WHERE store_id=$1 AND upload_id=$2 ORDER BY item_seq LIMIT 16)`, store, id)
-		if err != nil {
-			return err
-		}
-		if result.RowsAffected() == 0 {
-			if _, err = tx.Exec(ctx, `DELETE FROM mira_history_uploads WHERE store_id=$1 AND upload_id=$2`, store, id); err != nil {
-				return err
-			}
-		}
+	// Bound both row count and stored payload bytes without loading JSON into
+	// Go or detoasting it. Always allow the first item, even if it exceeds the
+	// budget: a single history record has no arbitrary size ceiling.
+	_, err = tx.Exec(ctx, `DELETE FROM mira_history_upload_items WHERE store_id=$1 AND upload_id=$2 AND item_seq IN (
+  SELECT item_seq FROM (
+    SELECT item_seq,COALESCE(sum(size) OVER (ORDER BY item_seq ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0) AS bytes_before
+    FROM (SELECT item_seq,pg_column_size(payload) AS size FROM mira_history_upload_items
+      WHERE store_id=$1 AND upload_id=$2 ORDER BY item_seq LIMIT $3) batch
+  ) sized WHERE bytes_before<$4)`, store, id, historyCleanupItemBatch, historyCleanupItemBytes)
+	if err != nil {
+		return false, err
 	}
-	return tx.Commit(ctx)
+	// Avoid an unbounded cascading delete while either staging table has rows.
+	_, err = tx.Exec(ctx, `DELETE FROM mira_history_uploads WHERE store_id=$1 AND upload_id=$2
+  AND NOT EXISTS(SELECT 1 FROM mira_history_upload_chunks WHERE store_id=$1 AND upload_id=$2)
+  AND NOT EXISTS(SELECT 1 FROM mira_history_upload_items WHERE store_id=$1 AND upload_id=$2)`, store, id)
+	if err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestChunkedHistoryAtomicCommit(t *testing.T) {
@@ -93,6 +94,26 @@ func TestChunkedHistoryAtomicCommit(t *testing.T) {
 	if duplicate.Status != 200 || duplicate.Body["duplicate"] != true {
 		t.Fatalf("duplicate: %+v", duplicate)
 	}
+	// A lost commit response remains replayable after disposable staging is gone.
+	for attempts := 0; ; attempts++ {
+		var exists bool
+		if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_history_uploads WHERE store_id=$1 AND upload_id=$2)`, store, upload).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			break
+		}
+		if attempts == 100 {
+			t.Fatal("committed upload cleanup did not finish")
+		}
+		if _, err = cleanupHistoryUploads(ctx, pool); err != nil {
+			t.Fatal(err)
+		}
+	}
+	duplicate = commit(upload, "append", 0, 0, 0, op, states)
+	if duplicate.Status != 200 || duplicate.Body["duplicate"] != true {
+		t.Fatalf("duplicate after staging cleanup: %+v", duplicate)
+	}
 	var saved string
 	if err = pool.QueryRow(ctx, `SELECT payload::text FROM codex_thread_events WHERE store_id=$1 AND thread_id=$2 AND item_seq=2`, store, thread).Scan(&saved); err != nil {
 		t.Fatal(err)
@@ -158,6 +179,101 @@ func TestChunkedHistoryAtomicCommit(t *testing.T) {
 		t.Fatal("invalid stream accepted")
 	}
 }
+
+func TestHistoryUploadCleanupBacklog(t *testing.T) {
+	url := os.Getenv("MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err = foundation.InitializeDatabase(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store, _ := randomUUID()
+	defer pool.Exec(ctx, `DELETE FROM mira_history_uploads WHERE store_id=$1`, store)
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stage := func(status string, hours, items, chunks int) string {
+		t.Helper()
+		id, _ := randomUUID()
+		exec(`INSERT INTO mira_history_uploads(store_id,upload_id,thread_id,item_count,total_bytes,status,updated_at)
+  VALUES($1,$2::uuid,$2::text,$3,0,$4,NOW()-make_interval(hours=>$5))`, store, id, items, status, hours)
+		exec(`INSERT INTO mira_history_upload_items SELECT $1,$2,i,'{}'::json,'fixture' FROM generate_series(1,$3::int) i`, store, id, items)
+		exec(`INSERT INTO mira_history_upload_chunks SELECT $1,$2,i,'x'::bytea FROM generate_series(0,$3::int-1) i`, store, id, chunks)
+		return id
+	}
+	locked := stage("committed", 60, 1, 1)
+	backlog := stage("committed", 48, historyCleanupItemBatch*3+7, historyCleanupChunkBatch+2)
+	small := stage("cancelled", 47, 1, 1)
+	stage("uploading", 25, 1, 1)
+	stage("sealed", 25, 1, 1)
+	live := stage("uploading", 0, 1, 1)
+	sealed := stage("sealed", 0, 1, 1)
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT 1 FROM mira_history_uploads WHERE store_id=$1 AND upload_id=$2 FOR UPDATE`, store, locked); err != nil {
+		t.Fatal(err)
+	}
+	if progress, err := cleanupHistoryUploads(ctx, pool); err != nil || !progress {
+		t.Fatalf("cleanup did not skip locked upload: %v %v", progress, err)
+	}
+	var items, chunks int
+	if err = pool.QueryRow(ctx, `SELECT
+  (SELECT count(*) FROM mira_history_upload_items WHERE store_id=$1 AND upload_id=$2),
+  (SELECT count(*) FROM mira_history_upload_chunks WHERE store_id=$1 AND upload_id=$2)`, store, backlog).Scan(&items, &chunks); err != nil {
+		t.Fatal(err)
+	}
+	if items != historyCleanupItemBatch*2+7 || chunks != 2 {
+		t.Fatalf("expected bounded progress in both tables: items=%d chunks=%d", items, chunks)
+	}
+	if progress, err := cleanupHistoryUploads(ctx, pool); err != nil || !progress {
+		t.Fatalf("second cleanup: %v %v", progress, err)
+	}
+	var exists bool
+	if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_history_uploads WHERE store_id=$1 AND upload_id=$2)`, store, small).Scan(&exists); err != nil || exists {
+		t.Fatalf("large backlog starved newer upload: exists=%v err=%v", exists, err)
+	}
+	if err = tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stop := StartThreadErasureWorker(ctx, pool, cleanupTestLogger{t})
+	defer stop()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var remaining int
+		if err = pool.QueryRow(ctx, `SELECT count(*) FROM mira_history_uploads WHERE store_id=$1 AND upload_id NOT IN ($2,$3)`, store, live, sealed).Scan(&remaining); err != nil {
+			t.Fatal(err)
+		}
+		if remaining == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("worker slept while upload backlog remained: %d", remaining)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err = pool.QueryRow(ctx, `SELECT
+  (SELECT count(*) FROM mira_history_upload_items WHERE store_id=$1),
+  (SELECT count(*) FROM mira_history_upload_chunks WHERE store_id=$1)`, store).Scan(&items, &chunks); err != nil || items != 2 || chunks != 2 {
+		t.Fatalf("live uploading/sealed data changed: items=%d chunks=%d err=%v", items, chunks, err)
+	}
+}
+
+type cleanupTestLogger struct{ t *testing.T }
+
+func (l cleanupTestLogger) Printf(format string, args ...any) { l.t.Logf(format, args...) }
 
 func TestHistoryUploadHTTPRetriesAndCancellation(t *testing.T) {
 	url := os.Getenv("MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL")
