@@ -18,7 +18,9 @@ const identity = path.join(temporary, "identity.json"), defaultHome = path.join(
 await fs.mkdir(defaultHome);
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 const runtimeLog = path.join(temporary, "runtime.log"), wrapper = path.join(temporary, "codex-test");
-await fs.writeFile(wrapper, `#!/bin/sh\nRUST_LOG=warn exec ${quote(codex)} "$@" 2>>${quote(runtimeLog)}\n`, { mode: 0o700 });
+// Plugin downloads are unrelated to this loopback fixture and can outlive a
+// previous CLI, racing removal of its temporary Codex home.
+await fs.writeFile(wrapper, `#!/bin/sh\nRUST_LOG=warn exec ${quote(codex)} -c 'features.plugins=false' "$@" 2>>${quote(runtimeLog)}\n`, { mode: 0o700 });
 const nodeKey = `accounts-runtime-${randomUUID()}`, store = `accounts-runtime-${randomUUID()}`;
 const session = await loginAdmin(origin);
 const admin = (url, body, method = "POST") => adminRequest(origin, session, url,
@@ -411,11 +413,13 @@ try {
   console.log("Subagent identity and followup survived parent account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);
   await fs.writeFile(path.join(cliHome, "config.toml"), [
-    'model="gpt-5.1-codex"', 'model_provider="fixture"', '[model_providers.fixture]', 'name="Fixture"',
+    'model="gpt-5.1-codex"', 'model_provider="fixture"', 'features.plugins=false', '[model_providers.fixture]', 'name="Fixture"',
     `base_url="http://127.0.0.1:${mock.address().port}/v1"`, 'wire_api="responses"', 'env_key="FIXTURE_KEY"',
     '[experimental_thread_store]', 'type="remote_http"', `endpoint="${origin}"`, `store_id="${cliStore}"`,
   ].join("\n"));
-  const cli = spawn(codex, ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", temporary, "CLI_ACCOUNT_SHARED_HISTORY"], {
+  // An optional previous runtime verifies that an upgrade can resume canonical
+  // history written before the new ThreadStore fields and protocol changes.
+  const cli = spawn(process.env.CODEX_PREVIOUS_TEST_BINARY || codex, ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", temporary, "CLI_ACCOUNT_SHARED_HISTORY"], {
     env: { ...process.env, CODEX_HOME: cliHome, FIXTURE_KEY: "synthetic-CLI", MIRA_NODE_TOKEN: token, MIRA_NODE_CODEX_ACCOUNT_ID: "", MIRA_NODE_CODEX_RUNTIME_ID: "" },
     stdio: ["ignore", "pipe", "pipe"],
   });
