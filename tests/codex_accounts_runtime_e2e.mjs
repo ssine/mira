@@ -415,7 +415,9 @@ try {
     `base_url="http://127.0.0.1:${mock.address().port}/v1"`, 'wire_api="responses"', 'env_key="FIXTURE_KEY"',
     '[experimental_thread_store]', 'type="remote_http"', `endpoint="${origin}"`, `store_id="${cliStore}"`,
   ].join("\n"));
-  const cli = spawn(codex, ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", temporary, "CLI_ACCOUNT_SHARED_HISTORY"], {
+  // An optional previous runtime verifies that an upgrade can resume canonical
+  // history written before the new ThreadStore fields and protocol changes.
+  const cli = spawn(process.env.CODEX_PREVIOUS_TEST_BINARY || codex, ["exec", "--json", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "-C", temporary, "CLI_ACCOUNT_SHARED_HISTORY"], {
     env: { ...process.env, CODEX_HOME: cliHome, FIXTURE_KEY: "synthetic-CLI", MIRA_NODE_TOKEN: token, MIRA_NODE_CODEX_ACCOUNT_ID: "", MIRA_NODE_CODEX_RUNTIME_ID: "" },
     stdio: ["ignore", "pipe", "pipe"],
   });

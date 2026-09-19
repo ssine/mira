@@ -4,14 +4,14 @@ Mira currently needs a small patch on top of the official Codex source tree so t
 App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
-- Base tag: `rust-v0.153.1` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `9856412`
-- Patch source commit: `513bc9431140`
+- Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
+- Base commit: `4e21628f9ec9`
+- Patch source commit: `dbe81774c17b`
 
 Apply it to a clean checkout:
 
 ```bash
-git clone --branch rust-v0.153.1 https://github.com/openai/codex.git codex
+git clone --branch rust-v0.155.1 https://github.com/openai/codex.git codex
 git -C codex am ../patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch
 ```
 
@@ -169,3 +169,26 @@ stream failures still use the ordinary bounded retry policy.
 Run `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1 MIRA_TEST_SSE_RATE_LIMIT=1 node tests/codex_accounts_runtime_e2e.mjs` against a disposable Server to verify an
 HTTP 200 rate-limit event after a persisted child spawn, followed by recovery and
 cold child handoff without repeating the spawn.
+
+Runtime revision `0.155.1-mira.1` rebases the complete adapter onto upstream
+0.155.1. It preserves upstream reasoning-effort recording before Mira's durable
+sampling barrier and adopts the new fork options without dropping fork progress
+or the final flush. Remote resume still works without a node-local rollout path.
+The native read projection now filters incompatible `runtime_workspace_roots`
+alongside `cwd`, retaining the original cross-platform metadata in PostgreSQL.
+Thread deletion acknowledges the canonical remote write before cleaning the
+upstream SQLite projection; cancellation and lost acknowledgements retain the
+same owned writer and exact retry body. Rejected remote deletion leaves the
+local projection intact.
+
+Temporary HTTP/SSE rate limits retain Mira's cancellable retry behavior; upstream
+quota classification remains terminal. Stable and experimental App Server schema
+bundles, TypeScript exports and the derived Python notification models are
+regenerated together. No new Mira database migration or account protocol is
+required. Upstream thread attachment APIs remain unsupported by this adapter.
+
+The account runtime regression accepts `CODEX_PREVIOUS_TEST_BINARY` to create
+CLI history with `0.153.1-mira.19` and resume it through the new App Server.
+Run it with `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1` and
+`MIRA_TEST_SSE_RATE_LIMIT=1` against a disposable Server, in addition to the
+large-fork and interrupted-tool scenarios described above.
