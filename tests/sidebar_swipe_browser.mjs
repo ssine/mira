@@ -214,7 +214,14 @@ try {
     // Let that guard expire before a new tap, rather than waiting after it.
     await page.waitForTimeout(450);
     await page.locator('#agentThreadDrawerToggle').tap();
-    await page.waitForTimeout(400); await follows(340);
+    // This is idle setup for the next gesture. Wait for the actual open frame
+    // under CI load; intermediate drag frames still use immediate assertions.
+    await page.waitForFunction(() => {
+      const element = document.querySelector('#agentThreadDrawer');
+      return element.getAttribute('aria-hidden') === 'false' &&
+        Math.abs(element.getBoundingClientRect().right - 340) <= 2;
+    });
+    await follows(340);
   };
   for (const area of ['list', 'backdrop', 'footer']) {
     await stableOpen();
