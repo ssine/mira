@@ -36,8 +36,19 @@ let nodeMetadataTarget = null;
 
 const themeStorageKey = "mira.theme";
 const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
-let agentThreadDrawerOpen = agentThreadDrawerWide.matches;
+// A 240px sidebar still leaves 480px for the conversation at this boundary.
+const agentSidebarCanDock = window.matchMedia("(min-width: 720px)");
+const sidebarLayoutStorageKey = "mira.sidebar.layout";
+const validSidebarLayout = value => ["auto", "docked", "drawer"].includes(value) ? value : "auto";
+let agentSidebarLayout = "auto";
+try { agentSidebarLayout = validSidebarLayout(localStorage.getItem(sidebarLayoutStorageKey)); } catch { /* optional preference */ }
+const sidebarShouldDock = () => agentSidebarLayout === "docked" ? agentSidebarCanDock.matches :
+  agentSidebarLayout === "auto" && agentThreadDrawerWide.matches;
+let agentSidebarDocked = sidebarShouldDock();
+let agentSidebarDockedOpen = true;
+let agentThreadDrawerOpen = agentSidebarDocked;
 let resetAgentDrawerDrag = () => {};
+let resetSidebarResize = () => {};
 let browserRouteEpoch = 0;
 
 function writeBrowserRoute(view, threadId = null, { replace = false } = {}) {
@@ -622,7 +633,7 @@ function acceptThreadReadState(threadId, state) {
 
 function visibleReadPosition() {
   if (document.hidden || !document.hasFocus() || document.body.dataset.view !== "agentView" ||
-      (!agentThreadDrawerWide.matches && agentThreadDrawerOpen) || document.querySelector("dialog[open]") ||
+      (!agentSidebarDocked && agentThreadDrawerOpen) || document.querySelector("dialog[open]") ||
       agent.transcriptGap || agent.transcriptLoadingOlder || agent.transcriptThreadId !== agent.threadId ||
       !traceNearBottom(null, 24)) return null;
   const generation = agent.transcriptGeneration, itemCount = agent.transcriptActivityCount;
@@ -835,9 +846,24 @@ function show(view) {
   scheduleThreadActivity();
   document.title = view === "agentView" ? `${$("#conversationTitle").textContent} · Mira` : "Mira";
   if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
-  else if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
+  else if (!agentSidebarDocked) setAgentThreadDrawer(false);
   syncAccountSidebar();
   scheduleThreadRead();
+}
+
+function syncSidebarLayout({ selected = false } = {}) {
+  const docked = sidebarShouldDock();
+  let open = agentThreadDrawerOpen;
+  if (selected) open = true;
+  else if (docked !== agentSidebarDocked) open = docked && agentSidebarDockedOpen;
+  if (docked !== agentSidebarDocked) resetSidebarResize();
+  agentSidebarDocked = docked;
+  $(".chat-shell").classList.toggle("sidebar-docked", docked);
+  for (const button of document.querySelectorAll("[data-sidebar-layout]")) {
+    button.setAttribute("aria-checked", String(button.dataset.sidebarLayout === agentSidebarLayout));
+  }
+  $("#agentSidebarLayoutNotice").hidden = agentSidebarLayout !== "docked" || docked;
+  setAgentThreadDrawer(open, { focus: selected });
 }
 
 function setAgentThreadDrawer(open, { focus = true } = {}) {
@@ -848,12 +874,13 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   resetAgentDrawerDrag();
   if (!open) closeSidebarPopovers();
   agentThreadDrawerOpen = open;
+  if (agentSidebarDocked) agentSidebarDockedOpen = open;
   syncAccountSidebar();
   drawer.closest(".chat-shell").classList.toggle("sidebar-open", open);
   drawer.classList.toggle("open", open);
   drawer.toggleAttribute("inert", !open);
   drawer.setAttribute("aria-hidden", String(!open));
-  const overlay = open && !agentThreadDrawerWide.matches;
+  const overlay = open && !agentSidebarDocked;
   backdrop.classList.toggle("open", overlay);
   backdrop.tabIndex = overlay ? 0 : -1;
   toggle.setAttribute("aria-expanded", String(open));
@@ -871,7 +898,7 @@ function installSidebarResize() {
   let desired = 300, drag = null;
   try { const saved = localStorage.getItem("mira.sidebar.width"); if (saved !== null && Number.isFinite(Number(saved))) desired = Number(saved); } catch { /* optional preference */ }
   const apply = (width = desired) => {
-    const max = Math.max(240, Math.min(480, innerWidth - 560));
+    const max = Math.max(240, Math.min(480, innerWidth - 480));
     const actual = Math.round(Math.max(240, Math.min(max, width)));
     shell.style.setProperty("--sidebar-width", `${actual}px`);
     handle.setAttribute("aria-valuenow", String(actual));
@@ -880,7 +907,7 @@ function installSidebarResize() {
   };
   const save = width => { desired = apply(width); try { localStorage.setItem("mira.sidebar.width", String(desired)); } catch { /* optional preference */ } };
   handle.addEventListener("pointerdown", event => {
-    if (event.button !== 0 || !agentThreadDrawerWide.matches) return;
+    if (event.button !== 0 || !agentSidebarDocked) return;
     event.preventDefault(); handle.focus(); handle.setPointerCapture(event.pointerId);
     drag = { id: event.pointerId, x: event.clientX, width: $("#agentThreadDrawer").getBoundingClientRect().width };
     shell.classList.add("sidebar-resizing");
@@ -894,19 +921,21 @@ function installSidebarResize() {
     scheduleSidebarCosts();
   };
   for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) handle.addEventListener(name, finish);
+  resetSidebarResize = () => { if (drag) finish({ pointerId: drag.id, type: "pointercancel" }); };
   handle.addEventListener("keydown", event => {
+    if (!agentSidebarDocked) return;
     const step = event.shiftKey ? 50 : 10;
     const width = Number(handle.getAttribute("aria-valuenow"));
     const next = { ArrowLeft: width - step, ArrowRight: width + step, Home: 240, End: 480 }[event.key];
     if (next !== undefined) { event.preventDefault(); save(next); scheduleSidebarCosts(); }
   });
-  window.addEventListener("resize", () => { if (!drag) apply(); });
+  window.addEventListener("resize", () => { resetSidebarResize(); apply(); });
   apply();
 }
 
 
-function closeAgentThreadDrawerOnMobile() {
-  if (!agentThreadDrawerWide.matches) setAgentThreadDrawer(false);
+function closeAgentThreadDrawerIfOverlaid() {
+  if (!agentSidebarDocked) setAgentThreadDrawer(false);
 }
 
 function installAgentDrawerSwipe() {
@@ -915,7 +944,7 @@ function installAgentDrawerSwipe() {
   const backdrop = $("#agentThreadDrawerBackdrop");
   let gesture = null;
   let suppressClickUntil = 0;
-  const enabled = () => document.body.dataset.view === "agentView" && !agentThreadDrawerWide.matches &&
+  const enabled = () => document.body.dataset.view === "agentView" && !agentSidebarDocked &&
     (window.visualViewport?.scale ?? 1) <= 1.05;
   const selectedText = () => window.getSelection()?.type === "Range";
   resetAgentDrawerDrag = () => {
@@ -4509,11 +4538,11 @@ function installConversationDetailsGestures() {
   // does for rightward gestures; a horizontal code scroller keeps its own input.
   surface.addEventListener("touchstart", event => {
     if (opening) cancelOpening();
-    if (event.touches.length !== 1 || agentThreadDrawerOpen || conversationDetailsWide.matches ||
+    if (event.touches.length !== 1 || (!agentSidebarDocked && agentThreadDrawerOpen) || conversationDetailsWide.matches ||
         document.body.dataset.view !== "agentView" || document.querySelector("dialog[open], [popover]:popover-open") ||
         (window.visualViewport?.scale ?? 1) > 1.05 || window.getSelection()?.type === "Range") return;
     const target = event.target instanceof Element ? event.target : event.target.parentElement;
-    if (!target || target.closest("input, textarea, select, [role=slider], [contenteditable]:not([contenteditable=false]), video, audio, canvas")) return;
+    if (!target?.closest(".conversation-card") || target.closest("input, textarea, select, [role=slider], [contenteditable]:not([contenteditable=false]), video, audio, canvas")) return;
     for (let node = target; node && node !== surface; node = node.parentElement) {
       if (node.scrollWidth > node.clientWidth + 2 && /^(auto|scroll)$/.test(getComputedStyle(node).overflowX)) return;
     }
@@ -5128,7 +5157,7 @@ async function openImportedSession(threadId, runtimeNodeId = null) {
   }
   if (!$("#agentRuntimeNode").value) throw new Error("请先选择一个 Codex 运行节点。导入来源与运行位置可以不同。");
   show("agentView");
-  closeAgentThreadDrawerOnMobile();
+  closeAgentThreadDrawerIfOverlaid();
   await resumeAgentThread(threadId);
 }
 
@@ -5921,6 +5950,14 @@ for (const [panelId, triggerId] of [["agentNavMenu", "agentNavMenuToggle"], ["ag
   $("#" + panelId).addEventListener("toggle", event => $("#" + triggerId).setAttribute("aria-expanded", String(event.newState === "open")));
 }
 $("#agentNavMenu").addEventListener("click", event => { if (event.target.closest("button")) $("#agentNavMenu").hidePopover(); }, { capture: true });
+for (const button of document.querySelectorAll("[data-sidebar-layout]")) {
+  button.addEventListener("click", () => {
+    agentSidebarLayout = validSidebarLayout(button.dataset.sidebarLayout);
+    try { localStorage.setItem(sidebarLayoutStorageKey, agentSidebarLayout); } catch { /* optional preference */ }
+    syncSidebarLayout({ selected: true });
+    if (agentSidebarLayout === "docked" && !agentSidebarDocked) toast("已选择常驻；窗口较窄，暂时使用抽屉");
+  });
+}
 $("#agentNavMenu").addEventListener("keydown", event => {
   if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
   const buttons = [...event.currentTarget.querySelectorAll("button:not([disabled])")].filter(button => button.getClientRects().length);
@@ -5960,13 +5997,20 @@ $("#agentThreadDrawerToggle").addEventListener("click", () => setAgentThreadDraw
 $("#agentThreadDrawerBackdrop").addEventListener("click", () => setAgentThreadDrawer(false));
 installAgentDrawerSwipe();
 installSidebarResize();
+syncSidebarLayout();
 $("#agentThreadList").addEventListener("scroll", scheduleSidebarCosts, { passive: true });
 window.addEventListener("popstate", () => {
   if (["loginView", "setupView"].includes(document.body.dataset.view)) return;
   agent.selectionEpoch++;
   void restoreBrowserRoute().catch((error) => setConversationNotice(error.message, "error"));
 });
-agentThreadDrawerWide.addEventListener("change", () => setAgentThreadDrawer(agentThreadDrawerWide.matches, { focus: false }));
+agentThreadDrawerWide.addEventListener("change", () => syncSidebarLayout());
+agentSidebarCanDock.addEventListener("change", () => syncSidebarLayout());
+window.addEventListener("storage", event => {
+  if (event.key !== sidebarLayoutStorageKey && event.key !== null) return;
+  agentSidebarLayout = validSidebarLayout(event.newValue);
+  syncSidebarLayout();
+});
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || document.querySelector("[popover]:popover-open")) return;
   if ($("#conversationDetails").open && conversationDetailsWide.matches) { closeConversationDetailsPanel(); return; }
@@ -6073,13 +6117,13 @@ traceScroller().addEventListener("scroll", scheduleThreadRead, { passive: true }
 window.addEventListener("focus", scheduleThreadRead);
 window.addEventListener("blur", scheduleThreadRead);
 document.addEventListener("visibilitychange", scheduleThreadRead);
-$("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerOnMobile(); });
+$("#agentNewThread").addEventListener("click", () => { newAgentThread(); closeAgentThreadDrawerIfOverlaid(); });
 $("#agentThreadList").addEventListener("click", (event) => {
   const project = event.target.closest("button[data-project-new]");
   if (project) {
     event.preventDefault();
     newAgentThread({ project: { key: project.dataset.projectNew, nodeId: project.dataset.projectNode, cwd: project.dataset.projectPath } });
-    closeAgentThreadDrawerOnMobile();
+    closeAgentThreadDrawerIfOverlaid();
     $("#conversationInput").focus();
     return;
   }
@@ -6087,7 +6131,7 @@ $("#agentThreadList").addEventListener("click", (event) => {
   if (menu) { openThreadMenu(menu.dataset.threadMenu, menu); return; }
   const button = event.target.closest("button[data-thread-id]");
   if (button) {
-    closeAgentThreadDrawerOnMobile();
+    closeAgentThreadDrawerIfOverlaid();
     resumeAgentThread(button.dataset.threadId).catch((error) => setConversationNotice(error.message, "error"));
   }
 });
@@ -6379,7 +6423,7 @@ $("#projectForm").addEventListener("submit", (event) => {
   }
   newAgentThread({ project: projectForThread({ runtimeNodeId: nodeId, cwd }) });
   $("#projectDialog").close();
-  closeAgentThreadDrawerOnMobile();
+  closeAgentThreadDrawerIfOverlaid();
   $("#conversationInput").focus();
 });
 

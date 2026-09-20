@@ -115,6 +115,14 @@
 				<button id="agentManageAccounts" type="button" role="menuitem">管理 Codex 账号</button>
                 <button id="agentArchiveToggle" type="button" role="menuitemcheckbox" aria-checked="false" aria-pressed="false"><span id="agentArchiveLabel">归档对话</span></button>
                 <hr>
+                <div class="sidebar-layout-menu" role="group" aria-labelledby="agentSidebarLayoutLabel">
+                  <p id="agentSidebarLayoutLabel">侧边栏布局</p>
+                  <button type="button" role="menuitemradio" data-sidebar-layout="auto" aria-checked="true" title="根据窗口宽度自动切换">自动</button>
+                  <button type="button" role="menuitemradio" data-sidebar-layout="docked" aria-checked="false" title="与对话并排显示，窄屏时临时使用抽屉">常驻</button>
+                  <button type="button" role="menuitemradio" data-sidebar-layout="drawer" aria-checked="false" title="按需滑入滑出，覆盖对话">抽屉</button>
+                  <p id="agentSidebarLayoutNotice" hidden>窗口较窄，暂时使用抽屉</p>
+                </div>
+                <hr>
                 <button id="agentThemeToggle" type="button" role="menuitem">切换外观</button>
                 <button class="hidden" type="button" data-install-app role="menuitem">安装 Mira</button>
                 <button id="agentLogout" type="button" role="menuitem">退出登录</button>
