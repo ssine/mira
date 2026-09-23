@@ -107,10 +107,29 @@ function mobileViewport() {
   update();
 }
 
-export function initializePwa() {
+export function installNotificationNavigation(openNotification) {
+  navigator.serviceWorker?.addEventListener("message", (event) => {
+    const port = event.ports?.[0];
+    if (!port || event.source?.scriptURL !== new URL("/service-worker.js", location.origin).href) return;
+    if (event.data?.type === "mira:notification-context") {
+      port.postMessage({ url: location.href, standalone: isInstalled() });
+    } else if (event.data?.type === "mira:notification-open") {
+      const target = event.data.url;
+      const valid = typeof target === "string" && /^\/\?thread=[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(target);
+      let accepted = false;
+      if (valid && isInstalled() && event.data.expiresAt > Date.now()) {
+        try { accepted = openNotification?.(target) === true; } catch { /* preserve the existing page */ }
+      }
+      port.postMessage({ accepted });
+    }
+  });
+}
+
+export function initializePwa({ openNotification } = {}) {
   restoreAppLaunch();
   installControls();
   mobileViewport();
+  installNotificationNavigation(openNotification);
   if ("serviceWorker" in navigator && window.isSecureContext) {
     void navigator.serviceWorker.register("/service-worker.js", { scope: "/", updateViaCache: "none" }).catch(() => {
       // Installation/offline support is optional; ordinary online use still works.
