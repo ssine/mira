@@ -1,7 +1,9 @@
+import { nativeAndroid, installAndroidNavigation, createAndroidNotifications } from "./android.js";
+
 const routeKey = "mira.app.route";
 const standalone = window.matchMedia("(display-mode: standalone)");
 let installedWindow = standalone.matches || navigator.standalone === true;
-const isInstalled = () => installedWindow;
+const isInstalled = () => installedWindow || nativeAndroid();
 
 function appRoute(url) {
   const thread = url.searchParams.get("thread");
@@ -130,7 +132,8 @@ export function initializePwa({ openNotification } = {}) {
   installControls();
   mobileViewport();
   installNotificationNavigation(openNotification);
-  if ("serviceWorker" in navigator && window.isSecureContext) {
+  installAndroidNavigation(openNotification);
+  if (!nativeAndroid() && "serviceWorker" in navigator && window.isSecureContext) {
     void navigator.serviceWorker.register("/service-worker.js", { scope: "/", updateViaCache: "none" }).catch(() => {
       // Installation/offline support is optional; ordinary online use still works.
     });
@@ -138,6 +141,7 @@ export function initializePwa({ openNotification } = {}) {
 }
 
 export function createCompletionNotifications(api, toast) {
+  if (nativeAndroid()) return createAndroidNotifications(api, toast);
   const controls = [...document.querySelectorAll("[data-completion-notifications]")];
   const preferenceKey = "mira.push.enabled";
   let authenticated = false, busy = false, enabled = false, epoch = 0;

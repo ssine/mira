@@ -97,7 +97,7 @@ final class AndroidBridgeServer {
                 }
             }
             if (requestParts.length < 2 || !requestParts[0].equals("POST")
-                    || !requestParts[1].equals("/v1/screen")) {
+                    || (!requestParts[1].equals("/v1/screen") && !requestParts[1].equals("/v1/notification"))) {
                 respond(output, 404, error("not_found"));
                 return;
             }
@@ -112,7 +112,9 @@ final class AndroidBridgeServer {
             }
             byte[] body = readBytes(input, contentLength);
             try {
-                JSONObject result = screen(new JSONObject(new String(body, StandardCharsets.UTF_8)));
+                JSONObject params = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                JSONObject result = requestParts[1].equals("/v1/notification")
+                        ? CompletionNotifications.deliver(context, params) : screen(params);
                 respond(output, 200, result);
             } catch (PermissionException error) {
                 respond(output, 409, error(error.getMessage()));

@@ -4,7 +4,8 @@ import vm from "node:vm";
 import test from "node:test";
 
 const workerSource = await fs.readFile(new URL("../server/public/service-worker.js", import.meta.url), "utf8");
-const pwaSource = (await fs.readFile(new URL("../server/public/pwa.js", import.meta.url), "utf8")).replaceAll("export function", "function");
+const androidSource = (await fs.readFile(new URL("../server/public/android.js", import.meta.url), "utf8")).replaceAll("export function", "function").replaceAll("export const", "const");
+const pwaSource = androidSource + "\n" + (await fs.readFile(new URL("../server/public/pwa.js", import.meta.url), "utf8")).replace(/^import .*;\n/m, "").replaceAll("export function", "function");
 const thread = "00000000-0000-4000-8000-0000000000a1";
 const otherThread = "00000000-0000-4000-8000-0000000000b2";
 

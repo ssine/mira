@@ -17,7 +17,9 @@ func enqueueCodexCompletions(ctx context.Context, tx pgx.Tx, storeID, operationI
 	}
 	var subscribed bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_push_subscriptions s JOIN mira_admin_sessions a USING(session_id)
-	 WHERE a.revoked_at IS NULL AND a.expires_at>now())`).Scan(&subscribed); err != nil || !subscribed {
+	 WHERE a.revoked_at IS NULL AND a.expires_at>now()) OR EXISTS(
+ SELECT 1 FROM mira_node_notification_subscriptions s JOIN mira_admin_sessions a USING(session_id)
+ JOIN codex_nodes n USING(node_id) WHERE a.revoked_at IS NULL AND a.expires_at>now() AND n.approval_status='approved')`).Scan(&subscribed); err != nil || !subscribed {
 		return err
 	}
 	for id, previous := range before {
@@ -99,5 +101,8 @@ func enqueuePush(ctx context.Context, tx pgx.Tx, runtime, storeID, threadID stri
 	_, err := tx.Exec(ctx, `INSERT INTO mira_push_deliveries(subscription_id,runtime,store_id,thread_id,generation,turn_id,title)
 	 SELECT s.subscription_id,$1,$2,$3,$4,$5,$6 FROM mira_push_subscriptions s JOIN mira_admin_sessions a USING(session_id)
 	 WHERE a.revoked_at IS NULL AND a.expires_at>now() ON CONFLICT DO NOTHING`, runtime, storeID, threadID, generation, turnID, title)
-	return err
+	if err != nil {
+		return err
+	}
+	return enqueueNodeCompletion(ctx, tx, storeID, threadID, generation, turnID, title)
 }
