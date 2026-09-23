@@ -39,3 +39,41 @@ self.addEventListener("fetch", (event) => {
     })());
   }
 });
+
+self.addEventListener("push", (event) => {
+  event.waitUntil((async () => {
+    let message;
+    try { message = event.data?.json(); } catch { return; }
+    const target = notificationTarget(message?.url);
+    if (!target || typeof message?.tag !== "string") return;
+    await self.registration.showNotification("对话已完成", {
+      body: String(message.body ?? "Mira 对话").slice(0, 160),
+      icon: "/icons/mira-192.png",
+      tag: `mira-completed-${message.tag.slice(0, 64)}`,
+      data: { url: target },
+    });
+  })());
+});
+
+function notificationTarget(value) {
+  if (typeof value !== "string") return null;
+  const id = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+  return new RegExp(`^/\\?thread=${id}$`, "i").test(value) ? value : null;
+}
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const target = notificationTarget(event.notification.data?.url);
+  if (!target) return;
+  event.waitUntil((async () => {
+    const absolute = new URL(target, self.location.origin).href;
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    // Reuse an already open copy of this conversation. Opening a different
+    // conversation must not navigate away from an unsent draft in another tab.
+    const existing = windows.find((client) => client.url === absolute);
+    if (existing) {
+      try { await existing.focus(); return; } catch { /* window closed meanwhile */ }
+    }
+    await self.clients.openWindow(absolute);
+  })());
+});

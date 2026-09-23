@@ -59,7 +59,7 @@
       <section id="dashboardView" class="dashboard hidden">
         <div class="hero-row">
           <div><p class="eyebrow">CONTROL PLANE</p><h1>设备网络</h1><p class="muted">批准接入、查看健康状态、选择 Codex 的运行位置。</p></div>
-          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开对话</button><button class="secondary hidden" type="button" data-install-app>安装 Mira</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
+          <div class="hero-actions"><button id="agentConsoleButton" class="approve" type="button">打开对话</button><button class="secondary hidden" type="button" data-install-app>安装 Mira</button><button class="secondary hidden" type="button" data-completion-notifications>开启完成通知</button><button id="refreshButton" class="secondary" type="button">刷新状态</button></div>
         </div>
         <div class="metrics" aria-label="设备摘要">
           <article><span>在线 Node</span><strong id="onlineCount">—</strong><small>Reverse channel</small></article>
@@ -125,6 +125,7 @@
                 <hr>
                 <button id="agentThemeToggle" type="button" role="menuitem">切换外观</button>
                 <button class="hidden" type="button" data-install-app role="menuitem">安装 Mira</button>
+                <button class="hidden" type="button" data-completion-notifications role="menuitemcheckbox" aria-checked="false">开启完成通知</button>
                 <button id="agentLogout" type="button" role="menuitem">退出登录</button>
               </div>
             </div>

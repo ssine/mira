@@ -58,6 +58,7 @@ jobs:
             tests/account_history_cache_test.mjs \
             tests/quota_reference.mjs \
             tests/conversation_progress_test.mjs \
+            tests/pwa_notifications_test.mjs \
             tests/thread_list_test.mjs \
             tests/thread_pages_test.mjs \
             tests/thread_title_test.mjs \

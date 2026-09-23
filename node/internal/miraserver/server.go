@@ -44,6 +44,7 @@ type Server struct {
 	authState        foundation.AuthState
 	http             *http.Server
 	listener         net.Listener
+	stopPush         func()
 	stopErasure      func()
 	stopAccountCosts func()
 	closeOnce        sync.Once
@@ -107,6 +108,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	}
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.stopAccountCosts = viewService.StartAccountCostProjector(ctx, configuration.Logger)
+	server.stopPush = server.startPushWorker(ctx)
 	server.sampler.Start(ctx)
 	server.http = &http.Server{
 		Handler:           server,
@@ -144,6 +146,9 @@ func (server *Server) ListenAndServe() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	var result error
 	server.closeOnce.Do(func() {
+		if server.stopPush != nil {
+			server.stopPush()
+		}
 		server.accountCosts.Close()
 		if server.stopAccountCosts != nil {
 			server.stopAccountCosts()
