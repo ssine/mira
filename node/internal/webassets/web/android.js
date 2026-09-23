@@ -80,9 +80,11 @@ export function createAndroidNotifications(api, toast) {
         const state = await androidRequest("permission");
         if (current !== epoch || !authenticated) return;
         if (state.permission !== "granted") { toast("请在 Android 应用设置中允许 Mira 通知后重试"); return; }
-        await save("POST", state);
-        if (current !== epoch || !authenticated) return;
+        // Make the receiver ready before the Server can enqueue its first event.
         await androidRequest("setEnabled", { enabled: true });
+        if (current !== epoch || !authenticated) { await androidRequest("setEnabled", { enabled: false }); return; }
+        try { await save("POST", state); }
+        catch (error) { await androidRequest("setEnabled", { enabled: false }); throw error; }
         if (current !== epoch || !authenticated) { await androidRequest("setEnabled", { enabled: false }); return; }
         enabled = true;
         toast("已开启完成通知，请允许 Mira 在后台运行");
