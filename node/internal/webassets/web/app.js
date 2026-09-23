@@ -331,7 +331,7 @@ function syncAccountSidebar() {
   const active = visible && agentThreadDrawerOpen;
   const node = selectedAccountNode();
   const offline = navigator.onLine === false;
-  const signedOut = ["loginView", "setupView"].includes(document.body.dataset.view);
+  const signedOut = ["loginView", "setupView", "connectionView"].includes(document.body.dataset.view);
   const nodes = signedOut ? [] : [...dashboardNodes.values()];
   accountSidebar.setNodes(nodes.map(node => offline ? { ...node, status: "offline" } : node), active, offline && node ? { ...node, status: "offline" } : node, { summariesActive: visible });
   if (!active || offline) {
@@ -776,6 +776,10 @@ function updateReplyProgress(entry, values) {
 }
 const nodeFileChunkBytes = 4 * 1024 * 1024;
 
+function isAdminSessionExpired(error) {
+  return error.status === 401 && error.code === "authentication_required";
+}
+
 async function refreshAdminCsrf() {
   if (!csrfRefreshPromise) {
     csrfRefreshPromise = (async () => {
@@ -783,7 +787,7 @@ async function refreshAdminCsrf() {
       let body = {};
       try { body = await response.json(); } catch { /* empty response */ }
       if (!response.ok || typeof body.csrfToken !== "string") {
-        const error = new Error(body.error ?? "管理员会话已经失效，请重新登录");
+        const error = new Error(body.error ?? "暂时无法验证登录状态，请稍后重试");
         error.status = response.status;
         error.code = body.code;
         throw error;
@@ -830,7 +834,7 @@ function clear(value) {
 function show(view) {
   closeSidebarPopovers();
   if (view !== "agentView") $("#conversationDetails").close();
-  for (const id of ["loginView", "setupView", "dashboardView", "workspaceView", "agentView", "runtimeView"]) {
+  for (const id of ["loginView", "setupView", "connectionView", "dashboardView", "workspaceView", "agentView", "runtimeView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
   const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView"].includes(view);
@@ -2371,9 +2375,14 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
       scheduleAgentHeartbeat();
     } catch (error) {
       if (epoch !== agent.selectionEpoch || !agent.connectionWanted) return;
-      if (error.status === 401 || error.status === 403) {
+      if (isAdminSessionExpired(error)) {
         stopAgentRecovery();
         setConversationNotice("登录已过期，请重新登录。输入内容仍保留。", "warning");
+        return;
+      }
+      if (error.status === 403) {
+        stopAgentRecovery();
+        setConversationNotice(`请求未通过权限校验，请刷新页面后重试。输入内容仍保留。${error.message}`, "warning");
         return;
       }
       if (error.status === 404 || error.status === 410 || error.code === -32004) {
@@ -5884,7 +5893,8 @@ $("#loginForm").addEventListener("submit", async (event) => {
     const result = await api("/v1/admin/login", { method: "POST", body: JSON.stringify({ username: $("#username").value, password: $("#password").value }) });
     csrfToken = result.csrfToken;
     $("#password").value = "";
-    await restoreBrowserRoute();
+    try { await restoreBrowserRoute(); }
+    catch (error) { showStartupError(error); }
   } catch (error) {
     $("#loginError").textContent = error.message;
     $("#loginError").classList.remove("hidden");
@@ -6563,7 +6573,26 @@ document.addEventListener("click", (event) => {
   task.catch((error) => toast(error.message)).finally(() => { button.disabled = false; });
 });
 
+function showStartupError(error) {
+  if (isAdminSessionExpired(error)) {
+    csrfToken = null;
+    show("loginView");
+    return;
+  }
+  $("#healthDot").classList.remove("ok");
+  $("#healthDot").classList.add("bad");
+  const denied = error.status === 403;
+  $("#healthText").textContent = denied ? "请求权限不足" : "暂时无法加载控制台";
+  $("#connectionError").textContent = denied
+    ? "请求未通过权限校验，请重试。"
+    : "暂时无法连接或加载 Mira，请检查网络后重试。";
+  show("connectionView");
+}
+
 async function bootstrap() {
+  $("#retryConnectionButton").disabled = true;
+  $("#healthDot").classList.remove("ok", "bad");
+  $("#healthText").textContent = "正在连接 Server";
   try {
     const health = await api("/healthz");
     $("#healthDot").classList.add("ok");
@@ -6579,19 +6608,17 @@ async function bootstrap() {
       $("#installAndroid").href = `https://github.com/ssine/mira/releases/download/v${releaseVersion}/mira_${releaseVersion}_android_arm64.apk`;
     }
     if (!health.adminConfigured) { show("setupView"); return; }
-    try {
-      const session = await api("/v1/admin/session");
-      csrfToken = session.csrfToken;
-      await restoreBrowserRoute();
-    } catch {
-      show("loginView");
-    }
-  } catch {
-    $("#healthDot").classList.add("bad");
-    $("#healthText").textContent = "Server 不可用";
-    show("loginView");
+    const session = await api("/v1/admin/session");
+    csrfToken = session.csrfToken;
+    await restoreBrowserRoute();
+  } catch (error) {
+    showStartupError(error);
+  } finally {
+    $("#retryConnectionButton").disabled = false;
   }
 }
+
+$("#retryConnectionButton").addEventListener("click", () => void bootstrap());
 
 for (const button of document.querySelectorAll("[data-copy-install]")) {
   button.addEventListener("click", async () => {

@@ -53,6 +53,7 @@ jobs:
           diff -qr --exclude vendor server/public node/internal/webassets/web
           for file in server/public/*.js tests/*.mjs; do node --check "$file"; done
           node --test \
+            tests/admin_session_ui_test.mjs \
             tests/account_status_test.mjs \
             tests/account_overview_test.mjs \
             tests/account_history_cache_test.mjs \

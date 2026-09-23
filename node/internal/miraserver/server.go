@@ -244,9 +244,10 @@ func (server *Server) writeRouteError(response http.ResponseWriter, err error) {
 }
 
 type authOptions struct {
-	CSRF       bool
-	ClientType string
-	NodeID     string
+	CSRF               bool
+	ClientType         string
+	NodeID             string
+	SkipSessionRenewal bool
 }
 
 func (server *Server) authorize(ctx context.Context, response http.ResponseWriter, request *http.Request, actorType string, options authOptions) (*foundation.Principal, error) {
@@ -280,6 +281,15 @@ func (server *Server) authorize(ctx context.Context, response http.ResponseWrite
 	if csrf && request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodOptions && !server.auth.ValidCSRF(request, principal) {
 		_ = foundation.WriteErrorJSON(response, 403, "invalid CSRF token", "invalid_csrf")
 		return nil, nil
+	}
+	if !options.SkipSessionRenewal {
+		cookie, err := server.auth.RenewSession(ctx, request, principal)
+		if err != nil {
+			return nil, err
+		}
+		if cookie != "" {
+			response.Header().Add("Set-Cookie", cookie)
+		}
 	}
 	return principal, nil
 }

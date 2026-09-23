@@ -65,7 +65,7 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 		return writeJSON(response, 200, map[string]any{"user": map[string]any{"username": principal.Username}, "csrfToken": csrf, "expiresAt": principal.ExpiresAt.UTC().Format(time.RFC3339Nano)})
 	}
 	if request.Method == http.MethodPost && path == "/v1/admin/logout" {
-		principal, err := server.authorize(ctx, response, request, "admin", authOptions{CSRF: true})
+		principal, err := server.authorize(ctx, response, request, "admin", authOptions{CSRF: true, SkipSessionRenewal: true})
 		if err != nil || principal == nil {
 			return err
 		}
