@@ -6,7 +6,7 @@ import { decorateTraceDiagrams } from "/trace-diagrams.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ReplyProgress } from "/conversation-progress.js";
-import { initializePwa, rememberAppRoute, clearAppRoute } from "/pwa.js";
+import { initializePwa, rememberAppRoute, clearAppRoute, createCompletionNotifications } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { interruptThread } from "/thread-interrupt.js";
 import { AccountSidebar } from "/account-status.js";
@@ -29,6 +29,7 @@ let composerSaveRevision = 0;
 let composerDraftReadFailed = false;
 let composerDraftRemoveKey = null;
 
+let completionNotifications;
 let csrfToken = null;
 let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
@@ -833,6 +834,7 @@ function show(view) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
   const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView"].includes(view);
+  completionNotifications?.setAuthenticated(authenticated);
   if (!authenticated) accountSidebar.clear();
   $("#logoutButton").classList.toggle("hidden", !authenticated);
   $("#globalNav").classList.toggle("hidden", !authenticated);
@@ -5897,6 +5899,7 @@ $("#logoutButton").addEventListener("click", async () => {
     await disconnectShell({ quiet: true });
     await api("/v1/admin/logout", { method: "POST", body: "{}" });
   } finally {
+    await completionNotifications?.logout().catch(() => {});
     csrfToken = null;
     agent.diagnostics.clear();
     clearAppRoute();
@@ -6601,4 +6604,5 @@ for (const button of document.querySelectorAll("[data-copy-install]")) {
 
 syncThemeControl();
 initializePwa();
+completionNotifications = createCompletionNotifications(api, toast);
 void bootstrap();
