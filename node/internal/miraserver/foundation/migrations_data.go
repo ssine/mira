@@ -838,4 +838,5 @@ CREATE INDEX codex_thread_events_provider_idx
   WHERE payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(session_meta|thread_settings_applied)"';`,
 		Checksum: "f127f25c00f3a2ef4bba69aa0565342e237be1e4ddea3e1ae622121d48f43c5c"},
 	{Version: 31, Name: "incremental-account-cost-projection", SQL: accountCostProjectionSQL, Checksum: "1a628e7cc3a302ff5555fb9b66deecb91481ab9b35b3a712738ee5c2afc9a794"},
+	{Version: 32, Name: "pwa-completion-notifications", SQL: pushNotificationsSQL, Checksum: "5f790ea3037fc13b6889c627efedc4ec3d8f109b905ac642a5cfac5e4e1a808c"},
 }
