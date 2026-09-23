@@ -1,4 +1,5 @@
 :root {
+  --safe-area-top: env(safe-area-inset-top, 0px);
   color-scheme: light;
   --canvas: #ffffff;
   --surface: #f6f8fb;
@@ -753,10 +754,10 @@ progress { width: 100%; accent-color: var(--accent); }
   html:has(body[data-view="agentView"]) { overscroll-behavior-y: none; }
   body[data-view="agentView"] { position: fixed; top: var(--app-viewport-top, 0px); width: 100%; height: var(--app-viewport-height, 100dvh); overscroll-behavior-y: none; }
   body[data-view="agentView"] > main { height: 100%; }
-  .topbar { height: calc(var(--header-height) + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
-  .conversation-head { margin-top: calc(4px + env(safe-area-inset-top)); margin-left: max(9px, env(safe-area-inset-left)); }
+  .topbar { height: calc(var(--header-height) + var(--safe-area-top)); padding-top: var(--safe-area-top); padding-left: max(12px, env(safe-area-inset-left)); padding-right: max(12px, env(safe-area-inset-right)); }
+  .conversation-head { margin-top: calc(4px + var(--safe-area-top)); margin-left: max(9px, env(safe-area-inset-left)); }
   .chat-drawer { padding-left: env(safe-area-inset-left); }
-  .chat-drawer-nav { min-height: calc(44px + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); }
+  .chat-drawer-nav { min-height: calc(44px + var(--safe-area-top)); padding-top: var(--safe-area-top); }
   .chat-drawer-footer { padding-bottom: max(4px, env(safe-area-inset-bottom)); }
   .conversation-card { --conversation-inline-start: max(12px, env(safe-area-inset-left)); --conversation-inline-end: max(12px, env(safe-area-inset-right)); }
   .conversation-scroll { scrollbar-gutter: auto; }
@@ -848,7 +849,7 @@ progress { width: 100%; accent-color: var(--accent); }
 @media (max-width: 600px) {
   .sidebar-popover { inset: auto 8px max(8px, env(safe-area-inset-bottom)) !important; width: auto; margin: 0; max-height: min(76dvh, 720px); }
   .conversation-details { width: min(340px, 92vw); padding-right: env(safe-area-inset-right); }
-  .conversation-details-head { min-height: calc(44px + env(safe-area-inset-top)); padding-top: env(safe-area-inset-top); }
+  .conversation-details-head { min-height: calc(44px + var(--safe-area-top)); padding-top: var(--safe-area-top); }
   .conversation-details-body { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
   .sidebar-popover::backdrop { background: rgb(18 31 47 / 12%); }
 }
@@ -925,7 +926,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-details-toggle { grid-area: conversation-head; justify-self: end; align-self: start; z-index: 3; margin: 6px 51px 0 0; }
 .conversation-details-toggle[aria-expanded="true"] { color: var(--accent); }
 @media (display-mode: standalone) {
-  .conversation-menu-toggle, .conversation-details-toggle { margin-top: calc(4px + env(safe-area-inset-top)); }
+  .conversation-menu-toggle, .conversation-details-toggle { margin-top: calc(4px + var(--safe-area-top)); }
 }
 @media (prefers-reduced-transparency: reduce) {
   .conversation-details, .conversation-details-toggle { background: var(--surface); backdrop-filter: none; -webkit-backdrop-filter: none; }
@@ -953,7 +954,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .chat-edit-error { color: var(--danger); }
 .chat-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 @media (pointer: coarse) {
-  .conversation-menu-toggle { margin-top: calc(4px + env(safe-area-inset-top)); margin-right: max(9px, env(safe-area-inset-right)); }
+  .conversation-menu-toggle { margin-top: calc(4px + var(--safe-area-top)); margin-right: max(9px, env(safe-area-inset-right)); }
   .thread-options-menu > *, .chat-edit-actions button, .project-create-actions .ghost { min-height: 44px; }
 }
 
@@ -999,4 +1000,39 @@ progress { width: 100%; accent-color: var(--accent); }
   .codex-accounts-panel .panel-head { align-items: start; flex-wrap: wrap; gap: 12px; }
   .codex-accounts-panel .actions { flex-wrap: wrap; }
   .composer-account-choice { max-width: 92px; }
+}
+
+/* Android supplies the status inset; the WebView itself reaches the window edge.
+   Keep touch targets below system icons while prose scrolls beneath a soft fade. */
+.android-app { --safe-area-top: var(--android-status-bar-height, 0px); }
+.android-app .topbar { height: calc(var(--header-height) + var(--safe-area-top)); padding-top: var(--safe-area-top); }
+.android-app .conversation-card { position: relative; }
+.android-app .conversation-head,
+.android-app .conversation-menu-toggle,
+.android-app .conversation-details-toggle { margin-top: calc(4px + var(--safe-area-top)); }
+.android-app .chat-icon-button { width: 44px; min-width: 44px; height: 44px; min-height: 44px; }
+.android-app .chat-drawer-nav,
+.android-app .conversation-details-head { min-height: calc(48px + var(--safe-area-top)); padding-top: var(--safe-area-top); }
+.android-app .conversation-card::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  top: 0; right: 0; left: 0;
+  height: calc(var(--safe-area-top) + 88px);
+  pointer-events: none;
+  background:
+    radial-gradient(ellipse at 85% 0%, color-mix(in srgb, var(--accent) 10%, transparent), transparent 70%),
+    linear-gradient(to bottom, var(--canvas), color-mix(in srgb, var(--canvas) 94%, transparent) var(--safe-area-top), color-mix(in srgb, var(--canvas) 65%, transparent) 70%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  mask-image: linear-gradient(to bottom, #000 calc(var(--safe-area-top) + 8px), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(var(--safe-area-top) + 8px), transparent);
+}
+@media (prefers-reduced-transparency: reduce), (forced-colors: active) {
+  .android-app .conversation-card::before {
+    height: calc(var(--safe-area-top) + 48px);
+    background: var(--canvas);
+    backdrop-filter: none; -webkit-backdrop-filter: none;
+    mask-image: none; -webkit-mask-image: none;
+  }
 }

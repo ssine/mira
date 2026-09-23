@@ -287,3 +287,32 @@ test("Android warm notification navigation acknowledges busy editors without dis
   page.events["mira:native-notification"]({ detail: "https://evil.test" });
   assert.equal(targets.length, 1);
 });
+
+test("Android shell negotiates insets, follows theme changes and opens settings without navigating", async () => {
+  const page = androidFixture(), classes = new Set(), style = new Map(), actions = [];
+  let themeChanged, settingsClick;
+  const root = { dataset: { theme: "light" }, classList: { add: value => classes.add(value), contains: value => classes.has(value) },
+    style: { setProperty: (key, value) => style.set(key, value), getPropertyValue: key => style.get(key) } };
+  page.context.document.documentElement = root;
+  page.context.document.querySelectorAll = () => [{ classList: { remove: name => actions.push(name) },
+    addEventListener: (_, handler) => settingsClick = handler, closest: () => ({ hidePopover: () => actions.push("close") }) }];
+  page.context.MutationObserver = class { constructor(handler) { themeChanged = handler; } observe() {} };
+  page.context.Event = class { constructor(type) { this.type = type; } };
+  page.context.window.dispatchEvent = event => actions.push(event.type);
+  vm.runInContext("installAndroidShell();", page.context);
+  await new Promise(setImmediate);
+  assert.equal(classes.size, 0, "older native replies must not remove safe-area protection");
+  page.events["mira:native-insets"]({ detail: { integrated: true, statusBarHeight: 32 } });
+  assert.equal(classes.has("android-app"), true);
+  assert.equal(style.get("--android-status-bar-height"), "32px");
+  page.events["mira:native-insets"]({ detail: { integrated: true, statusBarHeight: -1 } });
+  assert.equal(style.get("--android-status-bar-height"), "32px");
+  root.dataset.theme = "dark"; themeChanged(); await new Promise(setImmediate);
+  assert.equal(page.nativeCalls.at(-1).method, "shell");
+  assert.equal(page.nativeCalls.at(-1).dark, true);
+  settingsClick(); await new Promise(setImmediate);
+  assert.equal(page.nativeCalls.at(-1).method, "settings");
+  assert.ok(actions.includes("close"));
+  page.events["mira:native-insets"]({ detail: { integrated: true, statusBarHeight: 24 } });
+  assert.equal(style.get("--android-status-bar-height"), "24px", "fold/rotation updates the current inset");
+});
