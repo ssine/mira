@@ -65,7 +65,7 @@ def turn(runtime, thread_id, prompt):
 
 
 def checkpoints(path):
-    return [json.loads(line)["payload"] for line in path.read_text().splitlines()
+    return [json.loads(line)["payload"] for line in path.read_text(encoding="utf-8").splitlines()
             if json.loads(line)["type"] == "compacted"]
 
 
@@ -91,7 +91,7 @@ token_budget={str(token_budget).lower()}
         base = f"http://127.0.0.1:{provider.server_port}/v1"
         if name == "openai":
             config = f'openai_base_url="{base}"\n' + config
-            (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "synthetic-loopback-only"}))
+            (home / "auth.json").write_text(json.dumps({"OPENAI_API_KEY": "synthetic-loopback-only"}), encoding="utf-8")
         else:
             config += f'''[model_providers.{name}]
 name="{'Azure' if name == 'azure' else 'Custom API'}"
@@ -100,7 +100,7 @@ wire_api="responses"
 request_max_retries=0
 stream_max_retries=0
 '''
-        (home / "config.toml").write_text(config)
+        (home / "config.toml").write_text(config, encoding="utf-8")
         provider.requests = []
         provider.mid_call_issued = False
         runtime = Runtime(home)

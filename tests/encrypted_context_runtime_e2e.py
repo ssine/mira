@@ -91,7 +91,7 @@ base_url="http://127.0.0.1:{provider.server_port}/v1"
 wire_api="responses"
 request_max_retries=2
 stream_max_retries=2
-''')
+''', encoding="utf-8")
             runtime = Runtime(home)
             try:
                 for operation in ["turn", "compact"]:

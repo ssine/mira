@@ -48,9 +48,9 @@ class Runtime:
         env = {k: v for k, v in os.environ.items() if not k.startswith(
             ("MIRA", "CODEX", "OPENAI", "AZURE", "ANTHROPIC", "CONTROL_SERVER", "APP_SERVER", "NODE_AGENT"))}
         env.update(CODEX_HOME=str(home), RUST_LOG="warn")
-        self.log = (home / "runtime.log").open("a")
+        self.log = (home / "runtime.log").open("a", encoding="utf-8")
         self.process = subprocess.Popen([os.environ["CODEX_TEST_BINARY"], "app-server", "--listen", "stdio://"],
-            cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True, bufsize=1,
+            cwd=home, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, encoding="utf-8", bufsize=1,
             start_new_session=os.name != "nt")
 
         def read():
@@ -135,7 +135,7 @@ base_url="http://127.0.0.1:{provider.server_port}/v1"
 wire_api="responses"
 request_max_retries=0
 stream_max_retries=0
-''')
+''', encoding="utf-8")
             runtime = Runtime(home)
             try:
                 thread = runtime.call("thread/start", {"cwd": temporary, "historyMode": "legacy", "approvalPolicy": "never",
@@ -148,7 +148,7 @@ stream_max_retries=0
             finally:
                 runtime.close()
             # Simulate a process stopping after a persisted call, before output.
-            with rollout.open("a") as output:
+            with rollout.open("a", encoding="utf-8") as output:
                 output.write(json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "response_item", "payload": {
                     "type": "custom_tool_call", "call_id": "interrupted-fixture", "name": "fixture", "input": "no side effects"}}) + "\n")
             original = rollout.read_bytes()
