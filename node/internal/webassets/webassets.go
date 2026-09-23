@@ -54,6 +54,7 @@ var specs = map[string]assetSpec{
 	"/conversation-progress.js":  {"web/conversation-progress.js", "text/javascript; charset=utf-8"},
 	"/theme.js":                  {"web/theme.js", "text/javascript; charset=utf-8"},
 	"/styles.css":                {"web/styles.css", "text/css; charset=utf-8"},
+	"/android.js":                {"web/android.js", "text/javascript; charset=utf-8"},
 	"/pwa.js":                    {"web/pwa.js", "text/javascript; charset=utf-8"},
 	"/service-worker.js":         {"web/service-worker.js", "text/javascript; charset=utf-8"},
 	"/manifest.webmanifest":      {"web/manifest.webmanifest", "application/manifest+json; charset=utf-8"},

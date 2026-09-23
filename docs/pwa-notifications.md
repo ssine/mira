@@ -40,3 +40,5 @@ Server 停止向该登录会话的设备发送；已交给浏览器推送服务�
 验证：`node --test tests/pwa_notifications_test.mjs`；
 `MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL=... go -C node test ./internal/miraserver -run '^TestPush'`。
 数据库测试用模拟推送服务验证加密请求、重启消费、重试、去重和撤销；不等同于真实手机锁屏送达测试。
+
+Android users can also use the console inside the Mira APK and its native notification channel, independent of browser push providers. See [Android console](android-console.md).

@@ -6,6 +6,8 @@ installation and verifies the existing signing identity; official upgrades retai
 credentials. Migrating from a debug-signed APK requires a one-time reinstall and enrollment.
 See [INSTALL.md](../../INSTALL.md) for the complete installation and update flow.
 
+The APK also opens the Server console and supports native completion notifications without Google push. See [Android console](../../docs/android-console.md) for setup, authentication, notification delivery and background limits.
+
 The Android distribution of Mira Node is one deployable APK with two internal components:
 
 - `src/main/` is the Android application source in this single Gradle project. It owns the Activity, foreground service,
