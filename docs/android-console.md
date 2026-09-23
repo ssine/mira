@@ -7,6 +7,17 @@ sessions are not imported and the Node credential does not grant administrator l
 The existing native settings screen remains available even when Server is offline.
 The first version uses the one Server configured for this Android Node.
 
+In the conversation view, open the sidebar's **Mira** menu for **设备设置**.
+Other pages have a compact settings icon. No native toolbar occupies the reading
+surface; connection failures expose retry and device settings even when the page
+cannot load. Older Servers retain a compact native settings fallback.
+
+The Android reading surface extends beneath the transparent status bar with a
+theme-aware fade. Native window insets keep controls below system icons and keep
+the composer clear of navigation gestures, cutouts and the keyboard, including
+after folding or rotating. Light/dark appearance also updates system bar icons.
+Reduced-transparency and forced-color preferences use a solid top surface.
+
 The online Web assets come from that Server. Compatible frontend changes arrive
 with Server updates; changes to Android integration require an APK update. There is
 no local conversation database, embedded model runtime, or offline conversation mode.
@@ -59,7 +70,8 @@ that Server does not reuse another Server's cookies, opt-in or queued navigation
 
 Only the exact configured HTTPS origin's main frame receives an AndroidX WebKit
 WebMessage listener. The bridge exposes notification context/permission/consent,
-navigation acknowledgement, and user-selected streamed downloads. It does not expose
+navigation acknowledgement, system-bar appearance/insets, the device settings
+Activity, and user-selected streamed downloads. It does not expose
 Node tokens, passwords, arbitrary files/processes or the Go loopback bridge. External
 links go to another app without the listener; untrusted navigation and mixed content
 are blocked. Release WebView debugging is disabled. TLS errors are never bypassed.
