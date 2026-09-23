@@ -340,7 +340,7 @@ public final class MiraNodeService extends Service {
     }
 
     private Notification notification(String text) {
-        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class),
+        PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, ConsoleActivity.class),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         return new Notification.Builder(this, CHANNEL)
                 .setContentTitle("Mira Node")

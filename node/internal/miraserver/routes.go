@@ -78,6 +78,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 		}
 		return foundation.WriteJSON(response, 200, map[string]any{"status": "logged_out"}, http.Header{"Set-Cookie": []string{cookie}})
 	}
+	if handled, err := server.routeNodeNotifications(ctx, response, request); handled || err != nil {
+		return err
+	}
 	if handled, err := server.routePush(ctx, response, request); handled || err != nil {
 		return err
 	}

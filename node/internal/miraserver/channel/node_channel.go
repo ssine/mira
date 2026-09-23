@@ -451,6 +451,16 @@ func (channel *Channel) TrySendToNode(nodeID string, message any) bool {
 }
 
 func (channel *Channel) Invoke(ctx context.Context, nodeID, capability string, params map[string]any, timeout time.Duration) (any, error) {
+	return channel.invokeControl(ctx, nodeID, "request", capability, params, timeout)
+}
+
+// DeliverNotification is a Server-owned completion event, not an administrator
+// capability or dynamic tool. It shares bounded request/response correlation.
+func (channel *Channel) DeliverNotification(ctx context.Context, nodeID string, params map[string]any) (any, error) {
+	return channel.invokeControl(ctx, nodeID, "notification.deliver", "", params, 10*time.Second)
+}
+
+func (channel *Channel) invokeControl(ctx context.Context, nodeID, messageType, capability string, params map[string]any, timeout time.Duration) (any, error) {
 	requestID, err := randomUUID()
 	if err != nil {
 		return nil, err
@@ -466,7 +476,7 @@ func (channel *Channel) Invoke(ctx context.Context, nodeID, capability string, p
 	}
 	channel.pending[requestID] = pendingCall{nodeID: nodeID, done: done}
 	channel.mu.Unlock()
-	if err := channel.SendToNode(nodeID, map[string]any{"type": "request", "requestId": requestID, "capability": capability, "params": params}); err != nil {
+	if err := channel.SendToNode(nodeID, map[string]any{"type": messageType, "requestId": requestID, "capability": capability, "params": params}); err != nil {
 		channel.mu.Lock()
 		delete(channel.pending, requestID)
 		channel.mu.Unlock()
