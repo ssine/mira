@@ -61,6 +61,30 @@ function notificationTarget(value) {
   return new RegExp(`^/\\?thread=${id}$`, "i").test(value) ? value : null;
 }
 
+function clientConversation(value) {
+  try {
+    const url = new URL(value);
+    if (url.origin !== self.location.origin || url.pathname !== "/") return null;
+    return notificationTarget(`/?thread=${url.searchParams.get("thread")}`);
+  } catch { return null; }
+}
+
+function askClient(client, type, url) {
+  if (!client.postMessage) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const finish = (value) => {
+      clearTimeout(timer);
+      channel.port1.close(); channel.port2.close();
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), 1000);
+    channel.port1.onmessage = (event) => finish(event.data);
+    try { client.postMessage({ type, url, expiresAt: Date.now() + 1000 }, [channel.port2]); }
+    catch { finish(null); }
+  });
+}
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const target = notificationTarget(event.notification.data?.url);
@@ -68,12 +92,29 @@ self.addEventListener("notificationclick", (event) => {
   event.waitUntil((async () => {
     const absolute = new URL(target, self.location.origin).href;
     const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-    // Reuse an already open copy of this conversation. Opening a different
-    // conversation must not navigate away from an unsent draft in another tab.
-    const existing = windows.find((client) => client.url === absolute);
-    if (existing) {
-      try { await existing.focus(); return; } catch { /* window closed meanwhile */ }
+    const pages = await Promise.all(windows.slice(0, 32).map(async (client) => ({
+      client, context: await askClient(client, "mira:notification-context"),
+    })));
+    // WindowClient.url can lag behind SPA navigation. Ask the live page for its
+    // route and display mode, and prefer the installed app over browser tabs.
+    const sameConversation = ({ client, context }) => clientConversation(context?.url ?? client.url) === target;
+    const installed = pages.filter(({ context }) => context?.standalone === true);
+    installed.sort((left, right) => Number(sameConversation(right)) - Number(sameConversation(left)));
+    for (const page of installed) {
+      try {
+        await page.client.focus();
+        if (sameConversation(page)) return;
+        const reply = await askClient(page.client, "mira:notification-open", target);
+        if (reply?.accepted === true) return;
+      } catch { /* window closed or could not be focused */ }
     }
+    // Older pages can still reuse the same conversation. Never hard-navigate a
+    // different page: only the app can preserve its draft and check active work.
+    for (const page of pages.filter(sameConversation)) {
+      try { await page.client.focus(); return; } catch { /* window closed meanwhile */ }
+    }
+    // With no reusable app, the browser decides whether this opens a standalone
+    // installed app or a tab. The Web API has no way to force a specific mode.
     await self.clients.openWindow(absolute);
   })());
 });
