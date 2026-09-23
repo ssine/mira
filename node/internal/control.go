@@ -17,6 +17,7 @@ import (
 )
 
 type controlClient struct {
+	notificationMu  sync.Mutex
 	desktop         *desktopStatus
 	configuration   config
 	endpoints       *serverEndpointSelector
@@ -514,6 +515,24 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 		client.startSSH(ctx, message)
 	case "ssh.close":
 		client.stopSSH(message.SessionID)
+	case "notification.deliver":
+		// One small native delivery at a time; never block heartbeat or App Server traffic.
+		if len(message.Params) > 4096 || !client.notificationMu.TryLock() {
+			return
+		}
+		go func() {
+			defer client.notificationMu.Unlock()
+			deliveryCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			result, err := client.runtime.bridge.deliverCompletion(deliveryCtx, message.Params, client.configuration.ServerURL)
+			response := map[string]any{"type": "response", "requestId": message.RequestID, "ok": err == nil}
+			if err != nil {
+				response["error"] = map[string]any{"message": "native notification unavailable"}
+			} else {
+				response["result"] = result
+			}
+			_ = client.writeControl(response)
+		}()
 	case "request":
 		go func() {
 			result, err := client.runtime.execute(ctx, message.Capability, message.Params)

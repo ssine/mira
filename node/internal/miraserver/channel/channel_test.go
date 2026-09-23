@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -462,5 +463,46 @@ func waitConnected(t *testing.T, channel *Channel, nodeID string) {
 	}
 	if !channel.IsConnected(nodeID) {
 		t.Fatal("Node did not connect")
+	}
+}
+
+func TestNativeCompletionUsesPrivateFrameAndOwnedAcknowledgement(t *testing.T) {
+	channel := newTestChannel(t)
+	server := httptest.NewServer(channel)
+	defer server.Close()
+	defer channel.Close()
+	node := dial(t, server.URL, "/v1/nodes/"+testNodeA+"/connect", "mira-node-v1", "token-a")
+	defer node.Close()
+	waitConnected(t, channel, testNodeA)
+	done := make(chan error, 1)
+	go func() {
+		value, err := channel.DeliverNotification(context.Background(), testNodeA, map[string]any{"deliveryId": "test"})
+		if err == nil && value.(map[string]any)["accepted"] != true {
+			err = fmt.Errorf("missing native acknowledgement")
+		}
+		done <- err
+	}()
+	var frame map[string]any
+	if err := node.ReadJSON(&frame); err != nil {
+		t.Fatal(err)
+	}
+	if frame["type"] != "notification.deliver" || frame["capability"] != "" {
+		t.Fatalf("unexpected frame: %#v", frame)
+	}
+	response := map[string]any{"type": "response", "requestId": frame["requestId"], "ok": true, "result": map[string]any{"accepted": true}}
+	if err := channel.handleNodeMessage(testNodeB, nil, response); err != nil {
+		t.Fatal(err)
+	}
+	channel.mu.Lock()
+	pending := len(channel.pending)
+	channel.mu.Unlock()
+	if pending != 1 {
+		t.Fatal("another Node acknowledged the notification")
+	}
+	if err := node.WriteJSON(response); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }

@@ -32,22 +32,23 @@ type Config struct {
 }
 
 type Server struct {
-	config           Config
-	pool             *pgxpool.Pool
-	auth             *foundation.AuthService
-	nodes            *miranodes.Service
-	channel          *serverchannel.Channel
-	views            *serverviews.Service
-	accountCosts     *accountCostCache
-	imports          *serverimports.Service
-	sampler          *accountsampler.Sampler
-	authState        foundation.AuthState
-	http             *http.Server
-	listener         net.Listener
-	stopPush         func()
-	stopErasure      func()
-	stopAccountCosts func()
-	closeOnce        sync.Once
+	config                Config
+	pool                  *pgxpool.Pool
+	auth                  *foundation.AuthService
+	nodes                 *miranodes.Service
+	channel               *serverchannel.Channel
+	views                 *serverviews.Service
+	accountCosts          *accountCostCache
+	imports               *serverimports.Service
+	sampler               *accountsampler.Sampler
+	authState             foundation.AuthState
+	http                  *http.Server
+	listener              net.Listener
+	stopPush              func()
+	stopNodeNotifications func()
+	stopErasure           func()
+	stopAccountCosts      func()
+	closeOnce             sync.Once
 }
 
 func New(ctx context.Context, configuration Config) (*Server, error) {
@@ -109,6 +110,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.stopAccountCosts = viewService.StartAccountCostProjector(ctx, configuration.Logger)
 	server.stopPush = server.startPushWorker(ctx)
+	server.stopNodeNotifications = server.startNodeNotificationWorker(ctx)
 	server.sampler.Start(ctx)
 	server.http = &http.Server{
 		Handler:           server,
@@ -146,6 +148,9 @@ func (server *Server) ListenAndServe() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	var result error
 	server.closeOnce.Do(func() {
+		if server.stopNodeNotifications != nil {
+			server.stopNodeNotifications()
+		}
 		if server.stopPush != nil {
 			server.stopPush()
 		}

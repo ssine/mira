@@ -26,12 +26,31 @@ func newAndroidBridge(url string, token string) *androidBridge {
 }
 
 func (bridge *androidBridge) screen(ctx context.Context, params screenParams) (any, error) {
+	return bridge.call(ctx, "/v1/screen", params)
+}
+
+func (bridge *androidBridge) deliverCompletion(ctx context.Context, raw json.RawMessage, serverURL string) (any, error) {
+	if bridge == nil {
+		return nil, fmt.Errorf("Android app bridge unavailable")
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, fmt.Errorf("invalid completion")
+	}
+	value["serverUrl"] = serverURL
+	return bridge.call(ctx, "/v1/notification", value)
+}
+
+func (bridge *androidBridge) call(ctx context.Context, path string, params any) (any, error) {
 	encoded, err := json.Marshal(params)
 	if err != nil {
 		return nil, err
 	}
 	request, err := http.NewRequestWithContext(
-		ctx, http.MethodPost, bridge.url+"/v1/screen", bytes.NewReader(encoded),
+		ctx, http.MethodPost, bridge.url+path, bytes.NewReader(encoded),
 	)
 	if err != nil {
 		return nil, err

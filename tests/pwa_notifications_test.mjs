@@ -4,7 +4,8 @@ import vm from "node:vm";
 import test from "node:test";
 
 const workerSource = await fs.readFile(new URL("../server/public/service-worker.js", import.meta.url), "utf8");
-const pwaSource = (await fs.readFile(new URL("../server/public/pwa.js", import.meta.url), "utf8")).replaceAll("export function", "function");
+const androidSource = (await fs.readFile(new URL("../server/public/android.js", import.meta.url), "utf8")).replaceAll("export function", "function").replaceAll("export const", "const");
+const pwaSource = androidSource + "\n" + (await fs.readFile(new URL("../server/public/pwa.js", import.meta.url), "utf8")).replace(/^import .*;\n/m, "").replaceAll("export function", "function");
 const thread = "00000000-0000-4000-8000-0000000000a1";
 const otherThread = "00000000-0000-4000-8000-0000000000b2";
 
@@ -228,4 +229,61 @@ test("denied permission and failed server registration never report notification
   assert.equal(page.button.textContent, "开启完成通知");
   assert.equal(page.stats().unsubscribed, 1);
   assert.match(page.notices.at(-1), /通知设置失败/);
+});
+
+function androidFixture() {
+  const events = {}, clicks = {}, requests = [], notices = [], nativeCalls = [];
+  let enabled = false, permission = "granted", failSave = false;
+  const button = { classList: { remove() {} }, getAttribute() { return null; }, setAttribute() {}, addEventListener: (name, handler) => clicks[name] = handler };
+  const bridge = { postMessage(raw) {
+    const request = JSON.parse(raw); nativeCalls.push(request);
+    if (request.method === "setEnabled") enabled = request.enabled;
+    queueMicrotask(() => bridge.onmessage({ data: JSON.stringify({ id: request.id, result: { nodeKey: "test-android", enabled, permission } }) }));
+  } };
+  const context = vm.createContext({ setTimeout, clearTimeout,
+    window: { MiraAndroid: bridge, matchMedia: () => ({ matches: false }), addEventListener: (name, handler) => events[name] = handler },
+    document: { querySelectorAll: () => [button], addEventListener() {} }, navigator: {},
+    api: async (path, options) => { requests.push({ path, ...options }); if (failSave) throw new Error("offline"); return { enabled: options.method === "POST" }; },
+    toast: value => notices.push(value),
+  });
+  vm.runInContext(pwaSource + "\nglobalThis.controls = createCompletionNotifications(api, toast);", context);
+  return { context, clicks, button, requests, nativeCalls, events, notices,
+    enabled: () => enabled, deny: () => permission = "denied", fail: () => failSave = true,
+    login: async () => { context.controls.setAuthenticated(true); await new Promise(setImmediate); },
+  };
+}
+
+test("Android opts in over native channel without browser PushManager and disables locally on network loss", async () => {
+  const page = androidFixture(); await page.login();
+  assert.equal(page.nativeCalls.some(call => call.method === "permission"), false);
+  await page.clicks.click();
+  assert.equal(page.enabled(), true);
+  assert.equal(page.button.textContent, "关闭完成通知");
+  assert.equal(page.requests.at(-1).path, "/v1/push/node-subscription");
+  assert.deepEqual(JSON.parse(page.requests.at(-1).body), { nodeKey: "test-android" });
+  page.fail(); await page.clicks.click();
+  assert.equal(page.enabled(), false, "local delivery must stop even if DELETE cannot reach Server");
+  assert.equal(page.button.textContent, "开启完成通知");
+});
+
+test("Android permission rejection, failed registration and logout never leave native delivery enabled", async () => {
+  const denied = androidFixture(); await denied.login(); denied.deny(); await denied.clicks.click();
+  assert.equal(denied.requests.length, 0); assert.equal(denied.enabled(), false);
+  const offline = androidFixture(); await offline.login(); offline.fail(); await offline.clicks.click();
+  assert.equal(offline.enabled(), false);
+  const active = androidFixture(); await active.login(); await active.clicks.click();
+  await active.context.controls.logout(); assert.equal(active.enabled(), false);
+});
+
+test("Android warm notification navigation acknowledges busy editors without discarding their route", async () => {
+  const page = androidFixture(); const targets = [];
+  page.context.open = target => { targets.push(target); return false; };
+  vm.runInContext("installAndroidNavigation(open);", page.context);
+  await new Promise(setImmediate);
+  page.events["mira:native-notification"]({ detail: thread });
+  await new Promise(setImmediate);
+  assert.deepEqual(targets, [`/?thread=${thread}`]);
+  assert.equal(page.nativeCalls.at(-1).accepted, false);
+  page.events["mira:native-notification"]({ detail: "https://evil.test" });
+  assert.equal(targets.length, 1);
 });
