@@ -47,14 +47,14 @@ def main():
     for code in ["invalid_encrypted_content", "unknown_reasoning_pool"]:
         error = {"code": code, "message": "Encrypted context cannot be verified."}
         for status in [400, 409, 429, 500, 502]:
-            cases.append({"name": f"HTTP {status} {code}", "code": code, "retry": False,
+            cases.append({"name": f"HTTP {status} {code}", "error_text": code, "retry": False,
                           "response": (status, {"error": error})})
         for event in [
             {"type": "response.failed", "response": {"error": error}},
             {"type": "error", "error": error},
             {"type": "error", **error},
         ]:
-            cases.append({"name": f"SSE {json.dumps(event)}", "code": code, "retry": False,
+            cases.append({"name": f"SSE {json.dumps(event)}", "error_text": code, "retry": False,
                           "response": (200, [event])})
     for status, error in [
         (500, {"code": "server_error", "message": "Temporary service failure"}),
@@ -69,9 +69,9 @@ def main():
     cases.extend([
         {"name": "HTTP 401 project TPM admission timeout", "retry": True, "rate_limit": True,
          "failures": 3, "response": (401, tpm_timeout)},
-        {"name": "HTTP 401 invalid API key", "retry": False, "code": "invalid_api_key", "bounded_attempts": 3,
+        {"name": "HTTP 401 invalid API key", "retry": False, "error_text": "Invalid API key", "bounded_attempts": 3,
          "response": (401, {"error": {"code": "invalid_api_key", "message": "Invalid API key"}})},
-        {"name": "HTTP 401 unrelated deadline", "retry": False, "code": "context deadline exceeded", "bounded_attempts": 3,
+        {"name": "HTTP 401 unrelated deadline", "retry": False, "error_text": "context deadline exceeded", "bounded_attempts": 3,
          "response": (401, "authentication: context deadline exceeded")},
     ])
     warmup_case = next(case for case in cases if case["retry"])
@@ -124,7 +124,7 @@ stream_max_retries=2
                                 and event["params"].get("error", {}).get("message", "").startswith("Rate limited;")
                                 for event in runtime.events[event_count:]), (operation, case["name"])
                         if not case["retry"]:
-                            assert case["code"] in completed["error"]["message"], (case["name"], completed)
+                            assert case["error_text"] in completed["error"]["message"], (case["name"], completed)
                             assert not any(event.get("method") == "error"
                                 and event["params"].get("threadId") == thread["id"]
                                 and event["params"].get("willRetry")
