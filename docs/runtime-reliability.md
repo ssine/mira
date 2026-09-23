@@ -3,6 +3,23 @@
 PostgreSQL is still the only durable conversation store. These changes add no
 local JSONL mirror, disk outbox, or alternate source of truth.
 
+## Portable context defaults
+
+Codex runtime `0.155.1-mira.3` enables `features.mira_plaintext_context` by
+default for all providers and child threads. New collaboration messages carry
+readable text, and all compaction entry points use the existing ordinary
+Responses summarizer. The resulting checkpoint contains ordinary messages and
+a plaintext summary, with the original canonical history retained. Manual and
+automatic compaction share this policy, including when token-budget mode is
+enabled. The model, provider and authentication are not changed to select it.
+
+An explicit `features.mira_plaintext_context = false` retains the upstream
+encrypted-compaction/token-budget selection for compatibility testing; the
+legacy provider-specific plaintext message option still works. Old encrypted
+history is not rewritten, and encrypted model reasoning remains an independent
+mechanism. Such history can still require the existing scoped recovery flow
+after an incompatible account switch.
+
 ## Model rate limits
 
 Codex runtime `0.153.1-mira.14` keeps a turn alive after an HTTP or wrapped

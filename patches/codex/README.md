@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
-- Patch source commit: `cb4930610683`
+- Patch source commit: `16566b36e419`
 
 Apply it to a clean checkout:
 
@@ -24,6 +24,31 @@ Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the e
 as an independent Codex runtime, downloaded by the Node on demand. The Node probes the remote ThreadStore configuration before advertising a build
 as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
 release matrix builds, not just changing the version file.
+
+Runtime `0.155.1-mira.3` defaults to portable plaintext context for every provider,
+including built-in OpenAI, Azure and restored subagents. No per-account setting
+is needed. Message-bearing collaboration tools use Mira's existing plaintext
+aliases in direct calls and Code Mode. Manual, pre-turn, mid-turn and
+model-downshift compaction share one policy and use ordinary model requests to
+produce a readable summary checkpoint. This policy also takes precedence over
+the experimental token-budget context-reset path. Provider identity, model,
+authentication, compaction hooks and durable history remain unchanged.
+
+`features.mira_plaintext_context = false` explicitly restores the upstream
+selection policy for compatibility testing. The older custom-provider
+`plaintext_agent_messages = true` opt-in remains supported in that mode.
+Existing encrypted messages/checkpoints are still readable by compatible
+providers and are never silently deleted or decrypted. The model's separate
+`reasoning.encrypted_content` mechanism is unchanged; this release does not
+promise unrestricted account switching for previously encrypted history.
+
+`tests/plaintext_context_runtime_e2e.py` runs against both canonical platform
+packages with no plaintext config overrides. It verifies built-in OpenAI,
+Azure and custom-provider tool schemas, manual and automatic plaintext
+checkpoints, token-budget precedence, cold resume and unchanged original
+history. The account runtime E2E now verifies plaintext spawn/send/followup
+and cold child account handoff using the runtime defaults. Core integration
+tests also exercise direct, flat-name and Code Mode delivery.
 
 The patch is intentionally kept separate from the Mira control plane. When updating Codex, rebase
 or regenerate it against the new upstream tag, run the `codex-thread-store` tests, and verify the

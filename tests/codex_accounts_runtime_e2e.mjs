@@ -40,11 +40,11 @@ async function waitFor(read, description, timeout = 60_000) {
 }
 const encrypted = items => items.filter(item => item.encrypted_content);
 const importedEncrypted = new Set();
-const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES === "1";
+const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES !== "0";
 const sseRateLimit = process.env.MIRA_TEST_SSE_RATE_LIMIT === "1";
 let injectedRateLimit = false;
-const agentConfig = provider => ({ "features.multi_agent_v2": true,
-  ...(plaintextMessages ? { [`model_providers.${provider}.plaintext_agent_messages`]: true } : {}) });
+const agentConfig = () => ({ "features.multi_agent_v2": true,
+  ...(plaintextMessages ? {} : { "features.mira_plaintext_context": false }) });
 const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
 const isChildFollowup = body => body.input.some(item => item.type === "agent_message" &&
   item.recipient === "/root/account_child" && JSON.stringify(item.content).includes("ACCOUNT_CHILD_SECOND"));
@@ -369,7 +369,7 @@ try {
   }
   const parentClient = await connect(a);
   console.log("Testing persisted subagent handoff");
-  const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig("fixture"), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+  const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig(), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
   await turn(parentClient, parentId, "SPAWN_ACCOUNT_CHILD");
   const childId = await waitFor(async () => {
     const state = (await admin(`/v2/stores/${store}`)).state;
@@ -386,7 +386,7 @@ try {
     return true;
   }, "idle parent and child before handoff");
   const parentOnB = await connect(b);
-  await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: agentConfig("fixture_b") });
+  await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: agentConfig() });
   console.log("Parent resumed on B");
   // Resume only the parent. The persisted child remains cold until the native
   // followup_task restores it; its route and provider must already belong to B.
