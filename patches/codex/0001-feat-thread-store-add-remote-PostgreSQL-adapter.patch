@@ -1,4 +1,4 @@
-From 16566b36e4198dec06719af946aa041ceaf026e8 Mon Sep 17 00:00:00 2001
+From f462812ed3d7515225a4c8636d1735aa059e20e0 Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Thu, 17 Sep 2026 03:19:48 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
@@ -15873,7 +15873,7 @@ index 1f2a4b0..522d74c 100644
              "Configuring session: model={}; provider={:?}",
              session_configuration
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index aa82875..082ea94 100644
+index aa82875..5ae4822 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -5042,6 +5042,10 @@ fn text_block(s: &str) -> serde_json::Value {
@@ -15882,7 +15882,7 @@ index aa82875..082ea94 100644
      ConfigBuilder::without_managed_config_for_tests()
 +        .cli_overrides(vec![(
 +            "features.mira_plaintext_context".to_string(),
-+            toml::Value::Boolean(false),
++            false.into(),
 +        )])
          .codex_home(codex_home.to_path_buf())
          .harness_overrides(ConfigOverrides {
@@ -16709,7 +16709,7 @@ index 01054b1..48e558e 100644
              );
              if turn_context.config.multi_agent_v2.wait_agent_enabled {
 diff --git a/codex-rs/core/tests/common/lib.rs b/codex-rs/core/tests/common/lib.rs
-index 5705355..cf1de0f 100644
+index 5705355..fc5f858 100644
 --- a/codex-rs/core/tests/common/lib.rs
 +++ b/codex-rs/core/tests/common/lib.rs
 @@ -208,7 +208,13 @@ pub async fn load_default_config_for_test_with_cloud_config_bundle(
@@ -16721,7 +16721,7 @@ index 5705355..cf1de0f 100644
      ConfigBuilder::default()
 +        .cli_overrides(vec![(
 +            "features.mira_plaintext_context".to_string(),
-+            toml::Value::Boolean(false),
++            false.into(),
 +        )])
          .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
          .codex_home(codex_home.path().to_path_buf())
