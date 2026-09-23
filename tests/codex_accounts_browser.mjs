@@ -88,8 +88,10 @@ try {
   await page.locator("#conversationAccount").selectOption(custom);
   await page.locator("#conversationInput").fill("Continue using the selected provider"); await page.locator("#conversationSend").click();
   const recovery = page.locator("#conversationCompatibility button"); await recovery.waitFor();
-  assert.equal(calls.find(value => value.method === "thread/resume").binding, custom);
-  assert.equal(calls.find(value => value.method === "turn/start").binding, custom);
+  // Opening the view may resume the original account before selection changes.
+  const startIndex = calls.findIndex(value => value.method === "turn/start");
+  assert.equal(calls.slice(0, startIndex).findLast(value => value.method === "thread/resume").binding, custom);
+  assert.equal(calls[startIndex].binding, custom);
   const turns = calls.filter(value => value.method === "turn/start").length;
   page.once("dialog", dialog => dialog.dismiss()); await recovery.click();
   assert.equal(confirmed, false, "dismissal preserves encrypted input");

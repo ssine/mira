@@ -3,6 +3,29 @@
 PostgreSQL is still the only durable conversation store. These changes add no
 local JSONL mirror, disk outbox, or alternate source of truth.
 
+## Portable context defaults
+
+Codex runtime `0.155.1-mira.3` enables `features.mira_plaintext_context` by
+default for all providers and child threads. New collaboration messages carry
+readable text, and all compaction entry points use the existing ordinary
+Responses summarizer. The resulting checkpoint contains ordinary messages and
+a plaintext summary, with the original canonical history retained. Manual and
+automatic compaction share this policy, including when token-budget mode is
+enabled. The model, provider and authentication are not changed to select it.
+The plaintext request uses the same retry classification as sampling: permanent
+input errors stop immediately, while temporary rate limits retain cancellable
+backoff and completed work.
+This includes the gateway's complete `ratelimiter: tpm acquire project: tpm peek
+tpm:project:…: context deadline exceeded` diagnostic when mislabeled HTTP 401;
+ordinary authentication errors are not classified as temporary rate limits.
+
+An explicit `features.mira_plaintext_context = false` retains the upstream
+encrypted-compaction/token-budget selection for compatibility testing; the
+legacy provider-specific plaintext message option still works. Old encrypted
+history is not rewritten, and encrypted model reasoning remains an independent
+mechanism. Such history can still require the existing scoped recovery flow
+after an incompatible account switch.
+
 ## Model rate limits
 
 Codex runtime `0.153.1-mira.14` keeps a turn alive after an HTTP or wrapped
@@ -19,7 +42,23 @@ notifications expose the waiting state and delay to clients. Recognized usage,
 insufficient-quota and billing failures remain terminal. An unrecognized 429
 continues waiting until recovery or cancellation; a generic status alone cannot
 identify every provider's billing errors. Other HTTP errors and streamed SSE
-failures retain their existing retry policies.
+failures retain their existing retry policies, subject to permanent input errors
+below.
+
+## Encrypted input failures
+
+Runtime `0.155.1-mira.2` treats structured `invalid_encrypted_content` and
+`unknown_reasoning_pool` codes as permanent input failures, even when a gateway
+labels them HTTP 429 or 5xx. HTTP retries stop immediately, and the API mapping
+preserves the code in the terminal error instead of reporting generic server
+load. The same rule applies to `response.failed` and nested/flat SSE `error`
+events. Message text without a matching structured code does not change retry
+behavior.
+
+Mira can then offer its existing encrypted-input recovery action. Recovery still
+requires explicit administrator consent and only changes the frozen-prefix
+model-input projection; canonical records remain unchanged. It does not restart
+the account process or automatically resubmit the failed turn.
 
 ## Persistence acknowledgement
 

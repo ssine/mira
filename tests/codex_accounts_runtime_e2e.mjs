@@ -27,7 +27,7 @@ const admin = (url, body, method = "POST") => adminRequest(origin, session, url,
   body === undefined ? {} : { method, body: JSON.stringify(body) });
 let nodeProcess, nodeId, token, rejectOld = false;
 let holdNextResponse = false, releaseResponse;
-const requests = [], sockets = [], logs = [];
+const requests = [], rejectedRequests = [], sockets = [], logs = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(read, description, timeout = 60_000) {
   const deadline = Date.now() + timeout;
@@ -40,11 +40,11 @@ async function waitFor(read, description, timeout = 60_000) {
 }
 const encrypted = items => items.filter(item => item.encrypted_content);
 const importedEncrypted = new Set();
-const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES === "1";
+const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES !== "0";
 const sseRateLimit = process.env.MIRA_TEST_SSE_RATE_LIMIT === "1";
-let injectedRateLimit = false;
-const agentConfig = provider => ({ "features.multi_agent_v2": true,
-  ...(plaintextMessages ? { [`model_providers.${provider}.plaintext_agent_messages`]: true } : {}) });
+let injectedRateLimits = 0;
+const agentConfig = () => ({ "features.multi_agent_v2": true,
+  ...(plaintextMessages ? {} : { "features.mira_plaintext_context": false }) });
 const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
 const isChildFollowup = body => body.input.some(item => item.type === "agent_message" &&
   item.recipient === "/root/account_child" && JSON.stringify(item.content).includes("ACCOUNT_CHILD_SECOND"));
@@ -57,6 +57,7 @@ const mock = http.createServer(async (request, response) => {
   const key = request.headers.authorization;
   requests.push({ key, body, path: request.url });
   if (rejectOld && encrypted(body.input).some(incompatible)) {
+    rejectedRequests.push({ key, body });
     // Exercise both the gateway JSON envelope and Codex's message-only HTTP
     // fallback; account A still covers the upstream invalid_encrypted_content.
     if (key === "Bearer synthetic-B" || key === "Bearer synthetic-C") {
@@ -66,7 +67,9 @@ const mock = http.createServer(async (request, response) => {
       response.end(json ? JSON.stringify({ error: { type: "gateway_error", code: "unknown_reasoning_pool", message } }) : message);
       return;
     }
-    response.writeHead(400, { "content-type": "application/json" });
+    // Some providers wrap this permanent request error in HTTP 500. It must
+    // still reach Mira's recovery action after exactly one model request.
+    response.writeHead(500, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "The encrypted content could not be verified. Encrypted content could not be decrypted or parsed.",
       type: "invalid_request_error", code: "invalid_encrypted_content", param: null } })); return;
   }
@@ -76,9 +79,14 @@ const mock = http.createServer(async (request, response) => {
   const spawnChild = prompt.includes("SPAWN_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "spawn-account-child");
   const followChild = prompt.includes("FOLLOWUP_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "follow-account-child");
   const sendChild = prompt.includes("SEND_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "send-account-child");
-  if (sseRateLimit && !injectedRateLimit && prompt.includes("SPAWN_ACCOUNT_CHILD") &&
+  if (sseRateLimit && injectedRateLimits < 2 && prompt.includes("SPAWN_ACCOUNT_CHILD") &&
     body.input.some(item => item.type === "function_call_output" && item.call_id === "spawn-account-child")) {
-    injectedRateLimit = true;
+    injectedRateLimits += 1;
+    if (injectedRateLimits === 2) {
+      response.writeHead(401, { "content-type": "text/plain", "retry-after": "0" });
+      response.end("ratelimiter: tpm acquire project: tpm peek tpm:project:test-model:42: context deadline exceeded");
+      return;
+    }
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end([
       { type: "response.created", response: { id } },
@@ -251,7 +259,10 @@ try {
     second = await connect(b); await second.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
   }
   rejectOld = true;
+  const rejectedBeforeRecovery = rejectedRequests.length;
   await turn(second, threadId, "Incompatible encrypted context", "failed");
+  assert.equal(rejectedRequests.length - rejectedBeforeRecovery, 1,
+    "a structured gateway compatibility error must not retry");
   assert(second.events.some(event => event.method === "mira/account/contextIncompatible" && event.params.threadId === threadId),
     "gateway 409 must expose the recovery action");
   const endpoint = `/v1/codex/threads/${threadId}/input-recovery?storeId=${store}&nodeAccountId=${b}`;
@@ -289,8 +300,13 @@ try {
   for (const binding of [c, a, b]) {
     let client = await connect(binding);
     await client.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
+    const rejectedBefore = rejectedRequests.length;
     await turn(client, threadId, "Continue recovered history after another account switch", binding === b ? "completed" : "failed");
     if (binding !== b) {
+      if (binding === a) assert.equal(rejectedRequests.length - rejectedBefore, 1,
+        "HTTP 500 invalid_encrypted_content must not retry at the HTTP or sampling layer");
+      assert(client.events.some(event => event.method === "mira/account/contextIncompatible" && event.params.threadId === threadId),
+        "encrypted-context errors must expose the recovery action");
       // Recovery consent remains scoped to each account; canonical encrypted
       // input is preserved until that account also reports incompatibility.
       const recoveryUrl = `/v1/codex/threads/${threadId}/input-recovery?storeId=${store}&nodeAccountId=${binding}`;
@@ -358,7 +374,7 @@ try {
   }
   const parentClient = await connect(a);
   console.log("Testing persisted subagent handoff");
-  const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig("fixture"), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+  const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig(), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
   await turn(parentClient, parentId, "SPAWN_ACCOUNT_CHILD");
   const childId = await waitFor(async () => {
     const state = (await admin(`/v2/stores/${store}`)).state;
@@ -374,14 +390,35 @@ try {
     }
     return true;
   }, "idle parent and child before handoff");
+  let portableSummary;
+  if (plaintextMessages) {
+    const beforeCompact = (await history(parentId)).items;
+    const eventCount = parentClient.events.length;
+    await parentClient.call("thread/compact/start", { threadId: parentId });
+    const completed = await waitFor(() => parentClient.events.slice(eventCount).find(event =>
+      event.method === "turn/completed" && event.params.threadId === parentId), "parent plaintext compaction");
+    assert.equal(completed.params.turn.status, "completed");
+    const compacted = (await history(parentId)).items;
+    assert.deepEqual(compacted.slice(0, beforeCompact.length), beforeCompact, "compaction must preserve canonical history");
+    const checkpoint = compacted.findLast(record => record.type === "compacted").payload;
+    assert(checkpoint.replacement_history.every(item => item.type === "message"));
+    assert(!JSON.stringify(checkpoint.replacement_history).includes("encrypted_content"));
+    portableSummary = checkpoint.replacement_history.at(-1).content[0].text;
+  }
   const parentOnB = await connect(b);
-  await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: agentConfig("fixture_b") });
+  await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: agentConfig() });
   console.log("Parent resumed on B");
   // Resume only the parent. The persisted child remains cold until the native
   // followup_task restores it; its route and provider must already belong to B.
   const childBeforeFollowup = await parentOnB.call("thread/read", { threadId: childId, includeTurns: false });
   assert.equal(childBeforeFollowup.thread.modelProvider, "fixture_b");
-  if (plaintextMessages) await turn(parentOnB, parentId, "SEND_ACCOUNT_CHILD");
+  if (plaintextMessages) {
+    await turn(parentOnB, parentId, "SEND_ACCOUNT_CHILD");
+    assert(requests.some(request => request.key === "Bearer synthetic-B" &&
+      request.body.input.some(item => item.type === "message" &&
+        item.content?.some(part => part.text === portableSummary))), "new provider must replay the plaintext checkpoint");
+    console.log("Native plaintext checkpoint survived canonical storage and account handoff");
+  }
   await turn(parentOnB, parentId, "FOLLOWUP_ACCOUNT_CHILD");
   await waitFor(async () => JSON.stringify((await history(childId)).items).includes("CHILD_FOLLOWUP_OK"), "child followup after account handoff");
   const childRequest = requests.findLast(request => isChildFollowup(request.body));
@@ -402,13 +439,13 @@ try {
     console.log("Plaintext spawn/send/followup and canonical aliases survived cold child resume");
   }
   if (sseRateLimit) {
-    assert(injectedRateLimit, "standalone SSE rate limit must be exercised");
+    assert.equal(injectedRateLimits, 2, "SSE and HTTP 401 TPM rate limits must both be exercised");
     const calls = (await history(parentId)).items.filter(record => record.type === "response_item" &&
       record.payload.type === "function_call" && record.payload.call_id === "spawn-account-child");
     assert.equal(calls.length, 1, "rate-limit retries must retain the completed spawn without repeating it");
     assert(parentClient.events.some(event => event.method === "error" && event.params.willRetry &&
       event.params.error?.message?.startsWith("Rate limited; retrying in ")), "App Server must surface a retrying rate limit");
-    console.log("HTTP 200 SSE rate limit recovered without repeating the persisted child spawn");
+    console.log("SSE and HTTP 401 TPM rate limits recovered without repeating the persisted child spawn");
   }
   console.log("Subagent identity and followup survived parent account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);

@@ -5,8 +5,8 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `4e21628f9ec9`
-- Patch source commit: `dbe81774c17b`
+- Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
+- Patch source commit: `d0b487786921`
 
 Apply it to a clean checkout:
 
@@ -24,6 +24,43 @@ Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the e
 as an independent Codex runtime, downloaded by the Node on demand. The Node probes the remote ThreadStore configuration before advertising a build
 as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
 release matrix builds, not just changing the version file.
+
+Runtime `0.155.1-mira.3` defaults to portable plaintext context for every provider,
+including built-in OpenAI, Azure and restored subagents. No per-account setting
+is needed. Message-bearing collaboration tools use Mira's existing plaintext
+aliases in direct calls and Code Mode. Manual, pre-turn, mid-turn and
+model-downshift compaction share one policy and use ordinary model requests to
+produce a readable summary checkpoint. This policy also takes precedence over
+the experimental token-budget context-reset path. Provider identity, model,
+authentication, compaction hooks and durable history remain unchanged.
+Plaintext compaction also uses the shared Responses retry policy: permanent
+encrypted-input/quota errors stop immediately, temporary 429s wait with cancellable
+backoff, and exhausted WebSocket retries can fall back to HTTP.
+The gateway diagnostic `ratelimiter: tpm acquire project: tpm peek tpm:project:…:
+context deadline exceeded` is treated as a temporary rate limit even when the
+gateway labels it HTTP 401. The match is limited to that complete diagnostic;
+other authentication failures retain their existing handling.
+
+`features.mira_plaintext_context = false` explicitly restores the upstream
+selection policy for compatibility testing. The older custom-provider
+`plaintext_agent_messages = true` opt-in remains supported in that mode.
+Existing encrypted messages/checkpoints are still readable by compatible
+providers and are never silently deleted or decrypted. The model's separate
+`reasoning.encrypted_content` mechanism is unchanged; this release does not
+promise unrestricted account switching for previously encrypted history.
+
+`tests/plaintext_context_runtime_e2e.py` runs against both canonical platform
+packages with no plaintext config overrides. It verifies built-in OpenAI,
+Azure and custom-provider tool schemas, manual and automatic plaintext
+checkpoints, token-budget precedence, cold resume and unchanged original
+history. The account runtime E2E now verifies plaintext spawn/send/followup
+and a native plaintext parent checkpoint across cold child account handoff
+using the runtime defaults. Core integration tests also exercise direct,
+flat-name and Code Mode delivery. The encrypted-context runtime regression
+covers 44 sampling/compaction cases, including terminal structured errors,
+temporary 429s and the mislabeled TPM timeout beyond the ordinary stream retry
+budget. Root/subagent tests verify cancellation and retention of completed tools;
+the account E2E injects both SSE and HTTP 401 TPM limits after a durable child spawn.
 
 The patch is intentionally kept separate from the Mira control plane. When updating Codex, rebase
 or regenerate it against the new upstream tag, run the `codex-thread-store` tests, and verify the
@@ -192,3 +229,19 @@ CLI history with `0.153.1-mira.19` and resume it through the new App Server.
 Run it with `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1` and
 `MIRA_TEST_SSE_RATE_LIMIT=1` against a disposable Server, in addition to the
 large-fork and interrupted-tool scenarios described above.
+
+Runtime revision `0.155.1-mira.2` recognizes structured `invalid_encrypted_content`
+and `unknown_reasoning_pool` errors before HTTP status-based retries. Gateways
+sometimes return these permanent input failures as HTTP 500; both HTTP and
+sampling retry layers now stop after the first rejected request and preserve
+the error code for Mira's existing administrator-confirmed recovery action.
+Responses `response.failed` and nested/flat SSE `error` events follow the same
+rule. Plain message text alone does not trigger this classification; ordinary
+429 and 5xx behavior is unchanged. Canonical history and recovery consent remain
+unchanged.
+
+Release acceptance runs `tests/encrypted_context_runtime_e2e.py` against both
+canonical platform packages, covering terminal HTTP/SSE errors and transient
+retry success. `tests/codex_accounts_runtime_e2e.mjs` additionally verifies one
+HTTP 500 rejection exposes recovery, scoped consent reloads the same account
+runtime, and canonical history and unrelated active turns survive.

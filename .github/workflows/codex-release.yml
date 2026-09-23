@@ -14,6 +14,8 @@ on:
       - tests/runtime_fixture_cleanup*.mjs
       - tests/compiler_cache_snapshot_e2e.mjs
       - tests/interrupted_tool_resume_e2e.py
+      - tests/encrypted_context_runtime_e2e.py
+      - tests/plaintext_context_runtime_e2e.py
       - tests/codex_release_test.mjs
       - scripts/build-codex-release.mjs
       - .github/workflows/codex-release.yml
@@ -376,6 +378,30 @@ jobs:
           suffix=""
           [[ "$TARGET" == *windows* ]] && suffix=".exe"
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/interrupted_tool_resume_e2e.py
+
+      - name: Test encrypted context errors and transient retries in the release runtime
+        if: inputs.codex_release == ''
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          [[ "$TARGET" == *windows* ]] && suffix=".exe"
+          CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/encrypted_context_runtime_e2e.py
+
+      - name: Test default plaintext communication and compaction in the release runtime
+        if: inputs.codex_release == ''
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          [[ "$TARGET" == *windows* ]] && suffix=".exe"
+          CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/plaintext_context_runtime_e2e.py
 
       - uses: actions/upload-artifact@v4
         # Retain a completed candidate for diagnosis even if acceptance fails.
