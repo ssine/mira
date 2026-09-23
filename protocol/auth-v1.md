@@ -21,6 +21,13 @@ not bootstrap one from its environment.
 `__Host-` prefix with `Secure`, `HttpOnly`, `SameSite=Strict`, and `Path=/`. Browser mutations require
 the per-session `X-Mira-CSRF` value returned by login/session refresh. Login failures are throttled.
 
+Administrator sessions and their cookies last 30 days. Authorized HTTP requests renew both to
+30 days from use, after permission and CSRF validation; logout only revokes the session and clears
+its cookie. Renewal preserves the token and CSRF value across tabs. Unexpired older sessions renew
+on their next request; expired or revoked sessions require a fresh login. Server restarts preserve
+valid database sessions. Browser connection failures and HTTP 403 permission failures do not imply
+an expired login; the console treats `401 authentication_required` as requiring login.
+
 Only the administrator may list/decide enrollments, revoke/restore Nodes, and read security audit
 events. It may also perform the operations available to trusted Nodes.
 

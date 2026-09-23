@@ -21,7 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const AdminSessionLifetime = 12 * time.Hour
+const AdminSessionLifetime = 30 * 24 * time.Hour
 
 var nodeTokenPattern = regexp.MustCompile(`(?i)^mira_node_([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})_([A-Za-z0-9_-]{43})$`)
 
@@ -331,6 +331,34 @@ func (service *AuthService) RefreshCSRF(ctx context.Context, principal *Principa
 	return csrfToken, nil
 }
 
+// RenewSession extends an authorized browser session and returns its replacement
+// cookie. Call only after permission and CSRF checks. The token stays stable so
+// concurrent tabs and in-flight requests keep using the same session and CSRF.
+func (service *AuthService) RenewSession(ctx context.Context, request *http.Request, principal *Principal) (string, error) {
+	if principal == nil || principal.Kind != "admin" || principal.Transport != "cookie" {
+		return "", nil
+	}
+	cookie, err := request.Cookie(service.cookieName)
+	if err != nil {
+		return "", &HTTPError{Status: 401, Code: "authentication_required", Message: "authentication required"}
+	}
+	err = service.db.QueryRow(ctx,
+		`UPDATE mira_admin_sessions
+		 SET expires_at = GREATEST(expires_at, NOW() + $3::bigint * INTERVAL '1 second'), last_seen_at = NOW()
+		 WHERE session_id = $1::uuid AND token_hash = $2
+		   AND revoked_at IS NULL AND expires_at > NOW()
+		 RETURNING expires_at`,
+		principal.SessionID, TokenHash(cookie.Value), int64(AdminSessionLifetime/time.Second),
+	).Scan(&principal.ExpiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", &HTTPError{Status: 401, Code: "authentication_required", Message: "authentication required"}
+	}
+	if err != nil {
+		return "", fmt.Errorf("renew administrator session: %w", err)
+	}
+	return service.sessionCookie(cookie.Value), nil
+}
+
 func (service *AuthService) Login(ctx context.Context, request *http.Request, username, password string) (*LoginResult, error) {
 	if !ValidAdminUsername(username) {
 		return nil, nil
@@ -376,13 +404,16 @@ func (service *AuthService) Login(ctx context.Context, request *http.Request, us
 		Username: storedUsername, SessionID: sessionID, CSRFTokenHash: TokenHash(csrfToken),
 		ExpiresAt: expiresAt, Revoked: false,
 	}
+	return &LoginResult{Principal: principal, CSRFToken: csrfToken, Cookie: service.sessionCookie(sessionToken)}, nil
+}
+
+func (service *AuthService) sessionCookie(sessionToken string) string {
 	secure := ""
 	if service.secureCookies {
 		secure = "; Secure"
 	}
-	cookie := fmt.Sprintf("%s=%s; Path=/; HttpOnly; SameSite=Strict%s; Max-Age=%d",
+	return fmt.Sprintf("%s=%s; Path=/; HttpOnly; SameSite=Strict%s; Max-Age=%d",
 		service.cookieName, sessionToken, secure, int(AdminSessionLifetime/time.Second))
-	return &LoginResult{Principal: principal, CSRFToken: csrfToken, Cookie: cookie}, nil
 }
 
 func (service *AuthService) Logout(ctx context.Context, principal *Principal) (string, error) {
