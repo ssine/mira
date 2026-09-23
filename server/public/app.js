@@ -6629,7 +6629,19 @@ for (const button of document.querySelectorAll("[data-copy-install]")) {
   });
 }
 
+function openNotificationConversation(target) {
+  if (agent.sendPromise || agent.forkPromise || agent.threadActionPromise || composerDraftLoading || document.querySelector("dialog[open]")) return false;
+  // Capture text and attachments before the existing SPA route changes editors.
+  // Failed IndexedDB writes stay in ComposerDrafts.pending in this same window.
+  saveComposerDraft();
+  window.history.pushState(null, "", target);
+  rememberAppRoute();
+  agent.selectionEpoch++;
+  if (csrfToken) void restoreBrowserRoute().catch((error) => setConversationNotice(error.message, "error"));
+  return true;
+}
+
 syncThemeControl();
-initializePwa();
+initializePwa({ openNotification: openNotificationConversation });
 completionNotifications = createCompletionNotifications(api, toast);
 void bootstrap();
