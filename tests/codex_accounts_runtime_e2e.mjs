@@ -42,7 +42,7 @@ const encrypted = items => items.filter(item => item.encrypted_content);
 const importedEncrypted = new Set();
 const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES !== "0";
 const sseRateLimit = process.env.MIRA_TEST_SSE_RATE_LIMIT === "1";
-let injectedRateLimit = false;
+let injectedRateLimits = 0;
 const agentConfig = () => ({ "features.multi_agent_v2": true,
   ...(plaintextMessages ? {} : { "features.mira_plaintext_context": false }) });
 const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
@@ -79,9 +79,14 @@ const mock = http.createServer(async (request, response) => {
   const spawnChild = prompt.includes("SPAWN_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "spawn-account-child");
   const followChild = prompt.includes("FOLLOWUP_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "follow-account-child");
   const sendChild = prompt.includes("SEND_ACCOUNT_CHILD") && !body.input.some(item => item.call_id === "send-account-child");
-  if (sseRateLimit && !injectedRateLimit && prompt.includes("SPAWN_ACCOUNT_CHILD") &&
+  if (sseRateLimit && injectedRateLimits < 2 && prompt.includes("SPAWN_ACCOUNT_CHILD") &&
     body.input.some(item => item.type === "function_call_output" && item.call_id === "spawn-account-child")) {
-    injectedRateLimit = true;
+    injectedRateLimits += 1;
+    if (injectedRateLimits === 2) {
+      response.writeHead(401, { "content-type": "text/plain", "retry-after": "0" });
+      response.end("ratelimiter: tpm acquire project: tpm peek tpm:project:test-model:42: context deadline exceeded");
+      return;
+    }
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end([
       { type: "response.created", response: { id } },
@@ -434,13 +439,13 @@ try {
     console.log("Plaintext spawn/send/followup and canonical aliases survived cold child resume");
   }
   if (sseRateLimit) {
-    assert(injectedRateLimit, "standalone SSE rate limit must be exercised");
+    assert.equal(injectedRateLimits, 2, "SSE and HTTP 401 TPM rate limits must both be exercised");
     const calls = (await history(parentId)).items.filter(record => record.type === "response_item" &&
       record.payload.type === "function_call" && record.payload.call_id === "spawn-account-child");
     assert.equal(calls.length, 1, "rate-limit retries must retain the completed spawn without repeating it");
     assert(parentClient.events.some(event => event.method === "error" && event.params.willRetry &&
       event.params.error?.message?.startsWith("Rate limited; retrying in ")), "App Server must surface a retrying rate limit");
-    console.log("HTTP 200 SSE rate limit recovered without repeating the persisted child spawn");
+    console.log("SSE and HTTP 401 TPM rate limits recovered without repeating the persisted child spawn");
   }
   console.log("Subagent identity and followup survived parent account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);

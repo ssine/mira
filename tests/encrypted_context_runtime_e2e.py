@@ -28,15 +28,15 @@ class Provider(BaseHTTPRequestHandler):
                     "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}}},
             ]
         self.send_response(status)
-        if status == 429:
+        if status == 429 or case.get("rate_limit"):
             self.send_header("Retry-After", "0")
-        self.send_header("Content-Type", "text/event-stream" if status == 200 else "application/json")
+        self.send_header("Content-Type", "text/event-stream" if status == 200 else "text/plain" if isinstance(payload, str) else "application/json")
         self.end_headers()
         if status == 200:
             for event in payload:
                 self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
         else:
-            self.wfile.write(json.dumps(payload).encode())
+            self.wfile.write((payload if isinstance(payload, str) else json.dumps(payload)).encode())
 
     def log_message(self, *_args):
         pass
@@ -64,6 +64,18 @@ def main():
         cases.append({"name": f"transient HTTP {status}: {error['message']}", "retry": True,
                       "response": (status, {"error": error}), "failures": 3 if status == 429 else 1})
 
+    # Sanitized production diagnostic: a TPM admission timeout mislabeled as 401.
+    tpm_timeout = "ratelimiter: tpm acquire project: tpm peek tpm:project:test-model:42: context deadline exceeded"
+    cases.extend([
+        {"name": "HTTP 401 project TPM admission timeout", "retry": True, "rate_limit": True,
+         "failures": 3, "response": (401, tpm_timeout)},
+        {"name": "HTTP 401 invalid API key", "retry": False, "code": "invalid_api_key", "bounded_attempts": 3,
+         "response": (401, {"error": {"code": "invalid_api_key", "message": "Invalid API key"}})},
+        {"name": "HTTP 401 unrelated deadline", "retry": False, "code": "context deadline exceeded", "bounded_attempts": 3,
+         "response": (401, "authentication: context deadline exceeded")},
+    ])
+    warmup_case = next(case for case in cases if case["retry"])
+
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
     try:
@@ -89,7 +101,7 @@ stream_max_retries=2
                             "approvalPolicy": "never", "sandbox": "danger-full-access"})["thread"]
                         if operation == "compact":
                             # Seed ordinary history through the fixture's existing success path.
-                            provider.case, provider.attempts = cases[-1], cases[-1].get("failures", 1)
+                            provider.case, provider.attempts = warmup_case, warmup_case.get("failures", 1)
                             warmup = runtime.call("turn/start", {"threadId": thread["id"],
                                 "input": [{"type": "text", "text": "Synthetic compaction history"}]})["turn"]
                             runtime.wait(lambda event: event.get("method") == "turn/completed"
@@ -106,8 +118,8 @@ stream_max_retries=2
                             and event not in runtime.events[:event_count])["params"]["turn"]
                         expected = "completed" if case["retry"] else "failed"
                         assert completed["status"] == expected, (case["name"], completed)
-                        assert provider.attempts == (case.get("failures", 1) + 1 if case["retry"] else 1), (case["name"], provider.attempts)
-                        if case["retry"] and case["response"][0] == 429:
+                        assert provider.attempts == (case.get("failures", 1) + 1 if case["retry"] else case.get("bounded_attempts", 1)), (case["name"], provider.attempts)
+                        if case["retry"] and (case["response"][0] == 429 or case.get("rate_limit")):
                             assert any(event.get("method") == "error" and event["params"].get("willRetry")
                                 and event["params"].get("error", {}).get("message", "").startswith("Rate limited;")
                                 for event in runtime.events[event_count:]), (operation, case["name"])
@@ -115,7 +127,9 @@ stream_max_retries=2
                             assert case["code"] in completed["error"]["message"], (case["name"], completed)
                             assert not any(event.get("method") == "error"
                                 and event["params"].get("threadId") == thread["id"]
-                                and event["params"].get("willRetry") for event in runtime.events), case["name"]
+                                and event["params"].get("willRetry")
+                                and (not case.get("bounded_attempts") or event["params"].get("error", {}).get("message", "").startswith("Rate limited;"))
+                                for event in runtime.events), case["name"]
                         print(f"passed: {operation}: {case['name']}", flush=True)
             finally:
                 runtime.close()

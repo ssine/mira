@@ -15,6 +15,9 @@ enabled. The model, provider and authentication are not changed to select it.
 The plaintext request uses the same retry classification as sampling: permanent
 input errors stop immediately, while temporary rate limits retain cancellable
 backoff and completed work.
+This includes the gateway's complete `ratelimiter: tpm acquire project: tpm peek
+tpm:project:…: context deadline exceeded` diagnostic when mislabeled HTTP 401;
+ordinary authentication errors are not classified as temporary rate limits.
 
 An explicit `features.mira_plaintext_context = false` retains the upstream
 encrypted-compaction/token-budget selection for compatibility testing; the

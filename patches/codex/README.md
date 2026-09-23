@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
-- Patch source commit: `3a27134af567`
+- Patch source commit: `d0b487786921`
 
 Apply it to a clean checkout:
 
@@ -36,6 +36,10 @@ authentication, compaction hooks and durable history remain unchanged.
 Plaintext compaction also uses the shared Responses retry policy: permanent
 encrypted-input/quota errors stop immediately, temporary 429s wait with cancellable
 backoff, and exhausted WebSocket retries can fall back to HTTP.
+The gateway diagnostic `ratelimiter: tpm acquire project: tpm peek tpm:project:…:
+context deadline exceeded` is treated as a temporary rate limit even when the
+gateway labels it HTTP 401. The match is limited to that complete diagnostic;
+other authentication failures retain their existing handling.
 
 `features.mira_plaintext_context = false` explicitly restores the upstream
 selection policy for compatibility testing. The older custom-provider
@@ -53,8 +57,10 @@ history. The account runtime E2E now verifies plaintext spawn/send/followup
 and a native plaintext parent checkpoint across cold child account handoff
 using the runtime defaults. Core integration tests also exercise direct,
 flat-name and Code Mode delivery. The encrypted-context runtime regression
-covers 38 sampling/compaction cases, including terminal structured errors
-and temporary 429s beyond the ordinary stream retry budget.
+covers 44 sampling/compaction cases, including terminal structured errors,
+temporary 429s and the mislabeled TPM timeout beyond the ordinary stream retry
+budget. Root/subagent tests verify cancellation and retention of completed tools;
+the account E2E injects both SSE and HTTP 401 TPM limits after a durable child spawn.
 
 The patch is intentionally kept separate from the Mira control plane. When updating Codex, rebase
 or regenerate it against the new upstream tag, run the `codex-thread-store` tests, and verify the
