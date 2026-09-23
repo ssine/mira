@@ -12,6 +12,9 @@ Responses summarizer. The resulting checkpoint contains ordinary messages and
 a plaintext summary, with the original canonical history retained. Manual and
 automatic compaction share this policy, including when token-budget mode is
 enabled. The model, provider and authentication are not changed to select it.
+The plaintext request uses the same retry classification as sampling: permanent
+input errors stop immediately, while temporary rate limits retain cancellable
+backoff and completed work.
 
 An explicit `features.mira_plaintext_context = false` retains the upstream
 encrypted-compaction/token-budget selection for compatibility testing; the

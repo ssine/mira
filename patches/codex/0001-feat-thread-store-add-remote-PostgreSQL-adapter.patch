@@ -1,4 +1,4 @@
-From f462812ed3d7515225a4c8636d1735aa059e20e0 Mon Sep 17 00:00:00 2001
+From 3a27134af5673406f6390fd1341b28a7eea1b8ed Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Thu, 17 Sep 2026 03:19:48 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
@@ -39,10 +39,11 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  codex-rs/core/config.schema.json              |   35 +
  codex-rs/core/src/codex_delegate.rs           |    2 +-
  codex-rs/core/src/codex_thread.rs             |    6 +
+ codex-rs/core/src/compact.rs                  |   43 +-
  codex-rs/core/src/compaction_mode.rs          |   29 +
  codex-rs/core/src/config/mod.rs               |   17 +
  codex-rs/core/src/lib.rs                      |    1 +
- codex-rs/core/src/responses_retry.rs          |   47 +
+ codex-rs/core/src/responses_retry.rs          |   57 +-
  codex-rs/core/src/session/mod.rs              |    9 +
  codex-rs/core/src/session/session.rs          |   16 +
  codex-rs/core/src/session/tests.rs            |    4 +
@@ -100,7 +101,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
  .../generated/notification_registry.py        |    3 +
  .../src/openai_codex/generated/v2_all.py      |   32 +
- 95 files changed, 6093 insertions(+), 480 deletions(-)
+ 96 files changed, 6125 insertions(+), 501 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
@@ -15665,6 +15666,91 @@ index 7177740..ecd620f 100644
      /// Returns the session telemetry handle for thread-scoped production instrumentation.
      pub fn session_telemetry(&self) -> SessionTelemetry {
          self.session.services.session_telemetry.clone()
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 55cc171..c37af0a 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -15,13 +15,15 @@ use crate::hook_runtime::run_pre_compact_hooks;
+ use crate::responses_metadata::CodexResponsesMetadata;
+ use crate::responses_metadata::CodexResponsesRequestKind;
+ use crate::responses_metadata::CompactionTurnMetadata;
++use crate::responses_retry::ResponsesStreamRequest;
++use crate::responses_retry::ResponsesStreamRetryState;
++use crate::responses_retry::handle_retryable_response_stream_error;
+ use crate::session::RequestEffortUsage;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn::get_last_assistant_message_from_turn;
+ use crate::session::turn_context::TurnContext;
+ use crate::state::AutoCompactWindowIds;
+-use crate::util::backoff;
+ use codex_analytics::CodexCompactionEvent;
+ use codex_analytics::CompactionImplementation;
+ use codex_analytics::CompactionPhase;
+@@ -260,7 +262,7 @@ async fn run_compact_task_inner_impl(
+     );
+ 
+     let max_retries = turn_context.provider.info().stream_max_retries();
+-    let mut retries = 0;
++    let mut retry_state = ResponsesStreamRetryState::default();
+     let mut client_session = sess.services.model_client.new_session();
+     // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
+     // request tracking)
+@@ -320,7 +322,7 @@ async fn run_compact_task_inner_impl(
+                         "Context window exceeded while compacting; removing oldest history item. Error: {e}"
+                     );
+                     history.remove_first_item();
+-                    retries = 0;
++                    retry_state = ResponsesStreamRetryState::default();
+                     continue;
+                 }
+                 sess.set_total_tokens_full(turn_context.as_ref()).await;
+@@ -332,25 +334,30 @@ async fn run_compact_task_inner_impl(
+                 return Err(e);
+             }
+             Err(e) => {
+-                if retries < max_retries {
+-                    retries += 1;
+-                    let delay = backoff(retries);
+-                    sess.notify_stream_error(
+-                        turn_context.as_ref(),
+-                        format!("Reconnecting... {retries}/{max_retries}"),
++                let e = if e.is_retryable() {
++                    match handle_retryable_response_stream_error(
++                        &mut retry_state,
++                        max_retries,
+                         e,
++                        &mut client_session,
++                        &sess,
++                        turn_context.as_ref(),
++                        ResponsesStreamRequest::PlaintextCompaction,
+                     )
+-                    .await;
+-                    tokio::time::sleep(delay).await;
+-                    continue;
+-                } else {
+-                    sess.track_turn_codex_error(turn_context.as_ref(), &e);
+-                    if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
+-                        let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
+-                        sess.send_event(&turn_context, event).await;
++                    .await
++                    {
++                        Ok(()) => continue,
++                        Err(e) => e,
+                     }
+-                    return Err(e);
++                } else {
++                    e
++                };
++                sess.track_turn_codex_error(turn_context.as_ref(), &e);
++                if !matches!(compaction_metadata.phase(), CompactionPhase::PreTurn) {
++                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
++                    sess.send_event(&turn_context, event).await;
+                 }
++                return Err(e);
+             }
+         }
+     };
 diff --git a/codex-rs/core/src/compaction_mode.rs b/codex-rs/core/src/compaction_mode.rs
 new file mode 100644
 index 0000000..75adaa5
@@ -15748,7 +15834,7 @@ index 55d1f47..cb48c3e 100644
  pub use codex_network_proxy::NetworkDomainPermission;
  pub use codex_network_proxy::NetworkDomainPermissionEntry;
 diff --git a/codex-rs/core/src/responses_retry.rs b/codex-rs/core/src/responses_retry.rs
-index 462bb95..98a2201 100644
+index 462bb95..02d9918 100644
 --- a/codex-rs/core/src/responses_retry.rs
 +++ b/codex-rs/core/src/responses_retry.rs
 @@ -1,5 +1,6 @@
@@ -15758,7 +15844,15 @@ index 462bb95..98a2201 100644
  use std::time::Duration;
  
  use crate::client::ModelClientSession;
-@@ -27,6 +28,8 @@ pub(crate) struct ResponsesStreamRetryState {
+@@ -20,6 +21,7 @@ const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+ #[derive(Debug, Clone, Copy)]
+ pub(crate) enum ResponsesStreamRequest {
+     Sampling,
++    PlaintextCompaction,
+     RemoteCompactionV2,
+ }
+ 
+@@ -27,6 +29,8 @@ pub(crate) struct ResponsesStreamRetryState {
      retries: u64,
      connection_retries: u64,
      connection_retry_delay: Duration,
@@ -15767,7 +15861,7 @@ index 462bb95..98a2201 100644
  }
  
  impl Default for ResponsesStreamRetryState {
-@@ -35,6 +38,8 @@ impl Default for ResponsesStreamRetryState {
+@@ -35,6 +39,8 @@ impl Default for ResponsesStreamRetryState {
              retries: 0,
              connection_retries: 0,
              connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
@@ -15776,7 +15870,14 @@ index 462bb95..98a2201 100644
          }
      }
  }
-@@ -62,6 +67,48 @@ pub(crate) async fn handle_retryable_response_stream_error(
+@@ -58,10 +64,54 @@ pub(crate) async fn handle_retryable_response_stream_error(
+     request: ResponsesStreamRequest,
+ ) -> Result<(), CodexErr> {
+     let operation = match request {
+-        ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
++        ResponsesStreamRequest::Sampling | ResponsesStreamRequest::PlaintextCompaction => {
++            RetryOperation::Sampling
++        }
          ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
      };
  
@@ -15825,6 +15926,23 @@ index 462bb95..98a2201 100644
      if turn_context
          .config
          .features
+@@ -161,13 +211,14 @@ fn log_retry(
+                 "stream disconnected - retrying sampling request ({retries}/{max_retries} in {delay:?})...",
+             );
+         }
+-        ResponsesStreamRequest::RemoteCompactionV2 => {
++        ResponsesStreamRequest::RemoteCompactionV2
++        | ResponsesStreamRequest::PlaintextCompaction => {
+             warn!(
+                 turn_id = %turn_context.sub_id,
+                 retries,
+                 max_retries,
+                 compact_error = %err,
+-                "remote compaction v2 stream failed; retrying request after delay"
++                "compaction stream failed; retrying request after delay"
+             );
+         }
+     }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 index 98bfa79..36dbb50 100644
 --- a/codex-rs/core/src/session/mod.rs

@@ -385,6 +385,21 @@ try {
     }
     return true;
   }, "idle parent and child before handoff");
+  let portableSummary;
+  if (plaintextMessages) {
+    const beforeCompact = (await history(parentId)).items;
+    const eventCount = parentClient.events.length;
+    await parentClient.call("thread/compact/start", { threadId: parentId });
+    const completed = await waitFor(() => parentClient.events.slice(eventCount).find(event =>
+      event.method === "turn/completed" && event.params.threadId === parentId), "parent plaintext compaction");
+    assert.equal(completed.params.turn.status, "completed");
+    const compacted = (await history(parentId)).items;
+    assert.deepEqual(compacted.slice(0, beforeCompact.length), beforeCompact, "compaction must preserve canonical history");
+    const checkpoint = compacted.findLast(record => record.type === "compacted").payload;
+    assert(checkpoint.replacement_history.every(item => item.type === "message"));
+    assert(!JSON.stringify(checkpoint.replacement_history).includes("encrypted_content"));
+    portableSummary = checkpoint.replacement_history.at(-1).content[0].text;
+  }
   const parentOnB = await connect(b);
   await parentOnB.call("thread/resume", { threadId: parentId, cwd: temporary, model: "gpt-5.1-codex", config: agentConfig() });
   console.log("Parent resumed on B");
@@ -392,7 +407,13 @@ try {
   // followup_task restores it; its route and provider must already belong to B.
   const childBeforeFollowup = await parentOnB.call("thread/read", { threadId: childId, includeTurns: false });
   assert.equal(childBeforeFollowup.thread.modelProvider, "fixture_b");
-  if (plaintextMessages) await turn(parentOnB, parentId, "SEND_ACCOUNT_CHILD");
+  if (plaintextMessages) {
+    await turn(parentOnB, parentId, "SEND_ACCOUNT_CHILD");
+    assert(requests.some(request => request.key === "Bearer synthetic-B" &&
+      request.body.input.some(item => item.type === "message" &&
+        item.content?.some(part => part.text === portableSummary))), "new provider must replay the plaintext checkpoint");
+    console.log("Native plaintext checkpoint survived canonical storage and account handoff");
+  }
   await turn(parentOnB, parentId, "FOLLOWUP_ACCOUNT_CHILD");
   await waitFor(async () => JSON.stringify((await history(childId)).items).includes("CHILD_FOLLOWUP_OK"), "child followup after account handoff");
   const childRequest = requests.findLast(request => isChildFollowup(request.body));

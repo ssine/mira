@@ -18,7 +18,7 @@ class Provider(BaseHTTPRequestHandler):
         case = self.server.case
         self.server.attempts += 1
         status, payload = case["response"]
-        if case["retry"] and self.server.attempts > 1:
+        if case["retry"] and self.server.attempts > case.get("failures", 1):
             status, payload = 200, [
                 {"type": "response.created", "response": {"id": "fixture-response"}},
                 {"type": "response.output_item.done", "item": {
@@ -28,6 +28,8 @@ class Provider(BaseHTTPRequestHandler):
                     "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}}},
             ]
         self.send_response(status)
+        if status == 429:
+            self.send_header("Retry-After", "0")
         self.send_header("Content-Type", "text/event-stream" if status == 200 else "application/json")
         self.end_headers()
         if status == 200:
@@ -60,7 +62,7 @@ def main():
         (429, {"code": "rate_limit_exceeded", "message": "Try again later"}),
     ]:
         cases.append({"name": f"transient HTTP {status}: {error['message']}", "retry": True,
-                      "response": (status, {"error": error})})
+                      "response": (status, {"error": error}), "failures": 3 if status == 429 else 1})
 
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     threading.Thread(target=provider.serve_forever, daemon=True).start()
@@ -80,29 +82,47 @@ stream_max_retries=2
 ''')
             runtime = Runtime(home)
             try:
-                for case in cases:
-                    provider.case, provider.attempts = case, 0
-                    thread = runtime.call("thread/start", {"cwd": temporary, "historyMode": "legacy",
-                        "approvalPolicy": "never", "sandbox": "danger-full-access"})["thread"]
-                    turn = runtime.call("turn/start", {"threadId": thread["id"],
-                        "input": [{"type": "text", "text": "Synthetic retry fixture"}]})["turn"]
-                    completed = runtime.wait(lambda event: event.get("method") == "turn/completed"
-                        and event["params"]["turn"]["id"] == turn["id"])["params"]["turn"]
-                    expected = "completed" if case["retry"] else "failed"
-                    assert completed["status"] == expected, (case["name"], completed)
-                    assert provider.attempts == (2 if case["retry"] else 1), (case["name"], provider.attempts)
-                    if not case["retry"]:
-                        assert case["code"] in completed["error"]["message"], (case["name"], completed)
-                        assert not any(event.get("method") == "error"
-                            and event["params"].get("threadId") == thread["id"]
-                            and event["params"].get("willRetry") for event in runtime.events), case["name"]
-                    print(f"passed: {case['name']}", flush=True)
+                for operation in ["turn", "compact"]:
+                    for case in cases:
+                        provider.case, provider.attempts = case, 0
+                        thread = runtime.call("thread/start", {"cwd": temporary, "historyMode": "legacy",
+                            "approvalPolicy": "never", "sandbox": "danger-full-access"})["thread"]
+                        if operation == "compact":
+                            # Seed ordinary history through the fixture's existing success path.
+                            provider.case, provider.attempts = cases[-1], cases[-1].get("failures", 1)
+                            warmup = runtime.call("turn/start", {"threadId": thread["id"],
+                                "input": [{"type": "text", "text": "Synthetic compaction history"}]})["turn"]
+                            runtime.wait(lambda event: event.get("method") == "turn/completed"
+                                and event["params"]["turn"]["id"] == warmup["id"])
+                            provider.case, provider.attempts = case, 0
+                        event_count = len(runtime.events)
+                        if operation == "compact":
+                            runtime.call("thread/compact/start", {"threadId": thread["id"]})
+                        else:
+                            runtime.call("turn/start", {"threadId": thread["id"],
+                                "input": [{"type": "text", "text": "Synthetic retry fixture"}]})
+                        completed = runtime.wait(lambda event: event.get("method") == "turn/completed"
+                            and event["params"]["threadId"] == thread["id"]
+                            and event not in runtime.events[:event_count])["params"]["turn"]
+                        expected = "completed" if case["retry"] else "failed"
+                        assert completed["status"] == expected, (case["name"], completed)
+                        assert provider.attempts == (case.get("failures", 1) + 1 if case["retry"] else 1), (case["name"], provider.attempts)
+                        if case["retry"] and case["response"][0] == 429:
+                            assert any(event.get("method") == "error" and event["params"].get("willRetry")
+                                and event["params"].get("error", {}).get("message", "").startswith("Rate limited;")
+                                for event in runtime.events[event_count:]), (operation, case["name"])
+                        if not case["retry"]:
+                            assert case["code"] in completed["error"]["message"], (case["name"], completed)
+                            assert not any(event.get("method") == "error"
+                                and event["params"].get("threadId") == thread["id"]
+                                and event["params"].get("willRetry") for event in runtime.events), case["name"]
+                        print(f"passed: {operation}: {case['name']}", flush=True)
             finally:
                 runtime.close()
     finally:
         provider.shutdown()
         provider.server_close()
-    print(f"encrypted context release runtime: {len(cases)} scenarios passed")
+    print(f"encrypted context release runtime: {len(cases) * 2} scenarios passed")
 
 
 if __name__ == "__main__":
