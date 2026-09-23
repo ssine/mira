@@ -220,6 +220,14 @@ WSL uses the Linux build. Platform-specific behavior belongs behind build-tagged
 `node/internal/`; registration, heartbeat, reverse WebSocket, file/process operations, output
 cursors and lifecycle rules stay shared.
 
+The Android APK also presents the existing HTTPS Server frontend in an origin-scoped WebView.
+Keep administrator cookies separate from Node credentials; the WebMessage bridge must never expose
+Node secrets or general device capabilities. Completion notifications travel over the existing Node
+control connection as internal Server events, with persistent bounded delivery and deduplication;
+they are not Agent tools. Explicit notification intents open the app's own console and preserve
+warm-page drafts. Native settings and the foreground Node remain independent of WebView lifecycle.
+See `docs/android-console.md`; OEM background restrictions can still delay notifications.
+
 The Android APK under `node/android/` is a platform shell around the same Go binary. Java owns
 Android Framework responsibilities: Activity, foreground service, Accessibility, MediaProjection,
 permissions, boot recovery and child-process lifecycle. Go owns the Mira protocol and common data
@@ -448,6 +456,6 @@ The intended architecture records the most recent runtime Node for each thread, 
 task-to-node assignment, a task queue and scheduler,
 writer leases with fencing for network partitions, a multi-version Codex compatibility matrix,
 server-orchestrated fleet upgrades, scheduled credential rotation and hardware-backed key storage,
-distributed login limits for multi-Server deployments, a dedicated mobile client, backup/restore tooling,
+distributed login limits for multi-Server deployments, backup/restore tooling,
 metrics and alerting. The current Agent console is an administrator-facing single-user UI, not a
 multi-user collaboration product. Do not describe these gaps as already implemented.

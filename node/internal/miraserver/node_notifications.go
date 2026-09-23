@@ -131,7 +131,15 @@ func (server *Server) startNodeNotificationWorker(ctx context.Context) func() {
 	return func() { cancel(); <-done }
 }
 
+type nodeNotificationSender interface {
+	DeliverNotification(context.Context, string, map[string]any) (any, error)
+}
+
 func (server *Server) processNodeNotification(ctx context.Context) error {
+	return server.processNodeNotificationWith(ctx, server.channel)
+}
+
+func (server *Server) processNodeNotificationWith(ctx context.Context, sender nodeNotificationSender) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	tx, err := server.pool.Begin(ctx)
@@ -180,7 +188,7 @@ func (server *Server) processNodeNotification(ctx context.Context) error {
 	}
 	// Release locks before waiting for a phone. Only a correlated acknowledgement
 	// after Android posts/deduplicates the notification completes this delivery.
-	result, err := server.channel.DeliverNotification(ctx, nodeID, map[string]any{"deliveryId": id, "threadId": threadID, "title": strings.TrimSpace(title), "expiresAt": expires.UnixMilli()})
+	result, err := sender.DeliverNotification(ctx, nodeID, map[string]any{"deliveryId": id, "threadId": threadID, "title": strings.TrimSpace(title), "expiresAt": expires.UnixMilli()})
 	if err != nil {
 		return nil
 	}

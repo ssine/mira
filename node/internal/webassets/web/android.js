@@ -106,7 +106,10 @@ export function createAndroidNotifications(api, toast) {
   };
 }
 
+let blobDownloadRunning = false;
 async function downloadBlob(url, name) {
+  if (blobDownloadRunning) return;
+  blobDownloadRunning = true;
   let reader;
   try {
     await androidRequest("downloadStart", { name });
@@ -127,5 +130,5 @@ async function downloadBlob(url, name) {
     // Use the existing page's live toast surface without exposing bridge internals.
     const notice = document.querySelector("#toast");
     if (notice) { notice.textContent = error.message; notice.classList.remove("hidden"); }
-  } finally { await reader?.cancel().catch(() => {}); }
+  } finally { await reader?.cancel().catch(() => {}); blobDownloadRunning = false; }
 }
