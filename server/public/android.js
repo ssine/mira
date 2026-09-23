@@ -26,6 +26,29 @@ export function androidRequest(method, values = {}) {
   });
 }
 
+// Negotiate first: older APKs keep their native safe-area padding. Only a shell
+// that supplies real Android insets enables the edge-to-edge reading surface.
+export function installAndroidShell() {
+  if (!nativeAndroid()) return;
+  const root = document.documentElement;
+  const apply = (state) => {
+    if (state?.integrated !== true || !Number.isFinite(state.statusBarHeight) || state.statusBarHeight < 0 || state.statusBarHeight > 256) return;
+    const changed = !root.classList.contains("android-app") || root.style.getPropertyValue("--android-status-bar-height") !== `${state.statusBarHeight}px`;
+    root.style.setProperty("--android-status-bar-height", `${state.statusBarHeight}px`);
+    root.classList.add("android-app");
+    for (const button of document.querySelectorAll("[data-android-settings]")) button.classList.remove("hidden");
+    if (changed) window.dispatchEvent(new Event("resize"));
+  };
+  const appearance = () => androidRequest("shell", { dark: root.dataset.theme === "dark" }).then(apply).catch(() => {});
+  window.addEventListener("mira:native-insets", (event) => apply(event.detail));
+  new MutationObserver(() => { void appearance(); }).observe(root, { attributes: true, attributeFilter: ["data-theme"] });
+  for (const button of document.querySelectorAll("[data-android-settings]")) button.addEventListener("click", () => {
+    button.closest("[popover]")?.hidePopover();
+    void androidRequest("settings").catch(() => {});
+  });
+  void appearance();
+}
+
 export function installAndroidNavigation(openNotification) {
   if (!nativeAndroid()) return;
   window.addEventListener("mira:native-notification", (event) => {

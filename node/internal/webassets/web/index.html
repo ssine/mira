@@ -29,6 +29,7 @@
       </nav>
       <div class="server-state"><span id="healthDot" class="dot"></span><span id="healthText">正在连接 Server</span></div>
       <button id="themeToggle" class="topbar-action" type="button" aria-label="切换到深色主题" title="切换外观"><span aria-hidden="true">◐</span><span class="topbar-action-label">深色</span></button>
+      <button class="topbar-action hidden" type="button" data-android-settings aria-label="设备设置" title="设备设置">⚙</button>
       <button id="logoutButton" class="ghost hidden" type="button" aria-label="退出管理员账户">退出</button>
     </header>
 
@@ -130,6 +131,7 @@
                 </div>
                 <hr>
                 <button id="agentThemeToggle" type="button" role="menuitem">切换外观</button>
+                <button class="hidden" type="button" data-android-settings role="menuitem">设备设置</button>
                 <button class="hidden" type="button" data-install-app role="menuitem">安装 Mira</button>
                 <button class="hidden" type="button" data-completion-notifications role="menuitemcheckbox" aria-checked="false">开启完成通知</button>
                 <button id="agentLogout" type="button" role="menuitem">退出登录</button>

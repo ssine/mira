@@ -6120,6 +6120,7 @@ function scheduleConversationMeasurements() {
   });
 }
 const conversationOverlayObserver = new ResizeObserver(scheduleConversationMeasurements);
+window.addEventListener("resize", scheduleConversationMeasurements);
 conversationOverlayObserver.observe($(".conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
 conversationOverlayObserver.observe($(".conversation-notices"));

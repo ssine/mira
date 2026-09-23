@@ -10,15 +10,23 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.graphics.Color;
+import android.view.Gravity;
+import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
+import android.view.WindowManager;
 import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceError;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import androidx.webkit.JavaScriptReplyProxy;
@@ -36,6 +44,11 @@ public final class ConsoleActivity extends Activity {
     private static final int FILES = 201, NOTIFICATIONS = 202, SAVE_FILE = 203;
     private WebView web;
     private TextView notice;
+    private FrameLayout layout;
+    private LinearLayout feedback, recovery;
+    private Button settingsFallback;
+    private boolean shellIntegrated, pageFailed;
+    private int insetTop;
     private String server = "", origin = "", pendingThread;
     private ValueCallback<Uri[]> fileCallback;
     private JavaScriptReplyProxy permissionReply;
@@ -60,20 +73,100 @@ public final class ConsoleActivity extends Activity {
     private boolean trusted(String url) { return !origin.isEmpty() && origin.equals(originOf(url)); }
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        LinearLayout layout = new LinearLayout(this); layout.setOrientation(LinearLayout.VERTICAL);
-        layout.setOnApplyWindowInsetsListener((view, insets) -> {
-            view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()); return insets;
+        layout = new FrameLayout(this);
+        web = new WebView(this); layout.addView(web, new FrameLayout.LayoutParams(-1, -1));
+        feedback = new LinearLayout(this); feedback.setOrientation(LinearLayout.VERTICAL);
+        feedback.setPadding(dp(20), dp(16), dp(20), dp(16)); feedback.setVisibility(View.GONE);
+        notice = new TextView(this); notice.setTextSize(15); feedback.addView(notice);
+        recovery = new LinearLayout(this); recovery.setVisibility(View.GONE);
+        Button reload = new Button(this); reload.setText("重试连接"); reload.setOnClickListener(v -> {
+            if (origin.isEmpty()) { openSettings(); return; }
+            message(""); web.loadUrl(server + "/?launch=pwa");
         });
-        LinearLayout toolbar = new LinearLayout(this);
-        Button settings = new Button(this); settings.setText("设备设置"); settings.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class)));
-        Button reload = new Button(this); reload.setText("重试连接"); reload.setOnClickListener(v -> { if (web != null) web.reload(); });
-        toolbar.addView(settings); toolbar.addView(reload); layout.addView(toolbar);
-        notice = new TextView(this); notice.setPadding(16, 0, 16, 0); notice.setVisibility(android.view.View.GONE); layout.addView(notice);
-        web = new WebView(this); layout.addView(web, new LinearLayout.LayoutParams(-1, 0, 1)); setContentView(layout);
+        Button settings = new Button(this); settings.setText("设备设置"); settings.setOnClickListener(v -> openSettings());
+        recovery.addView(reload); recovery.addView(settings); feedback.addView(recovery);
+        FrameLayout.LayoutParams feedbackParams = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP);
+        layout.addView(feedback, feedbackParams);
+        // Older Servers have no settings bridge. Keep one compact escape hatch until
+        // the page acknowledges the integrated shell, including when its JS fails.
+        settingsFallback = new Button(this); settingsFallback.setText("⋯");
+        settingsFallback.setContentDescription("设备设置"); settingsFallback.setVisibility(View.GONE);
+        settingsFallback.setOnClickListener(v -> openSettings());
+        layout.addView(settingsFallback, new FrameLayout.LayoutParams(dp(48), dp(48), Gravity.TOP | Gravity.END));
+        setContentView(layout); configureWindow();
         blobDownloads = new ConsoleDownloads(this, text -> { message(text); notice.setOnClickListener(v -> { blobDownloads.cancel(); message("下载已取消"); }); });
         configure(); acceptIntent(getIntent()); loadServer(state);
     }
-    private void message(String text) { notice.setText(text); notice.setVisibility(text.isEmpty() ? android.view.View.GONE : android.view.View.VISIBLE); }
+    private int dp(int value) { return Math.round(value * getResources().getDisplayMetrics().density); }
+    private void openSettings() { startActivity(new Intent(this, MainActivity.class)); }
+    private void message(String text) {
+        notice.setOnClickListener(null); notice.setText(text);
+        feedback.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
+        recovery.setVisibility(View.GONE);
+    }
+    private void connectionFailure(String text) {
+        pageFailed = true; message(text); recovery.setVisibility(View.VISIBLE);
+        web.setVisibility(View.INVISIBLE);
+        settingsFallback.setVisibility(View.GONE);
+    }
+    @SuppressWarnings("deprecation") private void configureWindow() {
+        if (Build.VERSION.SDK_INT >= 30) getWindow().setDecorFitsSystemWindows(false);
+        else getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        if (Build.VERSION.SDK_INT >= 28) {
+            WindowManager.LayoutParams attributes = getWindow().getAttributes();
+            attributes.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+            getWindow().setAttributes(attributes);
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            getWindow().setStatusBarContrastEnforced(false);
+            getWindow().setNavigationBarContrastEnforced(false);
+        }
+        layout.setOnApplyWindowInsetsListener((view, insets) -> {
+            int left, right, bottom;
+            if (Build.VERSION.SDK_INT >= 30) {
+                android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
+                insetTop = bars.top; left = bars.left; right = bars.right;
+                bottom = Math.max(bars.bottom, insets.getInsets(WindowInsets.Type.ime()).bottom);
+            } else {
+                insetTop = insets.getSystemWindowInsetTop(); left = insets.getSystemWindowInsetLeft();
+                right = insets.getSystemWindowInsetRight(); bottom = insets.getSystemWindowInsetBottom();
+            }
+            // The reading surface extends under the status bar. Native padding still
+            // protects side cutouts, navigation gestures and the resized IME viewport.
+            view.setPadding(left, shellIntegrated ? 0 : insetTop, right, bottom);
+            FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) feedback.getLayoutParams();
+            params.topMargin = shellIntegrated ? insetTop : 0; feedback.setLayoutParams(params);
+            if (shellIntegrated && trusted(web.getUrl())) web.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('mira:native-insets',{detail:" + windowState() + "}))", null);
+            return Build.VERSION.SDK_INT >= 30 ? WindowInsets.CONSUMED : insets.consumeSystemWindowInsets();
+        });
+        applyAppearance(false); layout.requestApplyInsets();
+    }
+    private JSONObject windowState() {
+        JSONObject result = new JSONObject();
+        try { result.put("statusBarHeight", insetTop / getResources().getDisplayMetrics().density); result.put("integrated", true); }
+        catch (Exception ignored) { }
+        return result;
+    }
+    @SuppressWarnings("deprecation") private void applyAppearance(boolean dark) {
+        int background = Color.parseColor(dark ? "#1f2226" : "#ffffff");
+        layout.setBackgroundColor(background); web.setBackgroundColor(background);
+        feedback.setBackgroundColor(background); notice.setTextColor(Color.parseColor(dark ? "#e9edf2" : "#323130"));
+        if (Build.VERSION.SDK_INT >= 30) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                int light = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS | WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS;
+                controller.setSystemBarsAppearance(dark ? 0 : light, light);
+            }
+        } else {
+            View decor = getWindow().getDecorView();
+            int light = View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+            decor.setSystemUiVisibility(dark ? decor.getSystemUiVisibility() & ~light : decor.getSystemUiVisibility() | light);
+        }
+    }
     @SuppressLint("SetJavaScriptEnabled") private void configure() {
         WebSettings settings = web.getSettings(); settings.setJavaScriptEnabled(true); settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false); settings.setAllowContentAccess(true); settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -86,12 +179,22 @@ public final class ConsoleActivity extends Activity {
                 if (request.isForMainFrame() && request.hasGesture()) external(request.getUrl());
                 return true;
             }
-            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) { ready = false; }
+            @Override public void onPageStarted(WebView view, String url, android.graphics.Bitmap icon) {
+                ready = false; pageFailed = false; shellIntegrated = false; message(""); web.setVisibility(View.VISIBLE);
+                settingsFallback.setVisibility(View.GONE); layout.requestApplyInsets();
+            }
             @Override public void onPageFinished(WebView view, String url) {
                 if (trusted(url)) { CookieManager.getInstance().flush(); }
+                if (!shellIntegrated && !pageFailed) settingsFallback.setVisibility(View.VISIBLE);
             }
             @Override public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
-                if (request.isForMainFrame()) message("暂时无法连接 Mira，请检查网络后重试。");
+                if (request.isForMainFrame()) connectionFailure("暂时无法连接 Mira，请检查网络后重试。");
+            }
+            @Override public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                if (request.isForMainFrame()) connectionFailure("Mira 暂时不可用，请稍后重试。");
+            }
+            @Override public void onReceivedSslError(WebView view, android.webkit.SslErrorHandler callback, android.net.http.SslError error) {
+                callback.cancel(); connectionFailure("无法安全连接 Mira，请检查 Server 的 HTTPS 证书。");
             }
             // TLS failures retain WebView's default cancellation behavior.
         });
@@ -123,7 +226,7 @@ public final class ConsoleActivity extends Activity {
     private void loadServer(Bundle state) {
         NodeConfig config = NodeConfig.load(this); server = config.serverUrl; origin = originOf(server);
         if (origin.isEmpty() || !server.replaceAll("/+$", "").equals(origin)) {
-            message("请在设备设置中填写 Mira Server 的 HTTPS 地址。"); return;
+            connectionFailure("请在设备设置中填写 Mira Server 的 HTTPS 地址。"); return;
         }
         if (!WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             message("请更新 Android System WebView，以使用应用内通知。");
@@ -141,6 +244,11 @@ public final class ConsoleActivity extends Activity {
         if (!id.matches("[0-9]{1,10}")) return;
         if (blobDownloads.handle(request, reply)) return;
         switch (method) {
+            case "shell":
+                shellIntegrated = true; settingsFallback.setVisibility(View.GONE);
+                applyAppearance(request.optBoolean("dark")); layout.requestApplyInsets();
+                respond(reply, id, windowState(), null); break;
+            case "settings": openSettings(); respond(reply, id, new JSONObject(), null); break;
             case "context": respond(reply, id, CompletionNotifications.state(this), null); break;
             case "permission":
                 CompletionNotifications.channels(this);

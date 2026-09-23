@@ -1,4 +1,4 @@
-import { nativeAndroid, installAndroidNavigation, createAndroidNotifications } from "./android.js";
+import { nativeAndroid, installAndroidShell, installAndroidNavigation, createAndroidNotifications } from "./android.js";
 
 const routeKey = "mira.app.route";
 const standalone = window.matchMedia("(display-mode: standalone)");
@@ -128,6 +128,7 @@ export function installNotificationNavigation(openNotification) {
 }
 
 export function initializePwa({ openNotification } = {}) {
+  installAndroidShell();
   restoreAppLaunch();
   installControls();
   mobileViewport();
