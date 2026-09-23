@@ -5,8 +5,8 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `4e21628f9ec9`
-- Patch source commit: `dbe81774c17b`
+- Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
+- Patch source commit: `cb4930610683`
 
 Apply it to a clean checkout:
 
@@ -192,3 +192,19 @@ CLI history with `0.153.1-mira.19` and resume it through the new App Server.
 Run it with `MIRA_TEST_PLAINTEXT_AGENT_MESSAGES=1` and
 `MIRA_TEST_SSE_RATE_LIMIT=1` against a disposable Server, in addition to the
 large-fork and interrupted-tool scenarios described above.
+
+Runtime revision `0.155.1-mira.2` recognizes structured `invalid_encrypted_content`
+and `unknown_reasoning_pool` errors before HTTP status-based retries. Gateways
+sometimes return these permanent input failures as HTTP 500; both HTTP and
+sampling retry layers now stop after the first rejected request and preserve
+the error code for Mira's existing administrator-confirmed recovery action.
+Responses `response.failed` and nested/flat SSE `error` events follow the same
+rule. Plain message text alone does not trigger this classification; ordinary
+429 and 5xx behavior is unchanged. Canonical history and recovery consent remain
+unchanged.
+
+Release acceptance runs `tests/encrypted_context_runtime_e2e.py` against both
+canonical platform packages, covering terminal HTTP/SSE errors and transient
+retry success. `tests/codex_accounts_runtime_e2e.mjs` additionally verifies one
+HTTP 500 rejection exposes recovery, scoped consent reloads the same account
+runtime, and canonical history and unrelated active turns survive.

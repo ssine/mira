@@ -27,7 +27,7 @@ const admin = (url, body, method = "POST") => adminRequest(origin, session, url,
   body === undefined ? {} : { method, body: JSON.stringify(body) });
 let nodeProcess, nodeId, token, rejectOld = false;
 let holdNextResponse = false, releaseResponse;
-const requests = [], sockets = [], logs = [];
+const requests = [], rejectedRequests = [], sockets = [], logs = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(read, description, timeout = 60_000) {
   const deadline = Date.now() + timeout;
@@ -57,6 +57,7 @@ const mock = http.createServer(async (request, response) => {
   const key = request.headers.authorization;
   requests.push({ key, body, path: request.url });
   if (rejectOld && encrypted(body.input).some(incompatible)) {
+    rejectedRequests.push({ key, body });
     // Exercise both the gateway JSON envelope and Codex's message-only HTTP
     // fallback; account A still covers the upstream invalid_encrypted_content.
     if (key === "Bearer synthetic-B" || key === "Bearer synthetic-C") {
@@ -66,7 +67,9 @@ const mock = http.createServer(async (request, response) => {
       response.end(json ? JSON.stringify({ error: { type: "gateway_error", code: "unknown_reasoning_pool", message } }) : message);
       return;
     }
-    response.writeHead(400, { "content-type": "application/json" });
+    // Some providers wrap this permanent request error in HTTP 500. It must
+    // still reach Mira's recovery action after exactly one model request.
+    response.writeHead(500, { "content-type": "application/json" });
     response.end(JSON.stringify({ error: { message: "The encrypted content could not be verified. Encrypted content could not be decrypted or parsed.",
       type: "invalid_request_error", code: "invalid_encrypted_content", param: null } })); return;
   }
@@ -251,7 +254,10 @@ try {
     second = await connect(b); await second.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
   }
   rejectOld = true;
+  const rejectedBeforeRecovery = rejectedRequests.length;
   await turn(second, threadId, "Incompatible encrypted context", "failed");
+  assert.equal(rejectedRequests.length - rejectedBeforeRecovery, 1,
+    "a structured gateway compatibility error must not retry");
   assert(second.events.some(event => event.method === "mira/account/contextIncompatible" && event.params.threadId === threadId),
     "gateway 409 must expose the recovery action");
   const endpoint = `/v1/codex/threads/${threadId}/input-recovery?storeId=${store}&nodeAccountId=${b}`;
@@ -289,8 +295,13 @@ try {
   for (const binding of [c, a, b]) {
     let client = await connect(binding);
     await client.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
+    const rejectedBefore = rejectedRequests.length;
     await turn(client, threadId, "Continue recovered history after another account switch", binding === b ? "completed" : "failed");
     if (binding !== b) {
+      if (binding === a) assert.equal(rejectedRequests.length - rejectedBefore, 1,
+        "HTTP 500 invalid_encrypted_content must not retry at the HTTP or sampling layer");
+      assert(client.events.some(event => event.method === "mira/account/contextIncompatible" && event.params.threadId === threadId),
+        "encrypted-context errors must expose the recovery action");
       // Recovery consent remains scoped to each account; canonical encrypted
       // input is preserved until that account also reports incompatibility.
       const recoveryUrl = `/v1/codex/threads/${threadId}/input-recovery?storeId=${store}&nodeAccountId=${binding}`;

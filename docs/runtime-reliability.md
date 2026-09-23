@@ -19,7 +19,23 @@ notifications expose the waiting state and delay to clients. Recognized usage,
 insufficient-quota and billing failures remain terminal. An unrecognized 429
 continues waiting until recovery or cancellation; a generic status alone cannot
 identify every provider's billing errors. Other HTTP errors and streamed SSE
-failures retain their existing retry policies.
+failures retain their existing retry policies, subject to permanent input errors
+below.
+
+## Encrypted input failures
+
+Runtime `0.155.1-mira.2` treats structured `invalid_encrypted_content` and
+`unknown_reasoning_pool` codes as permanent input failures, even when a gateway
+labels them HTTP 429 or 5xx. HTTP retries stop immediately, and the API mapping
+preserves the code in the terminal error instead of reporting generic server
+load. The same rule applies to `response.failed` and nested/flat SSE `error`
+events. Message text without a matching structured code does not change retry
+behavior.
+
+Mira can then offer its existing encrypted-input recovery action. Recovery still
+requires explicit administrator consent and only changes the frozen-prefix
+model-input projection; canonical records remain unchanged. It does not restart
+the account process or automatically resubmit the failed turn.
 
 ## Persistence acknowledgement
 
