@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
-- Patch source commit: `d0b487786921`
+- Patch source commit: `b495cfb6b2cd`
 
 Apply it to a clean checkout:
 
@@ -48,6 +48,27 @@ Existing encrypted messages/checkpoints are still readable by compatible
 providers and are never silently deleted or decrypted. The model's separate
 `reasoning.encrypted_content` mechanism is unchanged; this release does not
 promise unrestricted account switching for previously encrypted history.
+
+Runtime `0.155.1-mira.4` adds opt-in, conversation-owned reasoning recovery.
+Pass `"config": {"mira_auto_reasoning_recovery": true}` on `thread/start` or
+on a cold `thread/resume` to enable it for that conversation. Normal requests
+still request and reuse encrypted reasoning. Only a structured
+`invalid_encrypted_content` error identifying exactly one encrypted reasoning
+item in the failed request can exclude that item and retry within the same turn.
+Completed tools are not rerun. Ordinary sampling and plaintext compaction use
+the same policy; encrypted compaction checkpoints are not automatically removed.
+
+The switch and rejected item IDs are saved in optional native thread settings
+before another model request. Original response items stay in canonical history.
+An omitted override on resume preserves the saved switch; explicit `false`
+disables further recovery while retaining existing exclusions. Separate threads
+remain disabled by default. At most eight items can be excluded per sampling
+request, with at most 128 active exclusions retained per conversation. Ambiguous,
+repeated or unrelated errors stop through the existing error path. This prevents
+an endless retry loop while preserving healthy reasoning and tool results.
+`tests/reasoning_recovery_runtime_e2e.py` verifies the actual Linux and Windows
+App Server packages across HTTP/SSE errors, normal reasoning, cold resume,
+conversation isolation, retry bounds and plaintext compaction.
 
 `tests/plaintext_context_runtime_e2e.py` runs against both canonical platform
 packages with no plaintext config overrides. It verifies built-in OpenAI,

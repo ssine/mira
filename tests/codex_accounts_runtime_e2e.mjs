@@ -43,6 +43,7 @@ const importedEncrypted = new Set();
 const plaintextMessages = process.env.MIRA_TEST_PLAINTEXT_AGENT_MESSAGES !== "0";
 const sseRateLimit = process.env.MIRA_TEST_SSE_RATE_LIMIT === "1";
 let injectedRateLimits = 0;
+let automaticRecoveryThread, observedDurableExclusion = false;
 const agentConfig = () => ({ "features.multi_agent_v2": true,
   ...(plaintextMessages ? {} : { "features.mira_plaintext_context": false }) });
 const incompatible = item => item.encrypted_content?.startsWith("old-") || importedEncrypted.has(item.encrypted_content);
@@ -56,6 +57,20 @@ const mock = http.createServer(async (request, response) => {
   const body = JSON.parse(Buffer.concat(parts));
   const key = request.headers.authorization;
   requests.push({ key, body, path: request.url });
+  const autoPrompt = JSON.stringify(body.input.filter(item => item.role === "user").at(-1)?.content ?? "").includes("AUTO_REASONING");
+  if (autoPrompt && body.input.some(item => item.type === "reasoning" && item.id === "rs_auto_bad")) {
+    response.writeHead(500, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { code: "invalid_encrypted_content", message:
+      "The encrypted content for item rs_auto_bad could not be verified. Reason: Encrypted content could not be decrypted or parsed." } }));
+    return;
+  }
+  if (autoPrompt && body.input.some(item => item.type === "reasoning" && item.id === "rs_auto_good")) {
+    const stored = (await history(automaticRecoveryThread)).items;
+    assert(stored.some(record => record.type === "event_msg" && record.payload.type === "thread_settings_applied" &&
+      record.payload.thread_settings.mira_reasoning_recovery?.rejected_item_ids.includes("rs_auto_bad")),
+    "recovery must reach PostgreSQL before the next model request");
+    observedDurableExclusion = true;
+  }
   if (rejectOld && encrypted(body.input).some(incompatible)) {
     rejectedRequests.push({ key, body });
     // Exercise both the gateway JSON envelope and Codex's message-only HTTP
@@ -94,7 +109,11 @@ const mock = http.createServer(async (request, response) => {
     ].map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""));
     return;
   }
-  const items = spawnChild || followChild || sendChild ? [{ type: "function_call", namespace: plaintextMessages ? "mira_collaboration" : "collaboration",
+  const items = autoPrompt && !body.input.some(item => item.id === "rs_auto_good") ? [
+    { type: "reasoning", id: "rs_auto_good", summary: [], encrypted_content: "valid-auto-reasoning" },
+    { type: "reasoning", id: "rs_auto_bad", summary: [], encrypted_content: "rejected-auto-reasoning" },
+    { type: "message", id: `msg-${n}`, role: "assistant", content: [{ type: "output_text", text: "AUTO_SEEDED" }] },
+  ] : spawnChild || followChild || sendChild ? [{ type: "function_call", namespace: plaintextMessages ? "mira_collaboration" : "collaboration",
     name: spawnChild ? "spawn_agent" : sendChild ? "send_message" : "followup_task",
     call_id: spawnChild ? "spawn-account-child" : sendChild ? "send-account-child" : "follow-account-child",
     arguments: JSON.stringify(spawnChild ? { task_name: "account_child", message: "ACCOUNT_CHILD_FIRST", fork_turns: "none" }
@@ -448,6 +467,25 @@ try {
     console.log("SSE and HTTP 401 TPM rate limits recovered without repeating the persisted child spawn");
   }
   console.log("Subagent identity and followup survived parent account handoff");
+  const autoClient = await connect(a);
+  automaticRecoveryThread = (await autoClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex",
+    config: { mira_auto_reasoning_recovery: true }, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+  await turn(autoClient, automaticRecoveryThread, "AUTO_REASONING_SEED");
+  const beforeRecovery = (await history(automaticRecoveryThread)).items;
+  const automaticRequestCount = requests.length;
+  await turn(autoClient, automaticRecoveryThread, "AUTO_REASONING_RECOVER");
+  assert.equal(requests.length, automaticRequestCount + 2, "only the failed request and its recovery should sample");
+  assert(observedDurableExclusion, "the exclusion must be durable before resampling");
+  assert(!requests.at(-1).body.input.some(item => item.id === "rs_auto_bad"));
+  assert(requests.at(-1).body.input.some(item => item.id === "rs_auto_good"));
+  assert.deepEqual((await history(automaticRecoveryThread)).items.slice(0, beforeRecovery.length), beforeRecovery);
+  const autoOnB = await connect(b);
+  await autoOnB.call("thread/resume", { threadId: automaticRecoveryThread, cwd: temporary, model: "gpt-5.1-codex" });
+  await turn(autoOnB, automaticRecoveryThread, "AUTO_REASONING_COLD_RESUME");
+  assert.equal(requests.at(-1).key, "Bearer synthetic-B");
+  assert(!requests.at(-1).body.input.some(item => item.id === "rs_auto_bad"));
+  assert(requests.at(-1).body.input.some(item => item.id === "rs_auto_good"));
+  console.log("Conditional reasoning exclusions reached PostgreSQL before sampling and survived cold account handoff");
   const cliStore = `${store}-cli`, cliHome = path.join(temporary, "cli"); await fs.mkdir(cliHome);
   await fs.writeFile(path.join(cliHome, "config.toml"), [
     'model="gpt-5.1-codex"', 'model_provider="fixture"', 'features.plugins=false', '[model_providers.fixture]', 'name="Fixture"',

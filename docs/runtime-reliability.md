@@ -60,6 +60,21 @@ requires explicit administrator consent and only changes the frozen-prefix
 model-input projection; canonical records remain unchanged. It does not restart
 the account process or automatically resubmit the failed turn.
 
+Runtime `0.155.1-mira.4` additionally offers an opt-in conversation setting,
+`mira_auto_reasoning_recovery`, passed through native thread start/cold-resume
+configuration. Enabling it authorizes automatic exclusion of a specifically
+identified encrypted reasoning item after a structured `invalid_encrypted_content`
+failure. The exclusion is appended to native thread settings and flushed before
+another model request. The retry stays in the same turn, retaining completed tool
+results and healthy reasoning; normal requests continue to carry encrypted
+reasoning. The saved switch and exclusions survive cold resume and account handoff.
+Explicit `false` stops further automatic recovery but preserves prior exclusions.
+This applies to sampling and plaintext compaction, with at most eight recoveries
+per request and 128 retained active exclusions. Unattributable failures, encrypted
+compaction checkpoints and exhausted limits still stop through the existing error
+path. Canonical response items remain unchanged. See the
+[Codex patch guide](../patches/codex/README.md) for the configuration contract.
+
 ## Persistence acknowledgement
 
 - Every delta commit gets one operation UUID and one serialized request body.
