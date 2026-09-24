@@ -13,7 +13,8 @@ surface; connection failures expose retry and device settings even when the page
 cannot load. Older Servers retain a compact native settings fallback.
 
 The Android reading surface extends beneath the transparent status bar with a
-theme-aware fade. Native window insets keep controls below system icons and keep
+light, theme-aware fade confined to the system status bar. The navigation row and
+conversation text below the status bar remain unobscured. Native window insets keep controls below system icons and keep
 the composer clear of navigation gestures, cutouts and the keyboard, including
 after folding or rotating. Light/dark appearance also updates system bar icons.
 Reduced-transparency and forced-color preferences use a solid top surface.
