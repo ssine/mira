@@ -1,4 +1,4 @@
-From d0b487786921d867153b8643bace4e205cfaed36 Mon Sep 17 00:00:00 2001
+From b495cfb6b2cde6ea97e13538a5bc82d6e8e23a0a Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
 Date: Thu, 17 Sep 2026 03:19:48 +0800
 Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
@@ -11,7 +11,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  .../codex_app_server_protocol.v2.schemas.json |   60 +
  .../MiraThreadForkProgressNotification.json   |   53 +
  .../app-server-exports-experimental.json.zst  |  Bin 156017 -> 156661 bytes
- .../app-server-exports-stable.json.zst        |  Bin 149929 -> 150428 bytes
+ .../app-server-exports-stable.json.zst        |  Bin 149929 -> 150568 bytes
  .../schema/typescript/ServerNotification.ts   |    3 +-
  .../typescript/ServerNotificationEnvelope.ts  |    3 +-
  .../v2/MiraThreadForkProgressNotification.ts  |    9 +
@@ -22,6 +22,7 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  codex-rs/app-server/src/message_processor.rs  |    6 +
  codex-rs/app-server/src/notification_media.rs |    3 +-
  codex-rs/app-server/src/request_processors.rs |    1 +
+ .../persisted_resume_settings_tests.rs        |    1 +
  .../src/request_processors/thread_handoff.rs  |  129 ++
  .../request_processors/thread_lifecycle.rs    |    9 +-
  .../request_processors/thread_processor.rs    |  115 +-
@@ -34,21 +35,24 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  codex-rs/codex-api/src/sse/responses.rs       |  231 ++--
  .../tests/encrypted_context_retry.rs          |   95 ++
  codex-rs/codex-client/src/retry.rs            |    8 +
- codex-rs/config/src/config_toml.rs            |    5 +
+ codex-rs/config/src/config_toml.rs            |    9 +
  codex-rs/config/src/thread_config.rs          |    1 +
  codex-rs/config/src/thread_config/remote.rs   |    4 +
- codex-rs/core/config.schema.json              |   35 +
+ codex-rs/core/config.schema.json              |   39 +
+ codex-rs/core/src/agent/control_tests.rs      |    1 +
  codex-rs/core/src/codex_delegate.rs           |    2 +-
  codex-rs/core/src/codex_thread.rs             |    6 +
- codex-rs/core/src/compact.rs                  |   43 +-
+ codex-rs/core/src/compact.rs                  |   55 +-
  codex-rs/core/src/compaction_mode.rs          |   29 +
- codex-rs/core/src/config/mod.rs               |   17 +
+ codex-rs/core/src/config/mod.rs               |   20 +
  codex-rs/core/src/lib.rs                      |    1 +
  codex-rs/core/src/responses_retry.rs          |   57 +-
- codex-rs/core/src/session/mod.rs              |    9 +
- codex-rs/core/src/session/session.rs          |   16 +
- codex-rs/core/src/session/tests.rs            |    4 +
- codex-rs/core/src/session/turn.rs             |   42 +-
+ codex-rs/core/src/session/mod.rs              |   17 +
+ .../core/src/session/reasoning_recovery.rs    |  189 +++
+ .../src/session/reasoning_recovery_tests.rs   |  105 ++
+ codex-rs/core/src/session/session.rs          |   19 +
+ codex-rs/core/src/session/tests.rs            |   12 +
+ codex-rs/core/src/session/turn.rs             |   54 +-
  codex-rs/core/src/tasks/compact.rs            |   18 +-
  codex-rs/core/src/tasks/failure_tests.rs      |   61 +
  codex-rs/core/src/tasks/mod.rs                |   47 +-
@@ -66,11 +70,13 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  codex-rs/core/tests/suite/client.rs           |    4 +
  .../core/tests/suite/client_websockets.rs     |    1 +
  codex-rs/core/tests/suite/guardian_history.rs |    3 +
- codex-rs/core/tests/suite/mod.rs              |    3 +
+ .../tests/suite/mira_reasoning_recovery.rs    |  239 ++++
+ codex-rs/core/tests/suite/mod.rs              |    4 +
  .../tests/suite/plaintext_agent_messages.rs   |  228 ++++
  .../core/tests/suite/plaintext_compaction.rs  |   92 ++
  codex-rs/core/tests/suite/rate_limit_retry.rs |  257 ++++
  codex-rs/core/tests/suite/retry_after.rs      |  252 ++--
+ .../core/tests/suite/settings_constraints.rs  |    1 +
  ...uite__rate_limit_retry__http_429_wait.snap |    6 +
  .../suite/stream_error_allows_next_turn.rs    |    1 +
  .../core/tests/suite/stream_no_completed.rs   |    1 +
@@ -82,6 +88,8 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  codex-rs/model-provider/src/provider.rs       |    1 +
  codex-rs/protocol/src/error.rs                |   12 +-
  codex-rs/protocol/src/error_tests.rs          |    2 +-
+ codex-rs/protocol/src/protocol.rs             |   13 +
+ codex-rs/state/src/extract.rs                 |    1 +
  codex-rs/thread-store/Cargo.toml              |    1 +
  codex-rs/thread-store/src/in_memory.rs        |   94 +-
  codex-rs/thread-store/src/lib.rs              |    4 +
@@ -98,19 +106,23 @@ Subject: [PATCH] feat(thread-store): remote PostgreSQL adapter and provider
  .../src/remote_http/retry_tests.rs            |  792 ++++++++++++
  .../thread-store/src/remote_http/uploads.rs   |  146 +++
  .../thread-store/src/remote_http/writer.rs    |  382 ++++++
+ .../thread-store/src/thread_metadata_sync.rs  |    1 +
  .../tui/src/app/app_server_event_targets.rs   |    3 +
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
  .../generated/notification_registry.py        |    3 +
  .../src/openai_codex/generated/v2_all.py      |   32 +
- 97 files changed, 6266 insertions(+), 552 deletions(-)
+ 106 files changed, 6871 insertions(+), 553 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server/src/request_processors/thread_handoff.rs
  create mode 100644 codex-rs/codex-api/tests/encrypted_context_retry.rs
  create mode 100644 codex-rs/core/src/compaction_mode.rs
+ create mode 100644 codex-rs/core/src/session/reasoning_recovery.rs
+ create mode 100644 codex-rs/core/src/session/reasoning_recovery_tests.rs
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/core/src/thread_manager/remote_agent_graph.rs
  create mode 100644 codex-rs/core/src/tools/plaintext_agent_messages.rs
+ create mode 100644 codex-rs/core/tests/suite/mira_reasoning_recovery.rs
  create mode 100644 codex-rs/core/tests/suite/plaintext_agent_messages.rs
  create mode 100644 codex-rs/core/tests/suite/plaintext_compaction.rs
  create mode 100644 codex-rs/core/tests/suite/rate_limit_retry.rs
@@ -8120,9 +8132,9 @@ z#<#cKk>FU6Ue<b4=)~T=P2a!uvCU}QU@ObtvTB<0h6%TxKfbl-$%19=Ob^&5`hUys
 TtXd_KeD_Aw8fV6z?I+m*T?-P{
 
 diff --git a/codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst b/codex-rs/app-server-protocol/schema/precomputed/app-server-exports-stable.json.zst
-index 414537133bdd2481df12748244eb96dc428d5ff1..3fb40b14c5f2baac769d646ecbcf36c6506197e5 100644
+index 414537133bdd2481df12748244eb96dc428d5ff1..093f1cb57b1eb6ee1a7edf014f71a00b0de5d087 100644
 GIT binary patch
-literal 150428
+literal 150568
 zcmdPcs{fZE<II0XEz`e7rW4MHOx?z))+o65R=%g2=<TS}K}+gB{cPbaDf~NERZZg9
 zIZ^AcQX4Nc<>y?Q<;nmC0*1_D%tFkQb3}TUK0W{Fi1hTu2TtBp{(EH+pW{9b-;m&|
 zpDJ}8-8{LeiBD0mN3mt4pTl2)r1_sz=S1!3UmWqeu=UJW-EO|$r|TX~X?DHZXn#V)
@@ -10881,294 +10893,297 @@ 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
-z`WpMnnu7vX2hOMai^ZQ%7c`G{bq@_u%d4C4EbU{~#h8+}`4ty0I^SljdCo9xRk`*A
-zZQ1|-|JSdI)D*lGt!6sulAn*qZO>D4m;AV^d;Ld881t&F`RdxvTNl|s%Vx-CC}1f6
-zaEIIH*NXYlqRR}X?EJ^-aC9rj`@fry?41;U+d{dPGdWU6wZzxBG_`Nf#5<ftf=d<l
-zpW7bVTXc`RYNaXnM(Nue+#6DJm!!^FUYO~m8dWi8ZK2n(Rcqxhe9SEA{AhQ7+wMq#
-z$x}OTnj1>2)y>n;zS2E;W06*gNUuTStU`(BZcakmUFUAt<1LbZ+;U->hw+jhuW!wZ
-zxNbP1c}2|Q3Ee(wf=7a*%}kcd$;$WMp8wi@sm!HA3txSIvwYif#qTzEztwGA_57co
-z&c(0azt~DMUh-7j^CxW%&zz2f$Jty;y>9gfNT?~4=l*6@@>?{$tlc3gAV5L!L&{6Z
-zQ!&<)eV1SNUe&ql<RRy$j!mDKbP~Tc=}H!*w9I)OyjbI_xsccOZ2_lSjUw-E4|yKa
-zHdXWattbz36A}68%f3vO@)4T4hxLlxhw~AQ8_Q;7ztcQkqW<)P+o3gWI$IzARZ#MH
-zP;@Nlv3ISn@eMQIXP@onYAa}5EsV^PS@^iQS5Pf!Lt;yhpqZLk&9PS+rrRc;{J&rC
-z>FrLh(yJOvg|vj;#?Ca)I&JZT@%+>4fr{_Ho(QqLEYWdfg~*>xVVPVW#tZ@%7!Dp}
-zPATfNk(%hPrpR}ioh9KQ2Zx-X0GBB<8#50B3j;edGm{y^K?Vj17KQ>Q1_ova7lRWb
-z4s5S)^VZ9^p0&Q=tMRx`{iKwbmFGM41FN1amOXx-?Z%hs7dnnb{|<Z7^xh*@F0Fg}
-zjJ#PBj^)(+`Ng#<>qgM5JH;0w;;j1iGHl(sYA%nTev_o`ukPNB{ZA^K?;aO@w}Laf
-zan574_NDc+y|dr^<0#iUYW7l4|7YPWhx)WU>&OcS?ep)1?O5{m#Lh1bCQ6kVZ0mB8
-zJdL7{O3R<OvrAJudFV<!&%!L>muu`-N7}!NR$-huJM@lN$K6jiZMPnhFZ!ouvnTy*
-zqgcF?L-?l^`)_60?&4gkkTc;~ZHtY?2VDl;JhzE!|3<BR#nrzsNaf9kYZX(rvSr?R
-zF*B<!(!$w)kNXl`7P)Pgu8U1<{<Pg{*ZlpzX64O^y_Y-to!OkyywXhvb!?KDKSk!5
-zw+CLB#IAHW<<fDL$#>f~d;QcBdOb78T}0*A!y^*Xt%uAqOeftt&*m>ZTW6L)u#;%(
-zMPGl@vmPuQ#dD-TUbyq|^~H^IcRuc3ns1o>tS|TSnK+3>dmqR)+Fkp*)~><1RoFn<
-zX5!(!6RV6?cbry;Hw)QflJj$eR+azZe*1HKEskxCJy(|bbQ*sNe~nD)?Sf~z*J8F6
-ze$o)kf0)Ag>eUnu&3_+xb{T7||J}H?VaJ_^JgVVy=dauO^%ql?=&?g_cfJT-RlAhC
-zzF_vG*}k4Xnwi*F7JRJO^w4J++mn~PQirTN_6D-;mp#UEX5#Lw2fkUYi{@{fBQLti
-z^ah)OtV-^&*A0e(2V%q6f_e0NcK6f>Tgm-RtTW~c^xJLFw8}N{K--cc-z!OMuh&-|
-z-dA#^NxkL5p6r=Z&g2z7|HN@9b6Z&GjJX?J)T(zECuu);ARQEFJE2}M>i28mtGnGk
-z`e`a2S#eu2S0+S3#p^<-QT%h`h#ftwB^8dX@6ErN3f$_=I-+xPZTf-*AAH`N?qc*>
-zJ=^>w>y{sE?;h>o`f6i3pX04+yqMoa7DeZ>CWVqEw=Xmoc<oKBfB3^>PpCiVx3oXg
-z>$T7PiTH4MlO4+wj>)U+?(T11{YQPr#oe;j0gqQ2te&RxdfxP6;p1JVM}IQSHV#-~
-zd*bz!IH`ZFbzz>?+ShWJM6dYIYhGq{Wo^5xx^azVtw3ky_pa-|mRnwWXK>_j9LJf*
-zExV`x`h3bDEUbL{TQ9G^zbCCe+lN(FK90&%K2)P)R@Z&P?2Le?kjbay;{8*%&hy)I
-zE%m^?L*<{#<+BgY33$yr=`SC@^u4tET;D7wZ<D_6t8py$^W7u+<|l6AKf~PIdSL^z
-zqP&LWzQ=Zlt{h0VwcPNnQGJz`=exPPimvvbwN#mV?DLuL`POb`&yFkon=iYVd2g`l
-z!*~hZRXejDc-;N^Vft?S?{bx~{NevJV)>OzPn90uvx#N-v*p|0Rc!lh<>4^z;<3xS
-z9-lPb{O*TT<)(KMjkhAo*NAUFv@1F0()xEha^l0w*OWirvg`3Jq1D#URMW1?e&3!P
-zSbF@@<t4iwuXAXUPWmLFHESC~hK^)dLR9`j295W9DhDsS)`>7YSSuB=XMbxKhh)aW
-zMQ_~VJB;?Yl<c~G_L*v7gjB%>p(ETzfsSkWO;gMME`P2Xby{HY2bW~NCcQ(kbuTM_
-zZ4R>M6u$ktNv7LuTlUiDu2+;FBw6zXbjdtt-V`!p<$qJQu9vQFtj=_{8S|cIjC{BI
-znc?fi#fLVO_=G*3JMYkDLvCqjuEQ51^X@j@WtbzVURM}bwy-ZmMlQzpg^7IctfXVd
-z8xPrTn78_FmcjZPyxUrtR~OFzDfOa8^nJqP*G;o@raLIyTgEb_v9UGYeom#*r0ia<
-z(=C=w(#y;*8!4yxW~W;{ixWvYxMcaKb3cv#u2Fq@Z{C#p`E%zyKGNKsarZ-^AoB*#
-zxi5P>jYM6R-Y8E>eQj$J75F-0OU??}{_Tg8%_p=JGjOk3^-1Ga!=HUWVzm?%1RYAB
-zr5b8)+@5)8>*+Z*N78j2dCqOUy`p)0@3h;lD=uyL+RpXw_cx;>f2K+BNjsXYzrZ3|
-z{iXEy)l>00`_=i*9qiWR*VJZ`JNEj9)FZ#_*PjKHoKEa2yL>C@hbYs84yI4HKC{Fg
-zza=!S#&UCgX^HISz3<<@ZN2;V|KGj*hUy9(&H6kq^URV=-?_A!?>ly_L^gWg9L+^t
-zk3P!0V0&d1w^*t@IrjJ*{m9tk?~6k}m&)Fs!z7Y+{bSduO|NI%R6X@&L)an<wY#6x
-zy7_m!-qC(<-Q#=pI?IgaW$UlHwsi3a{i!VTU0Wt4?n(>`UA$<o<%`SJr7|*?Vw2)!
-z`!}0j3jY7<$G#0o{A-eDG_L>7{(8sh>MbVg>YVRRn6oDAZ>2&QkKP6|L6H|{Ogs)f
-z)n&0he{A)dz6GJ;cN;SVp1N`!4^qn9KGB0EBW2;W(|jQtp7d|xn&V-=FL>SLnNP)(
-zPM-_-BWc{eKW%=|$<NybPG6ar_EvsUg|4DZJ%4$K%zEbQ5AC9tgspUn{c(4{y8Rpm
-z4#6Ek4`Tf5k5oq9iN6wfT*zg=y^sAT4@RHcGZo{+&r9!!OkMi_@Vs?07knKZQ@!^*
-z{yy*CtMsSK{<t~USGG;_4*H|d+m!c(B_q%F8dDZa-HG0_M)N+zhMrH1a4C?oKkc!S
-zuQ_Aw3;)FHf5jJ?d0U0QnIzF`Cy^=qJo-cLSB+e`>M8$i)B5ka2_5^esAhXl8rK`;
-zl!6P!$wveeA2$EnXuw^ST(EN^uZG6HhqslT4qo+LzGEZLgPXyAH!d*L`Wf5aY|N~X
-z`Z4GCif3L^o^1?U8NYSOw+joTew-@0@{i$y)s|XAH~&R%H$|RwGZ(G1=DaUI!{!RZ
-zncTg*HuT=mT(l?M%X{a_vYg~T!CfjlH(765+bO;Kw0Tv_h76PP9lzTDcfVTv{m-IC
-zuKLARAp#oi+no+9u4$>*%kfTXP1&7HZRHs^>J3&uke2-@GUxNZ+tXjG<mJv==IQWS
-zXu`i9DN)wjf1Gr3&zk<O&6<&N>ucYGRD-g+2cKAW%-mVGZ06*i`Qd9;-(a?VzLM8n
-z<yG06RnaX%Z_my#ulad!ii?8!?TfKm+6h&*Ggc-1{mkyXUFF!$LkWKwYx(9#^`1B)
-zXW)10$3k}o!KtUb7#H@M{#f5~UpsilQnB@tB`Xdvt<ZY*n>YNi`SX&fAZ{Bq&D5(=
-zU&L?xvQ$r1jpps|{n8$Krk_D(h3J}_9?9uvZ`^3u+2VaEMdk8`%M7Ys{q|nULGHf%
-zyH;<JmXFExy07?azQ@$>ueME&F7N1Py0|BJ>Z*H_oex?b%uPySo)c+y;P0)AE$;u4
-zHlO`#QP{)T%&|xNtj@wuah(1PQSTlb&J&q1t2A+;z2RnUo#4sxZvzV7T6G;^Y2973
-zNO5O((IUCp+y}2O&y!1V{q6oo;+loWJFa(TKC8TH+WrWApYdF<Uxn?y@q+M!-)*)l
-z-|0J0^i^lg>VGC*c*Soo%(?$JDkwtyySg0f^d>e5<>i`Y)urNc=k1*PlmAcPQ(Bd8
-zsQxPbe!2|rh9?P}X7fswpNc;<e)N78lh&D(x|;C$Mk_2|>b7p@zA@{7mR>?(;b*Z9
-zz9z1O9kbsp)<|slwRiT*i3NvP`TV#;S6^e2n)x;?vf=Nh2X-#J9&E>4F20y3o%vzk
-zn@=G=dk$N;irhZw(0bWtLGC6=>80Jmd+)Da_(|3-?d1iF2i~W;6>rW=5tF!^vDxxO
-z`LSSwymCfir{k-ZUNn2Ec+*PLQTOe=s^n_+au2ghGqNMOR_ScCk-TzkpDfRbj<)TR
-zmy>oD=gajQe0<5;s$tP#&~r@pPM6&@*6N}cPjBYmeW)9#!fN&<NV<bfgE{8Iq{((1
-zQGG=x1$NXbNXrYYk+BG``oL*bK4qss&2rm?wtp<z7g{Rpi+Rf0nq#n)_m;=~qd5Vk
-zzr`P@W+)u}Wa#na$_Bmpyg#~=H^2VTRT^=Y{r9buLhBCEg!Pi_k?f09f5@|U6m6XK
-zJ?~#e%-Sd0T@U$Itu{?e{Ihma)06(SH|}Xy9PK-#^YdNi!F-+Lsx!775UM<JG20;J
-z>BQ|U3C4WEKWmii{<vMxRrmY9JLvVJCy|@C3)w6>*)VI@O|KjC7g~Nl@Amh+%AO4t
-zC2H*!A9b3~xGv8xJ^tnnub{m`P4m>^w+Ebfu3Xfz+A9%V7O1SP;+6VNCaYZNh-_v=
-z`0i+?Ma?HQyDrR}|2O&gU&D`QKX3k%Wnox3?V!bJJ<dxymvuI=Z?B!QI%Dru^<_T~
-zYOFL9yEygarlr4@m~+%#YSjO_>icQ&In&lXFIuPZyVmpgMysWNf6It0VfbpWBPVvF
-zi{qLJG0Vd{F1cLXGX2_a3Dbjb`j7sab${-iiVulRLSMpJrrvuPRXeX)Y4zdim2G{E
-zpW|NjZpx@Xef^4*XyYy+->Tx(5_8@@Df$<jJT0hdnfJv!Jx!(Go*ps#mb+!hm$C%i
-z+*+JnebYw4!Ev3Y%$`LrjSuJ^40LUlp1U~h;k6i+tj4G2#m?fbmXiMOy$cUSztUX8
-zc&FCp+TCRhUkkPr${ZF7+s|-Oh@nR_s_n#EuNceai3NO}vAQ*V3*1;I+e@)#v7O-1
-zT6gmC>jz7xY~VF0WBey{KK|m_jMCL1ifd$wpQJ??wOU1{8f1Hf|17tO&oI9w`|U|w
-z+Ts1j%2t257pI>6y#LeryZRsg%KNTklmAtjac+bA>H3qGpC5cR+3Qnd`eebnn!6g0
-zf3}@ieZEP7wQT=3OP^;uK1jRW+E)|JF6iuF{M|!z+kKg}>l<68_>Ci$7iCRU&-d77
-zduD_Dn)QcbFPQ8p6ia=j(y`ph>1xQPMo&*qL-YJiZWX2BznJ#DDcfta^4pHn+b1Wk
-z%lg(C`mC4RG~rsMoWa!Xo_jK%HNRP_CYb-Be%6G=H`iIZZtfH@;y<Y4uOqEp?YsEH
-z!^G&b8@D`?{C2cFa-RO3Wiz!Fy?Pn3SmU<w`eoAnq1sXoVuJO4GweJ>Ds7cbq)gMN
-z&0w+T`oDJ1g8;jq{BPWT&TGEumY6LtXB)%nZ#FkYrGLn7lt}iKo1n|R_qa(jH-q}l
-zb(WcRIvoq^cGe4g%;{1-mVJpiWa-|*`nH?0ZvVfm)6)Bs^m=_)n^1bz0+;W5DqYU(
-zE}N^^Q2#A>f761=N#?elr5lX$oBJ*?TkoIeyyt|CKz^HPg_A2c`y%6lHT)A4(-%gW
-zBuFjl?Ks!p7IEb0r5XQfoSP%|Hyq4QU797K^U$rrIXpk~#_9altMb_kQnWVc*YQXw
-zzD$l-J%7T9Q`Irn{?iODN^$Ttl(Kv@J>T%LsxbVBJ?FFIClqgMI<7m#wV*y!=n2zB
-zi{vw(J|v4KFJZpi%l$lPNyLUtt&83tQ2f9s?(#+J{Eomy&Kf*#m8a<}3S+$L<+t^(
-zOC-ymQ%jE8840k2swN~&-MPqW-G%k<YLXxMeP3GMAT8=p`aZpgNovJAk7h&5<8O<W
-zxUW;TH(qBWvfJ6K`R|SiYV*>3`488gD0{m5!m6}nli1XkS+gn*h%^fNKa<&Jc10t6
-z`_^j`MG1Z}MVYrI{kmJS%B_SyaAMGrqrV(yzB(BD?AeqkX%CC8TWczWt!A&8_BrF1
-zYz*sJgJ;YVwI|bO%T_d<U^wNlXI0sJUZ>b!hWiRXTdth^D7WK3`<~~{Y<Y^sTr+sZ
-z-p!ft<i~!Nud@xJ<bTD^(z?FlcFm!_jZ-IFR(zzu#+RaS+iio~XI|^wQ&0S9ciX9H
-zaJOD;`w2FO8HU?#GrAqAox#0}@8u6|3v+?0e|6z&ZIo93(Ol7BUH<)y!>(*^x1b9b
-zPO5}GocyWj<fLh)^RF4oGZi+MI+lk|Xq_&XvH9!IB_*EIVjdd5<F-p(lQ%8euT&_p
-zVCBYbd@E$~Dwp=1kcs^0Wg)*nF!lb_g4~dwE1yh=IvHbK6m#W8{nFP5r=I+<sMC4t
-zBGnCgXEuGD>~kRZN=V^-gP6(Z{xU5QlGxHX|8>8H%chXIj7hIpLt<0iHca8+)(==I
-zJU{zundw)jYaasmWMoP=o^GAEcin|8Gx^`Hwp*?EDCD8}Y|)n{x&q2`KA4=lEy<AZ
-z@5$#$Pgee~mGb*}^3%qPQ!goW^;dpyn3x!|apRd=7k3q&;BC3f{Gj2lOj~93l+g8T
-zoI59kESi=(Jx=h<FMp%gaSr@V+s_+R&)zou`J7pb@9k!5$8en${SeAz!>h%7`1zh!
-z>)2eMW*=v5wT}zw+Bfh2L~|i_R*rp#eS6rQ-g8$z{4O=)L`B<4rwtc37OE`f*B1J-
-zOefMTdb_~G4S~J7uDUaSI9qlGhi&}2!}wJ0>`C_)Twj-YqH=-ij{`;F?&355sEYDb
-zMqTzzEP2nR&Ng4Xh41XGCu}7z<|TgNpVD$bW%=qglizG9XrJ(U#g+7ytG1DwjxLqV
-zzy3G>*@~09f3P<(Ro49Cop>~I?g{r3?^Ygk{i4EOzLLv&(o^~R*{QzFlE0L>({^1s
-zknY93qCPBg?U_GvzRs?1UVpk!5mLK=-y~M?q0l$081YF?InKE{r>1x7otkQ~!?G(k
-z(|Yf}l<8N!dKqUoM;?Az{eYWu!I3B#AMLLzHh<5$)7b5^pYzf0T!$A;|BZEfR)4SW
-zOA%rI^rhxm>>H1QeV%t`v)Yy>NS|pfE<6zPe73ldf#b2fLu;4%Z<+G_#CoqA4^y=o
-zAD;M^XEIml#9hAHowtp)R$1on{Jib+IfF*_X<j|5iTYlrFO-KL5Ne8lTB+82K<~%Y
-zn6CX<>cuBm>jb-G_m?@iWXQ%{?MMmu8);g5a;oHGy9Sr8LY7O0vl)IHUj4{*C1=GJ
-zrPFSyb(=Tk9k!GdpR&`^{L;VKma|H7CK-y`N=SQs@qEud|H}ze`2=rQrXNvTKT8<y
-z`1GA?`i{7#YHWv?McpI(-{-ft{hY7Z?485i7Pa9<-I+Ic6}}fXhD_R4b>ck#tJm>g
-z3ePS`E_js{HTm=^mJi*2*&<uA4hn?NS<=qA`o+y-K8u7)=hy_ja{Ra=EhA+9Bfp7>
-z<>h8aU+u_R-@eEA=JOQ?e_NQFWeGocSDk7j{UY_T%Hzw9BKy>r#=d#}HEa8tm=A1e
-z7ABWxzY8^XZT|jX;-x&%Z||dTGrC!pFznkt-JxAz?t|OXg_~ZSR}NCqJO7bOP<7EJ
-z&kIa*RI<bmY<3Y<*k15{l1Y4C374&l`GsxUMem${d*F>u<PHmtJJMgx55{D-Jz8<I
-zwBp;t%ikV3vuSVHxAN_xnSt}9_w~oswZ8qCqrN9G`j-7f<rR6JWlnvrY645Ei`iGz
-zhXyFDeD_8)A|`7tTmCwkc-c19-BXgTpF5|ftQS$6tm1CJ#H-<zwCB9)i$1gWtDcIn
-zfBPWUZlRa%??=V{KJR;1@t%6~f6B6}%hDJQ^<BOEd+&;8-D!ndtTjC$%||o8-kYX<
-zIpDM5ts);M{~IZ-myLFM+Z#=*S(Ff1cq_8wv#!IdKND-Lv)LJ^$;HmmP}WmVkMcb`
-zqoMJXboxieqf5-$mrtANEBnSKxj^d2T~E0sFIZN@S=-1?@Gg&Z-!tp=zjgh*hdkD|
-zF)=0@KJWTme@tod<nw{+jXYBB9M|?g|6t0ltt+3KD*WXNvQXdjyzRQb`>eIfZx_id
-zOuXy)%;WO8*OHOHetp>58_6bQE3;~qn*Q$j5=Ue91-dR~GAw?QETSgrViR#Ko+Z+R
-z(LG{|?d=D1lo$;6x+!fqzcGdDR@{yE8>33!GKR5Saprnz5X!h`SLv$@$J^#|oPTsz
-zN44Q{<c@{|fwL<nf4`XIueM{`$K9tFmAf=G%f<*z`OXr2MeXFdkm8tD)h}h$Q!PE_
-zTfI1S_>9>^{-4U4Sur;vjWU**WMpJL<V>!Odid?i{Tm^2n;1k(x^8XSCRy$y@hOkB
-zr7^j4X03DDEE^u}qYPY^Kg`?kw)mRgn&hSDexIJkQnAL?Q7lmB!^Vp%ZnN>7GA&cH
-z{pUMzVvcA@^Xmt*pMR~L{n+hY9|zZpSI#d^FSz+Oy<Kjd<i_$j$;GD065{fIVw}wH
-zX=JTjVzT7BmR0PnW+C(Fy1*42VmFw@cc*DrDcbSn?qqxExypaaq?^il3je0PdM{)#
-z%bc%gj!S}>`a;zsQmO4JQ$joTeG1<Yx98}Cw?Q1ggQ9l1DY-3*7uogo<_XKhI9<Li
-z250tf{aMNING4Bz`$MxQ|8H6E&I~o)$-Z3PM6<#7#%)=a=?t%|_&&{u3R@>#E5_a`
-zaOUmFzOPK#=T2Rj=gp_!{gh|=xxd2Ez2_Eja5kGOKVA3#T$@S2-}FyTGd->Le0-Ft
-za(}7JJd>K${eFLZU0+EXNJeaPo%$lF<D|D|;IAZhIah^qIhm6MtE2f6^)hY;HW{v-
-zEEs5%;M$dQ<@(vvsxsXx_FTP}wT<al%^4#$6^>_FpB}R*>^L4Newt^8<Gc3e(uxR&
-z6_=OB%`=)^zIfgR#|5@$EGO)`yYyDotHen=OCw#Ebg5_w`=%_+Of1@>HeDd|)66-G
-zZ*bPBf1Rl)FCp=w@W;#Ja_=%{ephKWTjMjG;kh;cHvZF9YCD!}o@gGEq~;T}bETS$
-zmvUW06|aV6>ZFW6$L7g5OG))yZ-4cw<>cmzbN3h?-)FRJ|8|bW(R0*q2Ta^&BE<1C
-z?8}Bnf20knXYNjYuz!2#2fatr+`cNG{uJ^|W8GhYK(@4pi(+L&&i_h3*SvXZj3IND
-z2-7dkdQ16;5H*P@>3UOIPW9|ta&+#*gBj`nCI!8Zzf{H}$G1Oj`9AH7^A<6St*TPZ
-z+U+ED#%sUtuH(-SZL6PlcK41AhU;e68FU|<&vW&=_NDmBgS%uO+2*`EDv<Bn<9$_X
-zhJX7G&#B+$9}ZG`;Z&D%eAl|C7hZ||pJ~ouRxtVS8KXD*+Ex7O?z4BC+E{V3`Ns2i
-zNks`3`St%36~mggCK+anh<p;sE=?1&nbx~mlxzFO)BVaD!?Wg2tKjjzb;2lP<;H)z
-zZnz|^w_U`%YpbH%ggI`no*cW~a&6NQK1<Ux8(0-@<eD7VFL~zUwPI=YpRDh~C;jSj
-zySE@XCTEVT&5M@O<<COw5{;Z5KFG+KWTEG<<VfVo7`D#9E9(wQuQ<uKnWtCh|1|f1
-zTlNSDu6#40X6MYW^0AYXgB@)&S6e(}n5|~V{NXkGJE1e_yD$3r&2h~;bF|*O^;3es
-z$gXQ;8k#4RdQ6=sZwT1@)S3MYi(15+#2L9FtUer3H`&a+%LMN4Q=8?*sg}Rxzg(*9
-z`m(!4XPKU=Y3)pwZdOb%DtA6M=`~-(tw=ZJ^hG6mcc+-GJ{6^1+n5l2xV>!h!y`-w
-z)+OKV&`+^+|E=$yVtdQ(VS=yyT~&n_TsydZwjbZ19p;;};Ov}eX`|no(>ZrfaO$!4
-znQ&83XFG%1k_=^rjV~e;ZY`R!B6|IlNoS`%<=pxre)<PRPu(*P3m+=H{QuvXBaR`F
-zA&TKji?8C7+Bp-aez5wG7Pe>R{<uXN9lnomIfog0-`%dE`h1Vx)=<B<T#{2xRQ=&d
-z5?S-EbMd@aZx?Bps|9UUQYz{BbLh6-y{uQo0s<m7EHhT<`j+%;NNlzV_V~JfGGk68
-z^Mf4Ct;^NqpMQM)R`&1Ce~Vvs^xQwSY;F9+$7Zu$sJ!cSV*I}5&;*8$3J2xFyPFb|
-zUVdBmX-4Q)Mm5Ko5fLmo8pqzvci(b(%DsD?GWqs?ZtEo9zCXFY$ZO4>E6Z|E^R1DV
-zb^P~RYVE1t4}?#>IA3{X{U(*Lobbg<osMrakk$3s@?nyur{&7!uY=|>{IBNtxj967
-zmg2<fJ=@#neNInZ#cNV}yZe{w5wpLJ%Zswkb8&K5@b6bKnOr~XS$7}9v3FY2zP<kO
-zy|m+R)eMhy&ua7}R#)i#V_bQx(j$9mw!t*5ug_N$8>t*Q5?4{be{IvQ<^PyhsxdYG
-z^~(5u)b&OI>!Phkcep>g<G{vtzl=S~`2A*ujXHXt<%|<__1iYDXy%>iJ820sXak5t
-zV^i{{0v#nTx5Y+QT*u{=6CO-B5um{(?wHshz{A4a=&(SL#ZiF8v4X`>pv6UE8l%?6
-zdxxZ6bpPMPp0B^(uJ`r+9Zxh4==}IQg=w3Y*@AzkgVt_(`1^j?)oqQs{im+Zy>R!)
-z&uLr}f^0v(+hbVHQ&7KT=d%FA@~JAng3cJ<UV7lR@Knb)UWf7@Ol!V2S*Wx->gku_
-zhnDKcI%oW^zRBU2wJ<eF=#Yqqk@E}byI+;wzVawmU%KrhgK8oB33+=<(<4_(8CHDI
-z@pBPe@6DMyDS5%(hl|cFmDmyY@D>YKjpUt>8&6&I=Y3Z_=vpw%JojDX7sEWSIrDlR
-zo~w?sUo+8n<xNlVMZaXDY~OBK_%>3i-lXH!h0D+Pew_DugDbb;Ew^On-6z`Eul$$D
-z@Lt1iQSJFbJnBLE)NosN%U#}!HW__cc4S6-AaCxy9jXk1&jin<nub=%d@SUVWl?L3
-z&B=IkdGlp!V@>84BHp`Z+?x06oXnN)Nj#CR_q&}x3Pr5xn6$QC)in0OeQ_Nl@6_k~
-z-*OKnr`Py(?-O6U^fc?e$RBR&<SNpS?A`6wu<+g4*GrBo%+fx%d|ufTRXOR&;<IKk
-z-p`MI?sLh-<lu{_81Ko|i;Tou!j`e0+5X_;m7<+$CuiIaE^d(AS-9nZJfkM}-VMK`
-zRrX$Z{pU|0i|^l)lb=R+TkP1u9`d4OVO#KGF1M||N<5$5UU2(1iAn0t$-VKOadCbj
-zp9*hnPK(T{+V?E_I(M%t=c>(bP0Wj#{I2@Xynb+3qSLB-Q#g|??>u+OTFqSTA{R9K
-zsX~gcQTL|Z(M7NKCpBs}c>UJy`^d&|L-TESbMLRsOLZokzn*lY^G{`Rq{<?e2iJe!
-z<Wf|fzhcU@d&{J1|GI|S|6`fQ=Hn-A=JWNezuU@NDS=NnsL6i4^eEt(cH+yWkyF>i
-z&R==gAwGG5ar?TIVvRq0%kr1_%BCOtB(|)@_xhHjS2rDSVSmG<-0{^Zw({1b``<mo
-z6dIC+gd(T$T=V@UdfIri)aGS-!kVnVuA0DU8M9k$HQ$T#H<!-ZxB6~{jBN+s<~=Uv
-z3-&jPwTIt(wrI=JQ_-vc7!`!vGnl9S{+?&G9D_$`v0l*M{d4LVPkdckyv)nZS2ZN+
-z%OAxvoA&1|t=}fg&r~Qhp)~ya`La8XMq9gzW=2^wE}ilB>;(Bg(yB5ucK&d=@wBLL
-z!_;%mk|OVZC)bC!*j>1E@Un{h^_N05yeb;zyH77JI+d%#t97*{(Xc-IS@PNBU#|<A
-z+1^ChI!~y!5j$4KqwZ(rS)RAxnRR!DfE`P8Tj9BD`vVH2T{~tLpHnI>QK;;>&RgL(
-zCD~EiKq$#@qIKcL!-v24dH0C4wJtXh3_lwlHZ#>pluyz{c}Kfi-+sP~SIHCqteFy*
-zs&MT=3%`ep>+=?MeTl0fCErfFr!l|NRMTe5excJD;+#IqpX;pa=f$N~obLNo6_gwL
-z_{83qKYtX*e78~D-_n$s{ZZ@h+1AXw^45nuUuw6#kdFQSW1mQLWS#V$ZEJG(EZrBn
-z+L!al`MHf9sogggnH^>P@-R@VZn44|yBVj9)%JgmyFLGH)4ofIBHI@J%|EvAm-Xkx
-z7v`icTa~`%ZNqcVha1^)x~{+cH`n(2uDBoXeY~06Up-h5yEf9QvMiA+`ug*d8&@}c
-z4V7JND7C1od|&jzK887e!%MTuf<rcCEm?Kv#Ge0?6PkBQh@N*@+i=w4cjwwQF0OwJ
-z8)S8Si=u8e-<<Qx@9wV6*%u98b(=_hzPiz7N~F2?ota-RY>2yaYjS_;E_M6A7OC-y
-z?3;h^rT9ILSZTg6$Exe^zD>_66VJSBn0Ax@@S2cx8C@YBv*0tIFWg?c<WJtx^<8@V
-zH+RlFouj-XbVvEh?#!6iSE5s<Tsx*H9`pED(c8EnrGh<`CzUT8oqYS7*}oqB6X9+Q
-zo}u10lQ~>8jZ5{u>$&ewNIE>z>hfvlqp9!L#4zuiXL{@Qo4K)!jC)_zly%H7n)soM
-zY2v%C`_gZC?$>d*y_=}|=hEE@W5J{1`mSfsi?yePJ}%zrFemlF8Ru8L^JiXjHYtAb
-zb8cYF0%b*OW=1F3O+C?9Z)9`w<UTZP@{n2?`z59E^V%8l-*5eUbu{JZ&Ahz=(VA5&
-z7Qg-Zj=8IBmdiu-p9@xN*m9nq^!NU{S@RTM?b!HzIooEI7Zb!SJaZaPb_IFAV|{A&
-zPe<Z$jcPCN=C^vj*1XKur)^pm!I>@n#OP?^g_ZL*q<(0!NN9R(ebISh$b{S<8tW^!
-z-`kO3A9+3dA?KFB8;@41<s0#TY1;KILe-kxPECj5?6x`XAJnCbwsN{|nKvz2NK`+}
-zbdKiwGe^>IZ<O@soawYcd5f>W;{|1r+Z7GhI{yyXXL!JWQq`N?v-LYC2});FTW@Uk
-zjNSTtkuc-s$&14-F`dua9`)?O#HVds{9kzYCbE}mmgKG9?3HR*{^aY~wX#2$(yw$r
-zxtfyo<IImkOD8dP-hTGr`lKCC?>;N}I(2$SuQvyGA!nxY?tfe4BM)ua@$RZR+w!@6
-z*Y<`h>HfX{^l4q}IY&0}*oG<Y%NB_5KkKxntoDLm*V4i{S>G4!*(dn*f$7;z4%Pkn
-zvlXSv=5I{;KhHzZ_}QGI;AqV~LA4sqORZ-HHm(yqzMUiEk>#EhSD#(9+^VzA;qN-F
-zwO2m9)4cRs<Jr1t(IvkFRSq}a=GZXr-=qhNllkV}bQ7uO^9^K=`{d>m_F}E(n(jrN
-zxvDM>Tx$;<URkR?bMfp+lNSjE6y{#;dTk+4%qM)rk$1n8{5K=!7;mqs8P|Sqx2V*e
-zb?GE`b4_x>j+eZF)%7m60eL4>-gX<_*s|@kH~WeCF3T<){h}~Ga>);)8;Mt{8P^>8
-zGj-C{^MAh7xGOrjh>FdrPTJeF?XtSeS<k-otf|+kuEYpSv{s!y=rZG^*u{T6ll|FT
-zp6FR!s(<QlGIRU#fS+u^QPZEyxK`?!8>_Co`C^oLhr}M6NiL7(7B#M$$i7Y>U+w(S
-z+BSx_h4OP6o(lB#Eqi$QR=<T_cJ(xkg0()OhH>gKu1QZi?I%e5ba}UFU15ZE(i7dN
-z`}2fa{X;ijw65Uun||_k==-yoAGDQUG;nRY*|~1RlXr~YQvbz#QF(P|iq=Ji+r7rk
-zIYpftlSLOy2>Nw?kHmBH*v9lYk#fU4z73jf&!uIhVhZK*lwvs*p8Qi=(rkR*<L23e
-zJ<HixeqMdA!6^M8@|JGsL;ts{+rt7FE=#T~@5(k1+<Qecl{=PIz_eyt#NO|WzmNZ0
-z9U^3P`P6>%Yc@uQtKw|dcn5rYXm)gYWc99+%2L1It+pH|*{e1#kasrlP}Q#f%O}-f
-zu$n30G5@i~OIJ7U(eYg1_2~87DOY*(&1W>ZNlp9Scl+>H#eQ$~_4>Or&*-mDE!U59
-z%WXci<8sNY%Do-EovY`_P3*iMqqT4Su8*Y!;Zx@2O<lZ{&EwBi6RQn!_jviQdvE>E
-zb?&F5ao&X2AJ#`blyl;ozL-7HWlI_F`Oi&L`fa?_7dM>v_F?C|D-SpC3Hmmd=co4X
-z3nEn}C!D_Uy!gDIL3q{a?GHO=Pye_^!$$P~x6?to;Tg)BhD&m+_%b;v*Dm=yTlvM;
-z=g-;|;$GxVj@^CjZQSX3;S*%pa#n6EO_seN|JG$%`PF|*F9fNbH^{2l)h2Pt=iC+P
-zi~5Omm(uzeURqSP+SdKysh@7k8`G;TVtQlN_29J`hv&byV?U^AqWtci>7v?_#C0CC
-z^LHstcG_~*V%x>&>~4wTl(QGtmQ3^hqy0!``*wlEt_7E+(qAswv*LHu4TbaO7MafP
-z8Y+!s)zuC@Q|^1aJ5)_5L1z7`XNSdG-hNj9#FBOQ&`!CQ5VPAq<$7X;=Extq>1=iE
-z;Zd=+1BJZd%Aadi`Q%CMy)3oZ?mFuiL9SD0`PM8<tmViqZV3KxUE$&yRuTRCPb@<6
-zj=eg5Xyc(9-~Ly>E?l?$_@kv4{MK)~rQvIqvbdrC>b+A7Ba1`dJM=U=OFUV)dVyRE
-z-{c=Rs!F-Eat_Whh&;UMX}HO0-W>ui7k#{|^<J`BB;PRTOMLC^>~3H3qT+V-)RyC%
-z$As4g*H?cy@6?j{%q(Tu;@fG}?~jUeneNuC(XUTx{g8P5mP@MJr#bU~o|>mL#oR7P
-zYk`?b0fW|j?iC65&mWOLa&6a|m|NeyBwzKWgnT-=K+fULqM6f9CU=S+H@>m&jIUM8
-zs|Bl!=LAj*Fnt=QxxM3qSZDdviO1TM-h6!ZAjCR#T5#BGp2d?`?M>Wk4EDcUliMy5
-zYM-X%ysLC_lvDJrt?XsDVk~?fCp<Mxeco&|SFvzLp8Va7Rf3;<SYPsgjLx}ve&6=~
-zP0r!3UR-H6n4Wz>_d$Hp))LX{?4s^J)zh6AFXb$Dx1N<9&m*I!puKZ%A=lk^@prv=
-zcHdLVwd|SgD<a+`!zCcJqgLyO(655c-7-)0y;r}PpOTcIx_DWi*~9*cD;wK-4!qz_
-zkFb!Ex+>pS@TkFV;`M(CRSouw7N!&|oAo9*NsVo#@7mn?e^oQOwKjU(jBEUq!NQO!
-z&9H2qk*0N#056M~yuzvEN|&&Jxa@m-Pt9okB6E+moN*?v@^Y=MR+nW8gT2H0<5eq;
-zyfJVVS~=tMx!tFJwD9fQBKl$f#lIJIt+L7&x9$C)@^NK_`k!Z07_*o8+(}$N)%r+A
-z5>M1~=k~l4dS}?oKP=n)Yc_9uzvrT#{ByQS26?|%)Qg@qYu0X#e8p&`>8*{28oA|!
-zf7C71<8&=y*cWo9q1`L#`0|X`#h<gK?;N)ZnPBI#<=&pijKg8F{=V&Bgw(g(N`Coo
-ztDcHWYe2&}&DV`a`)$ri#{ap!Q+AHR*Vk;ycIWK5a{NxLy*R1!llR=u0nL5eb(;J3
-zchv-FvvZdOCN&Bq96tK+yI;-LI?kDjmlMmsl&(DMw3_F~ZfEZ3&>G9QvZs8!2hM(N
-zt#jP;zu3V?lb_f0!3N#N1mAfR4=qh*(>@%dvSn`re}qERwb#~42FIVj?dbAeso7@|
-z@a)I+4WgF~I2Y&y?z{b?R`AIi<wGZJi<P#XSu)+Ve}dDhNvw^X+nY{4{GP3Ffnmo2
-z*|W30*M3&oBWb=+<jJuRZl0+*^EbY2SsK2jTk*N|+8^mz)0?e@FEX3n-?!mW)6#-i
-z_1v=0{+Y4rQ%+9*o;S%Qa8YhX;#$^p{nqDCPyG3|+B3ePN%7Fug)KMLtuFGeu4*ls
-z*!SxD6V3_G#6%f;3)?4N<Wl5gD(Nb=eto-P>l;DwbuvvSOX`}ol(#Lr`S9H_gEt*>
-z3k~g;JPErhzxCE}@u%%}`Lz>Gmh8K`wY5#lXy44(+J3uzUl@({R$q{vA#><usnWKn
-zEgNi=<E|fM;Ne=nNFn3%{+KCN+6NRS?ov8dZT#!YilS*3%tLyfnuYN{Z2fukW3jPN
-z*8Bi(o;k%r#ru+*a&zY~|I)~H?)SOklB++}`TXY39yK%HbDWy;YuRo)nZJPxe{N^L
-zB5Q0BKjWCv{b}bcXVvWuXW%oqF#GMgiLYB^wjYf96n1cfVbzkJVAXkwPnq5otN8!D
-z#Z*<UcC4oR&9dNYYqeTk8%z#8<q>$K!ZWvU+wqo;gBv^4n#<1`N_VgKJN#^8K3CsY
-zMw1y2)mt7(sN|kXfBoa=hLd7H_jAn&S~i<;Id9y3IrY%njj4B^Ua&kovwdCRZ~GS8
-zE}Nu>6ZTZ@xYhJ@<x%bmZds;~xqtetcZ$^)-?`;#W4OI_l8goK<N0ErQkoMSzB9Eg
-zGv3v@<D7)zqHLA0X;+o^N*c}la<*^7o*fBK`0BT(2zm2Ao%8a<u9FvRTHWP0y)-qQ
-z#C`Ua$N7-UuEpE$2Azu(<9w0BBCjXX|L?%bsy~MXI|{Vzll8XAxNW%P5O%WJZ<+k1
-zS$8&G**LB6_MN9|b$Eh5KDhkwZIa3o^$AHIiepn{OWNPhSLDB=IfE-+^233T6AT#~
-zr!~)-WH9e8-!9qh+?+RVo_Ob=<<}I-XV;NBFF5_iqNh2%YiHiNv?$muX&L7y)9tbm
-zx?g_IWr>)5BEjZ>oU>q1m$hPoVN8c&nNvf8Y(~LtcgN=YpY3HirRJC=UU(qK#xM1!
-zNpa!9+Q&8jZ3U%j-X~@lbZ=XD@bkWki~^;17amw^cCdY~b2pJtyy?>Hd6@0YdG)Rd
-z+Y1Z)!_P1M=fJfi-Z7S|Ea~EduO605CinBn&wch`;+g#ozr%HI3+;LMp)2+COYREg
-zAAjT7CaP*4`WSB+(05_yqf46?XiFK$1ihZ#vG&R5BTE+=t=;l4S>LzCcmL$6F^e1~
-z&op+rDkpCdVp%XLWTW(zic@numlUyYJe9T}pg5^w=2GpS3+MPPu434(^F!wPKdvKk
-z#)g`=>JPrZ^#Ad<FV%%PE_**XUwnABRWWntqpvJ0w@SryERsF(JO4_*X+_a`pM^ZT
-z`QO^~1Y6Hxoy}GH>)9`EtD<fBKaQ-a?AYdi@*2-MM&6(`btli>Enc|INPY3^mc|bb
-zYKo6NG81Nbq#H;1TuBg2Txa|$F(+((Isb_RP9^QXUQcV{HQsc4L7`-=%?nG{Uza51
-zr&eCb&q-hS_h`bCscWW0Jk*`EfK%z^zUPjQvOll?W8AveI$zO8`<8dqoPPmVZ{Oef
-zVtOSL`}M-TB4WXLR!_IMFx}$eVTjRmF-(=3`cL+ham_VtQHKT5+nOh|#~;f}JjHOR
-z;PPY7**3O*doGpOKjK-?9aPSyyWqIz_T6`SL^jv)$sfC-a(ddf$|($w(~oKk{gU^n
-z5kI*45DUNAvv(37Pw!mj!ewkAwwC#VLAL0xvZcpP{m$}#WYLzVaY3cpdft@wrRp0G
-zzWADSi$Ngp!|nx}&*v%^eY5<t_`(_&b%C8XpZ}LM{2ae^T4Ts@$&Br%o=8v8O!-!R
-z<YC&~Q)f@^{$GE)>-k(y3)jaH_qX=0DgN1eOss#c^~YwNu#S}ekfS=QCa=!4;Vt~H
-z&BP)m@ay-N4K{lEKX2bEl<+^YSo~dE?9>$10~eEhmnH98(q^?)W@cZrx1;=%QlH}z
-zvrJ3U^!X>v{hOqEuxM5Ezu0*PQeH-XOIl^-8Q^o=biWO+Zj#luZPlAzFk9ptE_t&f
-zJMH%W(=z@)Dl9!RH-8A{Tgx-y#&((H)bF~XQpVY4*AHr(^88YMz@X&cG9|$dMsLwF
-zrDeZV6&0r_9k@Kj<+P>S@^5)In!DetKMb(Ew%R@^@vk|nq{f1aYvslK5>9M7sBV7J
-ztZ2avoA(9}om|#dR42FJ{}xcbKq9o}Lek`IH&)&GzjNy1vTn}YpPpUTXJ^}7XZfAB
-zkj3}JyXFt9@1#};pJz4;W|6gITWNJr`j6BRW94>*>fa6)qJb`V9G%@(&bg4VrbcAj
-zyR|82r5Fw!<`tY!t1_=9A^1(^JNN$HLuX3FWgne1>diCz9`tXG*LHP1KB?|2{O*<7
-zqA|B@r#U{~V$t)Lp>Am-=bpyvW+%dqChMGB%M{o8_)_ZJC%@MIyTH6I(b^$R{6oY{
-zH`$9T+I>z)oXJrydbWAr|DR_94Z^%lZzaY&e4BA)xyOa8YZohg`gmjK%{k@C7dvj%
-zI3xt$mtyL0&r;i@RnxoC?f0v1zRmk0J{NgTmYipE;9sux<zi;*fMY=)kG<L`^<QJA
-z>2}WMD4YFL-t?9+?pVxQ71opd_*Kg#zL~F&<s9of_x#-~PU~B7E-eYwFZLY&rtoT2
-z;qmF~|6bzyclq><WYt>EV{>Coi=OvfD86BJy;s8FIO{4ApZnsRjaS;OSQ9L!9WN*p
-zy752N<=<ML#?MQ3KKsG5=tR}?4@VQT&hPzlG$UiVbkYfVqt50fu~+5`FAM02+9MId
-zsS|bK$=L(83wf5zcy!Egrtbs4N22YVD~*qwGOK;nowFe!TY9$fwh2lTEK+nEj#U(|
-zp8BQZgysE9f7N$i<YB#cc#cA-z4C{PhqcZ$^>iI(|Nm3+^sTes%j#_xzP<0PuYX%e
-z(Zh4`x?8e}X*ZYsYv|szP$Jwdl11v54ZqEbqKWkvZr=LI9N(w^v#P<nZ_#vlB`4o@
-zdx4+R=DJif{4!&45IxU**Ll{WqD6M1>OXywIG$<B*seW4_v1XHAJ5I?EPl;d=Nw%X
-zFuUW-*7&EbM<2a^mcd<AXCj<()r&#C;LP&RS2lKETF&NS!NPj7_>cOA37fity?l4P
-zTA;cttZ94U%{5Fn)*o-N|2*N$J%LUR>l>RxbZ%@o@{zxXgN6U0jza#KS4T@v-8mJa
-z@TKQ2SE%H(%f7WMqYaOI@_u_aDByYfs|#!q6?-gIWPQ}%3qDWT(Io!0gpc`3gL!)d
-zr-om{rFl<_Z`-%82x2h)tmNIZ%Q95|hUBGn7L6*=veU$D`PS_EI(yO8saYara<@1y
-zx@t<f>=(2D=l8bZ*(t-DDKZPR*Q{6h5h~sNA<gqy!x?#|y{p&6I<GkIcfqx=I7gg)
-z(QVx&SB?qDZQ0u-`&mT&3IogADhFAw9_|?a6>U$RoN8YBEcU0DfkXHPMlXqHUd@cR
-fK7Po^h&$(^T7HSkS7p_Wgh2KQ@3qfPnqdn72XacB
+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
+F8UPN$R_y=)
 
 literal 149929
 zcmdPcs{fZEqlA%Zm3gAE>4Y;PQ@1f*JJ=ETcDu^tuH3b$nnCtIYYwsP+VSt*CSjiB
@@ -14410,6 +14425,18 @@ index 6ec3567..bcb3694 100644
  mod thread_lifecycle;
  mod thread_resume_redaction;
  mod thread_summary;
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index d6ce293..9ff1ffc 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -30,6 +30,7 @@ fn settings_item(
+         ThreadSettingsAppliedEvent {
+             thread_id: None,
+             thread_settings: ThreadSettingsSnapshot {
++                mira_reasoning_recovery: None,
+                 disabled_plugin_ids: Vec::new(),
+                 model: "gpt-5".to_string(),
+                 model_provider_id: "openai".to_string(),
 diff --git a/codex-rs/app-server/src/request_processors/thread_handoff.rs b/codex-rs/app-server/src/request_processors/thread_handoff.rs
 new file mode 100644
 index 0000000..5477b07
@@ -15614,10 +15641,21 @@ index f78aa2e..6a36be5 100644
              TransportError::Http { status, .. } => {
                  (self.retry_429 && status.as_u16() == 429)
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 7bf9814..b2a4be7 100644
+index 7bf9814..4c7b2c7 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -538,6 +538,11 @@ pub struct ConfigToml {
+@@ -153,6 +153,10 @@ pub struct OrchestratorFeatureToml {
+ #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
+ #[schemars(deny_unknown_fields)]
+ pub struct ConfigToml {
++    /// Recover a rejected reasoning item after an explicit encrypted-input error.
++    /// Omitted values preserve the conversation's saved setting; new threads default to false.
++    pub mira_auto_reasoning_recovery: Option<bool>,
++
+     /// Optional override of model selection.
+     pub model: Option<String>,
+     /// Review model override used by the `/review` feature.
+@@ -538,6 +542,11 @@ pub struct ConfigToml {
  #[serde(tag = "type", rename_all = "snake_case")]
  pub enum ThreadStoreToml {
      Local {},
@@ -15678,7 +15716,7 @@ index 8d5b8fe..ec0890a 100644
          }
      }
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 3507239..6a8bd31 100644
+index 3507239..ba8a664 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -872,6 +872,9 @@
@@ -15744,6 +15782,29 @@ index 3507239..6a8bd31 100644
          "multi_agent": {
            "type": "boolean"
          },
+@@ -6781,6 +6816,10 @@
+       ],
+       "description": "Memories subsystem settings."
+     },
++    "mira_auto_reasoning_recovery": {
++      "description": "Recover a rejected reasoning item after an explicit encrypted-input error. Omitted values preserve the conversation's saved setting; new threads default to false.",
++      "type": "boolean"
++    },
+     "model": {
+       "description": "Optional override of model selection.",
+       "type": "string"
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index d2a2010..9a37821 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1204,6 +1204,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+                 ThreadSettingsAppliedEvent {
+                     thread_id: Some(parent_thread_id),
+                     thread_settings: ThreadSettingsSnapshot {
++                        mira_reasoning_recovery: None,
+                         disabled_plugin_ids: Vec::new(),
+                         model: "parent-only-model".to_string(),
+                         model_provider_id: "parent-only-provider".to_string(),
 diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
 index d5795df..59f847c 100644
 --- a/codex-rs/core/src/codex_delegate.rs
@@ -15775,7 +15836,7 @@ index 7177740..ecd620f 100644
      pub fn session_telemetry(&self) -> SessionTelemetry {
          self.session.services.session_telemetry.clone()
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 55cc171..c37af0a 100644
+index 55cc171..41769da 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
 @@ -15,13 +15,15 @@ use crate::hook_runtime::run_pre_compact_hooks;
@@ -15795,16 +15856,29 @@ index 55cc171..c37af0a 100644
  use codex_analytics::CodexCompactionEvent;
  use codex_analytics::CompactionImplementation;
  use codex_analytics::CompactionPhase;
-@@ -260,7 +262,7 @@ async fn run_compact_task_inner_impl(
+@@ -260,7 +262,8 @@ async fn run_compact_task_inner_impl(
      );
  
      let max_retries = turn_context.provider.info().stream_max_retries();
 -    let mut retries = 0;
 +    let mut retry_state = ResponsesStreamRetryState::default();
++    let mut reasoning_recoveries = 0;
      let mut client_session = sess.services.model_client.new_session();
      // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
      // request tracking)
-@@ -320,7 +322,7 @@ async fn run_compact_task_inner_impl(
+@@ -274,9 +277,10 @@ async fn run_compact_task_inner_impl(
+ 
+     let compaction_response_id = loop {
+         // Clone is required because of the loop
+-        let turn_input = history
++        let mut turn_input = history
+             .clone()
+             .for_prompt(&turn_context.model_info().input_modalities);
++        sess.filter_rejected_reasoning(&mut turn_input).await;
+         let turn_input_len = turn_input.len();
+         let prompt = Prompt {
+             input: turn_input,
+@@ -320,7 +324,7 @@ async fn run_compact_task_inner_impl(
                          "Context window exceeded while compacting; removing oldest history item. Error: {e}"
                      );
                      history.remove_first_item();
@@ -15813,7 +15887,7 @@ index 55cc171..c37af0a 100644
                      continue;
                  }
                  sess.set_total_tokens_full(turn_context.as_ref()).await;
-@@ -332,25 +334,30 @@ async fn run_compact_task_inner_impl(
+@@ -332,25 +336,38 @@ async fn run_compact_task_inner_impl(
                  return Err(e);
              }
              Err(e) => {
@@ -15823,6 +15897,14 @@ index 55cc171..c37af0a 100644
 -                    sess.notify_stream_error(
 -                        turn_context.as_ref(),
 -                        format!("Reconnecting... {retries}/{max_retries}"),
++                if reasoning_recoveries < crate::session::MAX_RECOVERIES_PER_REQUEST
++                    && sess
++                        .recover_rejected_reasoning(&e, &prompt.input, &turn_context)
++                        .await?
++                {
++                    reasoning_recoveries += 1;
++                    continue;
++                }
 +                let e = if e.is_retryable() {
 +                    match handle_retryable_response_stream_error(
 +                        &mut retry_state,
@@ -15895,7 +15977,7 @@ index 0000000..75adaa5
 +    }
 +}
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index ffbda1e..e0e71e1 100644
+index ffbda1e..b09de63 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -605,6 +605,12 @@ pub enum ThreadStoreConfig {
@@ -15911,7 +15993,16 @@ index ffbda1e..e0e71e1 100644
      /// In-memory thread store for test and debug configurations.
      InMemory { id: String },
  }
-@@ -2446,6 +2452,17 @@ fn resolve_tool_suggest_config_from_config(
+@@ -612,6 +618,8 @@ pub enum ThreadStoreConfig {
+ /// Application configuration loaded from disk and merged with overrides.
+ #[derive(Debug, Clone, PartialEq)]
+ pub struct Config {
++    /// Explicit override of the conversation's automatic reasoning recovery setting.
++    pub mira_auto_reasoning_recovery: Option<bool>,
+     /// Provenance for how this [`Config`] was derived (merged layers + enforced
+     /// requirements).
+     pub config_layer_stack: ConfigLayerStack,
+@@ -2446,6 +2454,17 @@ fn resolve_tool_suggest_config_from_config(
  fn thread_store_config(thread_store: Option<ThreadStoreToml>) -> ThreadStoreConfig {
      match thread_store {
          Some(ThreadStoreToml::Local {}) => ThreadStoreConfig::Local,
@@ -15929,6 +16020,14 @@ index ffbda1e..e0e71e1 100644
          Some(ThreadStoreToml::InMemory { id }) => ThreadStoreConfig::InMemory { id },
          None => ThreadStoreConfig::Local,
      }
+@@ -4357,6 +4376,7 @@ impl Config {
+             current_time_reminder,
+             sleep_tool_mode,
+             features,
++            mira_auto_reasoning_recovery: cfg.mira_auto_reasoning_recovery,
+             suppress_unstable_features_warning: cfg
+                 .suppress_unstable_features_warning
+                 .unwrap_or(false),
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
 index 55d1f47..cb48c3e 100644
 --- a/codex-rs/core/src/lib.rs
@@ -16052,10 +16151,33 @@ index 462bb95..02d9918 100644
          }
      }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 98bfa79..36dbb50 100644
+index 98bfa79..c3d1eb6 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1864,6 +1864,15 @@ impl Session {
+@@ -235,6 +235,8 @@ mod mcp_refresh;
+ mod mcp_runtime;
+ pub(crate) mod multi_agents;
+ mod realtime_history;
++mod reasoning_recovery;
++pub(crate) use reasoning_recovery::MAX_RECOVERIES_PER_REQUEST;
+ mod retained_context;
+ mod review;
+ mod rollout_budget;
+@@ -767,7 +769,13 @@ impl Session {
+         );
+         let service_tier =
+             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
++        let mira_reasoning_recovery = reasoning_recovery::restore(
++            &conversation_history,
++            forked_from_thread_id,
++            config.mira_auto_reasoning_recovery,
++        )?;
+         let session_configuration = SessionConfiguration {
++            mira_reasoning_recovery,
+             provider: create_model_provider(
+                 config.model_provider.clone(),
+                 Some(Arc::clone(&auth_manager)),
+@@ -1864,6 +1872,15 @@ impl Session {
              .thread_config_snapshot(self.services.turn_environments.selections())
      }
  
@@ -16071,11 +16193,334 @@ index 98bfa79..36dbb50 100644
      pub(crate) async fn thread_settings_snapshot(&self) -> ThreadSettingsSnapshot {
          let state = self.state.lock().await;
          state
+diff --git a/codex-rs/core/src/session/reasoning_recovery.rs b/codex-rs/core/src/session/reasoning_recovery.rs
+new file mode 100644
+index 0000000..1db0dc6
+--- /dev/null
++++ b/codex-rs/core/src/session/reasoning_recovery.rs
+@@ -0,0 +1,189 @@
++//! Opt-in recovery of precisely identified, rejected reasoning inputs.
++//!
++//! The provider's normal reasoning protocol and the canonical response items stay
++//! unchanged. Exclusions are durable thread settings, applied only to model input.
++
++use super::session::Session;
++use super::turn_context::TurnContext;
++use codex_history::InitialHistory;
++use codex_history::RolloutItem;
++use codex_protocol::ThreadId;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::CodexErrorDetails;
++use codex_protocol::error::Result;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::MiraReasoningRecovery;
++use codex_protocol::protocol::ThreadSettingsAppliedEvent;
++use codex_protocol::protocol::WarningEvent;
++use std::collections::HashSet;
++
++pub(crate) const MAX_RECOVERIES_PER_REQUEST: usize = 8;
++const MAX_REJECTED_ITEMS: usize = 128;
++
++fn valid_item_id(id: &str) -> bool {
++    !id.is_empty()
++        && id.len() <= 256
++        && id
++            .bytes()
++            .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
++}
++
++pub(super) fn restore(
++    history: &InitialHistory,
++    forked_from: Option<ThreadId>,
++    configured: Option<bool>,
++) -> Result<Option<MiraReasoningRecovery>> {
++    let owner = match history {
++        InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
++        InitialHistory::Forked(_) => forked_from,
++        InitialHistory::New | InitialHistory::Cleared => None,
++    };
++    let mut saved = owner.and_then(|owner| {
++        history.get_rollout_items().iter().rev().find_map(|item| {
++            if let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = item
++                && event.thread_id.is_none_or(|id| id == owner)
++            {
++                event.thread_settings.mira_reasoning_recovery.clone()
++            } else {
++                None
++            }
++        })
++    });
++    if let Some(enabled) = configured {
++        saved.get_or_insert_default().enabled = enabled;
++    }
++    if let Some(saved) = &saved
++        && (saved.rejected_item_ids.len() > MAX_REJECTED_ITEMS
++            || saved.rejected_item_ids.iter().any(|id| !valid_item_id(id)))
++    {
++        return Err(CodexErr::InvalidRequest(
++            "Invalid saved reasoning recovery settings".to_string(),
++        ));
++    }
++    Ok(saved)
++}
++
++fn rejected_reasoning_id(error: &CodexErr, input: &[ResponseItem]) -> Option<String> {
++    let CodexErrorDetails::InvalidRequest(body) = error.details() else {
++        return None;
++    };
++    if body.len() > 32_768 {
++        return None;
++    }
++    let envelope: serde_json::Value = serde_json::from_str(body).ok()?;
++    let detail = envelope.get("error").unwrap_or(&envelope);
++    if detail.get("code")?.as_str()? != "invalid_encrypted_content" {
++        return None;
++    }
++    let message = detail.get("message")?.as_str()?;
++    let (id, _) = message
++        .strip_prefix("The encrypted content for item ")?
++        .split_once(" could not be verified.")?;
++    if !valid_item_id(id) {
++        return None;
++    }
++    let mut matching = input
++        .iter()
++        .filter(|item| item.id().is_some_and(|value| value.to_string() == id));
++    let item = matching.next()?;
++    if matching.next().is_some() {
++        return None;
++    }
++    matches!(item, ResponseItem::Reasoning { encrypted_content: Some(value), .. } if !value.is_empty())
++        .then(|| id.to_string())
++}
++
++impl Session {
++    pub(crate) async fn filter_rejected_reasoning(&self, input: &mut Vec<ResponseItem>) {
++        let state = self.state.lock().await;
++        let Some(recovery) = &state.session_configuration.mira_reasoning_recovery else {
++            return;
++        };
++        if recovery.rejected_item_ids.is_empty() {
++            return;
++        }
++        input.retain(|item| {
++            !matches!(item, ResponseItem::Reasoning { .. })
++                || !item
++                    .id()
++                    .is_some_and(|id| recovery.rejected_item_ids.contains(&id.to_string()))
++        });
++    }
++
++    pub(crate) async fn recover_rejected_reasoning(
++        &self,
++        error: &CodexErr,
++        input: &[ResponseItem],
++        turn: &TurnContext,
++    ) -> Result<bool> {
++        let Some(id) = rejected_reasoning_id(error, input) else {
++            return Ok(false);
++        };
++        let _settings_guard = super::thread_settings::acquire_persistence_lock(self).await;
++        let recovery = {
++            let state = self.state.lock().await;
++            let active_ids: HashSet<String> = state
++                .history
++                .raw_items()
++                .filter(|item| matches!(item, ResponseItem::Reasoning { .. }))
++                .filter_map(ResponseItem::id)
++                .map(ToString::to_string)
++                .collect();
++            if !active_ids.contains(&id) {
++                return Ok(false);
++            }
++            let Some(mut recovery) = state.session_configuration.mira_reasoning_recovery.clone()
++            else {
++                return Ok(false);
++            };
++            if !recovery.enabled || recovery.rejected_item_ids.contains(&id) {
++                return Ok(false);
++            }
++            // Completed compaction windows no longer need individual exclusions.
++            recovery
++                .rejected_item_ids
++                .retain(|id| active_ids.contains(id));
++            if recovery.rejected_item_ids.len() >= MAX_REJECTED_ITEMS {
++                return Ok(false);
++            }
++            recovery.rejected_item_ids.push(id);
++            recovery
++        };
++        // A lost/failed write must never allow another model sample. The existing
++        // live-thread writer owns operation UUID reuse, cancellation, and flush.
++        if let Some(live_thread) = self.live_thread() {
++            let mut snapshot = self.thread_settings_snapshot().await;
++            snapshot.mira_reasoning_recovery = Some(recovery.clone());
++            let checkpoint = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
++                ThreadSettingsAppliedEvent {
++                    thread_id: Some(self.thread_id()),
++                    thread_settings: snapshot,
++                },
++            ));
++            let persisted = async {
++                live_thread.append_items(&[checkpoint]).await?;
++                live_thread.flush().await
++            }
++            .await;
++            persisted.map_err(|error| {
++                CodexErr::Fatal(format!(
++                    "Failed to save reasoning recovery before continuing: {error}"
++                ))
++            })?;
++        }
++        self.state
++            .lock()
++            .await
++            .session_configuration
++            .mira_reasoning_recovery = Some(recovery);
++        self.send_event(turn, EventMsg::Warning(WarningEvent {
++            message: "Automatically excluded one rejected reasoning item from model input; continuing this turn. Original history and completed tool results are preserved.".to_string(),
++        })).await;
++        Ok(true)
++    }
++}
++
++#[cfg(test)]
++#[path = "reasoning_recovery_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/session/reasoning_recovery_tests.rs b/codex-rs/core/src/session/reasoning_recovery_tests.rs
+new file mode 100644
+index 0000000..1f1f2c4
+--- /dev/null
++++ b/codex-rs/core/src/session/reasoning_recovery_tests.rs
+@@ -0,0 +1,105 @@
++use super::*;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn error(code: &str, id: &str) -> CodexErr {
++    CodexErr::InvalidRequest(json!({"error": {
++        "code": code,
++        "message": format!("The encrypted content for item {id} could not be verified. Reason: Encrypted content could not be decrypted or parsed.")
++    }}).to_string())
++}
++
++#[test]
++fn requires_structured_error_and_one_matching_encrypted_reasoning_item() {
++    let reasoning: ResponseItem = serde_json::from_value(json!({
++        "type":"reasoning", "id":"rs_rejected", "summary":[], "encrypted_content":"opaque"
++    }))
++    .unwrap();
++    let valid = error("invalid_encrypted_content", "rs_rejected");
++    assert_eq!(
++        rejected_reasoning_id(&valid, std::slice::from_ref(&reasoning)),
++        Some("rs_rejected".into())
++    );
++    assert_eq!(rejected_reasoning_id(&valid, &[]), None);
++    assert_eq!(
++        rejected_reasoning_id(&valid, &[reasoning.clone(), reasoning.clone()]),
++        None
++    );
++    assert_eq!(
++        rejected_reasoning_id(
++            &error("invalid_encrypted_content", "rs_absent"),
++            std::slice::from_ref(&reasoning)
++        ),
++        None
++    );
++    assert_eq!(
++        rejected_reasoning_id(
++            &error("server_error", "rs_rejected"),
++            std::slice::from_ref(&reasoning)
++        ),
++        None
++    );
++    assert_eq!(
++        rejected_reasoning_id(
++            &error("unknown_reasoning_pool", "rs_rejected"),
++            &[reasoning]
++        ),
++        None
++    );
++}
++
++#[test]
++fn refuses_compaction_tool_outputs_and_unencrypted_reasoning() {
++    for item in [
++        json!({"type":"compaction","id":"rs_rejected","encrypted_content":"opaque"}),
++        json!({"type":"reasoning","id":"rs_rejected","summary":[]}),
++        json!({"type":"function_call_output","id":"rs_rejected","call_id":"call_1","output":"invalid_encrypted_content"}),
++    ] {
++        let item: ResponseItem = serde_json::from_value(item).unwrap();
++        assert_eq!(
++            rejected_reasoning_id(&error("invalid_encrypted_content", "rs_rejected"), &[item]),
++            None
++        );
++    }
++    let text_only = CodexErr::InvalidRequest("invalid_encrypted_content for rs_rejected".into());
++    assert_eq!(rejected_reasoning_id(&text_only, &[]), None);
++}
++
++#[tokio::test]
++async fn settings_survive_resume_and_explicit_disable_preserves_exclusions() {
++    let configuration = super::super::tests::make_session_configuration_for_tests().await;
++    let mut snapshot = configuration.thread_settings_snapshot(&[]);
++    let owner = ThreadId::new();
++    let other = ThreadId::new();
++    let saved = MiraReasoningRecovery {
++        enabled: true,
++        rejected_item_ids: vec!["rs_bad".into()],
++    };
++    snapshot.mira_reasoning_recovery = Some(saved.clone());
++    let item = RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
++        codex_protocol::protocol::ThreadSettingsAppliedEvent {
++            thread_id: Some(owner),
++            thread_settings: snapshot,
++        },
++    ));
++    let history = InitialHistory::Resumed(codex_history::ResumedHistory {
++        conversation_id: owner,
++        history: std::sync::Arc::new(vec![item.clone()]),
++        rollout_path: None,
++    });
++    assert_eq!(restore(&history, None, None).unwrap(), Some(saved));
++    assert_eq!(
++        restore(&history, None, Some(false)).unwrap(),
++        Some(MiraReasoningRecovery {
++            enabled: false,
++            rejected_item_ids: vec!["rs_bad".into()]
++        })
++    );
++    let unrelated = InitialHistory::Resumed(codex_history::ResumedHistory {
++        conversation_id: other,
++        history: std::sync::Arc::new(vec![item]),
++        rollout_path: None,
++    });
++    assert_eq!(restore(&unrelated, None, None).unwrap(), None);
++    assert_eq!(restore(&InitialHistory::New, None, None).unwrap(), None);
++}
 diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
-index 1f2a4b0..522d74c 100644
+index 1f2a4b0..f8f1dad 100644
 --- a/codex-rs/core/src/session/session.rs
 +++ b/codex-rs/core/src/session/session.rs
-@@ -698,6 +698,22 @@ impl Session {
+@@ -120,6 +120,8 @@ pub(crate) struct SessionConfiguration {
+     /// Thread-owned plugin selection inherited by future turns.
+     pub(super) disabled_plugin_ids: Vec<String>,
+ 
++    pub(super) mira_reasoning_recovery: Option<codex_protocol::protocol::MiraReasoningRecovery>,
++
+     // TODO(pakrym): Remove config from here
+     pub(super) original_config_do_not_use: Arc<Config>,
+     /// Optional service name tag for session metrics.
+@@ -292,6 +294,7 @@ impl SessionConfiguration {
+         environment_selections: &[TurnEnvironmentSelection],
+     ) -> ThreadSettingsSnapshot {
+         ThreadSettingsSnapshot {
++            mira_reasoning_recovery: self.mira_reasoning_recovery.clone(),
+             model: self.step_settings.collaboration_mode.model().to_string(),
+             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
+             service_tier: self.step_settings.service_tier.clone(),
+@@ -698,6 +701,22 @@ impl Session {
          git_enrichment_policy: GitEnrichmentPolicy,
          windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
      ) -> anyhow::Result<Arc<Self>> {
@@ -16099,10 +16544,26 @@ index 1f2a4b0..522d74c 100644
              "Configuring session: model={}; provider={:?}",
              session_configuration
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index aa82875..5ae4822 100644
+index aa82875..dfde089 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5042,6 +5042,10 @@ fn text_block(s: &str) -> serde_json::Value {
+@@ -4503,6 +4503,7 @@ async fn set_rate_limits_retains_previous_credits() {
+         },
+     };
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+         step_settings: Arc::new(StepSettings {
+             collaboration_mode,
+@@ -4624,6 +4625,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+         },
+     };
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+         step_settings: Arc::new(StepSettings {
+             collaboration_mode,
+@@ -5042,6 +5044,10 @@ fn text_block(s: &str) -> serde_json::Value {
  
  async fn build_test_config(codex_home: &Path) -> Config {
      ConfigBuilder::without_managed_config_for_tests()
@@ -16113,8 +16574,56 @@ index aa82875..5ae4822 100644
          .codex_home(codex_home.to_path_buf())
          .harness_overrides(ConfigOverrides {
              model: Some("gpt-5.5".to_string()),
+@@ -5271,6 +5277,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+     };
+ 
+     SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+         step_settings: Arc::new(StepSettings {
+             collaboration_mode,
+@@ -6352,6 +6359,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+         },
+     };
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(
+             config.model_provider.clone(),
+             Some(Arc::clone(&auth_manager)),
+@@ -6512,6 +6520,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+     };
+     let default_environments = vec![local(config.cwd.clone())];
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(
+             config.model_provider.clone(),
+             Some(Arc::clone(&auth_manager)),
+@@ -6814,6 +6823,7 @@ async fn make_session_with_config_and_rx(
+     };
+     let default_environments = vec![local(config.cwd.clone())];
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(
+             config.model_provider.clone(),
+             Some(Arc::clone(&auth_manager)),
+@@ -6943,6 +6953,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+     };
+     let default_environments = vec![local(config.cwd.clone())];
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(
+             config.model_provider.clone(),
+             Some(Arc::clone(&auth_manager)),
+@@ -8682,6 +8693,7 @@ where
+     };
+     let default_environments = vec![local(config.cwd.clone())];
+     let session_configuration = SessionConfiguration {
++        mira_reasoning_recovery: None,
+         provider: create_model_provider(
+             config.model_provider.clone(),
+             Some(Arc::clone(&auth_manager)),
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 5d5fa3a..a9459d9 100644
+index 5d5fa3a..e6a7841 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -10,6 +10,7 @@ use crate::client_common::ResponseEvent;
@@ -16201,6 +16710,39 @@ index 5d5fa3a..a9459d9 100644
              emit_compact_metric(
                  &sess.services.session_telemetry,
                  "local",
+@@ -1562,6 +1566,7 @@ async fn run_sampling_request(
+     let mut initial_input = Some(input);
+     let mut original_input = None;
+     let mut executed_tool_calls_by_output = HashMap::new();
++    let mut reasoning_recoveries = 0;
+     loop {
+         // A retry must not attribute the next tool call to the previous response.
+         turn_context
+@@ -1575,6 +1580,7 @@ async fn run_sampling_request(
+                 .for_prompt(&step_context.settings.model_info.input_modalities)
+         };
+         let mut prompt_input = prompt_input;
++        sess.filter_rejected_reasoning(&mut prompt_input).await;
+         sess.services
+             .executed_tool_calls
+             .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
+@@ -1624,6 +1630,16 @@ async fn run_sampling_request(
+             },
+         };
+ 
++        if reasoning_recoveries < super::reasoning_recovery::MAX_RECOVERIES_PER_REQUEST
++            && sess
++                .recover_rejected_reasoning(&err, &prompt.input, &turn_context)
++                .await?
++        {
++            reasoning_recoveries += 1;
++            turn_context.turn_timing_state.record_sampling_retry();
++            continue;
++        }
++
+         if original_input.is_none() {
+             original_input = Some(prompt.input);
+         }
 diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
 index 14913d9..0d0d580 100644
 --- a/codex-rs/core/src/tasks/compact.rs
@@ -17042,11 +17584,264 @@ index 1438fd9..cc07272 100644
      };
      let mut builder = test_codex()
          .with_history_mode(history_mode)
+diff --git a/codex-rs/core/tests/suite/mira_reasoning_recovery.rs b/codex-rs/core/tests/suite/mira_reasoning_recovery.rs
+new file mode 100644
+index 0000000..c78a5b2
+--- /dev/null
++++ b/codex-rs/core/tests/suite/mira_reasoning_recovery.rs
+@@ -0,0 +1,239 @@
++use anyhow::Result;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::MiraReasoningRecovery;
++use codex_protocol::protocol::Op;
++use core_test_support::responses::*;
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++const REJECTED: &str = "The encrypted content for item rs_bad could not be verified. Reason: Encrypted content could not be decrypted or parsed.";
++
++fn initial_response() -> String {
++    sse(vec![
++        ev_response_created("first"),
++        ev_reasoning_item("rs_good", &[], &["valid reasoning"]),
++        ev_reasoning_item("rs_bad", &[], &["rejected reasoning"]),
++        ev_function_call(
++            "plan_once",
++            "update_plan",
++            &json!({
++                "plan":[{"step":"Verify recovery","status":"completed"}]
++            })
++            .to_string(),
++        ),
++        ev_completed("first"),
++    ])
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn preserves_tools_good_reasoning_and_recovery_across_restart() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            initial_response(),
++            sse_failed("rejected", "invalid_encrypted_content", REJECTED),
++            sse(vec![
++                ev_assistant_message("recovered", "Done"),
++                ev_completed("recovered"),
++            ]),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|config| {
++            config.mira_auto_reasoning_recovery = Some(true);
++            config.update_plan_enabled = true;
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Update the plan once, then finish.")
++        .await?;
++    let recorded = requests.requests();
++    assert_eq!(recorded.len(), 3);
++    assert_eq!(recorded[1].inputs_of_type("reasoning").len(), 2);
++    assert_eq!(
++        recorded[2]
++            .inputs_of_type("reasoning")
++            .iter()
++            .map(|item| item["id"].as_str().unwrap())
++            .collect::<Vec<_>>(),
++        vec!["rs_good"]
++    );
++    assert_eq!(
++        recorded[1].inputs_of_type("function_call_output"),
++        recorded[2].inputs_of_type("function_call_output")
++    );
++    assert_eq!(recorded[2].inputs_of_type("function_call_output").len(), 1);
++    assert_eq!(
++        recorded[2].inputs_of_type("function_call_output")[0]["output"],
++        "Plan updated"
++    );
++    assert_eq!(
++        recorded[1].body_json()["client_metadata"]["turn_id"],
++        recorded[2].body_json()["client_metadata"]["turn_id"]
++    );
++    assert_eq!(
++        test.codex
++            .thread_settings_snapshot()
++            .await
++            .mira_reasoning_recovery,
++        Some(MiraReasoningRecovery {
++            enabled: true,
++            rejected_item_ids: vec!["rs_bad".into()]
++        })
++    );
++    let continued = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_assistant_message("after_restart", "Continued"),
++            ev_completed("after_restart"),
++        ]),
++    )
++    .await;
++    let resumed = test_codex().restart(&server, &test).await?;
++    resumed
++        .submit_turn("Continue with the existing plan.")
++        .await?;
++    let input = continued.single_request();
++    assert_eq!(
++        input
++            .inputs_of_type("reasoning")
++            .iter()
++            .map(|item| item["id"].as_str().unwrap())
++            .collect::<Vec<_>>(),
++        vec!["rs_good"]
++    );
++    assert!(
++        resumed
++            .codex
++            .thread_settings_snapshot()
++            .await
++            .mira_reasoning_recovery
++            .unwrap()
++            .enabled
++    );
++    let rollout =
++        std::fs::read_to_string(resumed.session_configured.rollout_path.as_ref().unwrap())?;
++    assert!(rollout.lines().any(|line| {
++        let line: serde_json::Value = serde_json::from_str(line).unwrap();
++        line["type"] == "response_item"
++            && line["payload"]["id"] == "rs_bad"
++            && line["payload"]["encrypted_content"].is_string()
++    }));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn default_setting_preserves_the_original_error_behavior() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            initial_response(),
++            sse_failed("rejected", "invalid_encrypted_content", REJECTED),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|config| config.update_plan_enabled = true)
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Update the plan.").await?;
++    assert_eq!(requests.requests().len(), 2);
++    assert_eq!(
++        test.codex
++            .thread_settings_snapshot()
++            .await
++            .mira_reasoning_recovery,
++        None
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn enabled_setting_keeps_reasoning_until_it_is_rejected() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            initial_response(),
++            sse(vec![
++                ev_assistant_message("done", "Done"),
++                ev_completed("done"),
++            ]),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|config| {
++            config.mira_auto_reasoning_recovery = Some(true);
++            config.update_plan_enabled = true;
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    test.submit_turn("Update the plan.").await?;
++    let recorded = requests.requests();
++    assert_eq!(recorded.len(), 2);
++    assert_eq!(recorded[1].inputs_of_type("reasoning").len(), 2);
++    assert_eq!(
++        recorded[1].body_json()["include"],
++        json!(["reasoning.encrypted_content"])
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn plaintext_compaction_recovers_without_discarding_other_reasoning() -> Result<()> {
++    let server = start_mock_server().await;
++    let test = test_codex()
++        .with_config(|config| {
++            config.mira_auto_reasoning_recovery = Some(true);
++            config
++                .features
++                .enable(codex_features::Feature::MiraPlaintextContext)
++                .unwrap();
++        })
++        .build_with_auto_env(&server)
++        .await?;
++    mount_sse_once(
++        &server,
++        sse(vec![
++            ev_reasoning_item("rs_good", &[], &["good"]),
++            ev_reasoning_item("rs_bad", &[], &["bad"]),
++            ev_assistant_message("first", "Remember this task"),
++            ev_completed("first"),
++        ]),
++    )
++    .await;
++    test.submit_turn("Remember the task.").await?;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            sse_failed("rejected", "invalid_encrypted_content", REJECTED),
++            sse(vec![
++                ev_assistant_message("summary", "Preserved task summary"),
++                ev_completed("summary"),
++            ]),
++        ],
++    )
++    .await;
++    test.codex.submit(Op::Compact).await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let recorded = requests.requests();
++    assert_eq!(recorded.len(), 2);
++    assert_eq!(
++        recorded[1]
++            .inputs_of_type("reasoning")
++            .iter()
++            .map(|item| item["id"].as_str().unwrap())
++            .collect::<Vec<_>>(),
++        vec!["rs_good"]
++    );
++    Ok(())
++}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index b266997..dc3ec5d 100644
+index b266997..00ee8e8 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -127,11 +127,14 @@ mod override_updates;
+@@ -109,6 +109,7 @@ mod mcp_tool_cache;
+ mod mcp_tool_exposure;
+ mod mcp_turn_metadata;
+ mod mcp_user_verification;
++mod mira_reasoning_recovery;
+ mod model_overrides;
+ mod model_runtime_selectors;
+ mod model_switching;
+@@ -127,11 +128,14 @@ mod override_updates;
  mod pending_input;
  mod permissions_messages;
  mod personality;
@@ -18132,6 +18927,18 @@ index 991afbe..0f8f4b7 100644
      Ok(())
  }
  
+diff --git a/codex-rs/core/tests/suite/settings_constraints.rs b/codex-rs/core/tests/suite/settings_constraints.rs
+index ecdca64..23fbf05 100644
+--- a/codex-rs/core/tests/suite/settings_constraints.rs
++++ b/codex-rs/core/tests/suite/settings_constraints.rs
+@@ -155,6 +155,7 @@ async fn protected_model_settings_use_the_proposed_permissions(
+     assert!(response.requests().is_empty());
+ 
+     let expected = ThreadSettingsSnapshot {
++        mira_reasoning_recovery: None,
+         model: PROTECTED_MODEL.to_string(),
+         collaboration_mode: initial.collaboration_mode.with_updates(
+             Some(PROTECTED_MODEL.to_string()),
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap b/codex-rs/core/tests/suite/snapshots/all__suite__rate_limit_retry__http_429_wait.snap
 new file mode 100644
 index 0000000..fbbb08f
@@ -18377,6 +19184,49 @@ index 5357867..1cefa8f 100644
          ),
          (
              CodexErr::UnexpectedStatus(UnexpectedResponseError {
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index e25cce8..8cf8702 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2200,6 +2200,10 @@ pub struct ThreadSettingsAppliedEvent {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ pub struct ThreadSettingsSnapshot {
++    /// Mira's opt-in input projection. Original reasoning items remain in history.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub mira_reasoning_recovery: Option<MiraReasoningRecovery>,
+     pub model: String,
+     pub model_provider_id: String,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -2229,6 +2233,15 @@ pub struct ThreadSettingsSnapshot {
+     pub disabled_plugin_ids: Vec<String>,
+ }
+ 
++/// Conversation-owned recovery policy and reasoning items rejected by its provider.
++/// This records input exclusions, never decrypted reasoning or rewritten history.
++#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++pub struct MiraReasoningRecovery {
++    pub enabled: bool,
++    #[serde(default)]
++    pub rejected_item_ids: Vec<String>,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
+ pub struct TokenUsage {
+     #[ts(type = "number")]
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 308e892..53617ce 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -617,6 +617,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    mira_reasoning_recovery: None,
+                     disabled_plugin_ids: Vec::new(),
+                     model: "gpt-5.2-codex".to_string(),
+                     model_provider_id: "updated-provider".to_string(),
 diff --git a/codex-rs/thread-store/Cargo.toml b/codex-rs/thread-store/Cargo.toml
 index b0d2b15..64cb882 100644
 --- a/codex-rs/thread-store/Cargo.toml
@@ -22093,6 +22943,18 @@ index 0000000..ec5f66e
 +        result
 +    }
 +}
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index 791c0ff..5af5af9 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -656,6 +656,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    mira_reasoning_recovery: None,
+                     disabled_plugin_ids: Vec::new(),
+                     model: "gpt-5.2-codex".to_string(),
+                     model_provider_id: "updated-provider".to_string(),
 diff --git a/codex-rs/tui/src/app/app_server_event_targets.rs b/codex-rs/tui/src/app/app_server_event_targets.rs
 index 0054f79..6252dae 100644
 --- a/codex-rs/tui/src/app/app_server_event_targets.rs
