@@ -37,9 +37,11 @@ func TestCodexResidencyRPC(t *testing.T) {
 
 func TestCodexResidencyRPCUnsupportedAndCancellation(t *testing.T) {
 	for _, test := range []struct {
-		name  string
-		stall bool
-	}{{"unsupported", false}, {"cancel", true}} {
+		name    string
+		stall   bool
+		code    int
+		message string
+	}{{"unsupported", false, -32601, ""}, {"serde_unknown_method", false, -32600, "Invalid request: unknown variant `mira/thread/residency`, expected one of ..."}, {"cancel", true, 0, ""}} {
 		t.Run(test.name, func(t *testing.T) {
 			upgrader := websocket.Upgrader{}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +66,7 @@ func TestCodexResidencyRPCUnsupportedAndCancellation(t *testing.T) {
 						_, _, _ = conn.ReadMessage()
 						return
 					}
-					_ = conn.WriteJSON(map[string]any{"id": request.ID, "error": map[string]any{"code": -32601}})
+					_ = conn.WriteJSON(map[string]any{"id": request.ID, "error": map[string]any{"code": test.code, "message": test.message}})
 				}
 			}))
 			defer server.Close()

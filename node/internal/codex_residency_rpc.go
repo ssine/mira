@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -49,7 +50,8 @@ func callCodexResidency(parent context.Context, listenURL string, evict *residen
 				Method string          `json:"method"`
 				Result json.RawMessage `json:"result"`
 				Error  *struct {
-					Code int `json:"code"`
+					Code    int    `json:"code"`
+					Message string `json:"message"`
 				} `json:"error"`
 			}
 			if err := connection.ReadJSON(&message); err != nil {
@@ -59,7 +61,7 @@ func callCodexResidency(parent context.Context, listenURL string, evict *residen
 				continue
 			}
 			if message.Error != nil {
-				if message.Error.Code == -32601 {
+				if message.Error.Code == -32601 || (method == "mira/thread/residency" && message.Error.Code == -32600 && strings.Contains(message.Error.Message, "unknown variant `mira/thread/residency`")) {
 					return errResidencyUnsupported
 				}
 				return fmt.Errorf("runtime rejected residency query")
