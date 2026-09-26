@@ -7,6 +7,23 @@ async function until(fn, message) {
 }
 const state = () => fetch("/__test/state").then(response => response.json());
 const keys = () => [...document.querySelectorAll(".trace-card.image")].map(card => card.dataset.traceKey);
+function verifyCompactions() {
+  const card = $('[data-trace-key="compaction"]');
+  check(card && !card.querySelector("details").open, "plaintext compaction is collapsed by default");
+  check(card.querySelector(".compaction-expand").textContent === "展开", "notice offers an explicit expand action");
+  check(!card.querySelector(".trace-body").checkVisibility(), "summary is not visible while collapsed");
+  check(!$('[data-trace-key="compaction-summary"]'), "generated summary is not duplicated as ordinary prose");
+  const encrypted = $('[data-trace-key="encrypted-compaction"]');
+  check(encrypted.querySelector("details").hidden, "encrypted compaction does not offer an empty disclosure");
+  check($('[data-trace-key="normal-reply"] .trace-body').textContent.trim() === "继续正常回复。", "normal prose before encrypted compaction remains visible");
+  const { compactionSummaryKeys, mergeTranscriptItems } = window.transcriptRegression;
+  const assistant = { key: "older", kind: "assistant", body: "summary", turnId: "turn", sourceItemSeq: 10 };
+  const notice = { key: "newer", kind: "compaction", compactionSummary: "Handoff\nsummary", turnId: "turn", sourceItemSeq: 11 };
+  check(compactionSummaryKeys([notice]).size === 0, "summary-only tail can render without older prose");
+  check(compactionSummaryKeys(mergeTranscriptItems([notice], [assistant])).has("older"), "prepending an older page folds the duplicate summary");
+  check(compactionSummaryKeys([{ ...assistant, turnId: "other" }, notice]).size === 0, "matching prose in another turn remains visible");
+  check(compactionSummaryKeys([{ ...assistant, body: "normal answer" }, notice]).size === 0, "unrelated plaintext prose remains visible");
+}
 export async function verifyImages() {
   await until(() => document.querySelectorAll(".trace-card.image img:not([hidden])").length === 2, "images load without expanding tools");
   check(keys().join() === "history-2-image-0,history-4-image-0", "image order follows history, not download completion");
@@ -15,10 +32,14 @@ export async function verifyImages() {
   check(cards.findIndex(card => card.dataset.traceKey === "history-2-image-0") < cards.findIndex(card => card.textContent.includes("Between pictures")), "first image precedes later prose");
   const counters = await state();
   check(counters.nodeReads === 0, "never read paths from a Node");
+  verifyCompactions();
   return { keys: keys(), nodeReads: counters.nodeReads };
 }
 export async function runTranscriptScenarios() {
   await verifyImages();
+  const compaction = $('[data-trace-key="compaction"]'), compactionDetails = compaction.querySelector("details");
+  compaction.querySelector("summary").click();
+  check(compactionDetails.open && compaction.querySelector(".trace-body h2")?.textContent === "压缩摘要", "expanding the notice reveals formatted summary");
   const imageNodes = [...document.querySelectorAll(".trace-card.image img")];
   const initialReads = (await state()).imageRequests;
   const tool = $(".trace-card.tool"), details = tool.querySelector(".trace-detail");
@@ -30,10 +51,10 @@ export async function runTranscriptScenarios() {
   await delay(80);
   const before = scroll.scrollTop;
   check(before > 500, "long expanded tool has a reading position");
-  await until(() => $(".trace-cost")?.textContent === "费用 $0.21", "deferred turn cost loads");
+  await until(() => $(".trace-cost:not([hidden])")?.textContent === "费用 $0.21", "deferred turn cost loads");
   const missingCosts = [];
   const observer = new MutationObserver(() => {
-    if ($(".trace-cost")?.textContent !== "费用 $0.21") missingCosts.push($(".trace-cost")?.textContent);
+    if ($(".trace-cost:not([hidden])")?.textContent !== "费用 $0.21") missingCosts.push($(".trace-cost:not([hidden])")?.textContent);
   });
   observer.observe($("#conversationTrace"), { childList: true, subtree: true, characterData: true });
   await fetch("/__test/state", { method: "POST", body: JSON.stringify({ version: 2 }) });
@@ -47,6 +68,9 @@ export async function runTranscriptScenarios() {
   await delay(100);
   check(Math.abs(scroll.scrollTop - chosen) < 2, "detail completion respects scrolling during the request");
   check(details.open && tool.closest(".tool-group").open, "expanded state survives updates");
+  check(compaction.isConnected && compactionDetails.open, "expanded compaction survives history polling");
+  compaction.querySelector("summary").click();
+  check(!compactionDetails.open, "summary can be collapsed again at the notice");
   check(imageNodes.every((img, index) => img === document.querySelectorAll(".trace-card.image img")[index]), "decoded images survive reconciliation");
   check((await state()).imageRequests === initialReads, "updates do not reload unchanged images");
   check(keys().join() === "history-2-image-0,history-4-image-0", "details do not reorder images");
@@ -66,5 +90,6 @@ export async function runTranscriptScenarios() {
   await window.transcriptRegression.loadAgentTranscript(new URL(location.href).searchParams.get("thread"), null,
     { preserveLoaded: true, anchorBottom: true });
   check(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 2, "tail reconciliation stays at bottom before the next paint");
+  verifyCompactions();
   return { scrollBefore: before, scrollAfter: scroll.scrollTop, imageReads: initialReads, keys: keys() };
 }

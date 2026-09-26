@@ -3067,6 +3067,20 @@ function ensureToolGroup(trace, turnId = "", before = null) {
   return group;
 }
 
+function setCompactionSummary(card, notice, summary) {
+  const details = card.querySelector(".compaction-detail");
+  if (notice !== undefined) {
+    card.querySelector(".compaction-notice").textContent = notice;
+    details.querySelector(".compaction-label").textContent = notice;
+  }
+  if (summary !== undefined && card.querySelector(".trace-body")._miraSource !== summary) {
+    setTraceBody(card, summary, "assistant");
+  }
+  const hasSummary = Boolean(card.querySelector(".trace-body")._miraSource?.trim());
+  card.querySelector(".compaction-notice").hidden = hasSummary;
+  details.hidden = !hasSummary;
+}
+
 function upsertTrace(key, kind, title, body = undefined, status = "", options = {}) {
   const trace = $("#conversationTrace");
   const follow = options.autoScroll !== false && (options.forceScroll === true || traceNearBottom(trace));
@@ -3090,7 +3104,13 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       const footer = element("footer", "trace-footer");
       footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), element("span", "trace-cost"), copy);
       card.append(element("div", "trace-body"), footer);
-    } else if (["user", "compaction", "image"].includes(kind)) {
+    } else if (kind === "compaction") {
+      const details = element("details", "trace-detail compaction-detail");
+      const head = element("summary", "compaction-head");
+      head.append(element("span", "compaction-label"), element("span", "compaction-expand", "展开"), element("span", "compaction-collapse", "收起"));
+      details.append(head, element("div", "trace-body"));
+      card.append(element("div", "compaction-notice"), details);
+    } else if (["user", "image"].includes(kind)) {
       card.append(element("div", "trace-body"));
     } else {
       const head = element("div", "trace-head");
@@ -3099,7 +3119,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       head.append(element("span", "trace-kind", title), actions);
       card.append(head, element("div", "trace-body"));
     }
-    if (kind !== "image") setTraceBody(card, body, kind);
+    if (!["image", "compaction"].includes(kind)) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
     if (kind === "tool" && options.collapseTools !== false) {
       ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
@@ -3111,7 +3131,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.dataset.traceKind = kind;
     if (card.querySelector(".trace-kind")) card.querySelector(".trace-kind").textContent = title;
     if (card.querySelector(".trace-status")) card.querySelector(".trace-status").textContent = status;
-    if (kind !== "image" && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
+    if (!["image", "compaction"].includes(kind) && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
   }
   if (!trace.contains(card)) {
@@ -3120,6 +3140,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   }
   card.dataset.traceTitle = title;
   card.dataset.traceStatus = status;
+  if (kind === "compaction") setCompactionSummary(card, body, options.compactionSummary);
   if (options.turnId) card.dataset.turnId = options.turnId;
   if (options.transcriptKey) card._miraTranscriptKey = options.transcriptKey;
   if (options.toolDetail) {
@@ -3642,14 +3663,37 @@ function restoreTraceViewport(viewport) {
     : viewport.mode === "prepend" ? viewport.top + scroll.scrollHeight - viewport.height : viewport.top;
 }
 
+function compactionSummaryKeys(items) {
+  const hidden = new Set();
+  let previous;
+  for (const item of items) {
+    if (item.kind === "compaction") {
+      const summary = item.compactionSummary?.trim();
+      const body = previous?.kind === "assistant" && previous.body?.trim();
+      // Plaintext compaction records contain the generated reply, optionally
+      // preceded by Codex's handoff instructions. Match only that adjacent
+      // reply in the same turn, after loaded history pages have been merged.
+      if (summary && body && previous.turnId === item.turnId &&
+          (summary === body || summary.endsWith(`\n${body}`))) hidden.add(previous.key);
+    }
+    if (item.kind !== "reasoning") previous = item;
+  }
+  return hidden;
+}
+
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
+  const summaryKeys = compactionSummaryKeys(agent.transcriptItems);
+  const hiddenSummaries = new Set(agent.transcriptItems.filter(item => summaryKeys.has(item.key))
+    .map(item => JSON.stringify([item.turnId ?? "", item.body?.trim()])));
   const previousCards = [...existingTrace.querySelectorAll(".trace-card")];
-  // Keep expanded tool bodies and decoded images intact across reconciliation.
-  const reusableCards = new Map(previousCards.filter((card) => ["tool", "image"].includes(card.dataset.traceKind))
+  // Keep expanded details and decoded images intact across reconciliation.
+  const reusableCards = new Map(previousCards.filter((card) => ["tool", "image", "compaction"].includes(card.dataset.traceKind))
     .map((card) => [card.dataset.traceKey, card]));
   const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
     ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction), .trace-card[data-pending-user="true"]')]
+      .filter(card => card.dataset.traceKind !== "assistant" || !hiddenSummaries.has(
+        JSON.stringify([card.dataset.turnId ?? "", card.querySelector(".trace-body")._miraSource?.trim()])))
     : [];
   const liveCompactions = [...existingTrace.querySelectorAll('.trace-card.compaction')]
     .filter((card) => card.dataset.traceKey?.startsWith("item-"));
@@ -3669,12 +3713,13 @@ function renderTranscript(fallbackThread, options = {}) {
   const trace = clear($("#conversationTrace"));
   renderHistoryLoader(trace);
   for (const item of agent.transcriptItems) {
+    if (summaryKeys.has(item.key)) continue;
     if (item.kind === "error" && agent.diagnostics.has(JSON.stringify([agent.threadId, item.turnId ?? "unscoped"]))) continue;
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
       autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, reuseCard: reusableCards.get(key), turnId: item.turnId,
-      transcriptKey: item.key, toolDetail: item.toolDetail,
+      transcriptKey: item.key, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
       completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
       elapsedApproximate: item.elapsedApproximate,
       ...(Number.isFinite(item.turnElapsedMs) ? {

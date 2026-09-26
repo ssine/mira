@@ -88,6 +88,32 @@ func TestPaginateTranscript(t *testing.T) {
 	}
 }
 
+func TestProjectTranscriptCompactionSummary(t *testing.T) {
+	summary := "Handoff instructions\n# 压缩摘要\n\n已完成检查，接下来修改页面。"
+	items := []map[string]any{
+		record("event_msg", map[string]any{"type": "task_started", "turn_id": "turn"}),
+		record("compacted", map[string]any{"message": summary}),
+		record("compacted", map[string]any{"message": "", "replacement_history": []any{map[string]any{"type": "compaction", "encrypted_content": "opaque"}}}),
+		record("event_msg", map[string]any{"type": "item_completed", "item": map[string]any{"type": "contextCompaction", "id": "legacy"}}),
+	}
+	trace := ProjectCodexTranscript(items, ProjectionOptions{})
+	if len(trace) != 3 || trace[0]["compactionSummary"] != summary || trace[0]["body"] != "较早的上下文已自动压缩。" {
+		t.Fatalf("plaintext summary must be separate from the notice: %#v", trace)
+	}
+	for _, item := range trace[1:] {
+		if item["kind"] != "compaction" || item["compactionSummary"] != nil {
+			t.Fatalf("summary-free compaction must remain a notice: %#v", item)
+		}
+	}
+	tail := ProjectCodexTranscript(items[1:2], ProjectionOptions{InitialTurnID: "turn", ItemOffset: 1, Fragments: true})
+	if !reflect.DeepEqual(tail[0], trace[0]) {
+		t.Fatalf("a raw page boundary must retain the summary: %#v", tail)
+	}
+	if object(items[1]["payload"])["message"] != summary {
+		t.Fatal("projection modified canonical history")
+	}
+}
+
 func contains(value, part string) bool {
 	for index := 0; index+len(part) <= len(value); index++ {
 		if value[index:index+len(part)] == part {

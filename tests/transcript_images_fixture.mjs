@@ -46,7 +46,12 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
           image(2), { key: "reply", kind: "assistant", body: "Between pictures", turnId: "turn", sourceItemSeq: 3,
             turnCompletedAt: "2026-09-01T00:00:00Z", turnElapsedMs: 6250 }, image(4),
           // A legacy path-only tool notification must never mount an image.
-          { key: "path-only", kind: "tool", title: "Path only", body: "/tmp/missing.png", sourceItemSeq: 5, images: [{ path: "/tmp/missing.png" }] }],
+          { key: "path-only", kind: "tool", title: "Path only", body: "/tmp/missing.png", sourceItemSeq: 5, images: [{ path: "/tmp/missing.png" }] },
+          { key: "compaction-summary", kind: "assistant", body: "## 压缩摘要\n\n保留任务进度。", turnId: "turn", sourceItemSeq: 6 },
+          { key: "compaction", kind: "compaction", body: "较早的上下文已自动压缩。", turnId: "turn", sourceItemSeq: 7,
+            compactionSummary: "Handoff instructions\n## 压缩摘要\n\n保留任务进度。" },
+          { key: "normal-reply", kind: "assistant", body: "继续正常回复。", turnId: "turn", sourceItemSeq: 8 },
+          { key: "encrypted-compaction", kind: "compaction", body: "较早的上下文已自动压缩。", turnId: "turn", sourceItemSeq: 9 }],
       });
     }
     if (path === `/v1/codex/threads/${threadId}`) return json(row());
@@ -62,7 +67,7 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
       response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:");
       let content = await fs.readFile(file);
       if (resource === "app.js") content = content.toString().replace("void bootstrap();",
-        "window.transcriptRegression = { loadAgentTranscript }; void bootstrap();");
+        "window.transcriptRegression = { loadAgentTranscript, compactionSummaryKeys, mergeTranscriptItems }; void bootstrap();");
       response.end(content);
     } catch { response.statusCode = 404; response.end(); }
   });
