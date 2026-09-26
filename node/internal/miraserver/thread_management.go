@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ssine/mira/node/internal/miraserver/executionstate"
 )
 
 var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -274,6 +275,9 @@ func ManageThread(ctx context.Context, pool *pgxpool.Pool, storeID, threadID, ac
 		// turn/start reserves execution before Codex emits turn/started. Check
 		// that reservation under the same thread lock as claimExecution; a
 		// browser's local active-turn map cannot protect this interval.
+		if err := executionstate.ReconcileCompleted(ctx, tx, storeID, threadID); err != nil {
+			return operationResponse{}, err
+		}
 		var busy bool
 		err := tx.QueryRow(ctx, `SELECT EXISTS(
           SELECT 1 FROM mira_codex_execution_routes route

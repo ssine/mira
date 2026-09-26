@@ -233,6 +233,30 @@ try {
   releaseResponse(); releaseResponse = undefined;
   await waitFor(() => first.events.some(event => event.method === "turn/completed" && event.params.turn.id === companionTurn.id), "unrelated turn survived handoff");
 
+  // The browser can leave while the native runtime keeps working. Completion
+  // must release deletion through canonical persistence, without any subscriber.
+  const detached = await connect(a);
+  const detachedId = (await detached.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;
+  holdNextResponse = true;
+  const detachedTurn = (await detached.call("turn/start", { threadId: detachedId,
+    input: [{ type: "text", text: "COMPLETE_AFTER_BROWSER_DISCONNECT" }] })).turn;
+  await waitFor(() => releaseResponse, "detached response held");
+  const removeDetached = async () => {
+    const head = await admin(`/v2/stores/${store}?threadId=${detachedId}`);
+    return admin(`/v1/codex/threads/${detachedId}?storeId=${store}`, {
+      ...head.historyManifest[detachedId], operationId: randomUUID(),
+    }, "DELETE");
+  };
+  await assert.rejects(removeDetached(), /thread_busy/);
+  await new Promise(resolve => { detached.socket.addEventListener("close", resolve, { once: true }); detached.socket.close(); });
+  await delay(250); // Let the Node process the proxy's appserver.close.
+  releaseResponse(); releaseResponse = undefined;
+  await waitFor(async () => (await history(detachedId)).items.some(item => item.type === "event_msg" &&
+    item.payload.type === "task_complete" && item.payload.turn_id === detachedTurn.id), "completion persisted without browser");
+  assert(!detached.events.some(event => event.method === "turn/completed" && event.params.turn.id === detachedTurn.id));
+  assert.equal((await removeDetached()).action, "delete");
+  console.log("Disconnected conversation completed and deleted; active deletion remained blocked");
+
   // Match the Web composer: native turn/start appends input to the active turn.
   // Hold model sampling open so all submissions happen before turn completion.
   const steeringId = (await second.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;

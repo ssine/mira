@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -130,6 +131,15 @@ func TestAccountExecutionAllowsActiveTurnInput(t *testing.T) {
 	status("turn/started", "running", "turn-2")
 	status("turn/completed", "idle", "turn-1")
 	assertRoute("running", "turn-2", 2)
+	// A delayed notification for an already completed turn cannot consume the
+	// next turn's starting reservation or resurrect a previously finished turn.
+	status("turn/completed", "idle", "turn-2")
+	status("turn/started", "running", "turn-1")
+	assertRoute("idle", "turn-2", 2)
+	claim()
+	status("turn/started", "running", "turn-2")
+	assertRoute("starting", "", 3)
+	status("turn/started", "running", "turn-3")
 
 	for _, stale := range []*proxy{
 		{targetNodeID: testNodeA, nodeAccountID: otherBinding, runtimeID: runtime, storeID: storeID},
@@ -139,7 +149,63 @@ func TestAccountExecutionAllowsActiveTurnInput(t *testing.T) {
 			t.Fatal("input from a different account or stale runtime was accepted")
 		}
 	}
-	assertRoute("running", "turn-2", 2)
+	assertRoute("running", "turn-3", 3)
+	// An older Server may have persisted completion without observing its live
+	// notification. The next claim must repair it and reserve a NEW turn.
+	op, _ := randomUUID()
+	exec(`INSERT INTO codex_store_events(store_id,operation_id,event_seq,result_version) VALUES($1,$2::uuid,1,1)`, storeID, op)
+	exec(`INSERT INTO codex_thread_events(store_id,thread_id,generation,item_seq,operation_id,event_format_version,payload,payload_sha256)
+ VALUES($1,$2,1,1,$3::uuid,2,'{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn-3"}}','fixture')`, storeID, threadID, op)
+	exec(`UPDATE codex_thread_projections SET item_count=1 WHERE store_id=$1 AND thread_id=$2`, storeID, threadID)
+	claim()
+	assertRoute("starting", "", 4)
+	status("turn/started", "running", "turn-3")
+	assertRoute("starting", "", 4)
+
+	// Hold a completion and the next reservation uncommitted while an old
+	// start notification arrives. Its snapshot must follow that transaction.
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, `["mira-thread","steering-test","thread"]`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,turn_id)
+ VALUES(gen_random_uuid(),$1,$2,1,$3::uuid,$4,1,'turn/completed','turn-4')`, storeID, threadID, binding, runtime); err != nil {
+		t.Fatal(err)
+	}
+	// Lock the row too, so an implementation without the advisory gate takes
+	// its stale statement snapshot before waiting on the row update.
+	if _, err = tx.Exec(ctx, `UPDATE mira_codex_execution_routes SET state='starting',turn_id=NULL WHERE store_id=$1 AND thread_id=$2`, storeID, threadID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- channel.recordExecutionStatus(ctx, client, threadID, "turn/started", "running", "turn-4")
+	}()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		var blocked bool
+		if err = pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::int=ANY(pg_blocking_pids(pid)))`, tx.Conn().PgConn().PID()).Scan(&blocked); err != nil {
+			t.Fatal(err)
+		}
+		if blocked {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("notification did not wait for the pending commit")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err = tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = <-done; err != nil {
+		t.Fatal(err)
+	}
+	assertRoute("starting", "", 4)
 }
 
 func TestAccountExecutionHandoffMovesWholeCurrentGenerationTree(t *testing.T) {

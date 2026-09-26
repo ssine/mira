@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/executionstate"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
 
@@ -274,7 +275,19 @@ func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member ex
 	if deleted {
 		return 0, channelError("此会话已永久删除，不能继续写入或恢复。", http.StatusGone, "thread_deleted")
 	}
-	previous := member.Previous
+	// History may have completed while we waited for the thread lock. Repair
+	// legacy missed notifications before reserving a new turn, then re-read;
+	// using the earlier family snapshot could erase a fresh starting reservation.
+	if err := executionstate.ReconcileCompleted(ctx, tx, proxy.storeID, member.ID); err != nil {
+		return 0, err
+	}
+	var previous executionRoute
+	err := tx.QueryRow(ctx, `SELECT node_account_id::text,runtime_id,revision,generation,state
+ FROM mira_codex_execution_routes WHERE store_id=$1 AND thread_id=$2`, proxy.storeID, member.ID).
+		Scan(&previous.Binding, &previous.Runtime, &previous.Revision, &previous.Generation, &previous.State)
+	if err != nil && err != pgx.ErrNoRows {
+		return 0, err
+	}
 	exists := previous.Binding != ""
 	changed := !exists || previous.Binding != proxy.nodeAccountID || previous.Runtime != proxy.runtimeID || previous.Generation != member.Generation
 	revision, state, kind := previous.Revision, previous.State, "bound"
@@ -301,7 +314,7 @@ func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member ex
 			return 0, err
 		}
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,node_account_id,bound_at) VALUES($1,$2,$3::uuid,$4::uuid,NOW()) ON CONFLICT(store_id,thread_id) DO UPDATE SET node_id=EXCLUDED.node_id,node_account_id=EXCLUDED.node_account_id,bound_at=EXCLUDED.bound_at`, proxy.storeID, member.ID, proxy.targetNodeID, proxy.nodeAccountID)
+	_, err = tx.Exec(ctx, `INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,node_account_id,bound_at) VALUES($1,$2,$3::uuid,$4::uuid,NOW()) ON CONFLICT(store_id,thread_id) DO UPDATE SET node_id=EXCLUDED.node_id,node_account_id=EXCLUDED.node_account_id,bound_at=EXCLUDED.bound_at`, proxy.storeID, member.ID, proxy.targetNodeID, proxy.nodeAccountID)
 	return revision, err
 }
 
@@ -309,18 +322,44 @@ func (channel *Channel) recordExecutionStatus(ctx context.Context, proxy *proxy,
 	if proxy.nodeAccountID == "" || threadID == "" {
 		return nil
 	}
+	db, ok := channel.db.(transactionDatabase)
+	if !ok {
+		return errors.New("execution transactions are unavailable")
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	// Serialize notification observations with history commits and new claims.
+	// In particular, read completion evidence AFTER acquiring the lock so a
+	// delayed start cannot use a snapshot taken before completion committed.
+	storeKey, _ := json.Marshal([]string{"mira-store", proxy.storeID})
+	threadKey, _ := json.Marshal([]string{"mira-thread", proxy.storeID, threadID})
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))`, string(storeKey)); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(threadKey)); err != nil {
+		return err
+	}
 	operationID, err := randomUUID()
 	if err != nil {
 		return err
 	}
-	_, err = channel.db.Exec(ctx, `WITH changed AS (
-	 UPDATE mira_codex_execution_routes SET state=$5,turn_id=NULLIF($6,''),updated_at=NOW()
+	_, err = tx.Exec(ctx, `WITH changed AS (
+	 UPDATE mira_codex_execution_routes route SET state=$5,turn_id=NULLIF($6,''),updated_at=NOW()
 	 WHERE store_id=$1 AND thread_id=$2 AND node_account_id=$3::uuid AND runtime_id=$4
 	   AND (($8='request_failed' AND state='starting' AND turn_id IS NULL)
 	     OR ($8='turn/started' AND (state='starting' OR (state='running' AND turn_id=$6) OR (state='idle' AND turn_id IS DISTINCT FROM $6)))
 	     OR ($8='turn/completed' AND state='running' AND turn_id=$6))
+	   AND ($8<>'turn/started' OR NOT EXISTS(
+	     SELECT 1 FROM mira_codex_execution_events e WHERE e.store_id=route.store_id AND e.thread_id=route.thread_id
+	     AND e.generation=route.generation AND e.kind='turn/completed' AND e.turn_id=$6))
 	   AND (state IS DISTINCT FROM $5 OR turn_id IS DISTINCT FROM NULLIF($6,'')) RETURNING *
 	) INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,turn_id)
 	 SELECT $7::uuid,store_id,thread_id,generation,node_account_id,runtime_id,revision,$8,turn_id FROM changed`, proxy.storeID, threadID, proxy.nodeAccountID, proxy.runtimeID, state, turnID, operationID, kind)
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }

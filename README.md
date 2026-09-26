@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.43 将 Android 对话页的渐变限制在系统状态栏内部，并提高透明度，避免遮挡下方的正文。已有 1.0.42 APK 可直接使用更新后的 Server 网页。
+1.0.44 修复对话完成后仍被标记为运行、无法删除的问题：执行状态随持久化历史更新，页面断连也能正确完成，并自动校正遗留状态。默认 Codex 更新至 0.155.1-mira.4，支持按对话选择启用的推理上下文恢复。
 
 1.0.38 加快已提交历史上传的暂存清理：按条数和存储字节分批回收，有积压时持续推进，并轮转处理不同上传。正式历史与提交重试凭据保持独立；修复 Windows runtime 验收测试遗留子进程导致发布失败的问题。
 
@@ -152,13 +152,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.43
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.44
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.43'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.44'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
