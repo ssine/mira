@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ssine/mira/node/internal/agenttools"
 	serverchannel "github.com/ssine/mira/node/internal/miraserver/channel"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
@@ -20,15 +21,24 @@ var (
 
 func (server *Server) routeChannel(ctx context.Context, response http.ResponseWriter, request *http.Request) (bool, error) {
 	path := request.URL.Path
-	if request.Method == http.MethodGet && path == "/v1/dynamic-tools" {
-		principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: "codex"})
+	// The legacy routes retain their Codex wire format. New runtimes use the
+	// shared catalog and MCP content blocks without emulating Codex App Server.
+	clientType := "codex"
+	if path == "/v1/agent-tools" || path == "/v1/agent-tools/call" {
+		clientType = "cli"
+	}
+	if request.Method == http.MethodGet && (path == "/v1/dynamic-tools" || path == "/v1/agent-tools") {
+		principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: clientType})
 		if err != nil || principal == nil {
 			return true, err
 		}
+		if path == "/v1/agent-tools" {
+			return true, writeJSON(response, 200, map[string]any{"namespace": agenttools.Namespace, "description": agenttools.Description, "tools": agenttools.Catalog()})
+		}
 		return true, writeJSON(response, 200, map[string]any{"dynamicTools": serverchannel.DynamicToolSpecs()})
 	}
-	if request.Method == http.MethodPost && path == "/v1/dynamic-tools/call" {
-		principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: "codex"})
+	if request.Method == http.MethodPost && (path == "/v1/dynamic-tools/call" || path == "/v1/agent-tools/call") {
+		principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: clientType})
 		if err != nil || principal == nil {
 			return true, err
 		}
@@ -42,9 +52,12 @@ func (server *Server) routeChannel(ctx context.Context, response http.ResponseWr
 			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "tool and arguments are required"}
 		}
 		invokeContext := channelInvokeContext(request, body["timeoutMs"])
-		result, err := serverchannel.DispatchDynamicTool(ctx, server.channel.Capabilities(), principal, tool, arguments, invokeContext)
+		result, err := server.channel.Capabilities().CallTool(ctx, principal, tool, arguments, invokeContext)
 		if err != nil {
 			return true, err
+		}
+		if path == "/v1/agent-tools/call" {
+			return true, writeJSON(response, 200, map[string]any{"content": agenttools.Content(tool, result), "isError": false})
 		}
 		return true, writeJSON(response, 200, map[string]any{"result": result})
 	}

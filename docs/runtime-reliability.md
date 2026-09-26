@@ -1,5 +1,9 @@
 # Runtime persistence and build reliability
 
+The persistence guarantees below describe the Codex runtime. The preliminary
+[Claude Code integration](claude-code-integration.md) uses its separately accepted
+best-effort SessionStore mirror and must report incomplete persistence explicitly.
+
 PostgreSQL is still the only durable conversation store. These changes add no
 local JSONL mirror, disk outbox, or alternate source of truth.
 

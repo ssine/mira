@@ -171,7 +171,9 @@ func (service *CapabilityService) Invoke(ctx context.Context, actor *foundation.
 	return result, nil
 }
 
-func DispatchDynamicTool(ctx context.Context, service *CapabilityService, actor *foundation.Principal, tool string, args map[string]any, options InvokeContext) (any, error) {
+// CallTool is shared by runtime adapters and HTTP clients. Tool schemas and
+// content encoding do not bypass the capability service's identity/root checks.
+func (service *CapabilityService) CallTool(ctx context.Context, actor *foundation.Principal, tool string, args map[string]any, options InvokeContext) (any, error) {
 	if tool == "status" && stringValue(args["action"]) == "list" {
 		nodeList, err := service.List(ctx, actor)
 		if err != nil {
@@ -179,15 +181,18 @@ func DispatchDynamicTool(ctx context.Context, service *CapabilityService, actor 
 		}
 		return map[string]any{"nodes": nodeList}, nil
 	}
+	if tool == "status" && stringValue(args["action"]) != "get" {
+		return nil, channelError("status action must be list or get", http.StatusBadRequest, "invalid_request")
+	}
 	selector, ok := args["nodeId"].(string)
 	if !ok {
-		return nil, fmt.Errorf("nodeId is required")
+		return nil, channelError("nodeId is required", http.StatusBadRequest, "invalid_request")
 	}
 	if tool == "status" {
 		return service.Invoke(ctx, actor, selector, "status", map[string]any{}, options)
 	}
 	if tool != "file" && tool != "process" && tool != "pty" && tool != "screen" {
-		return nil, fmt.Errorf("unknown %s tool: %s", DynamicToolNamespace, tool)
+		return nil, channelError("unknown device tool", http.StatusBadRequest, "invalid_request")
 	}
 	params := make(map[string]any, len(args)-1)
 	for name, value := range args {

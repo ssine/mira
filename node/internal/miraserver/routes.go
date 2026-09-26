@@ -87,6 +87,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 	if handled, err := server.routeNodes(ctx, response, request); handled || err != nil {
 		return err
 	}
+	if handled, err := server.routeClaude(ctx, response, request); handled || err != nil {
+		return err
+	}
 	if handled, err := server.routeAccounts(ctx, response, request); handled || err != nil {
 		return err
 	}
@@ -119,7 +122,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 		return writeJSON(response, 200, map[string]any{
 			"storageModel": "postgresql-event-log", "eventFormatVersion": 1, "adapterProtocolVersion": 2,
 			"snapshotProjection": true, "nodeRegistry": true, "nodeUserMetadata": true, "nodeCapabilityChannel": true,
-			"appServerProxy": true, "dynamicTools": true, "androidNodeApp": true, "imageToolResults": true,
+			"agentRuntimes": []string{"codex", "claude"}, "claudeSessionsProtocol": 1,
+			"runtimePersistence": map[string]string{"codex": "postgresql-thread-store", "claude": "local-with-best-effort-mirror"},
+			"appServerProxy":     true, "dynamicTools": true, "androidNodeApp": true, "imageToolResults": true,
 			"databaseIsSourceOfTruth": true, "authenticationVersion": 1, "identities": []string{"admin", "node"},
 			"nodeApprovalRequired": true, "websocketQueryCredentials": false,
 		})

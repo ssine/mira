@@ -173,6 +173,29 @@ even when the parent history is unchanged. Per-turn cost remains local to that t
 
 ## Protocol and upgrade policy
 
+### Additional Agent runtimes
+
+Managed Claude Code runs alongside the existing Codex runtime.
+Keep device tool definitions and capability execution independent of the runtime;
+Codex dynamicTools and Claude MCP are adapters over the same bounded capabilities.
+Managed runtime, native storage, Web experience and reproducible SDK validation
+are described in `docs/claude-code-integration.md` and `protocol/claude-sessions-v1.md`.
+Claude sessions remain separate from Codex ThreadStore; never translate native
+Claude history into authoritative Codex rollout records. SDK preparation is optional
+and asynchronous on the execution Node, with pinned dependencies and bounded workers.
+
+For Claude Code, the user explicitly accepted local transcripts with best-effort
+external SessionStore mirroring (2026-09-23). Persist acknowledged raw entries in
+PostgreSQL, surface mirror failures as incomplete persistence, and never replay
+tool side effects to repair a missing batch. Do not claim Codex's pre-sampling
+durability barrier for Claude or weaken the existing Codex guarantees. Keep the
+engine's native history and resume semantics; shared views are projections.
+Production Agent runtimes access storage through Mira Server with their Node
+identity, not with direct database credentials. The direct PostgreSQL adapter in
+`experiments/claude-code/` is restricted to disposable local validation.
+
+### Codex compatibility
+
 Mira should follow official Codex ThreadStore and App Server semantics instead of inventing a
 parallel conversation model.
 

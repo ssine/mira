@@ -10,14 +10,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/ssine/mira/node/internal/clauderuntime"
 )
 
 type controlClient struct {
 	notificationMu  sync.Mutex
+	claude          *clauderuntime.Manager
 	desktop         *desktopStatus
 	configuration   config
 	endpoints       *serverEndpointSelector
@@ -99,6 +102,7 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	client := &controlClient{
 		configuration: configuration, runtime: runtimeValue,
+		claude:         clauderuntime.New(filepath.Dir(configuration.IdentityFile)),
 		token:          configuration.Token,
 		appServer:      newAppServerManager(configuration),
 		http:           httpClient,
@@ -535,7 +539,18 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 		}()
 	case "request":
 		go func() {
-			result, err := client.runtime.execute(ctx, message.Capability, message.Params)
+			var result any
+			var err error
+			if message.Capability == "claude" {
+				var params map[string]any
+				if err = json.Unmarshal(message.Params, &params); err == nil {
+					params["endpoint"] = client.endpoints.endpoint(ctx)
+					params["credential"] = client.token
+					result, err = client.claude.Call(params)
+				}
+			} else {
+				result, err = client.runtime.execute(ctx, message.Capability, message.Params)
+			}
 			response := map[string]any{"type": "response", "requestId": message.RequestID, "ok": err == nil}
 			if err != nil {
 				response["error"] = map[string]any{"message": err.Error()}
@@ -755,6 +770,9 @@ func (client *controlClient) closeTunnels() {
 }
 
 func (client *controlClient) close() {
+	if client.claude != nil {
+		client.claude.Close()
+	}
 	client.connectionMu.Lock()
 	connection := client.connection
 	client.connection = nil

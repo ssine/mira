@@ -615,7 +615,7 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 		if value, ok := params["subagentThreadId"].(string); ok {
 			metadata["subagentThreadId"] = value
 		}
-		value, callErr := DispatchDynamicTool(ctx, channel.capabilities, actor, stringValue(params["tool"]), arguments,
+		value, callErr := channel.capabilities.CallTool(ctx, actor, stringValue(params["tool"]), arguments,
 			InvokeContext{RequestID: rpcKey(id), ThreadID: firstNonempty(threadID, primary), AuditMetadata: metadata})
 		var content []map[string]any
 		success := callErr == nil
@@ -838,6 +838,10 @@ func (channel *Channel) nodeDeveloperInstructions(ctx context.Context, proxy *pr
 	proxy.mu.Lock()
 	target := proxy.target
 	proxy.mu.Unlock()
+	return channel.readRuntimeInstructionsFile(ctx, target, proxy.targetNodeID, requestID)
+}
+
+func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target *nodes.Node, targetNodeID string, requestID any) (string, error) {
 	path, err := targetDeveloperInstructionsFile(target)
 	if err != nil || path == "" {
 		return "", err
@@ -846,12 +850,12 @@ func (channel *Channel) nodeDeveloperInstructions(ctx context.Context, proxy *pr
 	if !files || channel.capabilities == nil {
 		return "", channelError("the configured Node Developer instructions file cannot be read because file access is unavailable", 409, "developer_instructions_file_unavailable")
 	}
-	actor := &foundation.Principal{Kind: "node", NodeID: proxy.targetNodeID, ClientType: "app-server", Transport: "internal"}
+	actor := &foundation.Principal{Kind: "node", NodeID: targetNodeID, ClientType: "app-server", Transport: "internal"}
 	requestKey := ""
 	if requestID != nil {
 		requestKey = rpcKey(requestID)
 	}
-	result, err := channel.capabilities.Invoke(ctx, actor, proxy.targetNodeID, "file", map[string]any{
+	result, err := channel.capabilities.Invoke(ctx, actor, targetNodeID, "file", map[string]any{
 		"action": "read", "path": path, "offset": int64(0), "length": int64(MaxDeveloperInstructionsFile + 1), "encoding": "base64",
 	}, InvokeContext{RequestID: requestKey, Timeout: 5 * time.Second, AuditMetadata: map[string]any{"source": "app-server-developer-instructions"}})
 	if err != nil {
@@ -936,4 +940,18 @@ func firstNonempty(values ...string) string {
 
 func isTurnStartMethod(method string) bool {
 	return method == "turn/start" || method == "mira/thread/recover"
+}
+
+// RuntimeInstructions shares the existing bounded policy and CLI injection with
+// other managed runtimes without changing their native conversation protocols.
+func (channel *Channel) RuntimeInstructions(ctx context.Context, nodeID string) (string, error) {
+	target, err := channel.nodes.Get(ctx, nodeID, false)
+	if err != nil {
+		return "", err
+	}
+	content, err := channel.readRuntimeInstructionsFile(ctx, target, nodeID, nil)
+	if err != nil {
+		return "", err
+	}
+	return miraCLIInstructions(target) + "\n" + content, nil
 }

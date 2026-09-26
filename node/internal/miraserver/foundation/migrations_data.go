@@ -841,4 +841,5 @@ CREATE INDEX codex_thread_events_provider_idx
 	{Version: 32, Name: "pwa-completion-notifications", SQL: pushNotificationsSQL, Checksum: "5f790ea3037fc13b6889c627efedc4ec3d8f109b905ac642a5cfac5e4e1a808c"},
 	{Version: 33, Name: "android-completion-notifications", SQL: androidNotificationsSQL, Checksum: "1f7c69fe1173b514deb9a0c47dc7d2f755d43a2642ca951522981173c3e88133"},
 	{Version: 34, Name: "automatic-input-recovery", SQL: automaticInputRecoverySQL, Checksum: "43323b659aab1576d575e4f3d586eed5e5bd49c708839a843dcfa7ab697cbf7c"},
+	{Version: 35, Name: "claude-native-sessions", SQL: claudeSessionsSQL, Checksum: "84ad8c3e97a5c8945339184e61037bc6f9bcf88920424338a29f817d7953db01"},
 }
