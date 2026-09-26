@@ -397,7 +397,11 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			continue
 		}
 		if recordType == "compacted" {
-			push(map[string]any{"key": fmt.Sprintf("history-%d-compaction", itemSeq), "turnId": nullableString(recordTurnID), "sourceItemSeq": itemSeq, "kind": "compaction", "title": "上下文自动压缩", "markdown": false, "body": "较早的上下文已自动压缩。"})
+			entry := map[string]any{"key": fmt.Sprintf("history-%d-compaction", itemSeq), "turnId": nullableString(recordTurnID), "sourceItemSeq": itemSeq, "kind": "compaction", "title": "上下文自动压缩", "markdown": false, "body": "较早的上下文已自动压缩。"}
+			if summary := stringValue(payload["message"]); strings.TrimSpace(summary) != "" {
+				entry["compactionSummary"] = boundedText(summary)
+			}
+			push(entry)
 			continue
 		}
 		if recordType == "event_msg" && includes(activityStarts, stringValue(payload["type"])) {
