@@ -606,6 +606,10 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 		return nil
 	}
 	method, _ := message["method"].(string)
+	if method == "mira/thread/residency" {
+		channel.sendProxyError(proxy, message["id"], "residency is controlled by the local Mira Node", -32601)
+		return nil
+	}
 	if method == "account/login/start" || method == "account/login/cancel" || method == "account/logout" || method == "account/rateLimitResetCredit/consume" {
 		channel.sendProxyError(proxy, message["id"], "请通过账号管理操作登录、退出和凭据变更", -32601)
 		return nil

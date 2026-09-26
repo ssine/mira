@@ -29,6 +29,7 @@ type config struct {
 	AppServerListenURL string
 	AppServerCodexHome string
 	ConfigOverrides    []string
+	CodexMemoryBudget  codexMemoryBudget
 }
 
 type fileConfig struct {
@@ -48,6 +49,7 @@ type fileConfig struct {
 	AppServerListenURL string   `json:"appServerListenUrl"`
 	AppServerCodexHome string   `json:"appServerCodexHome"`
 	ConfigOverrides    []string `json:"appServerConfigOverrides"`
+	CodexMemoryBudget  string   `json:"codexMemoryBudget"`
 }
 
 func firstEnv(names ...string) string {
@@ -280,6 +282,14 @@ func loadConfigArgs(args []string) (config, error) {
 		}
 	}
 
+	memoryBudget := stored.CodexMemoryBudget
+	if value := os.Getenv("MIRA_NODE_CODEX_MEMORY_BUDGET"); value != "" {
+		memoryBudget = value
+	}
+	parsedBudget, err := parseCodexMemoryBudget(memoryBudget)
+	if err != nil {
+		return config{}, err
+	}
 	return config{
 		ServerURL: serverURL, Token: token, IdentityFile: identityFile, NodeKey: nodeKey, AllowedRoots: roots,
 		HeartbeatInterval: time.Duration(heartbeatSeconds) * time.Second,
@@ -287,6 +297,7 @@ func loadConfigArgs(args []string) (config, error) {
 		ExitWithParent: exitWithParent, CodexBinary: codexBinary,
 		AppServerAutoStart: autoStart, AppServerListenURL: listenURL,
 		AppServerCodexHome: codexHome, ConfigOverrides: overrides,
+		CodexMemoryBudget: parsedBudget,
 	}, nil
 }
 

@@ -406,6 +406,36 @@ PostgreSQL 中的会话历史保留，可以重新打开并继续。应等任务
 单独调整托管账号的配置覆盖时，Mira 会等该账号的活动任务结束后再重启 App Server；
 已加载的会话需重新加载后使用新上限。
 
+### Codex 会话驻留内存预算
+
+Mira Node 按托管 Codex App Server 进程的实际驻留内存，统一管理所有账号的空闲会话。
+本机 Node 配置文件中的 `codexMemoryBudget` 支持：
+
+```json
+{"codexMemoryBudget": "auto"}
+```
+
+- `auto`（默认）：有效内存不超过 4 GiB 时取 20%；超过时取 `max(0.8 GiB, 有效内存 × 10%)`。
+  2 / 4 / 8 / 16 GiB 机器对应约 0.4 / 0.8 / 0.8 / 1.6 GiB。
+- 固定容量，例如 `"800MiB"`、`"2GiB"`，也支持十进制 `MB` / `GB`。
+- 比例，例如 `"20%"`，取值大于 0、不超过 100。
+
+环境变量 `MIRA_NODE_CODEX_MEMORY_BUDGET` 覆盖文件配置；修改后重启 Node 生效。
+Linux 按物理内存和可见的 cgroup v1/v2 硬限制中的较小值计算，Windows 使用物理内存。
+
+预算是所有托管账号共享的保留目标，统计进程 RSS / Windows working set；不会按账号数倍增。
+预算内不再按 60 秒卸载空闲会话。超过预算时，逐个回收最久空闲且无人订阅的会话，
+并重新采样；执行中或被客户端订阅的会话及其已加载子会话树受到保护。
+回收至预算的 90% 后退出回收状态，避免在阈值附近反复加载和卸载。
+活动任务、进程基础开销和分配器保留的内存可能让实际占用超过预算，因此它不是进程硬限制。
+工具启动的其他进程、独立 `mira codex` CLI 和 Claude runtime 不计入这个预算。
+
+这个机制需要支持驻留协议的 Mira Codex runtime。Node 无法读取内存或停止控制时，
+短期控制租约会过期，恢复 runtime 的原有空闲超时策略；不支持协议的旧 runtime 也保留原有策略。
+Node 的 `reportedAppServer.memoryResidency`（托管账号在各自 runtime 报告中）给出
+状态、共享预算、共享驻留内存、有效内存和查询失败原因。升级 runtime 或显式账号交接仍会卸载会话，
+PostgreSQL 历史保持不变。
+
 ## Android APK
 
 APK 内嵌相同 Go `mira` 程序并以 `node-worker` 启动，不依赖 ADB、Node.js 或 Termux。Java 负责 Activity、前台服务、

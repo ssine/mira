@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
-- Patch source commit: `b495cfb6b2cd`
+- Patch source commit: `fadf347266fe`
 
 Apply it to a clean checkout:
 
@@ -48,6 +48,18 @@ Existing encrypted messages/checkpoints are still readable by compatible
 providers and are never silently deleted or decrypted. The model's separate
 `reasoning.encrypted_content` mechanism is unchanged; this release does not
 promise unrestricted account switching for previously encrypted history.
+
+Runtime `0.155.1-mira.5` adds the local Node-controlled memory-residency lease.
+The Node shares a configurable RSS budget across managed accounts and asks the
+runtime to reclaim idle, unsubscribed sessions under pressure. The runtime
+revalidates opaque candidates, protects active/subscribed loaded families, and
+reserves the family during a selected leaf's native teardown. A 60-second lease
+falls back to upstream idle timing when Node memory accounting stops; explicit
+account handoff continues to use the existing unload/flush acknowledgement.
+Monitor connections never auto-subscribe to new conversations. Identical injected
+developer instructions and reasoning effort reuse an existing warm session,
+while changed or unknown overrides retain the upstream reload behavior.
+See the repository README for `codexMemoryBudget` and the automatic formula.
 
 Runtime `0.155.1-mira.4` adds opt-in, conversation-owned reasoning recovery.
 Pass `"config": {"mira_auto_reasoning_recovery": true}` on `thread/start` or
