@@ -444,6 +444,9 @@ func PutSnapshot(ctx context.Context, pool *pgxpool.Pool, storeID string, body m
 	if err := replaceProjections(ctx, tx, storeID, state, manifest, 1, affected, affected); err != nil {
 		return operationResponse{}, err
 	}
+	if err := syncExecutionHistory(ctx, tx, storeID, head.HistoryManifest, manifest); err != nil {
+		return operationResponse{}, err
+	}
 	if err := enqueueCodexCompletions(ctx, tx, storeID, operationID, head.HistoryManifest, manifest); err != nil {
 		return operationResponse{}, err
 	}

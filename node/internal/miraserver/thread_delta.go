@@ -523,6 +523,9 @@ func commitDeltaWithIdentity(ctx context.Context, beginner txBeginner, storeID s
 	if noChange {
 		noChangeVersion = &head.Version
 	}
+	if err := syncExecutionHistory(ctx, tx, storeID, head.HistoryManifest, manifest); err != nil {
+		return operationResponse{}, err
+	}
 	if err := enqueueCodexCompletions(ctx, tx, storeID, operationID, head.HistoryManifest, manifest); err != nil {
 		return operationResponse{}, err
 	}

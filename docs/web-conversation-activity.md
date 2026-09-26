@@ -16,6 +16,20 @@ positions and Node reachability are checked afresh. An unfinished turn becomes
 uncertain when its Node is offline, its managed runtime has restarted, or its
 imported history cannot establish current execution. Uncertainty is not completion.
 
+Execution routes used by deletion and account handoff also follow canonical
+lifecycle records. Live append commits update the route and append an execution
+event in the same transaction, for v1 snapshots and both inline and uploaded v2
+history. This continues after a browser disconnects. Imports, replacements and
+forks do not replay their copied lifecycle as live execution.
+
+Deletion and new execution claims reconcile legacy running routes against a
+bounded tail of the current generation. Only an explicit completion or abort for
+the matching turn can clear a running route. A starting reservation remains busy
+until its own lifecycle arrives; old completions cannot clear a pending new turn.
+Claims re-read the route under the thread lock, and late start notifications for
+an already completed turn cannot resurrect it. Original history is unchanged;
+reconciliation appends execution evidence referencing its canonical item sequence.
+
 The Web combines durable activity with live App Server events. Late snapshots
 cannot undo newer generation/count observations or resurrect a locally finished
 turn. Losing the browser socket does not hide an ongoing task. If the central
