@@ -55,6 +55,8 @@ jobs:
           node --test \
             tests/admin_session_ui_test.mjs \
             tests/account_status_test.mjs \
+            tests/account_recovery_test.mjs \
+            tests/automatic_recovery_test.mjs \
             tests/account_overview_test.mjs \
             tests/account_history_cache_test.mjs \
             tests/quota_reference.mjs \
