@@ -137,7 +137,7 @@ func (channel *Channel) ContinueRecoveredThread(ctx context.Context, store, thre
 				continue
 			}
 			if done["status"] != "completed" {
-				return errors.New("自动重试未完成，已停止自动恢复，请检查对话后继续")
+				return errors.New("本次自动重试未完成；兼容错误会按连续失败上限继续恢复，其他错误请查看对话详情")
 			}
 			return nil
 		case <-responses:

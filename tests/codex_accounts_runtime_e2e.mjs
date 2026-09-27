@@ -467,12 +467,12 @@ try {
   await failing.call("thread/resume", { threadId: failingId, cwd: temporary, model: "gpt-5.1-codex" });
   const failingBefore = requests.length;
   rejectAlways = true;
-  await turn(failing, failingId, "RETRY_ONCE_ONLY", "failed");
-  await waitFor(async () => (await admin(automaticEndpoint(failingId))).status === "stopped", "stop after failed retry");
+  await turn(failing, failingId, "RETRY_LIMIT_SAME_HISTORY", "failed");
+  await waitFor(async () => (await admin(automaticEndpoint(failingId))).reason.includes("连续失败 20 次"), "stop after twenty failures", 120_000);
   await delay(2500);
-  assert.equal(requests.length - failingBefore, 2, "a failed automatic retry must not loop");
+  assert.equal(requests.length - failingBefore, 20, "identical history stops at twenty consecutive failures");
   rejectAlways = false;
-  console.log("Automatic recovery stopped after a repeated failure");
+  console.log("Automatic recovery stopped after twenty consecutive failures of unchanged history");
 
 
   const parentClient = await connect(a);

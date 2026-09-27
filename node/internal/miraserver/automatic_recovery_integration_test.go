@@ -2,6 +2,7 @@ package miraserver
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -70,7 +71,7 @@ func TestAutomaticRecoveryScopeAndRetryLimit(t *testing.T) {
 	pool := accountTestDatabase(t)
 	server := &Server{pool: pool}
 	ctx := context.Background()
-	for _, kind := range []string{"disabled", "archived", "credentials", "generation", "retry", "ordinary-error", "tool-error"} {
+	for _, kind := range []string{"disabled", "archived", "credentials", "generation", "ordinary-error", "tool-error"} {
 		t.Run(kind, func(t *testing.T) {
 			f := newExecutionHistoryFixture(t, pool)
 			f.append("v2", lifecycle("task_started", "failed-turn"))
@@ -92,13 +93,58 @@ func TestAutomaticRecoveryScopeAndRetryLimit(t *testing.T) {
 				f.exec(`UPDATE mira_node_codex_accounts SET credential_revision=2 WHERE node_account_id=$1::uuid`, f.binding)
 			case "generation":
 				f.exec(`UPDATE codex_thread_projections SET active_generation=2 WHERE store_id=$1`, f.store)
-			case "retry":
-				f.exec(`INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail)
-    VALUES(gen_random_uuid(),$1,$2,1,$3::uuid,$4,1,'turn_requested','{"recoveryFailureId":"previous"}')`, f.store, f.thread, f.binding, f.runtime)
 			}
 			if job, err := server.claimAutomaticRecovery(ctx); err != nil || job != nil {
 				t.Fatalf("unsafe recovery claimed: %+v %v", job, err)
 			}
 		})
+	}
+}
+
+func TestAutomaticRecoveryCountsFailuresUntilHistoryProgress(t *testing.T) {
+	pool := accountTestDatabase(t)
+	server := &Server{pool: pool}
+	ctx := context.Background()
+	f := newExecutionHistoryFixture(t, pool)
+	encrypted := map[string]any{"type": "response_item", "payload": map[string]any{"type": "reasoning", "encrypted_content": "opaque"}}
+	f.append("v2", encrypted)
+	failure := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "error", "message": "invalid_encrypted_content"}}
+	fail := func(turn string, want int) {
+		t.Helper()
+		f.append("v2", lifecycle("task_started", turn),
+			map[string]any{"type": "turn_context", "payload": map[string]any{"turn_id": turn}},
+			map[string]any{"type": "event_msg", "payload": map[string]any{"type": "token_count"}},
+			failure, lifecycle("task_complete", turn))
+		job, err := server.claimAutomaticRecovery(ctx)
+		if err != nil || job == nil {
+			t.Fatalf("claim: %+v %v", job, err)
+		}
+		plan := inputRecoveryPlan{Generation: 1, ThroughItemSeq: f.count}
+		got, err := server.automaticRecoveryFailureCount(ctx, *job, plan)
+		if err != nil || got != want {
+			t.Fatalf("failure count=%d want=%d err=%v", got, want, err)
+		}
+		// A reconstructed Server uses the same durable count.
+		got, err = (&Server{pool: pool}).automaticRecoveryFailureCount(ctx, *job, plan)
+		if err != nil || got != want {
+			t.Fatalf("restart count=%d want=%d err=%v", got, want, err)
+		}
+	}
+	for n := 1; n <= 20; n++ {
+		fail(fmt.Sprintf("failure-%d", n), n)
+	}
+	// A new runtime-injected policy message is not task progress either.
+	f.append("v2", map[string]any{"type": "response_item", "payload": map[string]any{"type": "message", "role": "developer", "content": []any{}}})
+	fail("still-same-history", 20)
+	for _, record := range []any{
+		encrypted,
+		map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call_output", "output": "done"}},
+		map[string]any{"type": "response_item", "payload": map[string]any{"type": "message", "role": "assistant", "content": []any{}}},
+		map[string]any{"type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{}}},
+		map[string]any{"type": "compacted", "payload": map[string]any{"replacement_history": []any{}}},
+	} {
+		f.append("v2", record)
+		fail(fmt.Sprintf("progress-%d", f.count), 1)
+		fail(fmt.Sprintf("unchanged-%d", f.count), 2)
 	}
 }

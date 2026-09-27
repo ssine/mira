@@ -31,7 +31,7 @@ export class AutomaticRecovery {
       : result.status === "stopped" ? result.reason
       : result.status === "applying" ? "正在自动处理不兼容上下文…"
       : result.status === "dispatching" ? "已处理上下文，正在后台重试。"
-      : "遇到加密上下文不兼容时自动处理并重试一次，保留原始历史，不新增用户消息。关闭页面后仍然生效。";
+      : "遇到加密上下文不兼容时自动处理并后台重试，保留原始历史，不新增用户消息。同一份历史连续失败 20 次后停止；有新进展后重新计数。关闭页面后仍然生效。";
   }
   async save() {
     if (this.input.disabled || !this.saved || !this.threadId) return;

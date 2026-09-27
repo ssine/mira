@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"sync"
@@ -93,6 +94,8 @@ func (server *Server) routeAutomaticRecovery(ctx context.Context, response http.
 
 type automaticRecoveryJob struct{ Failure, Store, Thread, Node, Binding, Runtime string }
 
+const automaticRecoveryFailureLimit = 20
+
 // Bounded workers also own the broker connection while the continuation runs.
 // A persisted receipt is consumed once, even if the process dies before ack.
 func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
@@ -143,8 +146,8 @@ func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
 }
 
 func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRecoveryJob, error) {
-	// A retry that fails is never retried again. Only a subsequent ordinary
-	// turn_requested event re-arms the next automatic recovery opportunity.
+	// Each distinct failed turn is consumed once. The history-based failure
+	// budget is checked before applying another recovery, not by retry ancestry.
 	var job automaticRecoveryJob
 	err := server.pool.QueryRow(ctx, `WITH candidate AS (
  SELECT e.* FROM codex_thread_projections p
@@ -159,8 +162,6 @@ func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRec
  AND NOT EXISTS(SELECT 1 FROM mira_codex_recovery_attempts a WHERE a.failure_id=e.operation_id)
  AND NOT EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.item_refs->>'failureId'=e.operation_id::text AND d.store_id=e.store_id AND d.thread_id=e.thread_id)
  AND COALESCE((SELECT d.action FROM mira_thread_actions d WHERE d.store_id=p.store_id AND d.thread_id=p.thread_id ORDER BY action_seq DESC LIMIT 1),'restore') NOT IN ('delete','archive')
- AND COALESCE((SELECT t.detail->>'recoveryFailureId' FROM mira_codex_execution_events t WHERE t.store_id=r.store_id AND t.thread_id=r.thread_id AND t.generation=r.generation
-   AND t.kind='turn_requested' ORDER BY event_seq DESC LIMIT 1),'')=''
  ORDER BY e.event_seq LIMIT 1
  ), claimed AS (
  INSERT INTO mira_codex_recovery_attempts(failure_id,store_id,thread_id,generation,status)
@@ -194,6 +195,13 @@ func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRec
 	if !plan.Recoverable {
 		return errors.New(plan.Reason)
 	}
+	failures, err := server.automaticRecoveryFailureCount(setupCtx, job, plan)
+	if err != nil {
+		return err
+	}
+	if failures >= automaticRecoveryFailureLimit {
+		return fmt.Errorf("同一份上下文已连续失败 %d 次，已停止自动恢复；请检查账号或服务商后继续", automaticRecoveryFailureLimit)
+	}
 	resume, err := server.automaticRecoveryResume(setupCtx, job, plan.Generation)
 	if err != nil {
 		return err
@@ -214,6 +222,31 @@ func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRec
 		return errors.New("兼容处理已保存，重试状态未确认，请手动继续")
 	}
 	return server.channel.ContinueRecoveredThread(ctx, job.Store, job.Thread, job.Node, job.Binding, job.Runtime, job.Failure, resume)
+}
+
+// Only model-facing history progress resets the budget. Resume settings,
+// lifecycle markers and token counters must not turn every retry into a new
+// history. Count durable failures rather than process-local attempts so the
+// limit survives Server restarts, including attempts made by older Servers.
+func (server *Server) automaticRecoveryFailureCount(ctx context.Context, job automaticRecoveryJob, plan inputRecoveryPlan) (int, error) {
+	var count int
+	err := server.pool.QueryRow(ctx, `WITH progress AS (
+ SELECT COALESCE((SELECT item_seq FROM codex_thread_events
+ WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq<=$4
+ AND (payload->>'type'='compacted' OR (payload->>'type'='response_item'
+   AND NOT (payload->'payload'->>'type'='message' AND COALESCE(payload->'payload'->>'role','') IN ('system','developer'))))
+ ORDER BY item_seq DESC LIMIT 1),0) AS seq
+), failures AS (
+ SELECT 1 FROM mira_codex_execution_events e
+ JOIN mira_codex_execution_events current ON current.operation_id=$5::uuid
+ WHERE e.store_id=$1 AND e.thread_id=$2 AND e.generation=$3
+ AND e.kind='invalid_encrypted_content' AND e.event_seq<=current.event_seq
+ AND e.node_account_id=current.node_account_id
+ AND e.detail->>'credentialRevision'=current.detail->>'credentialRevision'
+ AND (e.detail->>'throughItemSeq')::bigint >= (SELECT seq FROM progress)
+ LIMIT $6
+) SELECT count(*) FROM failures`, job.Store, job.Thread, plan.Generation, plan.ThroughItemSeq, job.Failure, automaticRecoveryFailureLimit).Scan(&count)
+	return count, err
 }
 
 // Preserve the failed turn's execution options; never broaden an explicit
