@@ -1,0 +1,265 @@
+package miraserver
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"regexp"
+	"sync"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/channel"
+	"github.com/ssine/mira/node/internal/miraserver/foundation"
+	"github.com/ssine/mira/node/internal/miraserver/nodes"
+)
+
+var recoveryPreferenceRoute = regexp.MustCompile(`^/v1/codex/threads/([^/]+)/automatic-input-recovery$`)
+
+func (server *Server) routeAutomaticRecovery(ctx context.Context, response http.ResponseWriter, request *http.Request) (bool, error) {
+	match := recoveryPreferenceRoute.FindStringSubmatch(request.URL.Path)
+	if match == nil {
+		return false, nil
+	}
+	principal, err := server.authorize(ctx, response, request, "admin", authOptions{CSRF: request.Method != http.MethodGet})
+	if err != nil || principal == nil {
+		return true, err
+	}
+	if request.Method != http.MethodGet && request.Method != http.MethodPut {
+		return true, &HTTPError{Status: 405, Code: "method_not_allowed", Message: "method not allowed"}
+	}
+	store := request.URL.Query().Get("storeId")
+	if store == "" {
+		store = "personal"
+	}
+	if _, ok := safeStoreID(store); !ok {
+		return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid store id"}
+	}
+	tx, err := server.pool.Begin(ctx)
+	if err != nil {
+		return true, err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockScope(ctx, tx, store, []string{match[1]}); err != nil {
+		return true, err
+	}
+	var generation int64
+	err = tx.QueryRow(ctx, `SELECT active_generation FROM codex_thread_projections p WHERE store_id=$1 AND thread_id=$2
+ AND NOT EXISTS(SELECT 1 FROM mira_thread_actions d WHERE d.store_id=p.store_id AND d.thread_id=p.thread_id AND d.action='delete')`, store, match[1]).Scan(&generation)
+	if err == pgx.ErrNoRows {
+		return true, &HTTPError{Status: 404, Code: "not_found", Message: "对话不存在"}
+	}
+	if err != nil {
+		return true, err
+	}
+	if request.Method == http.MethodPut {
+		request.Body = http.MaxBytesReader(response, request.Body, 4096)
+		body, err := server.readBody(request)
+		if err != nil {
+			return true, err
+		}
+		enabled, ok := body["enabled"].(bool)
+		expected, valid := integer(body["generation"])
+		if !ok || !valid {
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "enabled and generation are required"}
+		}
+		if expected != generation {
+			return true, &HTTPError{Status: 409, Code: "recovery_changed", Message: "对话已变更，请重新打开后设置"}
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO mira_codex_recovery_preferences(store_id,thread_id,generation,enabled) VALUES($1,$2,$3,$4)
+   ON CONFLICT(store_id,thread_id,generation) DO UPDATE SET enabled=EXCLUDED.enabled,updated_at=now()`, store, match[1], generation, enabled)
+		if err != nil {
+			return true, err
+		}
+		if err = foundation.AppendAudit(ctx, tx, foundation.AuditEvent{Action: "codex_thread.automatic_input_recovery", Principal: principal, Request: request, Metadata: map[string]any{"storeId": store, "threadId": match[1], "generation": generation, "enabled": enabled}}, server.config.Foundation.TrustProxyHeaders); err != nil {
+			return true, err
+		}
+	}
+	var enabled bool
+	if err = tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM mira_codex_recovery_preferences WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND NOT enabled)`, store, match[1], generation).Scan(&enabled); err != nil {
+		return true, err
+	}
+	var status, reason string
+	err = tx.QueryRow(ctx, `SELECT status,reason FROM mira_codex_recovery_attempts WHERE store_id=$1 AND thread_id=$2 AND generation=$3 ORDER BY created_at DESC LIMIT 1`, store, match[1], generation).Scan(&status, &reason)
+	if err != nil && err != pgx.ErrNoRows {
+		return true, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return true, err
+	}
+	return true, writeJSON(response, 200, map[string]any{"enabled": enabled, "generation": generation, "status": status, "reason": reason})
+}
+
+type automaticRecoveryJob struct{ Failure, Store, Thread, Node, Binding, Runtime string }
+
+// Bounded workers also own the broker connection while the continuation runs.
+// A persisted receipt is consumed once, even if the process dies before ack.
+func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
+	ctx, cancel := context.WithCancel(ctx)
+	var workers sync.WaitGroup
+	for range 4 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					job, err := server.claimAutomaticRecovery(ctx)
+					if err != nil {
+						if ctx.Err() == nil {
+							server.config.Logger.Printf("automatic input recovery claim failed: %v", err)
+						}
+						continue
+					}
+					if job == nil {
+						continue
+					}
+					err = server.runAutomaticRecovery(ctx, *job)
+					status, reason := "completed", ""
+					if err != nil {
+						status = "stopped"
+						reason = err.Error()
+					}
+					// Do not store provider responses or command output in status metadata.
+					if len(reason) > 512 {
+						reason = "自动恢复失败，请打开对话检查并继续"
+					}
+					saveCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
+					_, saveErr := server.pool.Exec(saveCtx, `UPDATE mira_codex_recovery_attempts SET status=$2,reason=$3,updated_at=now() WHERE failure_id=$1::uuid`, job.Failure, status, reason)
+					done()
+					if saveErr != nil {
+						server.config.Logger.Printf("automatic input recovery outcome could not be saved: %v", saveErr)
+					}
+				}
+			}
+		}()
+	}
+	return func() { cancel(); workers.Wait() }
+}
+
+func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRecoveryJob, error) {
+	// A retry that fails is never retried again. Only a subsequent ordinary
+	// turn_requested event re-arms the next automatic recovery opportunity.
+	var job automaticRecoveryJob
+	err := server.pool.QueryRow(ctx, `WITH candidate AS (
+ SELECT e.* FROM codex_thread_projections p
+ LEFT JOIN mira_codex_recovery_preferences pref ON p.store_id=pref.store_id AND p.thread_id=pref.thread_id AND p.active_generation=pref.generation
+ JOIN mira_codex_execution_routes r ON r.store_id=p.store_id AND r.thread_id=p.thread_id AND r.generation=p.active_generation
+ JOIN mira_node_codex_accounts b USING(node_account_id)
+ JOIN mira_codex_execution_events e ON e.store_id=r.store_id AND e.thread_id=r.thread_id AND e.generation=r.generation
+   AND e.node_account_id=r.node_account_id AND e.runtime_id=r.runtime_id AND e.turn_id=r.turn_id AND e.kind='invalid_encrypted_content'
+
+ WHERE COALESCE(pref.enabled,true) AND r.state='idle' AND r.turn_id=e.turn_id AND r.revision=e.revision AND b.enabled
+ AND b.credential_revision=(e.detail->>'credentialRevision')::bigint
+ AND NOT EXISTS(SELECT 1 FROM mira_codex_recovery_attempts a WHERE a.failure_id=e.operation_id)
+ AND NOT EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.item_refs->>'failureId'=e.operation_id::text AND d.store_id=e.store_id AND d.thread_id=e.thread_id)
+ AND COALESCE((SELECT d.action FROM mira_thread_actions d WHERE d.store_id=p.store_id AND d.thread_id=p.thread_id ORDER BY action_seq DESC LIMIT 1),'restore') NOT IN ('delete','archive')
+ AND COALESCE((SELECT t.detail->>'recoveryFailureId' FROM mira_codex_execution_events t WHERE t.store_id=r.store_id AND t.thread_id=r.thread_id AND t.generation=r.generation
+   AND t.kind='turn_requested' ORDER BY event_seq DESC LIMIT 1),'')=''
+ ORDER BY e.event_seq LIMIT 1
+ ), claimed AS (
+ INSERT INTO mira_codex_recovery_attempts(failure_id,store_id,thread_id,generation,status)
+ SELECT operation_id,store_id,thread_id,generation,'applying' FROM candidate ON CONFLICT DO NOTHING RETURNING failure_id)
+ SELECT c.operation_id::text,c.store_id,c.thread_id,b.node_id::text,c.node_account_id::text,c.runtime_id
+ FROM candidate c JOIN claimed a ON a.failure_id=c.operation_id JOIN mira_node_codex_accounts b USING(node_account_id)`).Scan(&job.Failure, &job.Store, &job.Thread, &job.Node, &job.Binding, &job.Runtime)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRecoveryJob) error {
+	setupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	node, err := server.nodes.Get(setupCtx, job.Node, false)
+	if err != nil {
+		return errors.New("运行节点不可用，请手动继续")
+	}
+	account, err := nodes.SelectAccount(node, job.Binding)
+	if err != nil || account == nil || account.Reported["runtimeId"] != job.Runtime {
+		return errors.New("执行账号已变更，请手动继续")
+	}
+	plan, err := server.inputRecoveryPlan(setupCtx, job.Store, job.Thread, account)
+	if err != nil || plan.FailureID != job.Failure {
+		return errors.New("上下文已变化，请手动继续")
+	}
+	if !plan.Recoverable {
+		return errors.New(plan.Reason)
+	}
+	resume, err := server.automaticRecoveryResume(setupCtx, job, plan.Generation)
+	if err != nil {
+		return err
+	}
+	decision, err := randomUUID()
+	if err != nil {
+		return err
+	}
+	err = server.applyInputRecovery(setupCtx, nil, &foundation.Principal{Kind: "node", NodeID: job.Node, ClientType: "automatic-input-recovery", Transport: "internal"}, job.Store, job.Thread, job.Node, account, plan, decision,
+		func(ctx context.Context, tx pgx.Tx) error {
+			return channel.CheckAutomaticRecovery(ctx, tx, job.Store, job.Thread, job.Failure)
+		})
+	if err != nil {
+		return errors.New("自动兼容处理未完成，请使用手动处理检查上下文")
+	}
+	_, err = server.pool.Exec(setupCtx, `UPDATE mira_codex_recovery_attempts SET status='dispatching',updated_at=now() WHERE failure_id=$1::uuid`, job.Failure)
+	if err != nil {
+		return errors.New("兼容处理已保存，重试状态未确认，请手动继续")
+	}
+	return server.channel.ContinueRecoveredThread(ctx, job.Store, job.Thread, job.Node, job.Binding, job.Runtime, job.Failure, resume)
+}
+
+// Preserve the failed turn's execution options; never broaden an explicit
+// sandbox or approval policy when creating the continuation.
+func (server *Server) automaticRecoveryResume(ctx context.Context, job automaticRecoveryJob, generation int64) (map[string]any, error) {
+	var raw []byte
+	err := server.pool.QueryRow(ctx, `SELECT payload FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3
+ AND payload->>'type'='turn_context' ORDER BY item_seq DESC LIMIT 1`, job.Store, job.Thread, generation).Scan(&raw)
+	if err != nil {
+		return nil, errors.New("缺少原轮次的运行设置，请手动继续")
+	}
+	var record map[string]any
+	if err = json.Unmarshal(raw, &record); err != nil {
+		return nil, err
+	}
+	p := object(record["payload"])
+	result := map[string]any{}
+	for from, to := range map[string]string{"model": "model", "cwd": "cwd", "approval_policy": "approvalPolicy", "effort": "reasoningEffort"} {
+		if value := p[from]; value != nil {
+			result[to] = value
+		}
+	}
+	policy := object(p["sandbox_policy"])
+	switch policy["type"] {
+	case "danger-full-access":
+		result["sandbox"] = "danger-full-access"
+	case "read-only":
+		result["sandbox"] = "read-only"
+	case "workspace-write":
+		result["sandbox"] = "workspace-write"
+		result["config"] = map[string]any{"sandbox_workspace_write": policy}
+	default:
+		return nil, errors.New("当前沙箱设置需要手动恢复")
+	}
+	if result["approvalPolicy"] == nil {
+		return nil, errors.New("缺少原轮次的审批设置，请手动继续")
+	}
+	// App Server exposes reasoning effort through config on resume.
+	if effort := result["reasoningEffort"]; effort != nil {
+		delete(result, "reasoningEffort")
+		config, _ := result["config"].(map[string]any)
+		if config == nil {
+			config = map[string]any{}
+		}
+		config["model_reasoning_effort"] = effort
+		result["config"] = config
+	}
+	return result, nil
+}

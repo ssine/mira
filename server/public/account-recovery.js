@@ -1,4 +1,4 @@
-// Compatibility is opt-in after a provider error; never retry a turn here.
+// The Server owns automatic retries; this component keeps manual recovery available.
 export class AccountRecovery {
   constructor(root, { api, beforeApply, afterApply, notice, confirm = window.confirm.bind(window) }) {
     Object.assign(this, { root, api, beforeApply, afterApply, notice, confirm });
@@ -36,6 +36,9 @@ export class AccountRecovery {
     text.textContent = plan.recoverable
       ? "此账号无法使用历史中的加密上下文。可切回原账号，或确认兼容处理后继续；原始历史会保留。"
       : `此账号无法使用历史中的加密上下文：${plan.reason}。可切回原账号继续。`;
+    if (plan.recoverable && plan.automaticRecovery && plan.automaticStatus !== "stopped") {
+      text.textContent = "检测到加密上下文不兼容，服务端将自动处理并重试；原始历史会保留，不会新增用户消息。";
+    }
     this.root.append(text);
     if (!plan.recoverable) return;
     const button = document.createElement("button"); button.type = "button"; button.className = "secondary";

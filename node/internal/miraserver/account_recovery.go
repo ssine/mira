@@ -69,14 +69,16 @@ func (server *Server) addInputRecovery(ctx context.Context, request *http.Reques
 }
 
 type inputRecoveryPlan struct {
-	FailureID      string `json:"failureId"`
-	Generation     int64  `json:"generation"`
-	ItemCount      int64  `json:"itemCount"`
-	ThroughItemSeq int64  `json:"throughItemSeq"`
-	EncryptedItems int    `json:"encryptedItems"`
-	Policy         string `json:"policy"`
-	Recoverable    bool   `json:"recoverable"`
-	Reason         string `json:"reason"`
+	FailureID         string `json:"failureId"`
+	Generation        int64  `json:"generation"`
+	ItemCount         int64  `json:"itemCount"`
+	ThroughItemSeq    int64  `json:"throughItemSeq"`
+	EncryptedItems    int    `json:"encryptedItems"`
+	Policy            string `json:"policy"`
+	Recoverable       bool   `json:"recoverable"`
+	Reason            string `json:"reason"`
+	AutomaticRecovery bool   `json:"automaticRecovery"`
+	AutomaticStatus   string `json:"automaticStatus"`
 }
 
 func (server *Server) inputRecoveryPlan(ctx context.Context, storeID, threadID string, account *nodes.CodexAccount) (inputRecoveryPlan, error) {
@@ -280,6 +282,11 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 		return true, err
 	}
 	if request.Method == http.MethodGet {
+		err = server.pool.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM mira_codex_recovery_preferences WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND NOT enabled),
+        COALESCE((SELECT status FROM mira_codex_recovery_attempts WHERE store_id=$1 AND thread_id=$2 AND generation=$3 ORDER BY created_at DESC LIMIT 1),'')`, storeID, match[1], plan.Generation).Scan(&plan.AutomaticRecovery, &plan.AutomaticStatus)
+		if err != nil {
+			return true, err
+		}
 		return true, writeJSON(response, 200, plan)
 	}
 	generation, _ := integer(body["generation"])
@@ -288,58 +295,72 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 	if body["confirm"] != true || !operationIDPattern.MatchString(decisionID) || body["failureId"] != plan.FailureID || generation != plan.Generation || count != plan.ItemCount {
 		return true, &HTTPError{Status: 409, Code: "recovery_changed", Message: "上下文已变更，请重新查看并确认兼容处理"}
 	}
-	if !plan.Recoverable {
-		return true, &HTTPError{Status: 409, Code: "context_unrecoverable", Message: plan.Reason}
-	}
-	runtimeID, _ := account.Reported["runtimeId"].(string)
-	var supported bool
-	if operationIDPattern.MatchString(runtimeID) {
-		err = server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_account_protocols WHERE node_account_id=$1::uuid AND runtime_id=$2::uuid AND protocol>=1)`, bindingID, runtimeID).Scan(&supported)
-		if err != nil {
-			return true, err
-		}
-	}
-	if !supported {
-		return true, &HTTPError{Status: 409, Code: "runtime_upgrade_required", Message: "此 Codex 运行包尚不支持无损的输入兼容处理，请先更新运行包"}
-	}
-	tx, err := server.pool.Begin(ctx)
+	err = server.applyInputRecovery(ctx, request, principal, storeID, match[1], nodeID, account, plan, decisionID, nil)
 	if err != nil {
 		return true, err
 	}
-	defer tx.Rollback(ctx)
-	release, err := server.channel.PrepareExecutionReload(ctx, tx, storeID, match[1], nodeID, bindingID, runtimeID)
+	return true, writeJSON(response, 200, map[string]any{"status": "confirmed", "policy": plan.Policy, "canonicalHistoryUnchanged": true, "reloadedThreadId": match[1]})
+}
+
+func (server *Server) applyInputRecovery(ctx context.Context, request *http.Request, principal *foundation.Principal, storeID, threadID, nodeID string, account *nodes.CodexAccount, plan inputRecoveryPlan, decisionID string, guard func(context.Context, pgx.Tx) error) error {
+	if !plan.Recoverable {
+		return &HTTPError{Status: 409, Code: "context_unrecoverable", Message: plan.Reason}
+	}
+	bindingID := account.NodeAccountID
+	runtimeID, _ := account.Reported["runtimeId"].(string)
+	var supported bool
+	if operationIDPattern.MatchString(runtimeID) {
+		err := server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_codex_account_protocols WHERE node_account_id=$1::uuid AND runtime_id=$2::uuid AND protocol>=1)`, bindingID, runtimeID).Scan(&supported)
+		if err != nil {
+			return err
+		}
+	}
+	if !supported {
+		return &HTTPError{Status: 409, Code: "runtime_upgrade_required", Message: "此 Codex 运行包尚不支持无损的输入兼容处理，请先更新运行包"}
+	}
+	tx, err := server.pool.Begin(ctx)
 	if err != nil {
-		return true, &HTTPError{Status: 409, Code: "thread_busy", Message: err.Error()}
+		return err
+	}
+	defer tx.Rollback(ctx)
+	release, err := server.channel.PrepareExecutionReload(ctx, tx, storeID, threadID, nodeID, bindingID, runtimeID)
+	if err != nil {
+		return &HTTPError{Status: 409, Code: "thread_busy", Message: err.Error()}
 	}
 	defer func() {
 		_ = tx.Rollback(ctx)
 		release()
 	}()
 	var state, routeBinding, routeRuntime string
-	err = tx.QueryRow(ctx, `SELECT state,node_account_id::text,runtime_id FROM mira_codex_execution_routes WHERE store_id=$1 AND thread_id=$2 FOR UPDATE`, storeID, match[1]).Scan(&state, &routeBinding, &routeRuntime)
+	err = tx.QueryRow(ctx, `SELECT state,node_account_id::text,runtime_id FROM mira_codex_execution_routes WHERE store_id=$1 AND thread_id=$2 FOR UPDATE`, storeID, threadID).Scan(&state, &routeBinding, &routeRuntime)
 	if err != nil || state != "idle" || routeBinding != bindingID || routeRuntime != runtimeID {
-		return true, &HTTPError{Status: 409, Code: "account_busy", Message: "请等待本轮结束，并保持当前账号再确认"}
+		return &HTTPError{Status: 409, Code: "account_busy", Message: "请等待本轮结束，并保持当前账号再确认"}
 	}
-	if err := lockScope(ctx, tx, storeID, []string{match[1]}); err != nil {
-		return true, err
+	if err := lockScope(ctx, tx, storeID, []string{threadID}); err != nil {
+		return err
+	}
+	if guard != nil {
+		if err := guard(ctx, tx); err != nil {
+			return err
+		}
 	}
 	refs, _ := json.Marshal(map[string]any{"throughItemSeq": plan.ThroughItemSeq, "failureId": plan.FailureID, "itemCount": plan.ItemCount, "runtimeId": runtimeID, "threadReload": true})
 	tag, err := tx.Exec(ctx, `INSERT INTO mira_codex_input_compatibility(decision_id,store_id,thread_id,generation,node_account_id,model,policy,item_refs,credential_revision)
 	 SELECT $1::uuid,$2,$3,$4,$5::uuid,'',$6,$7::jsonb,$8 FROM codex_thread_projections p WHERE p.store_id=$2 AND p.thread_id=$3 AND p.active_generation=$4 AND p.item_count=$9
 	 AND EXISTS(SELECT 1 FROM mira_node_codex_accounts b WHERE b.node_account_id=$5::uuid AND b.credential_revision=$8 AND b.enabled)
-	 ON CONFLICT(decision_id) DO NOTHING`, decisionID, storeID, match[1], plan.Generation, bindingID, plan.Policy, refs, account.CredentialRevision, plan.ItemCount)
+	 ON CONFLICT(decision_id) DO NOTHING`, decisionID, storeID, threadID, plan.Generation, bindingID, plan.Policy, refs, account.CredentialRevision, plan.ItemCount)
 	if err != nil {
-		return true, err
+		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return true, &HTTPError{Status: 409, Code: "recovery_changed", Message: "上下文已变化，请刷新后重试"}
+		return &HTTPError{Status: 409, Code: "recovery_changed", Message: "上下文已变化，请刷新后重试"}
 	}
 	if err := foundation.AppendAudit(ctx, tx, foundation.AuditEvent{Action: "codex_account.input_recovery_confirmed", Principal: principal, TargetNodeID: nodeID, Request: request,
-		Metadata: map[string]any{"nodeAccountId": bindingID, "threadId": match[1], "decisionId": decisionID, "policy": plan.Policy}}, server.config.Foundation.TrustProxyHeaders); err != nil {
-		return true, err
+		Metadata: map[string]any{"nodeAccountId": bindingID, "threadId": threadID, "decisionId": decisionID, "policy": plan.Policy}}, server.config.Foundation.TrustProxyHeaders); err != nil {
+		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return true, err
+		return err
 	}
-	return true, writeJSON(response, 200, map[string]any{"status": "confirmed", "policy": plan.Policy, "canonicalHistoryUnchanged": true, "reloadedThreadId": match[1]})
+	return nil
 }

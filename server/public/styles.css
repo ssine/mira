@@ -1042,3 +1042,10 @@ progress { width: 100%; accent-color: var(--accent); }
     mask-image: none; -webkit-mask-image: none;
   }
 }
+
+.conversation-recovery-settings { margin: 16px 0; }
+.conversation-recovery-settings .toggle { align-items: flex-start; white-space: normal; font-size: 12px; }
+.conversation-recovery-settings p { font-size: 12px; line-height: 1.6; margin: 8px 0 0; }
+.conversation-recovery-settings .toggle span { flex: 0 0 28px; }
+.conversation-recovery-settings .toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.conversation-recovery-settings .toggle:has(input:disabled) { opacity: .65; cursor: wait; }

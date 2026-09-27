@@ -32,6 +32,7 @@ type Config struct {
 }
 
 type Server struct {
+	stopRecovery          func()
 	config                Config
 	pool                  *pgxpool.Pool
 	auth                  *foundation.AuthService
@@ -107,6 +108,15 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 		views: viewService, imports: importService, sampler: sampler, authState: authState,
 		accountCosts: newAccountCostCache(ctx, viewService.AccountCostHistory),
 	}
+	// A dispatched retry may have reached Codex before the previous Server
+	// stopped. Surface uncertainty without ever submitting it again.
+	if _, err := pool.Exec(ctx, `UPDATE mira_codex_recovery_attempts SET status='stopped',reason='服务已重启，自动重试结果待确认；请检查对话后继续。',updated_at=now() WHERE status IN ('applying','dispatching')`); err != nil {
+		server.accountCosts.Close()
+		_ = broker.Close()
+		pool.Close()
+		return nil, err
+	}
+	server.stopRecovery = server.startAutomaticRecovery(ctx)
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.stopAccountCosts = viewService.StartAccountCostProjector(ctx, configuration.Logger)
 	server.stopPush = server.startPushWorker(ctx)
@@ -148,6 +158,9 @@ func (server *Server) ListenAndServe() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	var result error
 	server.closeOnce.Do(func() {
+		if server.stopRecovery != nil {
+			server.stopRecovery()
+		}
 		if server.stopNodeNotifications != nil {
 			server.stopNodeNotifications()
 		}

@@ -82,9 +82,11 @@ type Result struct {
 }
 
 type socket struct {
-	connection *websocket.Conn
-	writeMu    sync.Mutex
-	closeOnce  sync.Once
+	internalWrite func([]byte) error
+	internalClose func()
+	connection    *websocket.Conn
+	writeMu       sync.Mutex
+	closeOnce     sync.Once
 }
 
 func newSocket(connection *websocket.Conn, limit int64) *socket {
@@ -107,6 +109,9 @@ func (socket *socket) writeText(payload []byte) error {
 func (socket *socket) write(messageType int, payload []byte) error {
 	socket.writeMu.Lock()
 	defer socket.writeMu.Unlock()
+	if socket.internalWrite != nil {
+		return socket.internalWrite(payload)
+	}
 	if err := socket.connection.SetWriteDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		return err
 	}
@@ -117,6 +122,10 @@ func (socket *socket) close(code int, reason string) {
 	socket.closeOnce.Do(func() {
 		socket.writeMu.Lock()
 		defer socket.writeMu.Unlock()
+		if socket.internalClose != nil {
+			socket.internalClose()
+			return
+		}
 		_ = socket.connection.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		_ = socket.connection.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason), time.Now().Add(5*time.Second))
 		_ = socket.connection.Close()

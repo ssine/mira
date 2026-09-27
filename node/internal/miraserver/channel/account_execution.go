@@ -55,6 +55,11 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 	if lockedRoot != root {
 		return 0, errors.New("会话父子关系已变更，请重新打开")
 	}
+	if proxy.recoveryFailureID != "" && (handoff || turn) {
+		if err := CheckAutomaticRecovery(ctx, tx, proxy.storeID, threadID, proxy.recoveryFailureID); err != nil {
+			return 0, err
+		}
+	}
 	current, err := channel.nodes.Get(ctx, proxy.targetNodeID, false)
 	if err != nil {
 		return 0, err
@@ -288,6 +293,11 @@ func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member ex
 	if err != nil && err != pgx.ErrNoRows {
 		return 0, err
 	}
+	if proxy.recoveryFailureID != "" && turn {
+		if err := CheckAutomaticRecovery(ctx, tx, proxy.storeID, member.ID, proxy.recoveryFailureID); err != nil {
+			return 0, err
+		}
+	}
 	exists := previous.Binding != ""
 	changed := !exists || previous.Binding != proxy.nodeAccountID || previous.Runtime != proxy.runtimeID || previous.Generation != member.Generation
 	revision, state, kind := previous.Revision, previous.State, "bound"
@@ -306,7 +316,11 @@ func writeExecutionRoute(ctx context.Context, tx pgx.Tx, proxy *proxy, member ex
 		if err != nil {
 			return 0, err
 		}
-		detail, _ := json.Marshal(map[string]string{"rootThreadId": root})
+		detailMap := map[string]string{"rootThreadId": root}
+		if starting && proxy.recoveryFailureID != "" {
+			detailMap["recoveryFailureId"] = proxy.recoveryFailureID
+		}
+		detail, _ := json.Marshal(detailMap)
 		if _, err = tx.Exec(ctx, `INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail) VALUES($1::uuid,$2,$3,$4,$5::uuid,$6,$7,$8,$9::jsonb)`, operationID, proxy.storeID, member.ID, member.Generation, proxy.nodeAccountID, proxy.runtimeID, revision, kind, detail); err != nil {
 			return 0, err
 		}

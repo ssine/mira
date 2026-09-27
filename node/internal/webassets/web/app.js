@@ -11,6 +11,7 @@ import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.j
 import { interruptThread } from "/thread-interrupt.js";
 import { AccountSidebar } from "/account-status.js";
 import { CodexAccounts, accountNode, accountQuery } from "/codex-accounts.js";
+import { AutomaticRecovery } from "/automatic-recovery.js";
 import { AccountRecovery } from "/account-recovery.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages } from "/trace-images.js";
@@ -287,6 +288,8 @@ const accountRecovery = new AccountRecovery($("#conversationCompatibility"), { a
     if (agent.threadId === threadId && $("#conversationAccount").value === bindingId) await loadAgentTranscript(threadId);
   },
 });
+
+const automaticRecovery = new AutomaticRecovery($("#conversationAutomaticRecovery"), $("#conversationAutomaticRecoveryStatus"), { api, notice: toast });
 
 const retiredAccountRuntimes = new Map();
 
@@ -4743,6 +4746,7 @@ function installConversationDetailsGestures() {
 }
 
 async function openConversationDetails(threadId) {
+  void automaticRecovery.select(threadId);
   const panel = $("#conversationDetails");
   const revision = (panel._miraRevision ?? 0) + 1;
   panel._miraRevision = revision;
