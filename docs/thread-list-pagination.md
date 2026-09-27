@@ -45,6 +45,19 @@ head discovery every 10 seconds and at most two expanded child-head checks per
 poll. It does not repeatedly reload all previously visited pages. Structural
 renders retain disclosure state, focus and sidebar scroll position.
 
+Opening a conversation reads its transcript independently of root and ancestor
+lists. A failed or unfinished first page retries the paged endpoint; only a
+successful non-paged response enables the legacy list fallback. Late ancestor
+responses cannot change the selected conversation.
+
+Cold history summaries are enriched in batches of 10 and cached after each
+completed batch. Cancellation preserves completed work, so retries can progress.
+The visible-assistant lookup uses the existing partial index plus a narrower
+candidate predicate and reads one candidate per thread at a time. It retains only
+scalar scan positions, avoiding accumulation of tool-output bodies. Canonical JSON,
+including escaped NUL, stays unchanged. These are process-local derived caches;
+a restart still requires cold reads.
+
 Token and cost statistics are independent of pagination: a parent's totals include
 all descendant threads, including archived children, and exclude copied pre-fork
 usage. They are fetched for visible rows on demand with bounded concurrency. The

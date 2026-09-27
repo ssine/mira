@@ -76,7 +76,12 @@ async function restoreBrowserRoute() {
   }
   if (view === "agent") {
     show("agentView");
-    await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+    const list = loadAgentThreads();
+    if (threadId) {
+      // A slow sidebar must not hold the selected conversation's history.
+      void list.catch(error => { if (epoch === browserRouteEpoch) toast(`会话列表暂未加载：${error.message}`); });
+      await refreshAgentNodes();
+    } else await Promise.all([refreshAgentNodes(), list]);
     if (epoch !== browserRouteEpoch) return;
     if (threadId) {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
@@ -681,8 +686,14 @@ async function refreshThreadActivity() {
     archived !== agent.showArchived || selectionEpoch !== agent.selectionEpoch;
   const operation = (async () => {
     try {
+      const pager = threadPager();
+      // A failed/unfinished first page says nothing about server support.
+      // Retry that small page instead of falling back to 300 cold summaries.
+      if (!pager.state("roots").checkedAt) {
+        await loadAgentThreads();
+        return;
+      }
       const signal = AbortSignal.timeout(12_000);
-      const pager = agent.threadPager;
       let response;
       if (pager?.enabled) {
         // Poll only the current conversation and rows visible in the sidebar.
@@ -5472,12 +5483,13 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
       return;
     }
   }
-  if (agent.threadPager?.enabled) {
-    try { await loadThreadPath(threadId, epoch); }
-    catch (error) { toast(`父级列表暂未加载：${error.message}`); }
-    if (epoch !== agent.selectionEpoch) return;
-    projected = currentAgentThread() ?? projected;
-  }
+  void (async () => {
+    const pager = threadPager();
+    if (!pager.state("roots").checkedAt) await pager.load("roots", "", true);
+    if (!pager.enabled || epoch !== agent.selectionEpoch) return;
+    await loadThreadPath(threadId, epoch);
+    if (epoch === agent.selectionEpoch) renderAgentThreads(true);
+  })().catch(error => { if (epoch === agent.selectionEpoch) toast(`父级列表暂未加载：${error.message}`); });
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
   agent.threadReasoningEffort = typeof projected?.reasoningEffort === "string" ? projected.reasoningEffort : null;
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;

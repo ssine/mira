@@ -6,6 +6,7 @@ import (
 )
 
 const historyCacheLimit = 1000
+const historyBatchSize = 10
 
 // Only immutable rollout-derived scalars are cached. Node reachability, account
 // bindings, metadata and shared read positions are resolved for every request.
@@ -64,17 +65,21 @@ func (service *Service) addHistorySummaries(ctx context.Context, storeID string,
 			pending = append(pending, thread)
 		}
 	}
-	if len(pending) > 0 {
+	// Bound decoded history per request and retain completed batches when a
+	// client cancels. Otherwise a large cold list repeats the same work forever.
+	for len(pending) > 0 {
+		batch := pending[:min(historyBatchSize, len(pending))]
+		pending = pending[len(batch):]
 		var err error
 		for _, enrich := range []func(context.Context, string, []Thread) ([]Thread, error){
 			service.addActivityHistory, service.addReadHistory, service.addTokenUsage, service.addModelSettings,
 		} {
-			pending, err = enrich(ctx, storeID, pending)
+			batch, err = enrich(ctx, storeID, batch)
 			if err != nil {
 				return nil, err
 			}
 		}
-		for _, thread := range pending {
+		for _, thread := range batch {
 			latest, _ := safeInteger(thread.ReadState["latestItemSeq"])
 			summary := historySummary{keyFor(thread), thread.Activity, thread.TokenUsage, thread.Model, thread.ReasoningEffort, latest}
 			summaries[summary.key] = summary

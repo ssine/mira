@@ -3,6 +3,7 @@ package views
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -15,11 +16,24 @@ import (
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 )
 
-type historyQueryCounter struct{ queries atomic.Int64 }
+type historyQueryCounter struct {
+	queries      atomic.Int64
+	cancel       context.CancelFunc
+	cancelThread string
+}
 
 func (counter *historyQueryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, query pgx.TraceQueryStartData) context.Context {
 	if strings.Contains(query.SQL, "FROM codex_thread_events") {
 		counter.queries.Add(1)
+		if counter.cancel != nil && len(query.Args) > 1 {
+			if ids, ok := query.Args[1].([]string); ok {
+				for _, id := range ids {
+					if id == counter.cancelThread {
+						counter.cancel()
+					}
+				}
+			}
+		}
 	}
 	return ctx
 }
@@ -142,9 +156,76 @@ func TestPostgresHistoryCacheKeepsMutableStateFresh(t *testing.T) {
 	if completed := read(); completed.Activity["state"] != "idle" || counter.queries.Load() <= scans {
 		t.Fatalf("append did not refresh: %#v", completed.Activity)
 	}
+	t.Run("visible assistant lookup ignores tool bodies and empty messages", func(t *testing.T) {
+		appendRecord(3, 1, record("event_msg", map[string]any{"type": "agent_message", "message": "Earlier answer"}))
+		appendRecord(3, 2, record("response_item", map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "Latest answer\x00"}}}))
+		for seq := 3; seq <= 70; seq++ {
+			appendRecord(3, seq, record("response_item", map[string]any{"type": "function_call_output", "output": strings.Repeat("large tool output\x00", 4096)}))
+		}
+		appendRecord(3, 71, record("response_item", map[string]any{"type": "message", "role": "user", "content": "New input"}))
+		appendRecord(3, 72, record("event_msg", map[string]any{"type": "agent_message", "message": " \x00\n"}))
+		got, err := service.addReadHistory(ctx, store, []Thread{{ThreadID: threadID, Generation: 3, ItemCount: 72}})
+		if err != nil || got[0].ReadState["latestItemSeq"] != int64(2) {
+			t.Fatalf("visible sequence: %#v %v", got, err)
+		}
+		appendRecord(3, 73, record("event_msg", map[string]any{"type": "item_completed", "item": map[string]any{"type": "AgentMessage", "content": "Completed message"}}))
+		got, err = service.addReadHistory(ctx, store, []Thread{{ThreadID: threadID, Generation: 3, ItemCount: 73}})
+		if err != nil || got[0].ReadState["latestItemSeq"] != int64(73) {
+			t.Fatalf("completed sequence: %#v %v", got, err)
+		}
+	})
+
 	appendRecord(2, 1, record("event_msg", map[string]any{"type": "task_started", "turn_id": "replacement"}))
 	exec(`UPDATE codex_thread_projections SET active_generation=2,item_count=1,state='{}' WHERE store_id=$1`, store)
 	if replaced := read(); replaced.Activity["turnId"] != "replacement" || replaced.TokenUsage != nil || replaced.Model != nil || replaced.ReadState["latestItemSeq"] != int64(0) {
 		t.Fatalf("generation leaked: %#v", replaced)
+	}
+}
+
+// A client abort after a completed batch must not throw away those summaries.
+func TestPostgresHistoryCacheRetainsCompletedBatchesOnCancel(t *testing.T) {
+	endpoint := os.Getenv("MIRA_VIEWS_TEST_DATABASE_URL")
+	if endpoint == "" {
+		t.Skip("set MIRA_VIEWS_TEST_DATABASE_URL")
+	}
+	config, err := pgxpool.ParseConfig(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter := &historyQueryCounter{}
+	config.ConnConfig.Tracer = counter
+	pool, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := foundation.InitializeDatabase(context.Background(), pool); err != nil {
+		t.Fatal(err)
+	}
+	service := New(pool)
+	threads := make([]Thread, historyBatchSize+1)
+	for i := range threads {
+		threads[i] = Thread{ThreadID: strconv.Itoa(i), Generation: 1}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	counter.cancel, counter.cancelThread = cancel, threads[historyBatchSize].ThreadID
+	_, err = service.addHistorySummaries(ctx, "cancelled-list-fixture", threads)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancelled second batch, got %v", err)
+	}
+	for i, thread := range threads {
+		_, cached := service.cachedHistory(historyKey{"cancelled-list-fixture", thread.ThreadID, 1, 0})
+		if cached != (i < historyBatchSize) {
+			t.Fatalf("thread %d cached=%v", i, cached)
+		}
+	}
+	counter.cancel = nil
+	before := counter.queries.Load()
+	if _, err := service.addHistorySummaries(context.Background(), "cancelled-list-fixture", threads[:historyBatchSize]); err != nil {
+		t.Fatal(err)
+	}
+	if counter.queries.Load() != before {
+		t.Fatal("retry re-read already completed canonical history")
 	}
 }
