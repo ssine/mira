@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/channel"
+	"github.com/ssine/mira/node/internal/miraserver/executionstate"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
@@ -188,6 +189,13 @@ const automaticRecoveryFailureLimit = 20
 func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
+	workers.Add(1)
+	go func() {
+		defer workers.Done()
+		if err := server.reconcileCompletedRecoveryFailures(ctx); err != nil && ctx.Err() == nil {
+			server.config.Logger.Printf("automatic input recovery history reconciliation failed: %v", err)
+		}
+	}()
 	for range 4 {
 		workers.Add(1)
 		go func() {
@@ -237,6 +245,71 @@ func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
 	return func() { cancel(); workers.Wait() }
 }
 
+// Older Servers observed completion without its nested model error after a
+// WebSocket disconnect. Repair those derived observations once at startup in
+// bounded pages; new appends now persist the failure and completion atomically.
+func (server *Server) reconcileCompletedRecoveryFailures(ctx context.Context) error {
+	var cursor int64
+	for {
+		rows, err := server.pool.Query(ctx, `SELECT done.event_seq,r.store_id,r.thread_id,r.generation
+ FROM mira_codex_execution_routes r
+ JOIN codex_thread_projections p ON p.store_id=r.store_id AND p.thread_id=r.thread_id AND p.active_generation=r.generation
+ JOIN mira_codex_execution_events done ON done.store_id=r.store_id AND done.thread_id=r.thread_id AND done.generation=r.generation
+   AND done.node_account_id=r.node_account_id AND done.runtime_id=r.runtime_id AND done.revision=r.revision AND done.turn_id=r.turn_id
+ JOIN codex_thread_events c ON c.store_id=done.store_id AND c.thread_id=done.thread_id AND c.generation=done.generation
+   AND c.item_seq=(done.detail->>'itemSeq')::bigint
+ WHERE r.state='idle' AND done.kind='turn/completed' AND done.detail->>'source'='canonical_history' AND done.event_seq>$1
+   AND c.payload->>'type'='event_msg' AND c.payload->'payload'->>'type' IN ('task_complete','turn_complete')
+   AND (c.payload->'payload'->'error')::text IS NOT NULL AND (c.payload->'payload'->'error')::text<>'null'
+   AND NOT EXISTS(SELECT 1 FROM mira_codex_execution_events e WHERE e.store_id=r.store_id AND e.thread_id=r.thread_id AND e.generation=r.generation
+     AND e.node_account_id=r.node_account_id AND e.runtime_id=r.runtime_id AND e.turn_id=r.turn_id AND e.kind='invalid_encrypted_content')
+ ORDER BY done.event_seq LIMIT 32`, cursor)
+		if err != nil {
+			return err
+		}
+		type completion struct {
+			seq, generation int64
+			store, thread   string
+		}
+		page := make([]completion, 0, 32)
+		for rows.Next() {
+			var item completion
+			if err = rows.Scan(&item.seq, &item.store, &item.thread, &item.generation); err != nil {
+				break
+			}
+			page = append(page, item)
+		}
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		if err = rows.Err(); err != nil {
+			return err
+		}
+		for _, item := range page {
+			cursor = item.seq
+			tx, err := server.pool.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			err = lockScope(ctx, tx, item.store, []string{item.thread})
+			if err == nil {
+				err = executionstate.ReconcileTerminalInputFailure(ctx, tx, item.store, item.thread, item.generation, item.seq)
+			}
+			if err == nil {
+				err = tx.Commit(ctx)
+			}
+			_ = tx.Rollback(ctx)
+			if err != nil {
+				return err
+			}
+		}
+		if len(page) < 32 {
+			return nil
+		}
+	}
+}
+
 func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRecoveryJob, error) {
 	// Each distinct failed turn is consumed once. The history-based failure
 	// budget is checked before applying another recovery, not by retry ancestry.
@@ -272,6 +345,16 @@ func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRec
 func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRecoveryJob) error {
 	setupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	// Startup may discover a durable failure before its execution Node has
+	// reconnected. Wait within the setup deadline instead of consuming the
+	// recovery receipt as an immediate offline failure.
+	for !server.channel.IsConnected(job.Node) {
+		select {
+		case <-setupCtx.Done():
+			return errors.New("运行节点尚未重新连接，请检查节点后继续")
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 	node, err := server.nodes.Get(setupCtx, job.Node, false)
 	if err != nil {
 		return errors.New("运行节点不可用，请手动继续")

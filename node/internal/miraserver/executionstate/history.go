@@ -28,10 +28,11 @@ func readRoute(ctx context.Context, tx pgx.Tx, store, thread string, generation 
 }
 
 type marker struct {
-	seq     int64
-	turn    string
-	started bool
-	failure bool
+	seq      int64
+	turn     string
+	started  bool
+	failure  bool
+	terminal bool
 }
 
 func parseMarker(raw []byte, seq int64) (marker, bool) {
@@ -41,6 +42,7 @@ func parseMarker(raw []byte, seq int64) (marker, bool) {
 			Type    string `json:"type"`
 			TurnID  string `json:"turn_id"`
 			Message string `json:"message"`
+			Error   any    `json:"error"`
 		} `json:"payload"`
 	}
 	if json.Unmarshal(raw, &record) != nil || record.Type != "event_msg" {
@@ -53,8 +55,10 @@ func parseMarker(raw []byte, seq int64) (marker, bool) {
 	switch p.Type {
 	case "task_started", "turn_started":
 		return marker{seq: seq, turn: p.TurnID, started: true}, true
-	case "task_complete", "turn_complete", "turn_aborted":
-		return marker{seq: seq, turn: p.TurnID}, true
+	case "task_complete", "turn_complete":
+		return marker{seq: seq, turn: p.TurnID, terminal: true, failure: InvalidEncryptedContent(p.Error, 0)}, true
+	case "turn_aborted":
+		return marker{seq: seq, turn: p.TurnID, terminal: true}, true
 	case "error":
 		if InvalidEncryptedContent(p.Message, 0) {
 			return marker{seq: seq, turn: p.TurnID, failure: true}, true
@@ -66,7 +70,7 @@ func parseMarker(raw []byte, seq int64) (marker, bool) {
 }
 
 func apply(ctx context.Context, tx pgx.Tx, store, thread string, generation int64, r route, m marker) error {
-	if m.failure {
+	if m.failure && !m.terminal {
 		return nil
 	}
 	if m.turn == "" {
@@ -128,15 +132,17 @@ func ApplyAppends(ctx context.Context, tx pgx.Tx, store, thread string, generati
 		}
 		for _, m := range markers {
 			if m.failure {
-				if m.turn == "" {
+				if m.turn == "" && !m.terminal {
 					m.turn = r.turn
 				}
-				if m.turn != "" {
+				if m.turn != "" && (!m.terminal || m.turn == r.turn) {
 					if err = recordInputFailure(ctx, tx, store, thread, generation, r, m); err != nil {
 						return err
 					}
 				}
-				continue
+				if !m.terminal {
+					continue
+				}
 			}
 			if m.started {
 				r.turn = m.turn
@@ -183,7 +189,7 @@ func ReconcileCompleted(ctx context.Context, tx pgx.Tx, store, thread string) er
 		if err = rows.Scan(&seq, &raw); err != nil {
 			break
 		}
-		if m, ok := parseMarker(raw, seq); ok && !m.failure {
+		if m, ok := parseMarker(raw, seq); ok && (!m.failure || m.terminal) {
 			latest = &m
 			break
 		}
@@ -198,5 +204,45 @@ func ReconcileCompleted(ctx context.Context, tx pgx.Tx, store, thread string) er
 	if latest == nil || latest.started || latest.turn == "" || latest.turn != r.turn {
 		return nil
 	}
+	if latest.failure {
+		if err := recordInputFailure(ctx, tx, store, thread, generation, r, *latest); err != nil {
+			return err
+		}
+	}
 	return apply(ctx, tx, store, thread, generation, r, *latest)
+}
+
+// Rebuild a missed failure observation from a completion already linked to its
+// canonical record. The caller holds the thread lock. Never replay imported or
+// superseded turns, and never change canonical history to repair a projection.
+func ReconcileTerminalInputFailure(ctx context.Context, tx pgx.Tx, store, thread string, generation, completionSeq int64) error {
+	r, err := readRoute(ctx, tx, store, thread, generation)
+	if err == pgx.ErrNoRows || (err == nil && (r.state != "idle" || r.turn == "")) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var raw []byte
+	var seq int64
+	err = tx.QueryRow(ctx, `SELECT c.payload,c.item_seq FROM mira_codex_execution_events done
+ JOIN codex_thread_projections p ON p.store_id=done.store_id AND p.thread_id=done.thread_id AND p.active_generation=done.generation
+ JOIN codex_thread_events c ON c.store_id=done.store_id AND c.thread_id=done.thread_id AND c.generation=done.generation
+   AND c.item_seq=(done.detail->>'itemSeq')::bigint
+ JOIN mira_node_codex_accounts b ON b.node_account_id=done.node_account_id AND b.enabled
+ WHERE done.store_id=$1 AND done.thread_id=$2 AND done.generation=$3 AND done.event_seq=$4
+   AND done.kind='turn/completed' AND done.detail->>'source'='canonical_history'
+   AND done.node_account_id=$5::uuid AND done.runtime_id=$6 AND done.revision=$7 AND done.turn_id=$8
+   AND b.reported->>'runtimeId'=done.runtime_id`, store, thread, generation, completionSeq, r.binding, r.runtime, r.revision, r.turn).Scan(&raw, &seq)
+	if err == pgx.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	m, ok := parseMarker(raw, seq)
+	if !ok || !m.terminal || !m.failure || m.turn != r.turn {
+		return nil
+	}
+	return recordInputFailure(ctx, tx, store, thread, generation, r, m)
 }

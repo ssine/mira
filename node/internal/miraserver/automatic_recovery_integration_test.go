@@ -225,3 +225,81 @@ func TestAutomaticRecoveryNoticesCountRetriesAtEachHistoryPosition(t *testing.T)
 	request(fourth.Failure)
 	check(map[string]int{"first": 1, "second": 2, "new-position": 1, "new-task": 1})
 }
+
+func TestAutomaticRecoveryFromTerminalErrorWithoutLiveNotification(t *testing.T) {
+	pool := accountTestDatabase(t)
+	server := &Server{pool: pool}
+	ctx := context.Background()
+	for _, mode := range []string{"v1", "v2", "upload"} {
+		for _, end := range []string{"task_complete", "turn_complete"} {
+			t.Run(mode+"/"+end, func(t *testing.T) {
+				f := newExecutionHistoryFixture(t, pool)
+				f.append(mode, lifecycle("task_started", "failed"), map[string]any{"type": "event_msg", "payload": map[string]any{
+					"type": end, "turn_id": "failed", "error": map[string]any{"codex_error_info": "other", "message": `{"error":{"code":"invalid_encrypted_content"}}`},
+				}})
+				f.route("idle", "failed")
+				job, err := server.claimAutomaticRecovery(ctx)
+				if err != nil || job == nil || job.Thread != f.thread {
+					t.Fatalf("terminal failure: %+v %v", job, err)
+				}
+				if job, err := server.claimAutomaticRecovery(ctx); err != nil || job != nil {
+					t.Fatalf("duplicate terminal claim: %+v %v", job, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAutomaticRecoveryRebuildsMissedTerminalFailure(t *testing.T) {
+	pool := accountTestDatabase(t)
+	server := &Server{pool: pool}
+	ctx := context.Background()
+	for _, guard := range []string{"recover", "ordinary-error", "aborted", "missing-turn", "new-turn", "generation", "runtime"} {
+		t.Run(guard, func(t *testing.T) {
+			f := newExecutionHistoryFixture(t, pool)
+			kind, turn, message := "task_complete", "failed", `{"error":{"code":"invalid_encrypted_content"}}`
+			if guard == "ordinary-error" {
+				message = "Permission denied"
+			}
+			if guard == "aborted" {
+				kind = "turn_aborted"
+			}
+			if guard == "missing-turn" {
+				turn = ""
+			}
+			f.append("v2", lifecycle("task_started", "failed"), map[string]any{"type": "event_msg", "payload": map[string]any{
+				"type": kind, "turn_id": turn, "error": map[string]any{"message": message},
+			}})
+			// Simulate the derived projection produced by older Servers.
+			f.exec(`DELETE FROM mira_codex_execution_events WHERE store_id=$1 AND kind='invalid_encrypted_content'`, f.store)
+			switch guard {
+			case "new-turn":
+				f.append("v2", lifecycle("task_started", "new"))
+			case "generation":
+				f.exec(`UPDATE codex_thread_projections SET active_generation=2 WHERE store_id=$1`, f.store)
+			case "runtime":
+				f.exec(`UPDATE mira_node_codex_accounts SET reported='{}' WHERE node_account_id=$1::uuid`, f.binding)
+			}
+			for range 2 {
+				if err := server.reconcileCompletedRecoveryFailures(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var count int
+			if err := pool.QueryRow(ctx, `SELECT count(*) FROM mira_codex_execution_events WHERE store_id=$1 AND kind='invalid_encrypted_content'`, f.store).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if guard == "recover" {
+				want = 1
+			}
+			if count != want {
+				t.Fatalf("reconciled failures=%d want=%d", count, want)
+			}
+			job, err := server.claimAutomaticRecovery(ctx)
+			if err != nil || (job != nil) != (want == 1) {
+				t.Fatalf("rebuild claim: %+v %v", job, err)
+			}
+		})
+	}
+}
