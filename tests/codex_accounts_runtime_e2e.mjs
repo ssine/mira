@@ -551,13 +551,13 @@ try {
     console.log("SSE and HTTP 401 TPM rate limits recovered without repeating the persisted child spawn");
   }
   console.log("Subagent identity and followup survived parent account handoff");
-  const autoClient = await connect(a);
-  automaticRecoveryThread = (await autoClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex",
+  const reasoningClient = await connect(a);
+  automaticRecoveryThread = (await reasoningClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex",
     config: { mira_auto_reasoning_recovery: true }, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
-  await turn(autoClient, automaticRecoveryThread, "AUTO_REASONING_SEED");
+  await turn(reasoningClient, automaticRecoveryThread, "AUTO_REASONING_SEED");
   const beforeRecovery = (await history(automaticRecoveryThread)).items;
   const automaticRequestCount = requests.length;
-  await turn(autoClient, automaticRecoveryThread, "AUTO_REASONING_RECOVER");
+  await turn(reasoningClient, automaticRecoveryThread, "AUTO_REASONING_RECOVER");
   assert.equal(requests.length, automaticRequestCount + 2, "only the failed request and its recovery should sample");
   assert(observedDurableExclusion, "the exclusion must be durable before resampling");
   assert(!requests.at(-1).body.input.some(item => item.id === "rs_auto_bad"));
