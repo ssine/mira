@@ -12,6 +12,7 @@ export function recoveryNoticeLabel(notice, enabled = true) {
   if (notice?.status === "stopped" && !notice.reason?.startsWith("本次自动重试未完成")) {
     return `${base}${retries ? ` · ${retries}` : ""} · 自动恢复已停止`;
   }
+  if (notice?.status === "unconfirmed" && !retries) return `${base} · 恢复状态待确认`;
   if (retries) return `${base} · ${retries}${notice.status === "dispatching" ? "，正在继续" : ""}`;
   if (notice?.status === "applying") return `${base} · 正在自动处理`;
   if (notice?.resolved) return `${base} · 已处理`;

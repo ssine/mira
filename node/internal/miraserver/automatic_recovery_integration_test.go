@@ -149,7 +149,7 @@ func TestAutomaticRecoveryCountsFailuresUntilHistoryProgress(t *testing.T) {
 	}
 }
 
-func TestAutomaticRecoveryNoticesCountDispatchedRetriesPerTask(t *testing.T) {
+func TestAutomaticRecoveryNoticesCountRetriesAtEachHistoryPosition(t *testing.T) {
 	pool := accountTestDatabase(t)
 	server := &Server{pool: pool}
 	ctx := context.Background()
@@ -173,7 +173,7 @@ func TestAutomaticRecoveryNoticesCountDispatchedRetriesPerTask(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer tx.Rollback(ctx)
-		got, err := automaticRecoveryNotices(ctx, tx, f.store, f.thread, 1, []string{"first", "second", "new-task", "unrelated"})
+		got, err := automaticRecoveryNotices(ctx, tx, f.store, f.thread, 1, []string{"first", "second", "new-position", "new-task", "unrelated"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -194,9 +194,34 @@ func TestAutomaticRecoveryNoticesCountDispatchedRetriesPerTask(t *testing.T) {
 	check(map[string]int{"first": 1, "second": 1})
 	request(second.Failure)
 	check(map[string]int{"first": 1, "second": 2})
-	request("")
-	third := fail("new-task")
-	check(map[string]int{"first": 1, "second": 2, "new-task": 0})
+	// Tool progress starts a new conversation position even with no new user turn.
+	f.append("v2", map[string]any{"type": "response_item", "payload": map[string]any{"type": "custom_tool_call_output", "output": "done"}})
+	third := fail("new-position")
+	check(map[string]int{"first": 1, "second": 2, "new-position": 0})
 	request(third.Failure)
-	check(map[string]int{"first": 1, "second": 2, "new-task": 1})
+	check(map[string]int{"first": 1, "second": 2, "new-position": 1})
+	// A shutdown cancels the Server observer, not the dispatched model turn.
+	f.exec(`UPDATE mira_codex_recovery_attempts SET status='stopped',reason='context canceled' WHERE failure_id=$1::uuid`, third.Failure)
+	f.append("v2", lifecycle("task_started", "retry-after-restart"))
+	status := func(want string) {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		got, err := automaticRecoveryNotices(ctx, tx, f.store, f.thread, 1, []string{"new-position"})
+		if err != nil || got["new-position"].Status != want || got["new-position"].Reason != "" || got["new-position"].RetryCount != 1 {
+			t.Fatalf("restart notice: %+v err=%v want=%s", got, err, want)
+		}
+	}
+	status("dispatching")
+	f.append("v2", lifecycle("task_complete", "retry-after-restart"))
+	status("completed")
+	request("")
+	f.append("v2", map[string]any{"type": "response_item", "payload": map[string]any{"type": "message", "role": "user", "content": []any{}}})
+	fourth := fail("new-task")
+	check(map[string]int{"first": 1, "second": 2, "new-position": 1, "new-task": 0})
+	request(fourth.Failure)
+	check(map[string]int{"first": 1, "second": 2, "new-position": 1, "new-task": 1})
 }

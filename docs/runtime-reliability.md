@@ -70,7 +70,9 @@ credential, generation and execution guards reject stale recovery work.
 
 Live diagnostics and persisted transcript errors use the same compact encrypted
 context notice. Its retry count comes from actual Server turn reservations in
-the current user task; refreshing the page never increments it. Original error
+the same effective-history position, using the same progress boundary as the
+stopping budget; refreshing the page never increments it. An interrupted Server
+observer cannot override durable dispatch and lifecycle evidence with a false stop. Original error
 details remain collapsed and expandable, and exhaustion is explicit. Other
 execution errors retain their ordinary error presentation. Schema 34 adds the
 default-on preference and attempt receipts without changing canonical records.

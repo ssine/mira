@@ -91,14 +91,22 @@ func (server *Server) routeAutomaticRecovery(ctx context.Context, response http.
 	if err = tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM mira_codex_recovery_preferences WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND NOT enabled)`, store, match[1], generation).Scan(&enabled); err != nil {
 		return true, err
 	}
-	var status, reason string
-	err = tx.QueryRow(ctx, `SELECT status,reason FROM mira_codex_recovery_attempts WHERE store_id=$1 AND thread_id=$2 AND generation=$3 ORDER BY created_at DESC LIMIT 1`, store, match[1], generation).Scan(&status, &reason)
+	var status, reason, latestTurn string
+	err = tx.QueryRow(ctx, `SELECT a.status,a.reason,COALESCE(e.turn_id,'') FROM mira_codex_recovery_attempts a
+ JOIN mira_codex_execution_events e ON e.operation_id=a.failure_id
+ WHERE a.store_id=$1 AND a.thread_id=$2 AND a.generation=$3 ORDER BY a.created_at DESC LIMIT 1`, store, match[1], generation).Scan(&status, &reason, &latestTurn)
 	if err != nil && err != pgx.ErrNoRows {
 		return true, err
+	}
+	if latestTurn != "" {
+		turnIDs = append(turnIDs, latestTurn)
 	}
 	notices, err := automaticRecoveryNotices(ctx, tx, store, match[1], generation, turnIDs)
 	if err != nil {
 		return true, err
+	}
+	if latest, ok := notices[latestTurn]; ok {
+		status, reason = latest.Status, latest.Reason
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return true, err
@@ -113,27 +121,49 @@ type automaticRecoveryNotice struct {
 	Resolved   bool   `json:"resolved"`
 }
 
-// Count actual turn reservations, not failed claims or lifecycle records. Each
-// notice shows the retries reached at that failure in the same user task.
+// Counts share the effective-history boundary used by the stopping budget.
+// A dispatched retry is independent of the worker observing it: a Server restart
+// must not turn a canceled observer into a stopped conversation.
 func automaticRecoveryNotices(ctx context.Context, tx pgx.Tx, store, thread string, generation int64, turnIDs []string) (map[string]automaticRecoveryNotice, error) {
 	notices := map[string]automaticRecoveryNotice{}
 	if len(turnIDs) == 0 {
 		return notices, nil
 	}
-	rows, err := tx.Query(ctx, `SELECT e.turn_id,COALESCE(a.status,''),COALESCE(a.reason,''),
+	rows, err := tx.Query(ctx, `SELECT e.turn_id,
+ CASE WHEN dispatched.event_seq IS NOT NULL THEN
+   CASE WHEN next_request.seq IS NOT NULL OR EXISTS(SELECT 1 FROM mira_codex_execution_events done
+     WHERE done.store_id=$1 AND done.thread_id=$2 AND done.generation=$3 AND done.kind='turn/completed'
+     AND done.event_seq>dispatched.event_seq AND (next_request.seq IS NULL OR done.event_seq<next_request.seq)) THEN 'completed'
+   WHEN EXISTS(SELECT 1 FROM mira_codex_execution_routes r WHERE r.store_id=$1 AND r.thread_id=$2 AND r.generation=$3
+     AND r.node_account_id=e.node_account_id AND r.state IN ('starting','running')) THEN 'dispatching'
+   ELSE 'unconfirmed' END
+ WHEN a.reason='context canceled' THEN 'unconfirmed' ELSE COALESCE(a.status,'') END,
+ CASE WHEN dispatched.event_seq IS NOT NULL OR a.reason='context canceled' THEN '' ELSE COALESCE(a.reason,'') END,
  EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.store_id=$1 AND d.thread_id=$2 AND d.generation=$3 AND d.item_refs->>'failureId'=e.operation_id::text),
- (SELECT count(*) FROM mira_codex_execution_events retry WHERE retry.store_id=$1 AND retry.thread_id=$2 AND retry.generation=$3
-  AND retry.kind='turn_requested' AND COALESCE(retry.detail->>'recoveryFailureId','')<>''
-  AND retry.event_seq>COALESCE((SELECT ordinary.event_seq FROM mira_codex_execution_events ordinary
-   WHERE ordinary.store_id=$1 AND ordinary.thread_id=$2 AND ordinary.generation=$3 AND ordinary.kind='turn_requested'
-   AND COALESCE(ordinary.detail->>'recoveryFailureId','')='' AND ordinary.event_seq<e.event_seq ORDER BY ordinary.event_seq DESC LIMIT 1),0)
-  AND retry.event_seq<=COALESCE((SELECT dispatched.event_seq FROM mira_codex_execution_events dispatched
-   WHERE dispatched.store_id=$1 AND dispatched.thread_id=$2 AND dispatched.generation=$3 AND dispatched.kind='turn_requested'
-   AND dispatched.detail->>'recoveryFailureId'=e.operation_id::text ORDER BY dispatched.event_seq DESC LIMIT 1),e.event_seq))
- FROM unnest($4::text[]) requested(turn_id)
+ (SELECT count(*) FROM mira_codex_execution_events failure
+  JOIN mira_codex_execution_events retry ON retry.store_id=$1 AND retry.thread_id=$2 AND retry.generation=$3
+    AND retry.kind='turn_requested' AND retry.detail->>'recoveryFailureId'=failure.operation_id::text
+  WHERE failure.store_id=$1 AND failure.thread_id=$2 AND failure.generation=$3
+    AND failure.kind='invalid_encrypted_content' AND failure.event_seq<=e.event_seq
+    AND failure.node_account_id=e.node_account_id
+    AND failure.detail->>'credentialRevision'=e.detail->>'credentialRevision'
+    AND (failure.detail->>'throughItemSeq')::bigint>=progress.seq
+    AND retry.event_seq<=COALESCE(dispatched.event_seq,e.event_seq))
+ FROM (SELECT DISTINCT unnest($4::text[]) AS turn_id) requested
  JOIN LATERAL (SELECT * FROM mira_codex_execution_events failure WHERE failure.store_id=$1 AND failure.thread_id=$2 AND failure.generation=$3
   AND failure.turn_id=requested.turn_id AND failure.kind='invalid_encrypted_content' ORDER BY failure.event_seq DESC LIMIT 1) e ON true
- LEFT JOIN mira_codex_recovery_attempts a ON a.failure_id=e.operation_id`, store, thread, generation, turnIDs)
+ LEFT JOIN mira_codex_recovery_attempts a ON a.failure_id=e.operation_id
+ CROSS JOIN LATERAL (SELECT COALESCE((SELECT item_seq FROM codex_thread_events
+  WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq<=(e.detail->>'throughItemSeq')::bigint
+  AND (payload->>'type'='compacted' OR (payload->>'type'='response_item'
+    AND NOT (payload->'payload'->>'type'='message' AND COALESCE(payload->'payload'->>'role','') IN ('system','developer'))))
+  ORDER BY item_seq DESC LIMIT 1),0) AS seq) progress
+ LEFT JOIN LATERAL (SELECT event_seq FROM mira_codex_execution_events retry
+  WHERE retry.store_id=$1 AND retry.thread_id=$2 AND retry.generation=$3 AND retry.kind='turn_requested'
+    AND retry.detail->>'recoveryFailureId'=e.operation_id::text ORDER BY event_seq DESC LIMIT 1) dispatched ON true
+ LEFT JOIN LATERAL (SELECT event_seq AS seq FROM mira_codex_execution_events ordinary
+  WHERE ordinary.store_id=$1 AND ordinary.thread_id=$2 AND ordinary.generation=$3
+    AND ordinary.kind='turn_requested' AND ordinary.event_seq>dispatched.event_seq ORDER BY event_seq LIMIT 1) next_request ON true`, store, thread, generation, turnIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +210,11 @@ func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
 						continue
 					}
 					err = server.runAutomaticRecovery(ctx, *job)
+					if ctx.Err() != nil {
+						// The retry may still run on its execution Node. Its durable
+						// dispatch/lifecycle records, not this observer, own the outcome.
+						return
+					}
 					status, reason := "completed", ""
 					if err != nil {
 						status = "stopped"
