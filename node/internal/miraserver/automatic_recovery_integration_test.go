@@ -108,7 +108,7 @@ func TestAutomaticRecoveryCountsFailuresUntilHistoryProgress(t *testing.T) {
 	f := newExecutionHistoryFixture(t, pool)
 	encrypted := map[string]any{"type": "response_item", "payload": map[string]any{"type": "reasoning", "encrypted_content": "opaque"}}
 	f.append("v2", encrypted)
-	failure := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "error", "message": "invalid_encrypted_content"}}
+	failure := map[string]any{"type": "event_msg", "payload": map[string]any{"type": "error", "message": `{"error":{"code":"invalid_encrypted_content"}}`}}
 	fail := func(turn string, want int) {
 		t.Helper()
 		f.append("v2", lifecycle("task_started", turn),
