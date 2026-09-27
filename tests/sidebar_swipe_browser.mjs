@@ -203,9 +203,11 @@ try {
   assert.equal(await inputFocused(), false, 'closing does not restore composer focus');
   await input.tap();
   assert.equal(await inputFocused(), true, 'explicitly tapping the composer still focuses it');
-  await readingPosition(); await swipe(170, 430, 5, -190); await closed();
-  assert.equal(await inputFocused(), true, 'vertical scrolling does not dismiss the composer');
-  await readingPosition(); await swipe(90, 300, 180, 0, { cancel: true }); await closed();
+  await input.evaluate(element => element.setSelectionRange(5, 5));
+  await readingPosition(); await beginDrag(90, 300); await dragTo(170, 300); await follows(80);
+  assert.equal(await inputFocused(), false, 'the cancellation test starts with a claimed opening drag');
+  await session.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] });
+  await closed();
   assert.equal(await inputFocused(), false, 'a cancelled horizontal drag does not restore stale focus');
   await input.evaluate(element => element.focus({ preventScroll: true }));
   // Use a DOM click so this tests drawer focus handling without the browser
@@ -213,6 +215,12 @@ try {
   await page.locator('#agentThreadDrawerToggle').evaluate(element => element.click());
   assert.equal(await inputFocused(), false, 'button opening also releases composer focus');
   await closeSidebar(page, { touch: true });
+  await input.evaluate(element => element.focus({ preventScroll: true }));
+  await readingPosition(); await beginDrag(170, 430); await dragTo(175, 240);
+  // Pause before lifting so native scroll inertia cannot swallow the next
+  // gesture. Cancellation above must exercise an actual claimed drawer drag.
+  await page.waitForTimeout(200); await endDrag(); await closed();
+  assert.equal(await inputFocused(), true, 'vertical scrolling does not dismiss the composer');
   await input.blur();
   await page.emulateMedia({ reducedMotion: 'reduce' });
   await readingPosition();
