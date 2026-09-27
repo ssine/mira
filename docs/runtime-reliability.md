@@ -77,6 +77,13 @@ details remain collapsed and expandable, and exhaustion is explicit. Other
 execution errors retain their ordinary error presentation. Schema 34 adds the
 default-on preference and attempt receipts without changing canonical records.
 
+Both standalone error events and nested `task_complete.error` / `turn_complete.error`
+envelopes are durable recovery triggers. A terminal error records the failure and
+completion in the same history transaction, so recovery does not depend on a live
+WebSocket observer. Startup reconciles older missed terminal errors in bounded
+pages, only for the matching current idle turn, generation, account and runtime.
+Aborted, superseded and imported turns do not trigger that repair.
+
 Runtime `0.155.1-mira.4` additionally offers an opt-in conversation setting,
 `mira_auto_reasoning_recovery`, passed through native thread start/cold-resume
 configuration. Enabling it authorizes automatic exclusion of a specifically
