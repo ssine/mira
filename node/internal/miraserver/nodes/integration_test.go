@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,7 +69,7 @@ func TestPostgresLifecycle(t *testing.T) {
 	registered, err := service.RegisterNode(ctx, nodeID, map[string]any{
 		"nodeKey": "integration-node", "hostname": "host", "platform": "linux", "architecture": "amd64",
 		"nodeMode": "linux", "nodeVersion": "test", "nodeBuild": map[string]any{"version": "test"},
-		"capabilities": map[string]any{"files": true, "appServer": true}, "codexInstallations": []any{},
+		"capabilities": map[string]any{"files": true, "appServer": true, "codexAccountsV1": true}, "codexInstallations": []any{},
 	})
 	if err != nil || registered.Status != 200 {
 		t.Fatalf("register Node = %#v, %v", registered, err)
@@ -95,6 +97,37 @@ func TestPostgresLifecycle(t *testing.T) {
 	node, err := service.GetNode(ctx, nodeID, false)
 	if err != nil || node == nil || len(node.Aliases) != 1 || node.ChannelStatus["connected"] != true {
 		t.Fatalf("get Node = %#v, %v", node, err)
+	}
+	account, err := service.CreateAccount(ctx, request, principal, nodeID, map[string]any{"name": "Second account"})
+	if err != nil || account.Status != 201 {
+		t.Fatalf("create account = %#v, %v", account, err)
+	}
+	bindingID := account.Body.(map[string]any)["nodeAccountId"].(string)
+	wantResidency := map[string]any{"status": "active", "budgetBytes": json.Number("838860800"),
+		"residentBytes": json.Number("419430400"), "effectiveMemoryBytes": json.Number("4294967296")}
+	for _, residency := range []map[string]any{
+		{"status": "active", "budgetBytes": float64(800 << 20), "residentBytes": float64(400 << 20),
+			"effectiveMemoryBytes": float64(4 << 30), "secret": "must-not-be-exposed"},
+		{"status": "bad\nstatus", "budgetBytes": float64(-1), "residentBytes": "400MiB",
+			"effectiveMemoryBytes": float64(4 << 30), "error": strings.Repeat("x", 1025)},
+	} {
+		if err := service.ReportAccounts(ctx, nodeID, []any{map[string]any{
+			"nodeAccountId": bindingID, "reportedAppServer": map[string]any{"status": "running", "memoryResidency": residency},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		node, err := service.GetNode(ctx, nodeID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected, err := SelectAccount(node, bindingID)
+		if err != nil || selected == nil {
+			t.Fatalf("select account = %#v, %v", selected, err)
+		}
+		if !reflect.DeepEqual(selected.Reported["memoryResidency"], wantResidency) {
+			t.Fatalf("account residency = %#v, want %#v", selected.Reported["memoryResidency"], wantResidency)
+		}
+		wantResidency = map[string]any{"effectiveMemoryBytes": json.Number("4294967296")}
 	}
 	revoked, err := service.RevokeNode(ctx, request, principal, nodeID, nil)
 	if err != nil || revoked.Status != 200 {
