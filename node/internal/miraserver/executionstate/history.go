@@ -31,14 +31,16 @@ type marker struct {
 	seq     int64
 	turn    string
 	started bool
+	failure bool
 }
 
 func parseMarker(raw []byte, seq int64) (marker, bool) {
 	var record struct {
 		Type    string `json:"type"`
 		Payload struct {
-			Type   string `json:"type"`
-			TurnID string `json:"turn_id"`
+			Type    string `json:"type"`
+			TurnID  string `json:"turn_id"`
+			Message string `json:"message"`
 		} `json:"payload"`
 	}
 	if json.Unmarshal(raw, &record) != nil || record.Type != "event_msg" {
@@ -53,12 +55,20 @@ func parseMarker(raw []byte, seq int64) (marker, bool) {
 		return marker{seq: seq, turn: p.TurnID, started: true}, true
 	case "task_complete", "turn_complete", "turn_aborted":
 		return marker{seq: seq, turn: p.TurnID}, true
+	case "error":
+		if InvalidEncryptedContent(p.Message, 0) {
+			return marker{seq: seq, turn: p.TurnID, failure: true}, true
+		}
+		return marker{}, false
 	default:
 		return marker{}, false
 	}
 }
 
 func apply(ctx context.Context, tx pgx.Tx, store, thread string, generation int64, r route, m marker) error {
+	if m.failure {
+		return nil
+	}
 	if m.turn == "" {
 		return nil
 	}
@@ -117,6 +127,20 @@ func ApplyAppends(ctx context.Context, tx pgx.Tx, store, thread string, generati
 			return err
 		}
 		for _, m := range markers {
+			if m.failure {
+				if m.turn == "" {
+					m.turn = r.turn
+				}
+				if m.turn != "" {
+					if err = recordInputFailure(ctx, tx, store, thread, generation, r, m); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if m.started {
+				r.turn = m.turn
+			}
 			if err = apply(ctx, tx, store, thread, generation, r, m); err != nil {
 				return err
 			}
@@ -159,7 +183,7 @@ func ReconcileCompleted(ctx context.Context, tx pgx.Tx, store, thread string) er
 		if err = rows.Scan(&seq, &raw); err != nil {
 			break
 		}
-		if m, ok := parseMarker(raw, seq); ok {
+		if m, ok := parseMarker(raw, seq); ok && !m.failure {
 			latest = &m
 			break
 		}

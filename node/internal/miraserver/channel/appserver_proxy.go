@@ -31,18 +31,19 @@ func proxyActorKey(caller *foundation.Principal) string {
 	return caller.Kind + ":" + subject
 }
 
-func (channel *Channel) attachProxy(targetNodeID string, connection *socket, caller *foundation.Principal, storeID string, target *nodes.Node) {
+func (channel *Channel) attachProxy(targetNodeID string, connection *socket, caller *foundation.Principal, storeID string, target *nodes.Node, recovery ...string) *proxy {
 	if !channel.IsConnected(targetNodeID) {
 		connection.close(websocket.CloseTryAgainLater, "node capability channel is offline")
-		return
+		return nil
 	}
 	sessionID, err := randomUUID()
 	if err != nil {
 		connection.close(websocket.CloseInternalServerErr, "could not create proxy session")
-		return
+		return nil
 	}
 	proxy := &proxy{
-		targetNodeID: targetNodeID, actorKey: proxyActorKey(caller), sessionID: sessionID,
+		runningThreads: map[string]string{},
+		targetNodeID:   targetNodeID, actorKey: proxyActorKey(caller), sessionID: sessionID,
 		nodeAccountID: target.SelectedNodeAccountID, accountID: target.SelectedAccountID,
 		runtimeID: stringValue(target.ReportedAppServer["runtimeId"]),
 		socket:    connection, storeID: storeID, target: target,
@@ -50,6 +51,9 @@ func (channel *Channel) attachProxy(targetNodeID string, connection *socket, cal
 		boundThreadIDs: map[string]bool{}, ephemeralStartRequests: map[string]bool{}, ephemeralThreadIDs: map[string]bool{},
 		toolFreeStartRequests: map[string]bool{}, toolFreeThreadIDs: map[string]bool{},
 		nodeMessages: make(chan map[string]any, 128), nodeMessagesDone: make(chan struct{}),
+	}
+	if len(recovery) > 0 {
+		proxy.recoveryFailureID = recovery[0]
 	}
 	for _, account := range target.CodexAccounts {
 		if account.NodeAccountID == proxy.nodeAccountID {
@@ -91,13 +95,21 @@ func (channel *Channel) attachProxy(targetNodeID string, connection *socket, cal
 		close(proxy.nodeMessagesDone)
 		channel.mu.Unlock()
 		connection.close(websocket.CloseTryAgainLater, "node capability channel is offline")
-		return
+		return nil
 	}
-	go channel.readProxy(proxy)
+	if connection.connection != nil {
+		go channel.readProxy(proxy)
+	}
+	return proxy
 }
 
 func (channel *Channel) readProxy(proxy *proxy) {
-	defer channel.markProxyClientClosed(proxy, false)
+	defer func() {
+		channel.markProxyClientClosed(proxy, false)
+		// Finish the browser close handshake even when the Node subscription
+		// remains alive to observe the active turn.
+		_ = proxy.socket.connection.Close()
+	}()
 	for {
 		_, payload, err := proxy.socket.connection.ReadMessage()
 		if err != nil {
@@ -114,6 +126,7 @@ func (channel *Channel) markProxyClientClosed(proxy *proxy, immediate bool) {
 	proxy.mu.Lock()
 	if proxy.clientClosed {
 		startAbandon := immediate && len(proxy.idempotentThreadStarts) > 0 && !proxy.abandoning
+		cleanup := immediate && !startAbandon
 		if startAbandon {
 			proxy.abandoning = true
 			if proxy.detachTimer != nil {
@@ -124,10 +137,21 @@ func (channel *Channel) markProxyClientClosed(proxy *proxy, immediate bool) {
 		proxy.mu.Unlock()
 		if startAbandon {
 			go channel.runAbandonProxyThreadStarts(proxy)
+		} else if cleanup {
+			channel.cleanupProxy(proxy)
 		}
 		return
 	}
 	proxy.clientClosed = true
+	// Keep the broker subscribed until active turns finish, so permanent
+	// model errors and dynamic tools do not depend on an open browser tab.
+	if !immediate && len(proxy.runningThreads) > 0 {
+		proxy.socket.writeMu.Lock()
+		proxy.socket.internalWrite = func([]byte) error { return nil }
+		proxy.socket.writeMu.Unlock()
+		proxy.mu.Unlock()
+		return
+	}
 	hasStarts := len(proxy.idempotentThreadStarts) > 0
 	if hasStarts && immediate {
 		proxy.abandoning = true
@@ -179,6 +203,25 @@ func (channel *Channel) cleanupProxy(proxy *proxy) {
 	}
 	proxy.mu.Unlock()
 	channel.TrySendToNode(proxy.targetNodeID, map[string]any{"type": "appserver.close", "sessionId": proxy.sessionID})
+}
+
+// A closed browser is not a runtime failure. Keep observing its active turn;
+// storage/protocol failures still take the immediate teardown path.
+func (channel *Channel) writeProxyText(proxy *proxy, payload []byte) error {
+	err := proxy.socket.writeText(payload)
+	if err != nil && proxy.socket.connection != nil {
+		channel.markProxyClientClosed(proxy, false)
+		return nil
+	}
+	return err
+}
+
+func (channel *Channel) writeProxyJSON(proxy *proxy, value any) error {
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	return channel.writeProxyText(proxy, payload)
 }
 
 func (channel *Channel) sendProxyResult(proxy *proxy, id, result any) {
@@ -433,7 +476,7 @@ func (channel *Channel) abandonProxyThreadStarts(ctx context.Context, proxy *pro
 func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *proxy, payload []byte) error {
 	message, err := decodeObject(payload)
 	if err != nil {
-		return proxy.socket.writeText(payload)
+		return channel.writeProxyText(proxy, payload)
 	}
 	if err := channel.finishThreadStart(ctx, proxy, message); err != nil {
 		return err
@@ -466,6 +509,21 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 	}
 	if method == "turn/started" || method == "turn/completed" {
 		turn, _ := params["turn"].(map[string]any)
+		proxy.mu.Lock()
+		if proxy.runningThreads == nil {
+			proxy.runningThreads = map[string]string{}
+		}
+		if method == "turn/started" {
+			proxy.runningThreads[observedID] = stringValue(turn["id"])
+		} else if proxy.runningThreads[observedID] == stringValue(turn["id"]) {
+			delete(proxy.runningThreads, observedID)
+		}
+		cleanup := proxy.clientClosed && len(proxy.runningThreads) == 0
+		proxy.mu.Unlock()
+		if cleanup {
+			defer channel.cleanupProxy(proxy)
+		}
+
 		state := "running"
 		if method == "turn/completed" {
 			state = "idle"
@@ -489,9 +547,26 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 		delete(proxy.toolFreeStartRequests, key)
 		proxy.mu.Unlock()
 		if bound && requested != nil && requestMethod == "turn/start" && message["error"] != nil {
+			proxy.mu.Lock()
+			if proxy.runningThreads[*requested] == "" {
+				delete(proxy.runningThreads, *requested)
+			}
+			cleanup := proxy.clientClosed && len(proxy.runningThreads) == 0
+			proxy.mu.Unlock()
+			if cleanup {
+				defer channel.cleanupProxy(proxy)
+			}
 			if err := channel.recordExecutionStatus(ctx, proxy, *requested, "request_failed", "idle", ""); err != nil {
 				return err
 			}
+		}
+		if bound && requested != nil && requestMethod == "turn/start" && message["error"] == nil {
+			turn, _ := result["turn"].(map[string]any)
+			proxy.mu.Lock()
+			if _, exists := proxy.runningThreads[*requested]; exists && stringValue(turn["id"]) != "" {
+				proxy.runningThreads[*requested] = stringValue(turn["id"])
+			}
+			proxy.mu.Unlock()
 		}
 		if bound {
 			threadID := ""
@@ -553,7 +628,7 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 			"payload": mustJSON(map[string]any{"id": id, "result": map[string]any{"contentItems": content, "success": success}})})
 		return nil
 	}
-	return proxy.socket.writeText(payload)
+	return channel.writeProxyText(proxy, payload)
 }
 
 func (channel *Channel) bindProxyThread(proxy *proxy, threadID string, primary bool) {
@@ -730,6 +805,16 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 	encoded, err := json.Marshal(message)
 	if err != nil {
 		return err
+	}
+	if method == "turn/start" && threadID != "" {
+		proxy.mu.Lock()
+		if proxy.runningThreads == nil {
+			proxy.runningThreads = map[string]string{}
+		}
+		if _, exists := proxy.runningThreads[threadID]; !exists {
+			proxy.runningThreads[threadID] = ""
+		}
+		proxy.mu.Unlock()
 	}
 	if !channel.TrySendToNode(proxy.targetNodeID, map[string]any{"type": "appserver.message", "sessionId": proxy.sessionID, "payload": string(encoded)}) {
 		proxy.socket.close(websocket.CloseInternalServerErr, "node disconnected")

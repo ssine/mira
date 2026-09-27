@@ -2,46 +2,13 @@ package channel
 
 import (
 	"context"
-	"encoding/json"
-	"regexp"
-	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/executionstate"
 )
 
-var encryptedContentCode = regexp.MustCompile(`"code"\s*:\s*"(?:invalid_encrypted_content|unknown_reasoning_pool)"`)
-
-// Codex may keep only the gateway's message when formatting an HTTP error,
-// dropping its structured unknown_reasoning_pool code. Match the known error
-// exactly, including Codex's optional HTTP wrapper, rather than every 409.
-var unknownReasoningPoolMessage = regexp.MustCompile(`^(?:unexpected status 409(?: Conflict)?: )?(?:encrypted history has no known compatibility pool|history belongs to different compatibility pools)(?:, url: \S+)?$`)
-
-// Only inspect the model error envelope. A tool result mentioning this string
-// must not trigger a context change, and ordinary authentication errors do not
-// establish encrypted-context incompatibility.
 func invalidEncryptedContent(value any, depth int) bool {
-	if depth > 8 {
-		return false
-	}
-	switch value := value.(type) {
-	case map[string]any:
-		if value["code"] == "invalid_encrypted_content" || value["code"] == "unknown_reasoning_pool" {
-			return true
-		}
-		for _, key := range []string{"error", "message", "additionalDetails"} {
-			if invalidEncryptedContent(value[key], depth+1) {
-				return true
-			}
-		}
-	case string:
-		if len(value) > 32768 {
-			return false
-		}
-		var parsed any
-		if json.Unmarshal([]byte(value), &parsed) == nil {
-			return invalidEncryptedContent(parsed, depth+1)
-		}
-		return encryptedContentCode.MatchString(value) || unknownReasoningPoolMessage.MatchString(strings.TrimSpace(value))
-	}
-	return false
+	return executionstate.InvalidEncryptedContent(value, depth)
 }
 
 func (channel *Channel) recordInputFailure(ctx context.Context, proxy *proxy, message map[string]any) error {
@@ -64,7 +31,7 @@ func (channel *Channel) recordInputFailure(ctx context.Context, proxy *proxy, me
 		return nil
 	}
 	// Normalize gateway routing failures to the existing recovery event so the
-	// account/credential scope, frozen input prefix and opt-in policy stay shared.
+	// account/credential scope, frozen input prefix and compatibility policy stay shared.
 	id, err := randomUUID()
 	if err != nil {
 		return err
@@ -79,8 +46,19 @@ func (channel *Channel) recordInputFailure(ctx context.Context, proxy *proxy, me
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() > 0 {
-		return proxy.socket.writeJSON(map[string]any{"method": "mira/account/contextIncompatible", "params": map[string]any{"threadId": threadID, "nodeAccountId": proxy.nodeAccountID, "failureId": id, "code": "invalid_encrypted_content"}})
+	if tag.RowsAffected() == 0 {
+		// The canonical history commit may have recorded this first, including
+		// while the browser was detached. Still publish the existing notice.
+		err = channel.db.QueryRow(ctx, `SELECT e.operation_id::text FROM mira_codex_execution_events e
+        JOIN codex_thread_projections p ON p.store_id=e.store_id AND p.thread_id=e.thread_id AND p.active_generation=e.generation
+        WHERE e.store_id=$1 AND e.thread_id=$2 AND e.node_account_id=$3::uuid AND e.runtime_id=$4 AND e.turn_id=$5
+        AND e.kind='invalid_encrypted_content' ORDER BY event_seq DESC LIMIT 1`, proxy.storeID, threadID, proxy.nodeAccountID, proxy.runtimeID, turnID).Scan(&id)
+		if err == pgx.ErrNoRows {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return nil
+	return channel.writeProxyJSON(proxy, map[string]any{"method": "mira/account/contextIncompatible", "params": map[string]any{"threadId": threadID, "nodeAccountId": proxy.nodeAccountID, "failureId": id, "code": "invalid_encrypted_content"}})
 }

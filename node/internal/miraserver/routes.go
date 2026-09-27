@@ -90,6 +90,9 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 	if handled, err := server.routeAccounts(ctx, response, request); handled || err != nil {
 		return err
 	}
+	if handled, err := server.routeAutomaticRecovery(ctx, response, request); handled || err != nil {
+		return err
+	}
 	if handled, err := server.routeInputRecovery(ctx, response, request); handled || err != nil {
 		return err
 	}

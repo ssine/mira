@@ -27,6 +27,7 @@ const admin = (url, body, method = "POST") => adminRequest(origin, session, url,
   body === undefined ? {} : { method, body: JSON.stringify(body) });
 let nodeProcess, nodeId, token, rejectOld = false;
 let holdNextResponse = false, releaseResponse;
+let holdNextFailure = false, releaseFailure, rejectAlways = false;
 const requests = [], rejectedRequests = [], sockets = [], logs = [];
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(read, description, timeout = 60_000) {
@@ -71,23 +72,20 @@ const mock = http.createServer(async (request, response) => {
     "recovery must reach PostgreSQL before the next model request");
     observedDurableExclusion = true;
   }
-  if (rejectOld && encrypted(body.input).some(incompatible)) {
+  if (rejectAlways || (rejectOld && encrypted(body.input).some(incompatible))) {
     rejectedRequests.push({ key, body });
     // Exercise both the gateway JSON envelope and Codex's message-only HTTP
     // fallback; account A still covers the upstream invalid_encrypted_content.
-    if (key === "Bearer synthetic-B" || key === "Bearer synthetic-C") {
-      const message = "encrypted history has no known compatibility pool";
-      const json = key === "Bearer synthetic-B";
-      response.writeHead(409, { "content-type": json ? "application/json" : "text/plain" });
-      response.end(json ? JSON.stringify({ error: { type: "gateway_error", code: "unknown_reasoning_pool", message } }) : message);
-      return;
-    }
-    // Some providers wrap this permanent request error in HTTP 500. It must
-    // still reach Mira's recovery action after exactly one model request.
-    response.writeHead(500, { "content-type": "application/json" });
-    response.end(JSON.stringify({ error: { message: "The encrypted content could not be verified. Encrypted content could not be decrypted or parsed.",
-      type: "invalid_request_error", code: "invalid_encrypted_content", param: null } })); return;
+    const gateway = key === "Bearer synthetic-B" || key === "Bearer synthetic-C";
+    const message = gateway ? "encrypted history has no known compatibility pool" : "The encrypted content could not be verified.";
+    const fail = () => {
+      response.writeHead(gateway ? 409 : 500, { "content-type": "application/json" });
+      response.end(key === "Bearer synthetic-C" ? message : JSON.stringify({ error: { code: gateway ? "unknown_reasoning_pool" : "invalid_encrypted_content", message } }));
+    };
+    if (holdNextFailure) { holdNextFailure = false; releaseFailure = fail; } else fail();
+    return;
   }
+
   const n = requests.length, id = `resp-${n}`;
   const latestUser = body.input.filter(item => item.role === "user").at(-1);
   const prompt = JSON.stringify(latestUser?.content ?? "");
@@ -212,6 +210,10 @@ try {
   const first = await connect(a);
   const threadId = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
   await turn(first, threadId, "Initial request");
+  const automaticEndpoint = id => `/v1/codex/threads/${id}/automatic-input-recovery?storeId=${store}`;
+  const defaultRecovery = await admin(automaticEndpoint(threadId));
+  assert.equal(defaultRecovery.enabled, true);
+  await admin(automaticEndpoint(threadId), { enabled: false, generation: defaultRecovery.generation }, "PUT");
   console.log("Initial account turn completed");
   assert.equal(requests.at(-1).key, "Bearer synthetic-A");
   await waitFor(async () => JSON.stringify((await history(threadId)).items).includes("old-account-A"), "encrypted reasoning persisted");
@@ -393,6 +395,8 @@ try {
       body: JSON.stringify({ expectedVersion: head.version, stateChanges: [], historyChanges: [{ threadId: importedId,
         mode: "replace", expectedGeneration: manifest.generation, expectedItemCount: manifest.itemCount, itemsUploadId: uploadId }] }) });
     await admin(`/v1/codex/runtimes/${nodeId}/start`, { nodeAccountId: a, storeId: store }); await running(a);
+    const importedPreference = await admin(automaticEndpoint(importedId));
+    await admin(automaticEndpoint(importedId), { enabled: false, generation: importedPreference.generation }, "PUT");
     assert(importedEncrypted.size > 0, "Private history fixture must have encrypted context");
     const recoveredBindings = new Set();
     for (const binding of [a, b, c, a]) {
@@ -415,6 +419,62 @@ try {
     }
     console.log(`Full private history passed: ${imported.length} records, ${bytes.length} bytes, three accounts and return to first`);
   }
+
+  // Fork keeps canonical encrypted input but gets the default enabled policy.
+  // Empty turn/start must resample without adding or replaying user messages.
+  const autoClient = await connect(b);
+  await autoClient.call("thread/resume", { threadId, cwd: temporary, model: "gpt-5.1-codex" });
+  const automaticId = (await autoClient.call("thread/fork", { threadId, cwd: temporary, excludeTurns: true, deferGoalContinuation: true })).thread.id;
+  await autoClient.call("thread/resume", { threadId: automaticId, cwd: temporary, model: "gpt-5.1-codex" });
+  assert.equal((await admin(automaticEndpoint(automaticId))).enabled, true);
+  const autoBefore = requests.length;
+  await turn(autoClient, automaticId, "AUTOMATIC_RETRY_ORIGINAL", "failed");
+  const beforeAuto = (await history(automaticId)).items;
+  await waitFor(async () => {
+    const result = await admin(automaticEndpoint(automaticId));
+    if (result.status === "stopped") throw Error(JSON.stringify(result));
+    return result.status === "completed";
+  }, "automatic context recovery");
+  assert.equal(requests.length - autoBefore, 2, "one failure and exactly one automatic retry");
+  const afterAuto = (await history(automaticId)).items;
+  assert.deepEqual(afterAuto.slice(0, beforeAuto.length), beforeAuto, "canonical history stays untouched");
+  const users = items => items.filter(item => item.type === "response_item" && item.payload.type === "message" && item.payload.role === "user");
+  assert.deepEqual(users(afterAuto), users(beforeAuto), "retry adds no user message");
+  assert.equal(JSON.stringify(requests.at(-1).body.input).split("AUTOMATIC_RETRY_ORIGINAL").length, 2);
+  assert(!encrypted(requests.at(-1).body.input).some(incompatible));
+  console.log("Automatic recovery passed: default enabled, one retry, unchanged original user messages");
+  const background = await connect(b);
+  const backgroundId = (await background.call("thread/fork", { threadId, cwd: temporary, excludeTurns: true, deferGoalContinuation: true })).thread.id;
+  await background.call("thread/resume", { threadId: backgroundId, cwd: temporary, model: "gpt-5.1-codex" });
+  const backgroundBefore = requests.length;
+  holdNextFailure = true;
+  await background.call("turn/start", { threadId: backgroundId, input: [{ type: "text", text: "RECOVER_WITHOUT_BROWSER" }] });
+  await waitFor(() => releaseFailure, "background rejection held");
+  await new Promise(resolve => { background.socket.addEventListener("close", resolve, { once: true }); background.socket.close(); });
+  await delay(250);
+  releaseFailure(); releaseFailure = undefined;
+  await waitFor(async () => {
+    const result = await admin(automaticEndpoint(backgroundId));
+    if (result.status === "stopped") throw Error(JSON.stringify(result));
+    return result.status === "completed";
+  }, "recovery without a browser subscriber");
+  assert.equal(requests.length - backgroundBefore, 2);
+  assert.equal(users((await history(backgroundId)).items).filter(item => JSON.stringify(item).includes("RECOVER_WITHOUT_BROWSER")).length, 1);
+  console.log("Automatic recovery survived browser disconnect");
+
+  const failing = await connect(b);
+  const failingId = (await failing.call("thread/fork", { threadId, cwd: temporary, excludeTurns: true, deferGoalContinuation: true })).thread.id;
+  await failing.call("thread/resume", { threadId: failingId, cwd: temporary, model: "gpt-5.1-codex" });
+  const failingBefore = requests.length;
+  rejectAlways = true;
+  await turn(failing, failingId, "RETRY_LIMIT_SAME_HISTORY", "failed");
+  await waitFor(async () => (await admin(automaticEndpoint(failingId))).reason.includes("连续失败 20 次"), "stop after twenty failures", 120_000);
+  await delay(2500);
+  assert.equal(requests.length - failingBefore, 20, "identical history stops at twenty consecutive failures");
+  rejectAlways = false;
+  console.log("Automatic recovery stopped after twenty consecutive failures of unchanged history");
+
+
   const parentClient = await connect(a);
   console.log("Testing persisted subagent handoff");
   const parentId = (await parentClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig(), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
@@ -491,13 +551,13 @@ try {
     console.log("SSE and HTTP 401 TPM rate limits recovered without repeating the persisted child spawn");
   }
   console.log("Subagent identity and followup survived parent account handoff");
-  const autoClient = await connect(a);
-  automaticRecoveryThread = (await autoClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex",
+  const reasoningClient = await connect(a);
+  automaticRecoveryThread = (await reasoningClient.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex",
     config: { mira_auto_reasoning_recovery: true }, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
-  await turn(autoClient, automaticRecoveryThread, "AUTO_REASONING_SEED");
+  await turn(reasoningClient, automaticRecoveryThread, "AUTO_REASONING_SEED");
   const beforeRecovery = (await history(automaticRecoveryThread)).items;
   const automaticRequestCount = requests.length;
-  await turn(autoClient, automaticRecoveryThread, "AUTO_REASONING_RECOVER");
+  await turn(reasoningClient, automaticRecoveryThread, "AUTO_REASONING_RECOVER");
   assert.equal(requests.length, automaticRequestCount + 2, "only the failed request and its recovery should sample");
   assert(observedDurableExclusion, "the exclusion must be durable before resampling");
   assert(!requests.at(-1).body.input.some(item => item.id === "rs_auto_bad"));
@@ -540,7 +600,7 @@ try {
 } catch (error) {
   console.error(error.stack, logs.join("").slice(-1500), (await fs.readFile(runtimeLog, "utf8").catch(() => "")).slice(-5000)); process.exitCode = 1;
 } finally {
-  releaseResponse?.();
+  releaseResponse?.(); releaseFailure?.();
   for (const socket of sockets) socket.close();
   if (nodeProcess?.exitCode === null) {
     const exited = new Promise(resolve => nodeProcess.once("exit", resolve)); nodeProcess.kill("SIGTERM"); await exited;

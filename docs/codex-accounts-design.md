@@ -114,14 +114,29 @@ thread/unsubscribe 并不证明线程已卸载。账号选择器的待选账号�
 根据 canonical type 判断 reasoning、
 compaction/context_compaction 和 compacted checkpoint，不依赖 cmp_ 等 ID 前缀。
 
-用户明确确认后，只过滤恢复时的模型输入。如果是推理则省略旧的加密推理项；如果压缩检查点也
+自动恢复或用户手动确认后，只过滤恢复时的模型输入。如果是推理则省略旧的加密推理项；如果压缩检查点也
 不兼容则从保存的完整压缩前消息重建输入，并提示输入可能变长。缺少完整来源、未知加密项或
 加密工具结果时拒绝自动处理。原始历史、导出、fork 和持久化 diff 不过滤、不删除、不换 generation。
 确认时只卸载当前对话树；同一账号进程下一次恢复会读取已确认策略，其他对话不受影响。
 
 确认绑定于 thread/generation/NodeAccount/credential revision 和冻结的历史前缀；新产生的加密
-推理继续保留。其他账号不继承该决定。确认 operation UUID 支持响应丢失重放；确认本身不重发
-失败的 turn 或工具，用户再次发送才继续。
+推理继续保留。其他账号不继承该决定。确认 operation UUID 支持响应丢失重放；手动确认本身不重发失败的 turn 或工具。
+
+所有新旧对话默认开启自动恢复，可在「会话详情 → 自动处理不兼容上下文并重试」单独关闭。
+设置保存在 PostgreSQL，按 thread/generation 隔离；fork 和新 generation 使用默认开启。
+Server 保存模型错误并结合轮次完成记录触发恢复；页面关闭后，broker 保持正在执行轮次的
+监听直到结束，继续处理工具请求与错误。支持的 canonical error 也在历史提交时补录。错误必须属于当前
+账号、凭据版本、generation 和最近结束的轮次；归档、删除、用户已继续或关闭开关时停止。
+恢复复用上述完整性检查与对话树卸载，再通过普通 App Server broker 恢复历史，保留模型、
+思考强度和权限设置，并用空 `turn/start.input` 重新生成。不会插入「继续」或重发用户消息，
+已保存的消息和工具结果保留在上下文中。
+
+同一份有效历史连续出现 20 次兼容失败后停止（首次失败计入，最多额外重试 19 次）。
+新用户消息、模型输出、推理、工具结果或压缩历史会重新计数；恢复设置、轮次生命周期和 token 计数不会。
+计数来自持久错误记录，Server 重启不会清零。4 个有界 worker 在后台处理；每次自动尝试先保存唯一 failure 收据，多个
+观察者不会重复提交。请求确认丢失、连接断开或服务重启后不盲目重放 `turn/start`，界面提示
+检查状态后手动继续。该机制不承诺对模型后续选择的工具调用提供 exactly-once 保证。
+兼容确认和自动尝试均独立于 canonical history；保留 generation，原始导出不变。
 
 输入恢复需要 0.153.1-mira.9 或更新兼容 runtime。Server 根据具体 runtime 的协议观察确认支持，
 旧包只保留输入并提示升级。fork 仍复制 canonical history，不能视为绕过加密兼容性的操作。
@@ -129,6 +144,8 @@ compaction/context_compaction 和 compacted checkpoint，不依赖 cmp_ 等 ID �
 ## 接口与存储
 
 Schema 28 追加逻辑账号、Node 绑定、额度样本、执行事件/路由、兼容确认与 runtime 协议观察表。
+Schema 34 追加对话自动恢复偏好与自动尝试收据；缺少偏好行表示开启。执行错误可由当前
+generation 新追加的 canonical error 记录重建，导入或替换历史不触发自动执行。
 Schema 29 将 Codex AgentGraphStore 的父子关系及 open/closed 状态保存在追加事件中，
 关系索引可从事件重建；恢复只读取当前 generation 的关系，跨账号不再依赖本地 SQLite。
 保留前一版 Server 的 SQL 契约，默认账号仍双写旧额度表。
@@ -137,6 +154,7 @@ Schema 29 将 Codex AgentGraphStore 的父子关系及 open/closed 状态保存�
 - GET/POST /v1/nodes/:nodeId/codex-accounts：列出/创建；单个绑定可 PATCH 名称。
 - 绑定下的 quota、quota-history、configure、login、login-status、login-cancel、logout：额度和凭据管理。
 - 既有 runtime start/stop 请求及 App Server WebSocket 接受 nodeAccountId；省略用默认账号，显式无效值不回退。
+- GET/PUT /v1/codex/threads/:threadId/automatic-input-recovery：读取/更新自动恢复偏好与最近尝试状态；PUT 校验 generation，要求管理员与 CSRF。
 - GET/POST /v1/codex/threads/:threadId/input-recovery：读取计划/确认，使用 storeId 和 nodeAccountId 限定范围。
 - Node 报告 codexAccountsV1 和 codexThreadHandoffV1；appserver.open 携带 binding/runtime，
   accountThreads 指定交接范围。凭据管理仍使用账号全局锁；对话交接锁保持到路由事务完成。

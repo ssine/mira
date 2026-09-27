@@ -55,6 +55,9 @@ jobs:
           node --test \
             tests/admin_session_ui_test.mjs \
             tests/account_status_test.mjs \
+            tests/account_recovery_test.mjs \
+            tests/automatic_recovery_test.mjs \
+            tests/recovery_notices_test.mjs \
             tests/account_overview_test.mjs \
             tests/account_history_cache_test.mjs \
             tests/quota_reference.mjs \
@@ -117,7 +120,7 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium
           browser_status=0
-          for test in web_shell thread_list thread_pages thread_activity thread_models codex_accounts account_overview sidebar_layout sidebar_swipe thread_token_usage composer_drafts transcript_images trace_diagrams; do
+          for test in web_shell thread_list thread_pages thread_activity thread_models codex_accounts account_overview sidebar_layout sidebar_swipe thread_token_usage composer_drafts transcript_images trace_diagrams recovery_notices; do
             MIRA_SERVER_URL=http://127.0.0.1:8787 node "tests/${test}_browser.mjs" "$RUNNER_TEMP/mira-browser/node_modules/playwright/index.mjs" || browser_status=1
           done
           exit "$browser_status"
