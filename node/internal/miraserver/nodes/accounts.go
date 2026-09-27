@@ -138,6 +138,20 @@ func (service *Service) ReportAccounts(ctx context.Context, nodeID string, raw a
 		}
 		reported := object(record["reportedAppServer"], nil)
 		clean := map[string]any{}
+		if residency, ok := reported["memoryResidency"].(map[string]any); ok {
+			view := map[string]any{}
+			for _, key := range []string{"status", "error"} {
+				if value, ok := residency[key].(string); ok && len(value) <= 1024 && !containsControl(value, false) {
+					view[key] = value
+				}
+			}
+			for _, key := range []string{"budgetBytes", "residentBytes", "effectiveMemoryBytes"} {
+				if value, ok := integer(residency[key]); ok && value >= 0 {
+					view[key] = value
+				}
+			}
+			clean["memoryResidency"] = view
+		}
 		if provider, ok := reported["provider"].(map[string]any); ok {
 			view := map[string]any{}
 			for _, key := range []string{"id", "name", "wireApi", "baseUrl", "credentialSource"} {
