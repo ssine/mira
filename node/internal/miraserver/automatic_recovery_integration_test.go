@@ -148,3 +148,55 @@ func TestAutomaticRecoveryCountsFailuresUntilHistoryProgress(t *testing.T) {
 		fail(fmt.Sprintf("unchanged-%d", f.count), 2)
 	}
 }
+
+func TestAutomaticRecoveryNoticesCountDispatchedRetriesPerTask(t *testing.T) {
+	pool := accountTestDatabase(t)
+	server := &Server{pool: pool}
+	ctx := context.Background()
+	f := newExecutionHistoryFixture(t, pool)
+	request := func(failure string) {
+		f.exec(`INSERT INTO mira_codex_execution_events(operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind,detail)
+ VALUES(gen_random_uuid(),$1,$2,1,$3::uuid,$4,1,'turn_requested',jsonb_build_object('recoveryFailureId',$5::text))`, f.store, f.thread, f.binding, f.runtime, failure)
+	}
+	fail := func(turn string) *automaticRecoveryJob {
+		f.append("v2", lifecycle("task_started", turn), map[string]any{"type": "event_msg", "payload": map[string]any{"type": "error", "message": `{"code":"invalid_encrypted_content"}`}}, lifecycle("task_complete", turn))
+		job, err := server.claimAutomaticRecovery(ctx)
+		if err != nil || job == nil {
+			t.Fatalf("claim: %+v %v", job, err)
+		}
+		return job
+	}
+	check := func(want map[string]int) {
+		t.Helper()
+		tx, err := pool.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback(ctx)
+		got, err := automaticRecoveryNotices(ctx, tx, f.store, f.thread, 1, []string{"first", "second", "new-task", "unrelated"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("notices: %+v", got)
+		}
+		for turn, count := range want {
+			if got[turn].RetryCount != count {
+				t.Fatalf("%s retries=%d want=%d", turn, got[turn].RetryCount, count)
+			}
+		}
+	}
+	request("")
+	first := fail("first")
+	check(map[string]int{"first": 0}) // Claim alone is not a retry.
+	request(first.Failure)
+	second := fail("second")
+	check(map[string]int{"first": 1, "second": 1})
+	request(second.Failure)
+	check(map[string]int{"first": 1, "second": 2})
+	request("")
+	third := fail("new-task")
+	check(map[string]int{"first": 1, "second": 2, "new-task": 0})
+	request(third.Failure)
+	check(map[string]int{"first": 1, "second": 2, "new-task": 1})
+}

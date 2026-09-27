@@ -55,10 +55,25 @@ load. The same rule applies to `response.failed` and nested/flat SSE `error`
 events. Message text without a matching structured code does not change retry
 behavior.
 
-Mira can then offer its existing encrypted-input recovery action. Recovery still
-requires explicit administrator consent and only changes the frozen-prefix
-model-input projection; canonical records remain unchanged. It does not restart
-the account process or automatically resubmit the failed turn.
+Mira Server enables encrypted-input recovery by default for existing and new
+conversations. The conversation details switch can disable it. Recovery uses the
+same scoped compatibility reload as the manual action and submits an empty-input
+turn in the background, including after the browser disconnects. It inserts no
+user message and retains canonical history and completed tool results.
+
+Twenty consecutive failures of unchanged effective history stop recovery: the
+initial failure plus at most nineteen automatic retries. New user/model/reasoning,
+tool or compaction history resets this budget; lifecycle, settings and token
+records do not. Durable failure receipts and dispatch reservations survive Server
+restarts and prevent blind redispatch of an ambiguous attempt. Account,
+credential, generation and execution guards reject stale recovery work.
+
+Live diagnostics and persisted transcript errors use the same compact encrypted
+context notice. Its retry count comes from actual Server turn reservations in
+the current user task; refreshing the page never increments it. Original error
+details remain collapsed and expandable, and exhaustion is explicit. Other
+execution errors retain their ordinary error presentation. Schema 34 adds the
+default-on preference and attempt receipts without changing canonical records.
 
 Runtime `0.155.1-mira.4` additionally offers an opt-in conversation setting,
 `mira_auto_reasoning_recovery`, passed through native thread start/cold-resume

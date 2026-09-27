@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +30,15 @@ func (server *Server) routeAutomaticRecovery(ctx context.Context, response http.
 	}
 	if request.Method != http.MethodGet && request.Method != http.MethodPut {
 		return true, &HTTPError{Status: 405, Code: "method_not_allowed", Message: "method not allowed"}
+	}
+	turnIDs := request.URL.Query()["turnId"]
+	if len(turnIDs) > 64 {
+		return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "最多同时读取 64 个轮次的恢复状态"}
+	}
+	for _, id := range turnIDs {
+		if id == "" || len(id) > 256 || strings.ContainsRune(id, 0) {
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid turn id"}
+		}
 	}
 	store := request.URL.Query().Get("storeId")
 	if store == "" {
@@ -86,10 +96,57 @@ func (server *Server) routeAutomaticRecovery(ctx context.Context, response http.
 	if err != nil && err != pgx.ErrNoRows {
 		return true, err
 	}
+	notices, err := automaticRecoveryNotices(ctx, tx, store, match[1], generation, turnIDs)
+	if err != nil {
+		return true, err
+	}
 	if err = tx.Commit(ctx); err != nil {
 		return true, err
 	}
-	return true, writeJSON(response, 200, map[string]any{"enabled": enabled, "generation": generation, "status": status, "reason": reason})
+	return true, writeJSON(response, 200, map[string]any{"enabled": enabled, "generation": generation, "status": status, "reason": reason, "turns": notices})
+}
+
+type automaticRecoveryNotice struct {
+	RetryCount int    `json:"retryCount"`
+	Status     string `json:"status"`
+	Reason     string `json:"reason"`
+	Resolved   bool   `json:"resolved"`
+}
+
+// Count actual turn reservations, not failed claims or lifecycle records. Each
+// notice shows the retries reached at that failure in the same user task.
+func automaticRecoveryNotices(ctx context.Context, tx pgx.Tx, store, thread string, generation int64, turnIDs []string) (map[string]automaticRecoveryNotice, error) {
+	notices := map[string]automaticRecoveryNotice{}
+	if len(turnIDs) == 0 {
+		return notices, nil
+	}
+	rows, err := tx.Query(ctx, `SELECT e.turn_id,COALESCE(a.status,''),COALESCE(a.reason,''),
+ EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.store_id=$1 AND d.thread_id=$2 AND d.generation=$3 AND d.item_refs->>'failureId'=e.operation_id::text),
+ (SELECT count(*) FROM mira_codex_execution_events retry WHERE retry.store_id=$1 AND retry.thread_id=$2 AND retry.generation=$3
+  AND retry.kind='turn_requested' AND COALESCE(retry.detail->>'recoveryFailureId','')<>''
+  AND retry.event_seq>COALESCE((SELECT ordinary.event_seq FROM mira_codex_execution_events ordinary
+   WHERE ordinary.store_id=$1 AND ordinary.thread_id=$2 AND ordinary.generation=$3 AND ordinary.kind='turn_requested'
+   AND COALESCE(ordinary.detail->>'recoveryFailureId','')='' AND ordinary.event_seq<e.event_seq ORDER BY ordinary.event_seq DESC LIMIT 1),0)
+  AND retry.event_seq<=COALESCE((SELECT dispatched.event_seq FROM mira_codex_execution_events dispatched
+   WHERE dispatched.store_id=$1 AND dispatched.thread_id=$2 AND dispatched.generation=$3 AND dispatched.kind='turn_requested'
+   AND dispatched.detail->>'recoveryFailureId'=e.operation_id::text ORDER BY dispatched.event_seq DESC LIMIT 1),e.event_seq))
+ FROM unnest($4::text[]) requested(turn_id)
+ JOIN LATERAL (SELECT * FROM mira_codex_execution_events failure WHERE failure.store_id=$1 AND failure.thread_id=$2 AND failure.generation=$3
+  AND failure.turn_id=requested.turn_id AND failure.kind='invalid_encrypted_content' ORDER BY failure.event_seq DESC LIMIT 1) e ON true
+ LEFT JOIN mira_codex_recovery_attempts a ON a.failure_id=e.operation_id`, store, thread, generation, turnIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var turn string
+		var notice automaticRecoveryNotice
+		if err := rows.Scan(&turn, &notice.Status, &notice.Reason, &notice.Resolved, &notice.RetryCount); err != nil {
+			return nil, err
+		}
+		notices[turn] = notice
+	}
+	return notices, rows.Err()
 }
 
 type automaticRecoveryJob struct{ Failure, Store, Thread, Node, Binding, Runtime string }

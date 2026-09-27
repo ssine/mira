@@ -12,6 +12,7 @@ import { interruptThread } from "/thread-interrupt.js";
 import { AccountSidebar } from "/account-status.js";
 import { CodexAccounts, accountNode, accountQuery } from "/codex-accounts.js";
 import { AutomaticRecovery } from "/automatic-recovery.js";
+import { RecoveryNotices, encryptedContextError, recoveryNoticeLabel } from "/recovery-notices.js";
 import { AccountRecovery } from "/account-recovery.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages } from "/trace-images.js";
@@ -289,6 +290,7 @@ const accountRecovery = new AccountRecovery($("#conversationCompatibility"), { a
   },
 });
 
+const recoveryNotices = new RecoveryNotices($("#conversationTrace"), { api, current: () => ({ threadId: agent.threadId, generation: agent.transcriptGeneration }) });
 const automaticRecovery = new AutomaticRecovery($("#conversationAutomaticRecovery"), $("#conversationAutomaticRecoveryStatus"), { api, notice: toast });
 
 const retiredAccountRuntimes = new Map();
@@ -3099,16 +3101,26 @@ function setCompactionSummary(card, notice, summary) {
 }
 
 function upsertTrace(key, kind, title, body = undefined, status = "", options = {}) {
+  if (kind === "error" && options.recoveryEligible !== false && encryptedContextError(body)) {
+    options = { ...options, compactionSummary: body };
+    kind = "recovery";
+    title = body = recoveryNoticeLabel();
+    status = "";
+  }
   const trace = $("#conversationTrace");
   const follow = options.autoScroll !== false && (options.forceScroll === true || traceNearBottom(trace));
   trace.querySelector(".conversation-empty")?.remove();
   let card = (key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null) ?? options.reuseCard;
+  if (card && card.dataset.traceKind !== kind && [card.dataset.traceKind, kind].includes("recovery")) {
+    card.remove();
+    card = null;
+  }
   if (!card) {
     card = element("article", `trace-card ${kind}`);
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
     card._miraExpandable = ["tool", "reasoning"].includes(kind);
-    const copy = ["user", "compaction", "image"].includes(kind) ? null : createTraceCopyButton(card);
+    const copy = ["user", "compaction", "recovery", "image"].includes(kind) ? null : createTraceCopyButton(card);
     if (card._miraExpandable) {
       const head = element("summary", "trace-head");
       const actions = element("div", "trace-actions");
@@ -3121,7 +3133,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       const footer = element("footer", "trace-footer");
       footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), element("span", "trace-cost"), copy);
       card.append(element("div", "trace-body"), footer);
-    } else if (kind === "compaction") {
+    } else if (["compaction", "recovery"].includes(kind)) {
       const details = element("details", "trace-detail compaction-detail");
       const head = element("summary", "compaction-head");
       head.append(element("span", "compaction-label"), element("span", "compaction-expand", "展开"), element("span", "compaction-collapse", "收起"));
@@ -3136,7 +3148,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
       head.append(element("span", "trace-kind", title), actions);
       card.append(head, element("div", "trace-body"));
     }
-    if (!["image", "compaction"].includes(kind)) setTraceBody(card, body, kind);
+    if (!["image", "compaction", "recovery"].includes(kind)) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
     if (kind === "tool" && options.collapseTools !== false) {
       ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
@@ -3148,7 +3160,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card.dataset.traceKind = kind;
     if (card.querySelector(".trace-kind")) card.querySelector(".trace-kind").textContent = title;
     if (card.querySelector(".trace-status")) card.querySelector(".trace-status").textContent = status;
-    if (!["image", "compaction"].includes(kind) && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
+    if (!["image", "compaction", "recovery"].includes(kind) && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
   }
   if (!trace.contains(card)) {
@@ -3157,8 +3169,9 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   }
   card.dataset.traceTitle = title;
   card.dataset.traceStatus = status;
-  if (kind === "compaction") setCompactionSummary(card, body, options.compactionSummary);
+  if (["compaction", "recovery"].includes(kind)) setCompactionSummary(card, body, options.compactionSummary);
   if (options.turnId) card.dataset.turnId = options.turnId;
+  if (kind === "recovery") recoveryNotices.decorate(card);
   if (options.transcriptKey) card._miraTranscriptKey = options.transcriptKey;
   if (options.toolDetail) {
     card._miraToolDetail = options.toolDetail;
@@ -3439,6 +3452,7 @@ function renderThread(thread) {
 }
 
 function resetAgentTranscript(threadId = null) {
+  recoveryNotices.reset();
   clearTimeout(agent.readTimer);
   agent.readTimer = null;
   if ($("#conversationDetails").open) {
@@ -3465,6 +3479,8 @@ function retainTurnError(threadId, turnId, message) {
     diagnostic = { threadId, turnId, messages: new Set(), dismissed: false };
     agent.diagnostics.set(key, diagnostic);
   }
+  if (message === "Codex Turn 执行失败" && [...diagnostic.messages].some(encryptedContextError)) return;
+  if (encryptedContextError(message)) diagnostic.messages.delete("Codex Turn 执行失败");
   diagnostic.messages.add(message);
   if (threadId === agent.threadId) renderTurnDiagnostics();
 }
@@ -3473,9 +3489,10 @@ function renderTurnDiagnostics() {
   for (const [key, diagnostic] of agent.diagnostics) {
     if (diagnostic.threadId !== agent.threadId || diagnostic.dismissed) continue;
     const card = upsertTrace(`diagnostic-${key}`, "error", "执行失败",
-      [...diagnostic.messages].join("\n\n"), "", { autoScroll: false, turnId: diagnostic.turnId });
+      [...diagnostic.messages].join("\n\n"), "", { autoScroll: false, turnId: diagnostic.turnId,
+        recoveryEligible: [...diagnostic.messages].every(encryptedContextError) });
     card.dataset.diagnosticKey = key;
-    if (!card.querySelector("[data-dismiss-diagnostic]")) {
+    if (card.dataset.traceKind !== "recovery" && !card.querySelector("[data-dismiss-diagnostic]")) {
       const dismiss = element("button", "trace-dismiss", "关闭此错误");
       dismiss.type = "button";
       dismiss.dataset.dismissDiagnostic = key;
@@ -3483,6 +3500,7 @@ function renderTurnDiagnostics() {
       card.append(dismiss);
     }
   }
+  void recoveryNotices.refresh();
 }
 
 function mergeTranscriptItems(current, updates) {
@@ -3705,7 +3723,7 @@ function renderTranscript(fallbackThread, options = {}) {
     .map(item => JSON.stringify([item.turnId ?? "", item.body?.trim()])));
   const previousCards = [...existingTrace.querySelectorAll(".trace-card")];
   // Keep expanded details and decoded images intact across reconciliation.
-  const reusableCards = new Map(previousCards.filter((card) => ["tool", "image", "compaction"].includes(card.dataset.traceKind))
+  const reusableCards = new Map(previousCards.filter((card) => ["tool", "image", "compaction", "recovery"].includes(card.dataset.traceKind))
     .map((card) => [card.dataset.traceKey, card]));
   const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
     ? [...existingTrace.querySelectorAll('.trace-card[data-trace-key^="item-"]:not(.compaction), .trace-card[data-pending-user="true"]')]
