@@ -57,6 +57,7 @@ try:
     # A cancelled connection's late success cannot satisfy a newer resume.
     browser("fill", "#conversationInput", "second draft")
     wait_for("async () => (await (await fetch('/__test/resume')).json()).requests === 2")
+    wait_for("() => !document.querySelector('#resumeProgress').classList.contains('hidden')")
     evaluate("async () => { await fetch('/__test/resume',{method:'POST',body:JSON.stringify({index:0})}); return true; }")
     assert not evaluate("() => document.querySelector('#resumeProgress').classList.contains('hidden')")
     evaluate("async () => { await fetch('/__test/resume',{method:'POST',body:'{}'}); return true; }")

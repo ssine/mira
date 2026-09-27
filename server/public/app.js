@@ -878,6 +878,7 @@ function setAgentThreadDrawer(open, { focus = true } = {}) {
   const toggle = $("#agentThreadDrawerToggle");
   if (!drawer || !backdrop || !toggle) return;
   resetAgentDrawerDrag();
+  if (open && !agentThreadDrawerOpen && !agentSidebarDocked) $("#conversationInput").blur();
   if (!open) closeSidebarPopovers();
   agentThreadDrawerOpen = open;
   if (agentSidebarDocked) agentSidebarDockedOpen = open;
@@ -987,7 +988,7 @@ function installAgentDrawerSwipe() {
     };
   };
   const update = (point, event) => {
-    if (!enabled() || gesture.source === "touch" && selectedText()) { resetAgentDrawerDrag(); return; }
+    if (!enabled() || gesture.source === "touch" && (selectedText() || !event.cancelable)) { resetAgentDrawerDrag(); return; }
     const dx = point.clientX - gesture.x, dy = Math.abs(point.clientY - gesture.y);
     if (!gesture.horizontal) {
       // Lock the intended axis early, before native scrolling claims the gesture.
@@ -996,10 +997,12 @@ function installAgentDrawerSwipe() {
           (gesture.open ? dx > 8 : dx < -8)) { resetAgentDrawerDrag(); return; }
       if (Math.abs(dx) < 8 || Math.abs(dx) < dy * 1.15) return;
       gesture.horizontal = true;
+      // Dismissing the phone keyboard can leave the composer focused. Release
+      // it once the drawer owns the gesture, before it can reopen the keyboard.
+      if (!gesture.open) $("#conversationInput").blur();
       surface.classList.add("drawer-dragging");
       if (gesture.source === "pointer") surface.setPointerCapture(gesture.id);
     }
-    if (gesture.source === "touch" && !event.cancelable) { resetAgentDrawerDrag(); return; }
     if (event.cancelable) event.preventDefault();
     move(point, event.timeStamp);
   };
@@ -5358,10 +5361,14 @@ async function resumeAgentThreadOnSocket(threadId) {
   };
   const promise = restoreAgentThread(threadId, socket);
   agent.resumePromises.set(threadId, { socket, promise });
-  render();
-  const timer = setInterval(render, 1_000);
+  let timer;
+  const delay = setTimeout(() => {
+    render();
+    timer = setInterval(render, 1_000);
+  }, 1_500);
   try { return await promise; }
   finally {
+    clearTimeout(delay);
     clearInterval(timer);
     if (agent.resumePromises.get(threadId)?.promise === promise) agent.resumePromises.delete(threadId);
     if (!agent.resumePromises.has(agent.threadId)) $("#resumeProgress").classList.add("hidden");
