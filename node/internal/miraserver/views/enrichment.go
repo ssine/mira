@@ -7,6 +7,10 @@ import (
 
 const tokenUsagePredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"token_count"'`
 const modelEventPredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(turn_context|thread_settings_applied)"'`
+
+// Keep the existing partial-index predicate and narrow its candidates to the
+// only record types VisibleAssistantUpdate accepts. Tool output can be enormous.
+const assistantUpdatePredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(agent_message|item_completed|message)"'`
 const threadUpdatePredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(user_message|agent_message|item_completed|view_image_tool_call|task_complete|turn_complete|turn_aborted|error|message|function_call_output|custom_tool_call_output)"'`
 
 // NormalizeTokenUsage returns the stable public cumulative usage shape.
@@ -326,17 +330,16 @@ func (service *Service) addReadHistory(ctx context.Context, storeID string, thre
       LEFT JOIN LATERAL (
         SELECT item_seq,payload FROM codex_thread_events
         WHERE store_id=$1 AND thread_id=selected.thread_id AND generation=selected.generation
-          AND item_seq<selected.before AND `+threadUpdatePredicate+`
-        ORDER BY item_seq DESC LIMIT 32
+          AND item_seq<selected.before AND `+threadUpdatePredicate+` AND `+assistantUpdatePredicate+`
+        ORDER BY item_seq DESC LIMIT 1
       ) events ON TRUE ORDER BY selected.thread_id,events.item_seq DESC`, storeID, ids, generations, positions)
 		if err != nil {
 			return nil, err
 		}
-		type candidate struct {
-			sequence int64
-			record   map[string]any
-		}
-		grouped := map[string][]candidate{}
+		// Retain only the newest visible sequence and the scan position, not
+		// every decoded payload in the batch.
+		type scan struct{ oldest, visible int64 }
+		grouped := map[string]scan{}
 		for rows.Next() {
 			var id string
 			var sequence *string
@@ -353,12 +356,19 @@ func (service *Service) addReadHistory(ctx context.Context, storeID string, thre
 				rows.Close()
 				return nil, err
 			}
-			record, err := decodeObject(raw)
-			if err != nil {
-				rows.Close()
-				return nil, err
+			candidate := grouped[id]
+			candidate.oldest = value
+			if candidate.visible == 0 {
+				record, err := decodeObject(raw)
+				if err != nil {
+					rows.Close()
+					return nil, err
+				}
+				if VisibleAssistantUpdate(record) {
+					candidate.visible = value
+				}
 			}
-			grouped[id] = append(grouped[id], candidate{value, record})
+			grouped[id] = candidate
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -367,18 +377,11 @@ func (service *Service) addReadHistory(ctx context.Context, storeID string, thre
 		rows.Close()
 		next := []Thread{}
 		for _, thread := range pending {
-			candidates := grouped[thread.ThreadID]
-			visible := int64(0)
-			for _, candidate := range candidates {
-				if VisibleAssistantUpdate(candidate.record) {
-					visible = candidate.sequence
-					break
-				}
-			}
-			if visible > 0 || len(candidates) == 0 {
-				latest[thread.ThreadID] = visible
+			candidate := grouped[thread.ThreadID]
+			if candidate.visible > 0 || candidate.oldest == 0 {
+				latest[thread.ThreadID] = candidate.visible
 			} else {
-				before[thread.ThreadID] = candidates[len(candidates)-1].sequence
+				before[thread.ThreadID] = candidate.oldest
 				next = append(next, thread)
 			}
 		}
