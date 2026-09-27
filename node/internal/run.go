@@ -55,6 +55,8 @@ func runConfigured(ctx context.Context, configuration config, status *desktopSta
 		status.attach(client)
 	}
 	defer client.close()
+	stopResidency := client.startCodexResidency(ctx)
+	defer stopResidency()
 	for ctx.Err() == nil {
 		if err := client.register(ctx); err != nil {
 			client.updateDesktopRegistration()

@@ -355,3 +355,34 @@ release: packaging/promotion still require all platform jobs to pass. This avoid
 losing the evidence needed to diagnose a post-compilation failure.
 `tests/compiler_cache_snapshot_e2e.mjs` verifies a cold native compile, an archived-cache
 restore hit and invalidation after a header change (GCC on Linux, MSVC on Windows).
+
+## Managed Codex memory residency
+
+The Node owns one `codexMemoryBudget` / `MIRA_NODE_CODEX_MEMORY_BUDGET` across all
+managed accounts. `auto` uses 20% up to 4 GiB, then the greater of 0.8 GiB and 10%
+of effective memory. Fixed byte capacities and percentages are supported. Linux
+uses the minimum of physical memory and visible ancestor cgroup hard limits;
+Windows uses physical memory. Accounting sums managed App Server RSS/working set,
+including caches and process overhead, but not separately launched tools or CLI.
+
+Every five seconds a bounded, cancellable controller samples memory and renews
+short runtime leases through local `mira/thread/residency`. Polling reads only
+loaded runtime metadata, never durable history. Monitor connections do not
+subscribe to new threads. Below budget the normal idle timer is deferred. On
+pressure the Node selects the oldest eligible candidate across accounts, schedules
+at most one unload per 15 seconds, and resamples. Reclamation stops at 90% of the
+budget. Activity, subscriptions and loaded family relationships are checked again
+in the runtime; leaves unload before parents. Opaque candidate revisions reject
+stale idle periods and process replacements. Explicit account handoff still uses
+its scoped unload/flush acknowledgement and canonical history stays unchanged.
+
+This is a soft retention target: running/observed conversations and allocator
+retention can exceed it. When memory accounting fails, Node stops renewing leases;
+after at most 60 seconds the runtime's configured idle timeout can unload eligible
+threads again. Runtime methods unavailable in older packages are reported as
+unsupported. Controller RPC failures are reported as unavailable, not healthy
+memory control. The control loop is independent of the Server WebSocket and does
+not block heartbeats. The setting is local to each execution Node and takes effect
+on restart. Warm resume with identical injected developer instructions and the
+same reasoning effort reuses the loaded session; changed or unknown overrides
+retain upstream reload behavior.

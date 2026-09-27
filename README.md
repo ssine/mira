@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.45 将明文上下文压缩摘要默认收起，在压缩提示旁提供“展开 / 收起”；历史自动刷新保留展开状态，摘要不再重复显示为普通回复。
+1.0.46 支持按固定容量或内存比例配置 Codex 会话驻留预算；预算内保留空闲会话，超预算时逐个回收，并保护执行中或仍被订阅的会话。
 
 1.0.44 修复对话完成后仍被标记为运行、无法删除的问题：执行状态随持久化历史更新，页面断连也能正确完成，并自动校正遗留状态。默认 Codex 更新至 0.155.1-mira.4，支持按对话选择启用的推理上下文恢复。
 
@@ -154,13 +154,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.45
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.46
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.45'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.46'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
@@ -405,6 +405,36 @@ Codex v2 的专用配置 `features.multi_agent_v2.max_concurrent_threads_per_ses
 PostgreSQL 中的会话历史保留，可以重新打开并继续。应等任务结束后升级执行 Node。
 单独调整托管账号的配置覆盖时，Mira 会等该账号的活动任务结束后再重启 App Server；
 已加载的会话需重新加载后使用新上限。
+
+### Codex 会话驻留内存预算
+
+Mira Node 按托管 Codex App Server 进程的实际驻留内存，统一管理所有账号的空闲会话。
+本机 Node 配置文件中的 `codexMemoryBudget` 支持：
+
+```json
+{"codexMemoryBudget": "auto"}
+```
+
+- `auto`（默认）：有效内存不超过 4 GiB 时取 20%；超过时取 `max(0.8 GiB, 有效内存 × 10%)`。
+  2 / 4 / 8 / 16 GiB 机器对应约 0.4 / 0.8 / 0.8 / 1.6 GiB。
+- 固定容量，例如 `"800MiB"`、`"2GiB"`，也支持十进制 `MB` / `GB`。
+- 比例，例如 `"20%"`，取值大于 0、不超过 100。
+
+环境变量 `MIRA_NODE_CODEX_MEMORY_BUDGET` 覆盖文件配置；修改后重启 Node 生效。
+Linux 按物理内存和可见的 cgroup v1/v2 硬限制中的较小值计算，Windows 使用物理内存。
+
+预算是所有托管账号共享的保留目标，统计进程 RSS / Windows working set；不会按账号数倍增。
+预算内不再按 60 秒卸载空闲会话。超过预算时，逐个回收最久空闲且无人订阅的会话，
+并重新采样；执行中或被客户端订阅的会话及其已加载子会话树受到保护。
+回收至预算的 90% 后退出回收状态，避免在阈值附近反复加载和卸载。
+活动任务、进程基础开销和分配器保留的内存可能让实际占用超过预算，因此它不是进程硬限制。
+工具启动的其他进程、独立 `mira codex` CLI 和 Claude runtime 不计入这个预算。
+
+这个机制需要支持驻留协议的 Mira Codex runtime。Node 无法读取内存或停止控制时，
+短期控制租约会过期，恢复 runtime 的原有空闲超时策略；不支持协议的旧 runtime 也保留原有策略。
+Node 的 `reportedAppServer.memoryResidency`（托管账号在各自 runtime 报告中）给出
+状态、共享预算、共享驻留内存、有效内存和查询失败原因。升级 runtime 或显式账号交接仍会卸载会话，
+PostgreSQL 历史保持不变。
 
 ## Android APK
 

@@ -24,7 +24,7 @@ func (manager *appServerManager) confirmAccountIdleLocked(ctx context.Context) e
 		manager.clearAccountActivityLocked()
 		return nil
 	}
-	if manager.managementSession != "" || len(manager.threadManagement) > 0 {
+	if manager.managementSession != "" || len(manager.threadManagement) > 0 || manager.residencyEvicting {
 		return errCodexAccountBusy
 	}
 	// An unacknowledged request might still create a thread after a read-only

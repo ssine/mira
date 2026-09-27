@@ -27,12 +27,15 @@ func (manager *appServerManager) reserveAccountRequest(instance *appServerInstan
 	if json.Unmarshal(payload, &message) != nil {
 		return fmt.Errorf("invalid App Server request")
 	}
+	if message.Method == "mira/thread/residency" {
+		return fmt.Errorf("residency is controlled by the local Mira Node")
+	}
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if manager.instance != instance || (instance != nil && channelClosed(instance.done)) {
 		return fmt.Errorf("account runtime was replaced")
 	}
-	if manager.transitioning || manager.activityChecking {
+	if manager.transitioning || manager.activityChecking || manager.residencyEvicting {
 		switch message.Method {
 		case "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
 			return fmt.Errorf("账号正在核验状态或停止，请稍后重试")

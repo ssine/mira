@@ -59,6 +59,10 @@ type appServerInstance struct {
 }
 
 type appServerManager struct {
+	residencyStatus      codexResidencyStatus
+	residencyEvicting    bool
+	residencyUnsupported *appServerInstance
+
 	configuration     config
 	mu                sync.Mutex
 	nodeToken         string
@@ -618,6 +622,7 @@ func (manager *appServerManager) report() map[string]any {
 		"miraCliPath": miraCLIPath,
 		"codexHome":   instance.codexHome, "configOverrideCount": len(instance.configOverrides),
 		"startedAt": instance.startedAt.Format(time.RFC3339Nano), "lastError": manager.lastError,
+		"memoryResidency": manager.residencyStatus,
 	}
 }
 
