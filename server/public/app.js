@@ -5361,10 +5361,14 @@ async function resumeAgentThreadOnSocket(threadId) {
   };
   const promise = restoreAgentThread(threadId, socket);
   agent.resumePromises.set(threadId, { socket, promise });
-  render();
-  const timer = setInterval(render, 1_000);
+  let timer;
+  const delay = setTimeout(() => {
+    render();
+    timer = setInterval(render, 1_000);
+  }, 1_500);
   try { return await promise; }
   finally {
+    clearTimeout(delay);
     clearInterval(timer);
     if (agent.resumePromises.get(threadId)?.promise === promise) agent.resumePromises.delete(threadId);
     if (!agent.resumePromises.has(agent.threadId)) $("#resumeProgress").classList.add("hidden");
