@@ -52,6 +52,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
     upsertTrace: () => ({ dataset: {} }), prepareTurnInput: async () => ({ message: "Continue", inputs: [] }),
     replyProgress: { finish() {} },
     accountRecovery: { select() {} },
+    threadPager: () => ({ enabled: false, state: () => ({ checkedAt: 1 }) }),
   });
   for (const name of [
     "writeBrowserRoute", "selectComposerDraft", "resetAgentTranscript", "setConversationTitle",
