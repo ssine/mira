@@ -64,11 +64,12 @@ func (server *Server) addInputRecovery(ctx context.Context, request *http.Reques
 	if err := json.Unmarshal(raw, &refs); err != nil {
 		return err
 	}
-	result.Body["inputRecovery"] = map[string]any{"throughItemSeq": refs["throughItemSeq"], "policy": policy}
+	result.Body["inputRecovery"] = map[string]any{"throughItemSeq": refs["throughItemSeq"], "policy": policy, "failureId": refs["failureId"]}
 	return nil
 }
 
 type inputRecoveryPlan struct {
+	TurnID            string `json:"-"`
 	FailureID         string `json:"failureId"`
 	Generation        int64  `json:"generation"`
 	ItemCount         int64  `json:"itemCount"`
@@ -87,15 +88,15 @@ func (server *Server) inputRecoveryPlan(ctx context.Context, storeID, threadID s
 	// Filtering confirmed failures before LIMIT would resurrect older errors
 	// whose input is already covered by the user's latest recovery decision.
 	err := server.pool.QueryRow(ctx, `WITH latest_failure AS (
-	 SELECT e.operation_id,e.store_id,e.thread_id,e.node_account_id,e.generation,e.detail,p.item_count
+	 SELECT e.operation_id,e.store_id,e.thread_id,e.node_account_id,e.generation,e.detail,p.item_count,e.turn_id
 	 FROM mira_codex_execution_events e JOIN codex_thread_projections p USING(store_id,thread_id)
 	 WHERE e.store_id=$1 AND e.thread_id=$2 AND e.node_account_id=$3::uuid AND e.generation=p.active_generation
 	 AND e.kind='invalid_encrypted_content' AND (e.detail->>'credentialRevision')::bigint=$4
 	 ORDER BY e.event_seq DESC LIMIT 1
-	) SELECT e.operation_id::text,e.generation,e.item_count,(e.detail->>'throughItemSeq')::bigint FROM latest_failure e
+	) SELECT e.operation_id::text,e.generation,e.item_count,(e.detail->>'throughItemSeq')::bigint,COALESCE(e.turn_id,'') FROM latest_failure e
 	 WHERE NOT EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.store_id=e.store_id AND d.thread_id=e.thread_id
 	 AND d.node_account_id=e.node_account_id AND d.generation=e.generation AND d.credential_revision=$4
-	 AND d.item_refs->>'failureId'=e.operation_id::text)`, storeID, threadID, account.NodeAccountID, account.CredentialRevision).Scan(&plan.FailureID, &plan.Generation, &plan.ItemCount, &plan.ThroughItemSeq)
+	 AND d.item_refs->>'failureId'=e.operation_id::text)`, storeID, threadID, account.NodeAccountID, account.CredentialRevision).Scan(&plan.FailureID, &plan.Generation, &plan.ItemCount, &plan.ThroughItemSeq, &plan.TurnID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return plan, &HTTPError{Status: 409, Code: "no_context_failure", Message: "此账号没有待处理的加密上下文错误"}
 	}
@@ -295,14 +296,14 @@ func (server *Server) routeInputRecovery(ctx context.Context, response http.Resp
 	if body["confirm"] != true || !operationIDPattern.MatchString(decisionID) || body["failureId"] != plan.FailureID || generation != plan.Generation || count != plan.ItemCount {
 		return true, &HTTPError{Status: 409, Code: "recovery_changed", Message: "上下文已变更，请重新查看并确认兼容处理"}
 	}
-	err = server.applyInputRecovery(ctx, request, principal, storeID, match[1], nodeID, account, plan, decisionID, nil)
+	err = server.applyInputRecovery(ctx, request, principal, storeID, match[1], nodeID, account, plan, decisionID, nil, false)
 	if err != nil {
 		return true, err
 	}
 	return true, writeJSON(response, 200, map[string]any{"status": "confirmed", "policy": plan.Policy, "canonicalHistoryUnchanged": true, "reloadedThreadId": match[1]})
 }
 
-func (server *Server) applyInputRecovery(ctx context.Context, request *http.Request, principal *foundation.Principal, storeID, threadID, nodeID string, account *nodes.CodexAccount, plan inputRecoveryPlan, decisionID string, guard func(context.Context, pgx.Tx) error) error {
+func (server *Server) applyInputRecovery(ctx context.Context, request *http.Request, principal *foundation.Principal, storeID, threadID, nodeID string, account *nodes.CodexAccount, plan inputRecoveryPlan, decisionID string, guard func(context.Context, pgx.Tx) error, inPlace bool) error {
 	if !plan.Recoverable {
 		return &HTTPError{Status: 409, Code: "context_unrecoverable", Message: plan.Reason}
 	}
@@ -323,7 +324,7 @@ func (server *Server) applyInputRecovery(ctx context.Context, request *http.Requ
 		return err
 	}
 	defer tx.Rollback(ctx)
-	release, err := server.channel.PrepareExecutionReload(ctx, tx, storeID, threadID, nodeID, bindingID, runtimeID)
+	release, err := server.channel.PrepareInputRecovery(ctx, tx, storeID, threadID, nodeID, bindingID, runtimeID, inPlace)
 	if err != nil {
 		return &HTTPError{Status: 409, Code: "thread_busy", Message: err.Error()}
 	}

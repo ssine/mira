@@ -56,10 +56,17 @@ events. Message text without a matching structured code does not change retry
 behavior.
 
 Mira Server enables encrypted-input recovery by default for existing and new
-conversations. The conversation details switch can disable it. Recovery uses the
-same scoped compatibility reload as the manual action and submits an empty-input
-turn in the background, including after the browser disconnects. It inserts no
-user message and retains canonical history and completed tool results.
+conversations. The conversation details switch can disable it. With runtime
+`0.155.1-mira.6`, recovery refreshes the failed session's model input in place and
+starts a background retry, including after the browser disconnects. It inserts
+no user message and retains canonical history, completed tool results and native
+parent/child ownership. Active parents and siblings keep running. Cold ancestors
+are restored in ownership order with their own recorded settings before the child.
+The runtime validates the confirmed failure and terminal turn in its submission
+queue; active or queued parent work and superseding turns reject stale recovery.
+Closed children are excluded. The parent can still observe the initial failure
+before automatic recovery starts. Older runtimes retain the scoped unload/resume
+fallback and need an upgrade for native multi-agent child recovery.
 
 Twenty consecutive failures of unchanged effective history stop recovery: the
 initial failure plus at most nineteen automatic retries. New user/model/reasoning,
@@ -67,6 +74,12 @@ tool or compaction history resets this budget; lifecycle, settings and token
 records do not. Durable failure receipts and dispatch reservations survive Server
 restarts and prevent blind redispatch of an ambiguous attempt. Account,
 credential, generation and execution guards reject stale recovery work.
+Before a compatibility decision or dispatch, temporary offline/busy preparation
+reuses the same receipt after a bounded delay without spending another model
+failure. A saved decision or ambiguous dispatch is never blindly replayed.
+Four setup workers release their slot once a retry is acknowledged, while at most
+128 observer connections retain tool transport through completion. Long-running
+retries therefore do not occupy all setup workers needed by their children.
 
 Live diagnostics and persisted transcript errors use the same compact encrypted
 context notice. Its retry count comes from actual Server turn reservations in

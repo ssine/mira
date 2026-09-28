@@ -8,6 +8,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { adminRequest, approvePendingNode, loginAdmin } from "./auth_helpers.mjs";
+import { subagentRecoveryFixture } from "./subagent_recovery_fixture.mjs";
 
 const origin = process.env.MIRA_SERVER_URL;
 const mira = process.env.MIRA_NODE_TEST_BINARY, codex = process.env.CODEX_TEST_BINARY;
@@ -29,6 +30,7 @@ let nodeProcess, nodeId, token, rejectOld = false;
 let holdNextResponse = false, releaseResponse;
 let holdNextFailure = false, releaseFailure, rejectAlways = false;
 const requests = [], rejectedRequests = [], sockets = [], logs = [];
+const subagentRecovery = subagentRecoveryFixture();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitFor(read, description, timeout = 60_000) {
   const deadline = Date.now() + timeout;
@@ -58,6 +60,7 @@ const mock = http.createServer(async (request, response) => {
   const body = JSON.parse(Buffer.concat(parts));
   const key = request.headers.authorization;
   requests.push({ key, body, path: request.url });
+  if (await subagentRecovery.respond(body, response)) return;
   const autoPrompt = JSON.stringify(body.input.filter(item => item.role === "user").at(-1)?.content ?? "").includes("AUTO_REASONING");
   if (autoPrompt && body.input.some(item => item.type === "reasoning" && item.id === "rs_auto_bad")) {
     response.writeHead(500, { "content-type": "application/json" });
@@ -134,9 +137,11 @@ const mock = http.createServer(async (request, response) => {
 });
 await new Promise(resolve => mock.listen(0, "127.0.0.1", resolve));
 
-async function connect(binding, selectedStore = store) {
-  const socket = new WebSocket(`${origin.replace(/^http/, "ws")}/v1/nodes/${nodeId}/app-server?storeId=${selectedStore}&nodeAccountId=${binding}`,
-    ["mira-client-v1", `auth.${Buffer.from(token).toString("base64url")}`]);
+async function connect(binding, selectedStore = store, direct = false) {
+  const address = direct ? (await account(binding)).reportedAppServer.listenUrl
+    : `${origin.replace(/^http/, "ws")}/v1/nodes/${nodeId}/app-server?storeId=${selectedStore}&nodeAccountId=${binding}`;
+  if (direct) assert.equal(new URL(address).hostname, "127.0.0.1", "native test access stays on loopback");
+  const socket = new WebSocket(address, direct ? [] : ["mira-client-v1", `auth.${Buffer.from(token).toString("base64url")}`]);
   sockets.push(socket);
   let next = 1;
   const pending = new Map(), events = [];
@@ -175,7 +180,7 @@ async function history(threadId) {
   return admin(`/v2/stores/${store}/threads/${threadId}/history`);
 }
 
-try {
+async function run() {
   nodeProcess = spawn(mira, ["node-worker"], { cwd: temporary, stdio: ["ignore", "pipe", "pipe"], env: {
     ...process.env, MIRA_SERVER_URL: origin, MIRA_NODE_KEY: nodeKey, MIRA_IDENTITY_FILE: identity,
     CODEX_BINARY: wrapper, CODEX_HOME: defaultHome, APP_SERVER_CODEX_HOME: defaultHome,
@@ -206,6 +211,11 @@ try {
     assert.equal((await admin(`/v1/nodes/${nodeId}/codex-accounts/${id}/quota`)).quotaSupported, false);
   }
   const [a, b, c] = bindings;
+  if (process.env.MIRA_TEST_SUBAGENT_RECOVERY_ONLY === "1") {
+    const automaticEndpoint = id => `/v1/codex/threads/${id}/automatic-input-recovery?storeId=${store}`;
+    await subagentRecovery.run({ connect, binding: b, temporary, agentConfig, waitFor, admin, store, history, automaticEndpoint });
+    return;
+  }
   const initialAccountRuntime = (await running(a)).reportedAppServer.runtimeId;
   const first = await connect(a);
   const threadId = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
@@ -461,6 +471,9 @@ try {
   assert.equal(requests.length - backgroundBefore, 2);
   assert.equal(users((await history(backgroundId)).items).filter(item => JSON.stringify(item).includes("RECOVER_WITHOUT_BROWSER")).length, 1);
   console.log("Automatic recovery survived browser disconnect");
+  if (process.env.MIRA_TEST_SUBAGENT_RECOVERY === "1") {
+    await subagentRecovery.run({ connect, binding: b, temporary, agentConfig, waitFor, admin, store, history, automaticEndpoint });
+  }
 
   const failing = await connect(b);
   const failingId = (await failing.call("thread/fork", { threadId, cwd: temporary, excludeTurns: true, deferGoalContinuation: true })).thread.id;
@@ -597,7 +610,8 @@ try {
   assert(JSON.stringify(requests.at(-1).body.input).includes("CLI_ACCOUNT_SHARED_HISTORY"));
   console.log("CLI creation and App Server resume share canonical PostgreSQL history");
   console.log("Account runtime E2E passed: isolated keys, live handoff, compatible reasoning, provider error, consent replay, input projection, canonical fork");
-} catch (error) {
+}
+try { await run(); } catch (error) {
   console.error(error.stack, logs.join("").slice(-1500), (await fs.readFile(runtimeLog, "utf8").catch(() => "")).slice(-5000)); process.exitCode = 1;
 } finally {
   releaseResponse?.(); releaseFailure?.();

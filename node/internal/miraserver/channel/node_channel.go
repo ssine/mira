@@ -35,6 +35,7 @@ type invocationResult struct {
 type proxy struct {
 	runningThreads         map[string]string
 	recoveryFailureID      string
+	recoveryThreadID       string
 	mu                     sync.Mutex
 	targetNodeID           string
 	nodeAccountID          string

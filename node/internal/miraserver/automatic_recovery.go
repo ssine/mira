@@ -2,7 +2,6 @@ package miraserver
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -184,11 +183,16 @@ type automaticRecoveryJob struct{ Failure, Store, Thread, Node, Binding, Runtime
 
 const automaticRecoveryFailureLimit = 20
 
-// Bounded workers also own the broker connection while the continuation runs.
+var errAutomaticRecoveryDeferred = errors.New("等待运行节点或对话状态就绪后自动重试")
+
+// Setup workers release their slot after dispatch. Observers retain bounded
+// broker connections for tools without starving recovery of a running parent's
+// children.
 // A persisted receipt is consumed once, even if the process dies before ack.
 func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	var workers sync.WaitGroup
+	observers := make(chan struct{}, 128)
 	workers.Add(1)
 	go func() {
 		defer workers.Done()
@@ -207,36 +211,59 @@ func (server *Server) startAutomaticRecovery(ctx context.Context) func() {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
+					select {
+					case observers <- struct{}{}:
+					default:
+						continue
+					}
 					job, err := server.claimAutomaticRecovery(ctx)
 					if err != nil {
+						<-observers
 						if ctx.Err() == nil {
 							server.config.Logger.Printf("automatic input recovery claim failed: %v", err)
 						}
 						continue
 					}
 					if job == nil {
+						<-observers
 						continue
 					}
-					err = server.runAutomaticRecovery(ctx, *job)
-					if ctx.Err() != nil {
-						// The retry may still run on its execution Node. Its durable
-						// dispatch/lifecycle records, not this observer, own the outcome.
+					ready := make(chan struct{})
+					var once sync.Once
+					dispatched := func() { once.Do(func() { close(ready) }) }
+					workers.Add(1)
+					go func() {
+						defer workers.Done()
+						defer func() { <-observers; dispatched() }()
+						err := server.runAutomaticRecovery(ctx, *job, dispatched)
+						if ctx.Err() != nil {
+							// The retry may still run on its execution Node. Its durable
+							// dispatch/lifecycle records, not this observer, own the outcome.
+							return
+						}
+						status, reason := "completed", ""
+						if err != nil {
+							status = "stopped"
+							reason = err.Error()
+							if errors.Is(err, errAutomaticRecoveryDeferred) {
+								status = "applying"
+							}
+						}
+						// Do not store provider responses or command output in status metadata.
+						if len(reason) > 512 {
+							reason = "自动恢复失败，请打开对话检查并继续"
+						}
+						saveCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
+						_, saveErr := server.pool.Exec(saveCtx, `UPDATE mira_codex_recovery_attempts SET status=$2,reason=$3,updated_at=now() WHERE failure_id=$1::uuid`, job.Failure, status, reason)
+						done()
+						if saveErr != nil {
+							server.config.Logger.Printf("automatic input recovery outcome could not be saved: %v", saveErr)
+						}
+					}()
+					select {
+					case <-ready:
+					case <-ctx.Done():
 						return
-					}
-					status, reason := "completed", ""
-					if err != nil {
-						status = "stopped"
-						reason = err.Error()
-					}
-					// Do not store provider responses or command output in status metadata.
-					if len(reason) > 512 {
-						reason = "自动恢复失败，请打开对话检查并继续"
-					}
-					saveCtx, done := context.WithTimeout(context.Background(), 5*time.Second)
-					_, saveErr := server.pool.Exec(saveCtx, `UPDATE mira_codex_recovery_attempts SET status=$2,reason=$3,updated_at=now() WHERE failure_id=$1::uuid`, job.Failure, status, reason)
-					done()
-					if saveErr != nil {
-						server.config.Logger.Printf("automatic input recovery outcome could not be saved: %v", saveErr)
 					}
 				}
 			}
@@ -324,15 +351,20 @@ func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRec
 
  WHERE COALESCE(pref.enabled,true) AND r.state='idle' AND r.turn_id=e.turn_id AND r.revision=e.revision AND b.enabled
  AND b.credential_revision=(e.detail->>'credentialRevision')::bigint
- AND NOT EXISTS(SELECT 1 FROM mira_codex_recovery_attempts a WHERE a.failure_id=e.operation_id)
+ AND NOT EXISTS(SELECT 1 FROM mira_codex_recovery_attempts a WHERE a.failure_id=e.operation_id
+   AND NOT (a.status='applying' AND a.reason=$1 AND a.updated_at<now()-interval '5 seconds'))
  AND NOT EXISTS(SELECT 1 FROM mira_codex_input_compatibility d WHERE d.item_refs->>'failureId'=e.operation_id::text AND d.store_id=e.store_id AND d.thread_id=e.thread_id)
  AND COALESCE((SELECT d.action FROM mira_thread_actions d WHERE d.store_id=p.store_id AND d.thread_id=p.thread_id ORDER BY action_seq DESC LIMIT 1),'restore') NOT IN ('delete','archive')
+ AND NOT EXISTS(SELECT 1 FROM mira_agent_graph_edges g WHERE g.store_id=p.store_id AND g.child_thread_id=p.thread_id AND g.child_generation=p.active_generation AND g.status='closed')
  ORDER BY e.event_seq LIMIT 1
  ), claimed AS (
  INSERT INTO mira_codex_recovery_attempts(failure_id,store_id,thread_id,generation,status)
- SELECT operation_id,store_id,thread_id,generation,'applying' FROM candidate ON CONFLICT DO NOTHING RETURNING failure_id)
+ SELECT operation_id,store_id,thread_id,generation,'applying' FROM candidate
+ ON CONFLICT(failure_id) DO UPDATE SET reason='',updated_at=now()
+ WHERE mira_codex_recovery_attempts.status='applying' AND mira_codex_recovery_attempts.reason=$1
+   AND mira_codex_recovery_attempts.updated_at<now()-interval '5 seconds' RETURNING failure_id)
  SELECT c.operation_id::text,c.store_id,c.thread_id,b.node_id::text,c.node_account_id::text,c.runtime_id
- FROM candidate c JOIN claimed a ON a.failure_id=c.operation_id JOIN mira_node_codex_accounts b USING(node_account_id)`).Scan(&job.Failure, &job.Store, &job.Thread, &job.Node, &job.Binding, &job.Runtime)
+ FROM candidate c JOIN claimed a ON a.failure_id=c.operation_id JOIN mira_node_codex_accounts b USING(node_account_id)`, errAutomaticRecoveryDeferred.Error()).Scan(&job.Failure, &job.Store, &job.Thread, &job.Node, &job.Binding, &job.Runtime)
 	if err == pgx.ErrNoRows {
 		return nil, nil
 	}
@@ -342,18 +374,13 @@ func (server *Server) claimAutomaticRecovery(ctx context.Context) (*automaticRec
 	return &job, nil
 }
 
-func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRecoveryJob) error {
+func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRecoveryJob, dispatched func()) error {
 	setupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	// Startup may discover a durable failure before its execution Node has
-	// reconnected. Wait within the setup deadline instead of consuming the
-	// recovery receipt as an immediate offline failure.
-	for !server.channel.IsConnected(job.Node) {
-		select {
-		case <-setupCtx.Done():
-			return errors.New("运行节点尚未重新连接，请检查节点后继续")
-		case <-time.After(500 * time.Millisecond):
-		}
+	// Requeue before dispatch rather than occupying a worker while a Node is
+	// offline. No request or side effect has been sent at this stage.
+	if !server.channel.IsConnected(job.Node) {
+		return errAutomaticRecoveryDeferred
 	}
 	node, err := server.nodes.Get(setupCtx, job.Node, false)
 	if err != nil {
@@ -381,6 +408,12 @@ func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRec
 	if err != nil {
 		return err
 	}
+	inPlace, err := server.channel.SupportsInputRecovery(setupCtx, job.Node, job.Binding, job.Runtime, job.Thread, plan.TurnID, job.Failure)
+	if err != nil {
+		// The capability probe cannot sample or change history. Account startup,
+		// handoff and a reconnect can therefore wait without consuming a retry.
+		return errAutomaticRecoveryDeferred
+	}
 	decision, err := randomUUID()
 	if err != nil {
 		return err
@@ -388,15 +421,19 @@ func (server *Server) runAutomaticRecovery(ctx context.Context, job automaticRec
 	err = server.applyInputRecovery(setupCtx, nil, &foundation.Principal{Kind: "node", NodeID: job.Node, ClientType: "automatic-input-recovery", Transport: "internal"}, job.Store, job.Thread, job.Node, account, plan, decision,
 		func(ctx context.Context, tx pgx.Tx) error {
 			return channel.CheckAutomaticRecovery(ctx, tx, job.Store, job.Thread, job.Failure)
-		})
+		}, inPlace)
 	if err != nil {
+		var busy *HTTPError
+		if errors.As(err, &busy) && (busy.Code == "thread_busy" || busy.Code == "account_busy" || busy.Code == "recovery_changed") {
+			return errAutomaticRecoveryDeferred
+		}
 		return errors.New("自动兼容处理未完成，请使用手动处理检查上下文")
 	}
 	_, err = server.pool.Exec(setupCtx, `UPDATE mira_codex_recovery_attempts SET status='dispatching',updated_at=now() WHERE failure_id=$1::uuid`, job.Failure)
 	if err != nil {
 		return errors.New("兼容处理已保存，重试状态未确认，请手动继续")
 	}
-	return server.channel.ContinueRecoveredThread(ctx, job.Store, job.Thread, job.Node, job.Binding, job.Runtime, job.Failure, resume)
+	return server.channel.ContinueRecoveredThread(ctx, job.Store, job.Thread, job.Node, job.Binding, job.Runtime, job.Failure, plan.TurnID, resume, inPlace, dispatched)
 }
 
 // Only model-facing history progress resets the budget. Resume settings,
@@ -433,41 +470,5 @@ func (server *Server) automaticRecoveryResume(ctx context.Context, job automatic
 	if err != nil {
 		return nil, errors.New("缺少原轮次的运行设置，请手动继续")
 	}
-	var record map[string]any
-	if err = json.Unmarshal(raw, &record); err != nil {
-		return nil, err
-	}
-	p := object(record["payload"])
-	result := map[string]any{}
-	for from, to := range map[string]string{"model": "model", "cwd": "cwd", "approval_policy": "approvalPolicy", "effort": "reasoningEffort"} {
-		if value := p[from]; value != nil {
-			result[to] = value
-		}
-	}
-	policy := object(p["sandbox_policy"])
-	switch policy["type"] {
-	case "danger-full-access":
-		result["sandbox"] = "danger-full-access"
-	case "read-only":
-		result["sandbox"] = "read-only"
-	case "workspace-write":
-		result["sandbox"] = "workspace-write"
-		result["config"] = map[string]any{"sandbox_workspace_write": policy}
-	default:
-		return nil, errors.New("当前沙箱设置需要手动恢复")
-	}
-	if result["approvalPolicy"] == nil {
-		return nil, errors.New("缺少原轮次的审批设置，请手动继续")
-	}
-	// App Server exposes reasoning effort through config on resume.
-	if effort := result["reasoningEffort"]; effort != nil {
-		delete(result, "reasoningEffort")
-		config, _ := result["config"].(map[string]any)
-		if config == nil {
-			config = map[string]any{}
-		}
-		config["model_reasoning_effort"] = effort
-		result["config"] = config
-	}
-	return result, nil
+	return channel.RecoveryResumeSettings(raw)
 }
