@@ -31,13 +31,15 @@ export function subagentRecoveryFixture() {
         const rejected = cold ? "recovery-tree-cold-rejected" : "recovery-tree-rejected";
         if (body.input.some(item => item.encrypted_content === rejected)) {
           response.writeHead(400, { "content-type": "application/json" });
-          response.end(JSON.stringify({ error: { code: "invalid_encrypted_content", message: "The encrypted content for item rs_tree_bad could not be verified. Reason: Encrypted content could not be decrypted or parsed." } }));
+          response.end(JSON.stringify({ error: { code: "invalid_encrypted_content", message: `The encrypted content for item ${cold ? "rs_tree_cold_bad" : "rs_tree_bad"} could not be verified. Reason: Encrypted content could not be decrypted or parsed.` } }));
         } else if (!body.input.some(item => item.call_id === notify)) {
           send(response, [
             { type: "reasoning", id: cold ? "rs_tree_cold_bad" : "rs_tree_bad", summary: [], encrypted_content: rejected },
             tool("send_message", notify, { target: "/root", message: "RECOVERY_TREE_CHILD_TOOL_COMPLETED" }),
           ]);
         } else send(response, [message(cold ? "RECOVERY_TREE_CHILD_COLD_RECOVERED" : "RECOVERY_TREE_CHILD_RECOVERED")]);
+      } else if (parent && user.includes("VERIFY") && !body.input.some(item => item.call_id === `verify-${user}`)) {
+        send(response, [{ type: "function_call", namespace: "collaboration", name: "wait_agent", call_id: `verify-${user}`, arguments: JSON.stringify({ timeout_ms: 10000 }) }]);
       } else if (parent && user.includes("_COLD") && !body.input.some(item => item.call_id === "tree-follow-cold")) {
         send(response, [tool("followup_task", "tree-follow-cold", { target: "/root/recovering", message: "RECOVERY_TREE_CHILD_COLD" })]);
       } else if (parent && !body.input.some(item => item.call_id === "tree-spawn-child")) {
@@ -45,13 +47,15 @@ export function subagentRecoveryFixture() {
           tool("spawn_agent", "tree-spawn-child", { task_name: "recovering", message: "RECOVERY_TREE_CHILD", fork_turns: "none" }),
           tool("spawn_agent", "tree-spawn-sibling", { task_name: "working", message: "RECOVERY_TREE_SIBLING", fork_turns: "none" }),
         ]);
-      } else if (holding) held.set(kind, () => send(response, [message(`RECOVERY_TREE_${kind.toUpperCase()}_DONE`)]));
+      } else if (holding) held.set(kind, () => send(response, kind === "parent" ? [
+        { type: "function_call", namespace: "collaboration", name: "wait_agent", call_id: "tree-wait", arguments: JSON.stringify({ timeout_ms: 10000 }) },
+      ] : [message(`RECOVERY_TREE_${kind.toUpperCase()}_DONE`)]));
       else send(response, [message(`RECOVERY_TREE_${kind.toUpperCase()}_DONE`)]);
       return true;
     },
     async run({ connect, binding, temporary, agentConfig, waitFor, admin, store, history, automaticEndpoint }) {
       const client = await connect(binding);
-      const parent = (await client.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex", config: agentConfig(), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+      const parent = (await client.call("thread/start", { cwd: temporary, model: "gpt-6-astra", config: agentConfig(), approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
       await client.call("turn/start", { threadId: parent, input: [{ type: "text", text: "RECOVERY_TREE_PARENT" }] });
       try {
         await waitFor(() => held.has("parent") && held.has("sibling"), "parent and sibling actively sampling");
@@ -78,6 +82,8 @@ export function subagentRecoveryFixture() {
         assert(rootTurns[0], "child records the parent task's root turn");
         assert(rootTurns.every(id => id === rootTurns[0]), "retry preserves the original root-turn lineage");
         assert.equal(items.filter(item => item.type === "response_item" && item.payload.type === "function_call" && item.payload.call_id === "tree-child-notify").length, 1);
+        const toolResult = items.find(item => item.type === "response_item" && item.payload.type === "function_call_output" && item.payload.call_id === "tree-child-notify");
+        assert(toolResult && !JSON.stringify(toolResult).includes("unsupported call"), "the child message tool really executed");
         assert(items.some(item => item.type === "response_item" && item.payload.encrypted_content === "recovery-tree-rejected"), "canonical encrypted history is retained");
         console.log("Subagent recovery passed with active parent and sibling, preserved tool result and no added message");
         holding = false;
@@ -92,9 +98,28 @@ export function subagentRecoveryFixture() {
           return true;
         };
         await waitFor(idle, "completed first tree");
+        const verifyParentResult = async (marker, result, expectedToolMessages) => {
+          await client.call("turn/start", { threadId: parent, input: [{ type: "text", text: marker }] });
+          const request = await waitFor(() => calls.find(call => call.kind === "parent" &&
+            JSON.stringify(call.body.input.filter(item => item.role === "user").at(-1)?.content).includes(marker) &&
+            call.body.input.some(item => item.type === "function_call_output" && item.call_id?.startsWith("verify-") && item.call_id.includes(marker))), "parent receives recovered child result");
+          const results = request.body.input.filter(item => item.type === "agent_message" &&
+            item.recipient === "/root" && JSON.stringify(item.content).includes(result));
+          assert.equal(results.length, 1, "parent receives exactly one expected child result");
+          assert.equal(request.body.input.filter(item => item.type === "agent_message" &&
+            item.recipient === "/root" && JSON.stringify(item.content).includes("RECOVERY_TREE_CHILD_TOOL_COMPLETED")).length,
+          expectedToolMessages, "the completed communication tool is never replayed");
+          assert(request.body.input.some(item => item.type === "agent_message" &&
+            item.recipient === "/root" && JSON.stringify(item.content).includes("could not be verified")), "initial failure remains visible to the parent");
+          await waitFor(idle, "parent finishes consuming child result");
+        };
+        await verifyParentResult("RECOVERY_TREE_PARENT_VERIFY_WARM", "RECOVERY_TREE_CHILD_RECOVERED", 1);
         await admin(automaticEndpoint(child), { generation: 1, enabled: false }, "PUT");
         await client.call("turn/start", { threadId: parent, input: [{ type: "text", text: "RECOVERY_TREE_PARENT_COLD" }] });
         await waitFor(async () => JSON.stringify((await history(child)).items).includes("tree-child-cold-notify") && await idle(), "second child failure with recovery disabled");
+        // Consume queued native mail before deliberately unloading the family;
+        // unread process-local mail is not part of canonical stored history.
+        await verifyParentResult("RECOVERY_TREE_PARENT_VERIFY_BEFORE_UNLOAD", "rs_tree_cold_bad", 2);
         const coldPlan = await admin(`/v1/codex/threads/${child}/input-recovery?storeId=${store}&nodeAccountId=${binding}`);
         const failedTurn = (await client.call("thread/read", { threadId: child, includeTurns: true })).thread.turns.at(-1).id;
         const coldRootTurn = (await history(child)).items.filter(item => item.type === "turn_context").at(-1).payload.root_turn_id;
@@ -114,6 +139,7 @@ export function subagentRecoveryFixture() {
         await assert.rejects(native.call("mira/thread/recover", oldRequest), /failed turn was superseded/);
         await assert.rejects(client.call("mira/thread/recover", oldRequest), /controlled by Mira Server/);
         assert.equal(calls.length, beforeRejectedRetry, "unconfirmed recovery must not sample");
+        await verifyParentResult("RECOVERY_TREE_PARENT_VERIFY_RESTORED", "RECOVERY_TREE_CHILD_COLD_RECOVERED", 2);
         console.log("Cold child recovery restored its owner without replaying the parent's followup; stale requests were rejected");
       } finally {
         holding = false;
