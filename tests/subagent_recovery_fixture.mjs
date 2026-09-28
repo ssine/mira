@@ -74,6 +74,9 @@ export function subagentRecoveryFixture() {
         const after = childCalls[2].body.input.filter(item => item.type !== "reasoning");
         assert.deepEqual(after, before, "retry preserves all input except incompatible reasoning");
         const items = (await history(child)).items;
+        const rootTurns = items.filter(item => item.type === "turn_context").map(item => item.payload.root_turn_id);
+        assert(rootTurns[0], "child records the parent task's root turn");
+        assert(rootTurns.every(id => id === rootTurns[0]), "retry preserves the original root-turn lineage");
         assert.equal(items.filter(item => item.type === "response_item" && item.payload.type === "function_call" && item.payload.call_id === "tree-child-notify").length, 1);
         assert(items.some(item => item.type === "response_item" && item.payload.encrypted_content === "recovery-tree-rejected"), "canonical encrypted history is retained");
         console.log("Subagent recovery passed with active parent and sibling, preserved tool result and no added message");
@@ -94,6 +97,7 @@ export function subagentRecoveryFixture() {
         await waitFor(async () => JSON.stringify((await history(child)).items).includes("tree-child-cold-notify") && await idle(), "second child failure with recovery disabled");
         const coldPlan = await admin(`/v1/codex/threads/${child}/input-recovery?storeId=${store}&nodeAccountId=${binding}`);
         const failedTurn = (await client.call("thread/read", { threadId: child, includeTurns: true })).thread.turns.at(-1).id;
+        const coldRootTurn = (await history(child)).items.filter(item => item.type === "turn_context").at(-1).payload.root_turn_id;
         // Evict the idle native family without changing its account, durable
         // identity, generation, or the parent's intended child task.
         const native = await connect(binding, store, true);
@@ -102,6 +106,7 @@ export function subagentRecoveryFixture() {
         await admin(automaticEndpoint(child), { generation: 1, enabled: true }, "PUT");
         await waitFor(async () => JSON.stringify((await history(child)).items).includes("RECOVERY_TREE_CHILD_COLD_RECOVERED"), "cold child resumes through restored parent");
         await waitFor(idle, "cold recovery completes before testing a stale retry");
+        assert.equal((await history(child)).items.filter(item => item.type === "turn_context").at(-1).payload.root_turn_id, coldRootTurn);
         assert.equal((await history(parent)).items.filter(item => item.type === "response_item" && item.payload.type === "function_call" && item.payload.call_id === "tree-follow-cold").length, 1);
         const beforeRejectedRetry = calls.length;
         await assert.rejects(native.call("mira/thread/recover", { threadId: child, expectedTurnId: "superseded", failureId: "unconfirmed" }), /recovery rejected/);
