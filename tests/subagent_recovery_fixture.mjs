@@ -92,6 +92,8 @@ export function subagentRecoveryFixture() {
         await admin(automaticEndpoint(child), { generation: 1, enabled: false }, "PUT");
         await client.call("turn/start", { threadId: parent, input: [{ type: "text", text: "RECOVERY_TREE_PARENT_COLD" }] });
         await waitFor(async () => JSON.stringify((await history(child)).items).includes("tree-child-cold-notify") && await idle(), "second child failure with recovery disabled");
+        const coldPlan = await admin(`/v1/codex/threads/${child}/input-recovery?storeId=${store}&nodeAccountId=${binding}`);
+        const failedTurn = (await client.call("thread/read", { threadId: child, includeTurns: true })).thread.turns.at(-1).id;
         // Evict the idle native family without changing its account, durable
         // identity, generation, or the parent's intended child task.
         const native = await connect(binding, store, true);
@@ -103,6 +105,9 @@ export function subagentRecoveryFixture() {
         assert.equal((await history(parent)).items.filter(item => item.type === "response_item" && item.payload.type === "function_call" && item.payload.call_id === "tree-follow-cold").length, 1);
         const beforeRejectedRetry = calls.length;
         await assert.rejects(native.call("mira/thread/recover", { threadId: child, expectedTurnId: "superseded", failureId: "unconfirmed" }), /recovery rejected/);
+        const oldRequest = { threadId: child, expectedTurnId: failedTurn, failureId: coldPlan.failureId };
+        await assert.rejects(native.call("mira/thread/recover", oldRequest), /failed turn was superseded/);
+        await assert.rejects(client.call("mira/thread/recover", oldRequest), /controlled by Mira Server/);
         assert.equal(calls.length, beforeRejectedRetry, "unconfirmed recovery must not sample");
         console.log("Cold child recovery restored its owner without replaying the parent's followup; stale requests were rejected");
       } finally {
