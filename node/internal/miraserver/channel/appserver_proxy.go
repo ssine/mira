@@ -546,7 +546,7 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 		wasToolFree := proxy.toolFreeStartRequests[key]
 		delete(proxy.toolFreeStartRequests, key)
 		proxy.mu.Unlock()
-		if bound && requested != nil && requestMethod == "turn/start" && message["error"] != nil {
+		if bound && requested != nil && isTurnStartMethod(requestMethod) && message["error"] != nil {
 			proxy.mu.Lock()
 			if proxy.runningThreads[*requested] == "" {
 				delete(proxy.runningThreads, *requested)
@@ -560,7 +560,7 @@ func (channel *Channel) forwardAppServerMessage(ctx context.Context, proxy *prox
 				return err
 			}
 		}
-		if bound && requested != nil && requestMethod == "turn/start" && message["error"] == nil {
+		if bound && requested != nil && isTurnStartMethod(requestMethod) && message["error"] == nil {
 			turn, _ := result["turn"].(map[string]any)
 			proxy.mu.Lock()
 			if _, exists := proxy.runningThreads[*requested]; exists && stringValue(turn["id"]) != "" {
@@ -681,6 +681,10 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 		return nil
 	}
 	method, _ := message["method"].(string)
+	if method == "mira/thread/recover" && (proxy.recoveryFailureID == "" || stringValue(recoveryObject(message["params"])["failureId"]) != proxy.recoveryFailureID || recoveryObject(message["params"])["probe"] == true) {
+		channel.sendProxyError(proxy, message["id"], "input recovery is controlled by Mira Server", -32601)
+		return nil
+	}
 	if method == "mira/thread/residency" {
 		channel.sendProxyError(proxy, message["id"], "residency is controlled by the local Mira Node", -32601)
 		return nil
@@ -695,12 +699,12 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 		message["params"] = params
 	}
 	threadID, _ := params["threadId"].(string)
-	if threadID != "" && (method == "thread/resume" || method == "turn/start" || method == "turn/steer" || method == "turn/interrupt") {
+	if threadID != "" && (method == "thread/resume" || isTurnStartMethod(method) || method == "turn/steer" || method == "turn/interrupt") {
 		proxy.mu.Lock()
 		ephemeral := proxy.ephemeralThreadIDs[threadID]
 		proxy.mu.Unlock()
 		if !ephemeral {
-			if _, err := channel.claimExecution(ctx, proxy, threadID, method == "thread/resume", method == "turn/start"); err != nil {
+			if _, err := channel.claimExecution(ctx, proxy, threadID, method == "thread/resume", isTurnStartMethod(method)); err != nil {
 				channel.sendProxyError(proxy, message["id"], err.Error(), -32009)
 				return nil
 			}
@@ -789,7 +793,7 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 			proxy.mu.Unlock()
 		}
 	}
-	if id, exists := message["id"]; exists && (method == "thread/start" || method == "thread/resume" || method == "thread/fork" || method == "turn/start") {
+	if id, exists := message["id"]; exists && (method == "thread/start" || method == "thread/resume" || method == "thread/fork" || isTurnStartMethod(method)) {
 		var thread *string
 		if value, ok := params["threadId"].(string); ok {
 			thread = &value
@@ -806,7 +810,7 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 	if err != nil {
 		return err
 	}
-	if method == "turn/start" && threadID != "" {
+	if isTurnStartMethod(method) && threadID != "" {
 		proxy.mu.Lock()
 		if proxy.runningThreads == nil {
 			proxy.runningThreads = map[string]string{}
@@ -906,7 +910,7 @@ func (channel *Channel) assertThreadsNotDeleted(ctx context.Context, storeID str
 
 func methodUsesExistingThread(method string) bool {
 	switch method {
-	case "thread/resume", "thread/fork", "thread/read", "thread/turns/list", "thread/items/list", "turn/start", "turn/steer":
+	case "thread/resume", "thread/fork", "thread/read", "thread/turns/list", "thread/items/list", "turn/start", "mira/thread/recover", "turn/steer":
 		return true
 	}
 	return false
@@ -920,4 +924,8 @@ func firstNonempty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func isTurnStartMethod(method string) bool {
+	return method == "turn/start" || method == "mira/thread/recover"
 }

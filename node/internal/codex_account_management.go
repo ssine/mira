@@ -37,7 +37,7 @@ func (manager *appServerManager) reserveAccountRequest(instance *appServerInstan
 	}
 	if manager.transitioning || manager.activityChecking || manager.residencyEvicting {
 		switch message.Method {
-		case "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
+		case "mira/thread/recover", "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
 			return fmt.Errorf("账号正在核验状态或停止，请稍后重试")
 		}
 	}
@@ -72,7 +72,7 @@ func (manager *appServerManager) reserveAccountRequest(instance *appServerInstan
 		manager.pendingTurns[sessionID+":"+string(message.ID)] = accountPendingRequest{Method: message.Method}
 	}
 	switch message.Method {
-	case "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
+	case "mira/thread/recover", "turn/start", "turn/steer", "thread/start", "thread/resume", "thread/fork", "thread/compact/start", "thread/realtime/start":
 		if manager.managementSession != "" {
 			return fmt.Errorf("此账号正在更新凭据，请完成或取消登录后再发送")
 		}
@@ -122,7 +122,7 @@ func (manager *appServerManager) observeAccountResponse(instance *appServerInsta
 		if ok && ((pending.Method == "account/login/start" && (failed || response.Result.Type == "apiKey")) || (pending.Method == "account/login/cancel" && !failed)) {
 			manager.loginPending = false
 		}
-		if ok && pending.Method == "turn/start" && pending.ThreadID != "" && !pending.ObservedActivity && !failed && response.Result.Turn.Status == "inProgress" {
+		if ok && (pending.Method == "turn/start" || pending.Method == "mira/thread/recover") && pending.ThreadID != "" && !pending.ObservedActivity && !failed && response.Result.Turn.Status == "inProgress" {
 			if manager.activeThreads == nil {
 				manager.activeThreads = map[string]bool{}
 			}

@@ -67,6 +67,12 @@ func (channel *Channel) unloadAccountThreads(ctx context.Context, source executi
 // PrepareExecutionReload applies the same root gate and precise unload when
 // changing the model-facing history. It deliberately precedes storage locks.
 func (channel *Channel) PrepareExecutionReload(ctx context.Context, tx pgx.Tx, storeID, threadID, nodeID, bindingID, runtimeID string) (func(), error) {
+	return channel.PrepareInputRecovery(ctx, tx, storeID, threadID, nodeID, bindingID, runtimeID, false)
+}
+
+// In-place recovery retains the family owner and every live session. Only a
+// runtime that negotiated the serialized recovery RPC may use this path.
+func (channel *Channel) PrepareInputRecovery(ctx context.Context, tx pgx.Tx, storeID, threadID, nodeID, bindingID, runtimeID string, inPlace bool) (func(), error) {
 	family, root, err := readExecutionFamily(ctx, tx, storeID, threadID)
 	if err != nil {
 		return nil, err
@@ -87,6 +93,9 @@ func (channel *Channel) PrepareExecutionReload(ctx context.Context, tx pgx.Tx, s
 			return nil, errors.New("会话树的账号已变更，请重新打开主会话")
 		}
 		ids = append(ids, member.ID)
+	}
+	if inPlace {
+		return func() {}, nil
 	}
 	return channel.unloadAccountThreads(ctx, executionSource{Node: nodeID, Binding: bindingID, Runtime: runtimeID}, root, ids)
 }

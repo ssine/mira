@@ -12,6 +12,9 @@ func TestThreadHandoffDoesNotBlockOtherConversations(t *testing.T) {
 		if err := manager.reserveAccountRequest(manager.instance, "browser", []byte(`{"id":1,"method":"turn/start","params":{"threadId":"`+id+`"}}`)); err == nil {
 			t.Fatal("handoff admitted a competing turn")
 		}
+		if err := manager.reserveAccountRequest(manager.instance, "recovery", []byte(`{"id":2,"method":"mira/thread/recover","params":{"threadId":"`+id+`","expectedTurnId":"failed","failureId":"failure"}}`)); err == nil {
+			t.Fatal("handoff admitted a competing input recovery")
+		}
 	}
 	if err := manager.reserveAccountRequest(manager.instance, "browser", []byte(`{"id":2,"method":"turn/start","params":{"threadId":"other"}}`)); err != nil {
 		t.Fatal(err)

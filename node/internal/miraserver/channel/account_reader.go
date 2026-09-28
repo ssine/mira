@@ -372,6 +372,9 @@ func (reader *AccountReader) call(ctx context.Context, session *accountSession, 
 	}
 	select {
 	case value := <-response:
+		if method == "mira/thread/recover" && value.err != nil && (value.code == "-32601" || value.code == "-32600") {
+			return nil, errInputRecoveryUnsupported
+		}
 		if method == "mira/thread/unload" && value.err != nil && value.detail != "" && len(value.detail) <= 2048 {
 			if value.code == "-32601" {
 				return nil, errors.New("请升级旧账号的 Codex 运行包，以支持单独交接对话")

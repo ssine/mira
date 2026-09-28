@@ -56,7 +56,14 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		return 0, errors.New("会话父子关系已变更，请重新打开")
 	}
 	if proxy.recoveryFailureID != "" && (handoff || turn) {
-		if err := CheckAutomaticRecovery(ctx, tx, proxy.storeID, threadID, proxy.recoveryFailureID); err != nil {
+		recoveryThread := proxy.recoveryThreadID
+		if recoveryThread == "" {
+			recoveryThread = threadID
+		}
+		if threadID != recoveryThread && (turn || !isRecoveryAncestor(family, recoveryThread, threadID)) {
+			return 0, errors.New("自动恢复只能加载当前对话的父节点")
+		}
+		if err := CheckAutomaticRecovery(ctx, tx, proxy.storeID, recoveryThread, proxy.recoveryFailureID); err != nil {
 			return 0, err
 		}
 	}
@@ -84,6 +91,9 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		}
 		if source == nil {
 			continue
+		}
+		if proxy.recoveryFailureID != "" {
+			return 0, errors.New("会话树账号已变化，已取消自动恢复")
 		}
 		if !handoff {
 			return 0, errors.New("此对话或父子会话已切换到其他账号，请重新打开主会话后再发送")
@@ -184,6 +194,7 @@ func (channel *Channel) requireTreeExecutionProtocol(ctx context.Context, tx pgx
 
 type executionMember struct {
 	ID         string
+	Parent     string
 	Generation int64
 	Previous   executionRoute
 	SourceNode string
@@ -232,7 +243,7 @@ const executionFamilySQL = `WITH RECURSIVE edges AS (
 ), ancestors(id) AS (SELECT $2::text UNION SELECT e.parent FROM edges e JOIN ancestors a ON e.child=a.id),
 roots(id) AS (SELECT a.id FROM ancestors a WHERE NOT EXISTS(SELECT 1 FROM edges e WHERE e.child=a.id)),
 family(id) AS (SELECT id FROM roots UNION SELECT e.child FROM edges e JOIN family f ON e.parent=f.id)
-SELECT p.thread_id,p.active_generation,COALESCE(r.node_account_id::text,''),COALESCE(r.runtime_id,''),COALESCE(r.revision,0),COALESCE(r.generation,0),COALESCE(r.state,''),COALESCE(b.node_id::text,''),COALESCE(l.node_id::text,''),(SELECT count(*) FROM roots),(SELECT min(id) FROM roots)
+SELECT p.thread_id,p.active_generation,COALESCE(r.node_account_id::text,''),COALESCE(r.runtime_id,''),COALESCE(r.revision,0),COALESCE(r.generation,0),COALESCE(r.state,''),COALESCE(b.node_id::text,''),COALESCE(l.node_id::text,''),(SELECT count(*) FROM roots),(SELECT min(id) FROM roots),COALESCE((SELECT parent FROM edges WHERE child=p.thread_id),'')
 FROM family f JOIN codex_thread_projections p ON p.store_id=$1 AND p.thread_id=f.id
 LEFT JOIN mira_codex_execution_routes r ON r.store_id=p.store_id AND r.thread_id=p.thread_id
 LEFT JOIN mira_node_codex_accounts b USING(node_account_id)
@@ -251,7 +262,7 @@ func readExecutionFamily(ctx context.Context, tx pgx.Tx, storeID, threadID strin
 	for rows.Next() {
 		var member executionMember
 		var roots int
-		if err = rows.Scan(&member.ID, &member.Generation, &member.Previous.Binding, &member.Previous.Runtime, &member.Previous.Revision, &member.Previous.Generation, &member.Previous.State, &member.SourceNode, &member.LegacyNode, &roots, &root); err != nil {
+		if err = rows.Scan(&member.ID, &member.Generation, &member.Previous.Binding, &member.Previous.Runtime, &member.Previous.Revision, &member.Previous.Generation, &member.Previous.State, &member.SourceNode, &member.LegacyNode, &roots, &root, &member.Parent); err != nil {
 			return nil, "", err
 		}
 		if roots != 1 {

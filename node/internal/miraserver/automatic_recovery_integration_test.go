@@ -67,6 +67,90 @@ func TestAutomaticRecoveryClaimsCanonicalFailureOnce(t *testing.T) {
 	}
 }
 
+func TestAutomaticRecoveryDeferredPreparationDoesNotConsumeRetry(t *testing.T) {
+	pool := accountTestDatabase(t)
+	server := &Server{pool: pool}
+	ctx := context.Background()
+	f := newExecutionHistoryFixture(t, pool)
+	f.append("v2", lifecycle("task_started", "failed"), map[string]any{"type": "event_msg", "payload": map[string]any{"type": "error", "message": `{"error":{"code":"invalid_encrypted_content"}}`}}, lifecycle("task_complete", "failed"))
+	job, err := server.claimAutomaticRecovery(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("claim: %v %v", job, err)
+	}
+	f.exec(`UPDATE mira_codex_recovery_attempts SET reason=$2,updated_at=now()-interval '10 seconds' WHERE failure_id=$1::uuid`, job.Failure, errAutomaticRecoveryDeferred.Error())
+	var wg sync.WaitGroup
+	claims := make(chan *automaticRecoveryJob, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			next, err := server.claimAutomaticRecovery(ctx)
+			if err != nil {
+				t.Error(err)
+			}
+			if next != nil {
+				claims <- next
+			}
+		}()
+	}
+	wg.Wait()
+	close(claims)
+	if len(claims) != 1 {
+		t.Fatalf("deferred claim count=%d", len(claims))
+	}
+	if next := <-claims; next.Failure != job.Failure {
+		t.Fatal("deferred preparation created a different failure")
+	}
+	count, err := server.automaticRecoveryFailureCount(ctx, *job, inputRecoveryPlan{Generation: 1, ThroughItemSeq: f.count})
+	if err != nil || count != 1 {
+		t.Fatalf("preparation spent model retry budget: %d %v", count, err)
+	}
+	// An ambiguous dispatch must never enter the preparatory queue again.
+	f.exec(`UPDATE mira_codex_recovery_attempts SET status='dispatching',reason=$2,updated_at=now()-interval '10 seconds' WHERE failure_id=$1::uuid`, job.Failure, errAutomaticRecoveryDeferred.Error())
+	if next, err := server.claimAutomaticRecovery(ctx); err != nil || next != nil {
+		t.Fatalf("dispatch replayed: %v %v", next, err)
+	}
+}
+
+func TestAutomaticRecoveryCannotReviveClosedChild(t *testing.T) {
+	pool := accountTestDatabase(t)
+	server := &Server{pool: pool}
+	ctx := context.Background()
+	for _, afterClaim := range []bool{false, true} {
+		t.Run(fmt.Sprint(afterClaim), func(t *testing.T) {
+			f := newExecutionHistoryFixture(t, pool)
+			f.append("v2", lifecycle("task_started", "failed"), map[string]any{"type": "event_msg", "payload": map[string]any{"type": "error", "message": `{"code":"invalid_encrypted_content"}`}}, lifecycle("task_complete", "failed"))
+			var job *automaticRecoveryJob
+			if afterClaim {
+				var err error
+				job, err = server.claimAutomaticRecovery(ctx)
+				if err != nil || job == nil {
+					t.Fatalf("claim: %v %v", job, err)
+				}
+			}
+			f.exec(`WITH event AS (
+ INSERT INTO mira_agent_graph_events(store_id,operation_id,request_sha256,child_thread_id,parent_thread_id,child_generation,parent_generation,status)
+ VALUES($1,gen_random_uuid(),repeat('0',64),$2,'parent',1,1,'closed') RETURNING event_seq)
+ INSERT INTO mira_agent_graph_edges(store_id,child_thread_id,parent_thread_id,child_generation,parent_generation,status,event_seq)
+ SELECT $1,$2,'parent',1,1,'closed',event_seq FROM event`, f.store, f.thread)
+			if !afterClaim {
+				if next, err := server.claimAutomaticRecovery(ctx); err != nil || next != nil {
+					t.Fatalf("closed child claimed: %v %v", next, err)
+				}
+				return
+			}
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback(ctx)
+			if err := channel.CheckAutomaticRecovery(ctx, tx, f.store, f.thread, job.Failure); err == nil {
+				t.Fatal("parent closure did not supersede the pending child recovery")
+			}
+		})
+	}
+}
+
 func TestAutomaticRecoveryScopeAndRetryLimit(t *testing.T) {
 	pool := accountTestDatabase(t)
 	server := &Server{pool: pool}
