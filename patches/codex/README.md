@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
-- Patch source commit: `fadf347266fe`
+- Patch source commit: `7d1d47261d33`
 
 Apply it to a clean checkout:
 
@@ -48,6 +48,22 @@ Existing encrypted messages/checkpoints are still readable by compatible
 providers and are never silently deleted or decrypted. The model's separate
 `reasoning.encrypted_content` mechanism is unchanged; this release does not
 promise unrestricted account switching for previously encrypted history.
+
+Runtime `0.155.1-mira.6` adds `mira/thread/recover` for Mira Server's automatic
+input recovery. Its `probe` request negotiates version 1 without starting work.
+The real request accepts only `threadId`, `expectedTurnId` and `failureId`; it
+refreshes the Server-confirmed model-facing projection through the selected
+thread's writer queue, then retries within the existing native session. Active
+or queued work, a changed terminal turn, and missing or different consent reject
+the request. Ordinary direct-input restrictions on native v2 children remain.
+No user message is inserted and completed tool results and raw canonical history
+are retained. Server 1.0.55 restores cold owners before their children and keeps
+running parents and siblings loaded. No database migration is required.
+
+Run `MIRA_TEST_SUBAGENT_RECOVERY=1 node tests/codex_accounts_runtime_e2e.mjs`
+against a disposable Server and the actual runtime to verify active-family and
+cold-child recovery, stale rejection, no added user message or duplicate tool,
+the 20-consecutive-failure limit, account handoff and CLI resume together.
 
 Runtime `0.155.1-mira.5` adds the local Node-controlled memory-residency lease.
 The Node shares a configurable RSS budget across managed accounts and asks the
