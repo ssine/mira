@@ -196,7 +196,13 @@ Account handoff starts from the root conversation and atomically moves its curre
 subagent tree, including closed/archived descendants; ordinary forks remain independent. Drain and unload only the selected conversation tree before acquiring canonical storage locks;
 keep other conversations and their account processes running. Hold Node-side thread gates through
 the binding commit, require an explicit Codex unload/flush acknowledgement, and never treat
-thread/unsubscribe as release. Input compatibility reload uses the same scoped handoff. Child-only account switches must not split
+thread/unsubscribe as release. Manual input compatibility reload uses the same scoped handoff.
+Negotiated automatic input recovery refreshes only the failed idle native session from a
+Server-confirmed model-input projection, retaining its parent/child owner and active siblings.
+Validate the failure and terminal turn in the native submission queue; newer or queued tasks and
+closed children supersede recovery. Preserve canonical history and completed tools, restore cold
+owners before their children, and never use direct child turn input to bypass native ownership.
+Child-only account switches must not split
 the tree. Managed runtime provider selection is a read projection at the ThreadStore boundary;
 keep each child's model and all canonical metadata/history intact. Require account protocol 2
 before switching a tree to a runtime, while retaining protocol 1 readers for older clients.
