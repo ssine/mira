@@ -85,7 +85,7 @@ subagents included) with the public Claude list prices in `claude_views.go`. Cac
 writes use their 5-minute/1-hour multipliers. The estimate is marked `running`; unknown
 models or invalid usage make it partial. The Web shows it beside the running indicator
 and in the conversation total, then fetches the turn footer from the SDK result once the
-turn settles. Schema 37 only adds the per-turn `assistant` event index for this lookup.
+turn settles. Schema 38 only adds the per-turn `assistant` event index for this lookup.
 
 Rebuild the projection by reloading attribution from `mira_claude_turns`, then applying
 `mira_claude_project_result(turn_id, seq, payload)` to the latest root `result` event per

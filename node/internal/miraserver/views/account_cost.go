@@ -31,22 +31,55 @@ const accountCostOwnersSQL = `identities AS (
  FROM mira_codex_execution_events e JOIN mira_node_codex_accounts b USING(node_account_id) JOIN mira_codex_accounts a USING(account_id)
  WHERE e.kind IN ('bound','turn_requested'))`
 
+// AccountCostSnapshot is immutable after loading. One database aggregation serves
+// every account and supported range in a timezone. History only slices/merges
+// these bounded daily/hourly totals; it never reads PostgreSQL.
+type AccountCostSnapshot struct {
+	now, from                                                               time.Time
+	zone                                                                    string
+	accounts                                                                map[string][]accountCostDay
+	totalThreads, pendingThreads, failedThreads, processedItems, totalItems int64
+}
+
+type accountCostDay struct {
+	total costTotals
+	hours map[int64]*costTotals
+}
+
 func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName, zone string) (map[string]any, error) {
-	name = strings.TrimSpace(name)
+	if _, err := accountCostRange(name, rangeName); err != nil {
+		return nil, err
+	}
+	snapshot, err := service.LoadAccountCostSnapshot(ctx, zone)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot.History(name, rangeName)
+}
+
+func accountCostRange(name, rangeName string) (int, error) {
 	if rangeName == "" {
 		rangeName = "7d"
 	}
+	count := map[string]int{"24h": 1, "7d": 7, "30d": 30}[rangeName]
+	if name = strings.TrimSpace(name); name == "" || len(name) > 128 || count == 0 {
+		return 0, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "name and range (24h, 7d, 30d) are required"}
+	}
+	return count, nil
+}
+
+func (service *Service) LoadAccountCostSnapshot(ctx context.Context, zone string) (*AccountCostSnapshot, error) {
 	if zone == "" {
 		zone = "UTC"
 	}
-	count := map[string]int{"24h": 1, "7d": 7, "30d": 30}[rangeName]
 	location, err := time.LoadLocation(zone)
-	if name == "" || len(name) > 128 || count == 0 || err != nil {
-		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "name, range (24h, 7d, 30d) and a valid timezone are required"}
+	if err != nil {
+		return nil, &foundation.HTTPError{Status: 400, Code: "invalid_request", Message: "a valid timezone is required"}
 	}
 	now := service.now().In(location)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, location)
-	from := today.AddDate(0, 0, 1-count)
+	from := today.AddDate(0, 0, -29)
+	snapshot := &AccountCostSnapshot{now: now, from: from, zone: zone, accounts: map[string][]accountCostDay{}}
 	// Progress and amounts come from one MVCC snapshot, so a concurrent page
 	// commit or generation replacement cannot produce a false complete result.
 	tx, err := service.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
@@ -54,20 +87,19 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 		return nil, err
 	}
 	defer tx.Rollback(context.Background())
-	var totalThreads, pendingThreads, failedThreads, processedItems, totalItems int64
 	err = tx.QueryRow(ctx, `WITH sources AS (`+accountCostSourcesSQL+`)
  SELECT count(*),count(*) FILTER(WHERE c.thread_id IS NULL OR c.generation<>s.active_generation OR c.revision<>$1 OR c.source_key<>s.source_key OR c.item_seq<>s.item_count),
  count(*) FILTER(WHERE c.error_code IS NOT NULL),
  coalesce(sum(CASE WHEN c.generation=s.active_generation AND c.revision=$1 AND c.source_key=s.source_key THEN least(c.item_seq,s.item_count) ELSE 0 END),0)::bigint,
  coalesce(sum(s.item_count),0)::bigint
  FROM sources s LEFT JOIN mira_account_cost_checkpoints c USING(store_id,thread_id)`, accountCostRevision).
-		Scan(&totalThreads, &pendingThreads, &failedThreads, &processedItems, &totalItems)
+		Scan(&snapshot.totalThreads, &snapshot.pendingThreads, &snapshot.failedThreads, &snapshot.processedItems, &snapshot.totalItems)
 	if err != nil {
 		return nil, err
 	}
 	rows, err := tx.Query(ctx, `WITH sources AS (`+accountCostSourcesSQL+`),`+accountCostOwnersSQL+`, facts AS (
- SELECT f.*,t.name IS NULL AND b.name IS NULL AS historical,
- to_char(f.happened_at AT TIME ZONE $5,'YYYY-MM-DD') AS day,
+ SELECT f.*,coalesce(t.name,b.name,a.name) AS name,t.name IS NULL AND b.name IS NULL AS historical,
+ to_char(f.happened_at AT TIME ZONE $4,'YYYY-MM-DD') AS day,
  date_trunc('hour',f.happened_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC' AS hour
  FROM mira_account_cost_entries f JOIN mira_account_cost_checkpoints c USING(store_id,thread_id)
  JOIN sources s USING(store_id,thread_id)
@@ -76,27 +108,23 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
  AND f.happened_at>=b.created_at AND (b.until IS NULL OR f.happened_at<b.until)
  LEFT JOIN aliases a ON a.provider=f.provider
  WHERE c.generation=s.active_generation AND c.revision=$1 AND c.source_key=s.source_key AND f.item_seq<=s.item_count
- AND f.happened_at>=$3 AND f.happened_at<=$4 AND coalesce(t.name,b.name,a.name)=$2)
- SELECT day,hour,historical,models,reasons,bool_or(observed),sum(priced)::bigint,sum(unpriced)::bigint,sum(long_requests)::bigint,
+ AND f.happened_at>=$2 AND f.happened_at<=$3 AND coalesce(t.name,b.name,a.name) IS NOT NULL)
+ SELECT name,day,hour,historical,models,reasons,bool_or(observed),sum(priced)::bigint,sum(unpriced)::bigint,sum(long_requests)::bigint,
  sum(input)::text,sum(cached)::text,sum(write)::text,sum(output)::text
- FROM facts GROUP BY day,hour,historical,models,reasons`, accountCostRevision, name, from, now, zone)
+ FROM facts GROUP BY name,day,hour,historical,models,reasons`, accountCostRevision, from, now, zone)
 	if err != nil {
 		return nil, err
 	}
-	days := make([]map[string]any, count)
-	totals := make([]costTotals, count)
-	hours := make([]map[int64]*costTotals, count)
-	for i := range days {
-		start := from.AddDate(0, 0, i)
-		days[i] = map[string]any{"date": start.Format("2006-01-02"), "at": start.UnixMilli(), "end": start.AddDate(0, 0, 1).UnixMilli()}
-		hours[i] = map[int64]*costTotals{}
+	dayIndex := make(map[string]int, 30)
+	for i := 0; i < 30; i++ {
+		dayIndex[from.AddDate(0, 0, i).Format("2006-01-02")] = i
 	}
 	for rows.Next() {
-		var day string
+		var name, day string
 		var hour time.Time
 		var historical bool
 		var numbers accountCostNumbers
-		if err := rows.Scan(&day, &hour, &historical, &numbers.Models, &numbers.Reasons, &numbers.Observed, &numbers.Priced, &numbers.Unpriced, &numbers.LongRequests,
+		if err := rows.Scan(&name, &day, &hour, &historical, &numbers.Models, &numbers.Reasons, &numbers.Observed, &numbers.Priced, &numbers.Unpriced, &numbers.LongRequests,
 			&numbers.Input, &numbers.Cached, &numbers.Write, &numbers.Output); err != nil {
 			rows.Close()
 			return nil, err
@@ -109,25 +137,32 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 		if historical {
 			incomplete(&delta, "historical_provider_attribution")
 		}
-		for i, value := range days {
-			if value["date"] != day {
-				continue
-			}
-			mergeAccountCost(&totals[i], delta)
-			bucket := hour.Add(time.Hour)
-			if end := time.UnixMilli(value["end"].(int64)); bucket.After(end) {
-				bucket = end
-			}
-			if bucket.After(now) {
-				bucket = now
-			}
-			key := bucket.UnixMilli()
-			if hours[i][key] == nil {
-				hours[i][key] = &costTotals{}
-			}
-			mergeAccountCost(hours[i][key], delta)
-			break
+		i, ok := dayIndex[day]
+		if !ok {
+			continue
 		}
+		days := snapshot.accounts[name]
+		if days == nil {
+			days = make([]accountCostDay, 30)
+			snapshot.accounts[name] = days
+		}
+		value := &days[i]
+		mergeAccountCost(&value.total, delta)
+		bucket := hour.Add(time.Hour)
+		if end := from.AddDate(0, 0, i+1); bucket.After(end) {
+			bucket = end
+		}
+		if bucket.After(now) {
+			bucket = now
+		}
+		key := bucket.UnixMilli()
+		if value.hours == nil {
+			value.hours = map[int64]*costTotals{}
+		}
+		if value.hours[key] == nil {
+			value.hours[key] = &costTotals{}
+		}
+		mergeAccountCost(value.hours[key], delta)
 	}
 	err = rows.Err()
 	rows.Close()
@@ -137,35 +172,62 @@ func (service *Service) AccountCostHistory(ctx context.Context, name, rangeName,
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
+	return snapshot, nil
+}
+
+func (snapshot *AccountCostSnapshot) History(name, rangeName string) (map[string]any, error) {
+	count, err := accountCostRange(name, rangeName)
+	if err != nil {
+		return nil, err
+	}
+	name = strings.TrimSpace(name)
+	if rangeName == "" {
+		rangeName = "7d"
+	}
+	from := snapshot.from.AddDate(0, 0, 30-count)
+	days := make([]map[string]any, count)
 	points := []map[string]any{}
 	var total costTotals
 	for i := range days {
-		if pendingThreads > 0 {
-			incomplete(&totals[i], "projection_pending")
+		start := from.AddDate(0, 0, i)
+		date := start.Format("2006-01-02")
+		var value accountCostDay
+		if account := snapshot.accounts[name]; account != nil {
+			value = account[30-count+i]
 		}
-		estimate := pricedEstimate(&totals[i])
-		days[i]["amount"], days[i]["status"] = estimate["amount"], estimate["status"]
-		mergeAccountCost(&total, totals[i])
-		for at, value := range hours[i] {
-			if pendingThreads > 0 {
-				incomplete(value, "projection_pending")
+		// Copy totals before adding presentation-only completeness reasons. A
+		// caller must never mutate the snapshot shared by other requests.
+		var dayTotal costTotals
+		mergeAccountCost(&dayTotal, value.total)
+		if snapshot.pendingThreads > 0 {
+			incomplete(&dayTotal, "projection_pending")
+		}
+		estimate := pricedEstimate(&dayTotal)
+		days[i] = map[string]any{"date": date, "at": start.UnixMilli(), "end": start.AddDate(0, 0, 1).UnixMilli(),
+			"amount": estimate["amount"], "status": estimate["status"]}
+		mergeAccountCost(&total, dayTotal)
+		for at, hour := range value.hours {
+			var hourTotal costTotals
+			mergeAccountCost(&hourTotal, *hour)
+			if snapshot.pendingThreads > 0 {
+				incomplete(&hourTotal, "projection_pending")
 			}
-			estimate := pricedEstimate(value)
-			points = append(points, map[string]any{"at": at, "amount": estimate["amount"], "status": estimate["status"], "date": days[i]["date"]})
+			estimate := pricedEstimate(&hourTotal)
+			points = append(points, map[string]any{"at": at, "amount": estimate["amount"], "status": estimate["status"], "date": date})
 		}
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i]["at"].(int64) < points[j]["at"].(int64) })
 	status := "ready"
-	if pendingThreads > 0 {
+	if snapshot.pendingThreads > 0 {
 		status = "updating"
 	}
-	if failedThreads > 0 {
+	if snapshot.failedThreads > 0 {
 		status = "retrying"
 	}
-	return map[string]any{"name": name, "range": rangeName, "timezone": zone, "from": from.UnixMilli(), "to": now.UnixMilli(),
+	return map[string]any{"name": name, "range": rangeName, "timezone": snapshot.zone, "from": from.UnixMilli(), "to": snapshot.now.UnixMilli(),
 		"days": days, "points": points, "estimate": pricedEstimate(&total), "basis": "standard", "currency": "USD",
-		"projection": map[string]any{"status": status, "pendingThreads": pendingThreads, "totalThreads": totalThreads, "failedThreads": failedThreads,
-			"processedItems": processedItems, "totalItems": totalItems}}, nil
+		"projection": map[string]any{"status": status, "pendingThreads": snapshot.pendingThreads, "totalThreads": snapshot.totalThreads, "failedThreads": snapshot.failedThreads,
+			"processedItems": snapshot.processedItems, "totalItems": snapshot.totalItems}}, nil
 }
 
 func mergeAccountCost(target *costTotals, value costTotals) {

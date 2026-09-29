@@ -26,8 +26,38 @@ func TestInitializeDatabaseIntegration(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT MAX(version) FROM codex_schema_migrations`).Scan(&expandedFrom); err != nil || expandedFrom != CurrentSchemaVersion()-1 {
 		t.Fatalf("pre-upgrade schema=%d err=%v", expandedFrom, err)
 	}
+	// An old Server writes only state. Existing and future rows must acquire
+	// the derived scalar without changing that rollback SQL contract.
+	const store = "cost-source-upgrade-fixture"
+	defer func() {
+		if _, err := pool.Exec(ctx, `DELETE FROM codex_thread_projections WHERE store_id=$1`, store); err != nil {
+			t.Error(err)
+		}
+	}()
+	if _, err := pool.Exec(ctx, `INSERT INTO codex_thread_projections(store_id,thread_id,active_generation,item_count,state,through_event_seq)
+ VALUES($1,'fork',1,0,'{"createdThread":{"forked_from_id":"parent"}}',1)`, store); err != nil {
+		t.Fatal(err)
+	}
 	if err := InitializeDatabase(ctx, pool); err != nil {
 		t.Fatal(err)
+	}
+	checkFork := func(want string) {
+		t.Helper()
+		var got string
+		if err := pool.QueryRow(ctx, `SELECT cost_forked_from_id FROM codex_thread_projections WHERE store_id=$1 AND thread_id='fork'`, store).Scan(&got); err != nil || got != want {
+			t.Fatalf("derived fork=%q want=%q err=%v", got, want, err)
+		}
+	}
+	checkFork("parent")
+	for _, state := range []string{`{"createdThread":{"forked_from_id":"replacement"}}`, `{}`} {
+		if _, err := pool.Exec(ctx, `UPDATE codex_thread_projections SET state=$2::jsonb WHERE store_id=$1`, store, state); err != nil {
+			t.Fatal(err)
+		}
+		if state == "{}" {
+			checkFork("")
+		} else {
+			checkFork("replacement")
+		}
 	}
 	// Re-entry validates every immutable name/checksum without rerunning SQL.
 	if err := InitializeDatabase(ctx, pool); err != nil {

@@ -267,17 +267,10 @@ func (service *AuthService) AuthenticateNodeToken(ctx context.Context, token, cl
 		return nil, nil
 	}
 	revoked := credentialRevoked || approvalStatus != "approved"
-	if !revoked {
-		if _, err := service.db.Exec(ctx,
-			`WITH used AS (
-			   UPDATE mira_node_credentials SET last_used_at = NOW() WHERE credential_id = $1::uuid
-			 )
-			 UPDATE codex_nodes SET last_authenticated_at = NOW() WHERE node_id = $2::uuid`,
-			parsed.CredentialID, nodeID,
-		); err != nil {
-			return nil, fmt.Errorf("record Node authentication: %w", err)
-		}
-	}
+	// Authentication is read-only. The legacy last_used_at / last_authenticated_at
+	// fields have no consumers; writing them on every storage request creates hot
+	// rows and dead tuples. Heartbeats own Node liveness. Keep checking approval
+	// and revocation above on every request rather than caching authorization.
 	return &Principal{
 		Kind: "node", ClientType: normalizedClientType(clientType), Transport: "bearer",
 		SubjectID: credentialID, CredentialID: credentialID, NodeID: nodeID, NodeKey: nodeKey, Revoked: revoked,
