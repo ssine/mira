@@ -55,11 +55,12 @@ try {
   assert.equal(await view.locator("[data-model]").inputValue(), "anthropic.claude-example");
   await view.locator("[data-input]").fill("Remember this account");
   await view.locator("[data-send]").click();
+  await page.waitForFunction(() => document.querySelector("#claudeView [data-input]").value === "");
   await page.waitForFunction(() => document.querySelector("#claudeView [data-account]").disabled);
   assert.equal(calls.find(c => c.path === "/v1/claude/sessions" && c.body).body.nodeAccountId, ids[1]);
   assert.equal(calls.find(c => c.path.endsWith("/turns")).body.nodeAccountId, ids[1]);
   await page.reload();
-  await view.locator("[data-title]").getByText("Remember this account", { exact: true }).waitFor();
+  await page.waitForFunction(() => document.querySelector("#claudeView [data-title]").textContent === "Remember this account");
   assert.equal(await view.locator("[data-account]").inputValue(), ids[1]);
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#claudeView [data-account]").disabled);
