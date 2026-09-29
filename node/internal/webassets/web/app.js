@@ -1426,7 +1426,7 @@ async function loadDashboard() {
 
 async function refreshNodeModels(nodeId) {
   let node = await api(`/v1/nodes/${nodeId}`);
-  const bindingId = nodeId === $("#agentRuntimeNode").value ? $("#conversationAccount").value : "";
+  const bindingId = nodeId === $("#agentRuntimeNode").value ? $("#agentRuntimeAccount").value : "";
   if (node.status !== "online" || node.capabilities?.appServer !== true) throw new Error("此节点当前无法读取 Codex 模型");
   dashboardNodes.set(node.nodeId, node);
   node = accountNode(node, bindingId);
@@ -1450,7 +1450,7 @@ async function refreshNodeModels(nodeId) {
   }
   const selectedHere = $("#agentRuntimeNode").value === nodeId;
   const cwd = selectedHere ? $("#conversationCwd").value.trim() : node.desiredAppServer?.defaultCwd ?? "";
-  const key = JSON.stringify([nodeId, cwd, node.nodeAccountId ?? "", node.accountRevision ?? 0, node.reportedAppServer?.runtimeId ?? ""]);
+  const key = JSON.stringify([nodeId, cwd, node.nodeAccountId ?? "", node.accountRevision ?? 0, node.reportedAppServer?.runtimeId ?? "", "codex"]);
   invalidateModelCatalog(nodeId);
   const composerJob = selectedHere && conversationModelKey() === key ? { key } : null;
   if (composerJob) {

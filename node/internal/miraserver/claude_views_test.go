@@ -99,6 +99,12 @@ func TestClaudeUnifiedProjectPagination(t *testing.T) {
 	if status != 400 {
 		t.Fatal("cursor scope not checked")
 	}
+	// Imported Codex projects may have no execution Node yet. That is a valid
+	// shared project key, but must not select every Claude session.
+	unbound := f.call("GET", "/v1/claude/conversations?view=roots&projectKey="+url.QueryEscape(`["","/project"]`), nil)
+	if len(unbound["data"].([]any)) != 0 || len(unbound["projects"].([]any)) != 2 {
+		t.Fatal("unbound Codex project leaked Claude rows or lost the directory")
+	}
 }
 
 func TestClaudeProjectionCannotRejectNativeNUL(t *testing.T) {

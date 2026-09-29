@@ -31,6 +31,8 @@ export function conversationPageReader(api, engineOf) {
     return { ...codex, data: [...(codex.data || []), ...(claude.data || [])].sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)),
       ...(codex.projects || claude.projects ? { projects: [...projects.values()] } : {}),
       nextCursor: next.codex || next.claude ? JSON.stringify(next) : null,
-      paged: codex.paged || claude.paged, removed: [...(codex.removed || []), ...(claude.removed || [])] };
+      // Legacy Codex responses already contain the full family tree. Do not
+      // reinterpret those rows as paginated roots merely because Claude pages.
+      paged: codex.paged === true, removed: [...(codex.removed || []), ...(claude.removed || [])] };
   };
 }

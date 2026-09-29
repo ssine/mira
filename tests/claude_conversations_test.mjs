@@ -46,3 +46,10 @@ test("lost native turn response reuses exactly the same request and account",asy
  await assert.rejects(runtime.send({sessionId:"s"},{text:"one",nodeAccountId:"A"}));
  await runtime.send({sessionId:"s"},{text:"two",nodeAccountId:"B"});assert.deepEqual(requests[0],requests[1]);
 });
+
+test("empty native pages preserve the legacy Codex full-tree contract", async () => {
+ const rows=[{threadId:"root"},{threadId:"child",parentThreadId:"root",activity:{state:"running"}}];
+ const reader=conversationPageReader(async url=>url.startsWith("/v1/codex/")?{data:rows}:{paged:true,data:[],projects:[]},()=>"codex");
+ const page=await reader(new URLSearchParams({view:"roots"}));
+ assert.equal(page.paged,false);assert.deepEqual(page.data,rows);
+});

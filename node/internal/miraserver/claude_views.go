@@ -194,13 +194,13 @@ func (server *Server) claudeConversationList(ctx context.Context, r *http.Reques
 		var filterNode, filterCwd string
 		if project != "" {
 			var pair []string
-			if json.Unmarshal([]byte(project), &pair) != nil || len(pair) != 2 || !claudeUUID(pair[0]) {
+			if json.Unmarshal([]byte(project), &pair) != nil || len(pair) != 2 || pair[0] != "" && !claudeUUID(pair[0]) {
 				return nil, claudeError(400, "Invalid project")
 			}
 			filterNode, filterCwd = pair[0], pair[1]
 		}
-		rows, err := server.pool.Query(ctx, `SELECT `+claudeColumns+` FROM mira_claude_sessions WHERE archived=$1 AND ($2='' OR node_id::text=$2 AND `+claudeProjectNormalized+`=$3)
- AND (updated_at,session_id)<($4,$5::uuid) ORDER BY updated_at DESC,session_id DESC LIMIT 51`, archived, filterNode, filterCwd, cursor.At, cursor.ID)
+		rows, err := server.pool.Query(ctx, `SELECT `+claudeColumns+` FROM mira_claude_sessions WHERE archived=$1 AND ($6='' OR node_id::text=$2 AND `+claudeProjectNormalized+`=$3)
+ AND (updated_at,session_id)<($4,$5::uuid) ORDER BY updated_at DESC,session_id DESC LIMIT 51`, archived, filterNode, filterCwd, cursor.At, cursor.ID, project)
 		if err != nil {
 			return nil, err
 		}
@@ -314,7 +314,9 @@ func (server *Server) claudeAccountCosts(ctx context.Context, r *http.Request) (
 			*total += *amount
 			prior, _ := day["amount"].(float64)
 			day["amount"] = prior + *amount
-			day["status"] = "complete"
+			if day["status"] != "partial" {
+				day["status"] = "complete"
+			}
 		}
 		if p {
 			day["status"] = "partial"
