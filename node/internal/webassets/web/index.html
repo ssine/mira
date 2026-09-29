@@ -357,6 +357,17 @@
           <div class="overview-grid">
             <article class="tool-card"><p class="eyebrow">DEVICE</p><h2>节点信息</h2><dl id="nodeFacts" class="facts"></dl></article>
             <article class="tool-card"><p class="eyebrow">CAPABILITIES</p><h2>可用能力</h2><div id="workspaceCapabilities" class="capabilities"></div></article>
+            <article id="claudeCacheCard" class="tool-card hidden">
+              <p class="eyebrow">CLAUDE CODE</p><h2>本地会话缓存</h2>
+              <p class="muted">缓存近期会话，加快续聊时的历史读取。超出容量时自动清理较久未用的缓存。</p>
+              <form id="claudeCacheForm">
+                <label>容量上限（GiB）<input id="claudeCacheLimit" type="number" min="0" step="any" value="4" required></label>
+                <p class="muted">设为 0 可关闭；配置保存在此节点，重启后仍有效。</p>
+                <p id="claudeCacheStatus" class="muted" role="status">正在读取…</p>
+                <button id="claudeCacheSave" class="secondary" type="submit">保存容量</button>
+                <button id="claudeCacheRefresh" class="ghost" type="button">刷新占用</button>
+              </form>
+            </article>
             <article class="tool-card resource-card"><p class="eyebrow">RESOURCES</p><h2>资源使用</h2><div id="memoryResource"></div><div id="diskResources" class="resource-list"></div></article>
             <article class="tool-card network-card"><p class="eyebrow">NETWORK</p><h2>网络接口</h2><div id="networkInterfaces" class="network-list"></div></article>
           </div>

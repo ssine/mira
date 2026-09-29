@@ -7,12 +7,13 @@ const account = (id, name, provider) => ({ engine: "claude", nodeAccountId: id, 
   enabled: true, configured: true, provider, reportedAppServer: { status: "ready", provider: {
     id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example" } } });
 const node = { nodeId, hostname: "WSL fixture", platform: "linux", status: "online", approvalStatus: "approved",
-  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true },
+  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true },
   desiredAppServer: { defaultCwd: "/work" }, reportedAppServer: { status: "stopped" }, codexAccounts: [],
   claudeAccounts: [account(ids[0], "Messages account", "anthropic"), account(ids[1], "AWS account", "bedrock")] };
 const codexId = randomUUID();
 node.codexAccounts = [{ nodeAccountId: codexId, name: "Messages account", enabled: true, isDefault: true, reportedAppServer: {status:"stopped"} }];
 const calls = [], sessions = [];
+let cacheBytes = 4 * 1024 ** 3;
 const summary = s => ({ ...s, threadId:s.sessionId, engine:"claude", runtimeNodeId:s.nodeId, generation:1, itemCount:1, listRoot:true, childCount:0,
  updatedAt: new Date().toISOString(), activity:{state:s.activeTurn?"running":"idle",turnId:s.activeTurn || s.lastTurn,generation:1,itemCount:1}, costEstimate:{amount:.4,status:"complete",basis:"claude_sdk"} });
 const browser = await chromium.launch({ headless: true });
@@ -34,6 +35,10 @@ try {
     if (path === "/v1/claude/conversations") return route.fulfill({json:{data:sessions.map(summary),paged:true,projects:sessions.length?[{key:JSON.stringify([nodeId,"/work"]),nodeId,cwd:"/work",count:sessions.length}]:[]}});
     if (path.startsWith("/v1/claude/conversations/")) return route.fulfill({json:summary(sessions.find(s=>s.sessionId===path.split("/")[4]))});
     if (path.includes("/accounts/")) return route.fulfill({ json: { configured: true } });
+    if (path.endsWith("/cache-status") || path.endsWith("/cache-configure")) {
+      if (path.endsWith("/cache-configure")) cacheBytes = body.maxBytes;
+      return route.fulfill({ json: { maxBytes: cacheBytes, usedBytes: 0, entries: 0, cleanupPending: false } });
+    }
     if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "claude-example", displayName: "Claude" }] } : { status: "ready" } });
     if (path === "/v1/claude/sessions") {
       if (req.method() === "POST") { const session = { ...body, sessionId: randomUUID(), persistence: "saved", activeTurn: null }; sessions.push(session); return route.fulfill({ json: session }); }
@@ -56,6 +61,17 @@ try {
   await page.locator("#password").fill(process.env.MIRA_TEST_ADMIN_PASSWORD ?? "mira-local-admin-password");
   await page.locator("#loginForm button[type=submit]").click();
   await page.locator("#dashboardView:not(.hidden)").waitFor();
+  await page.locator(`[data-action="workspace"][data-id="${nodeId}"]`).click();
+  await page.locator("#claudeCacheSave:not([disabled])").waitFor();
+  assert.equal(await page.locator("#claudeCacheLimit").inputValue(), "4");
+  await page.locator("#claudeCacheLimit").fill("1.5");
+  await page.locator("#claudeCacheSave").click();
+  await page.waitForFunction(() => document.querySelector("#claudeCacheStatus").textContent.includes("已用"));
+  assert.equal(cacheBytes, 1.5 * 1024 ** 3);
+  await page.locator("#claudeCacheLimit").fill("0");
+  await page.locator("#claudeCacheSave").click();
+  await page.waitForFunction(() => document.querySelector("#claudeCacheStatus").textContent.includes("已关闭"));
+  await page.locator("#workspaceBack").click();
   await page.locator(".codex-account-row").filter({ hasText: "AWS account" }).click();
   const dialog = page.locator("#codexAccountDialog");
   assert.equal(await dialog.locator("[name=engine]").inputValue(), "claude");

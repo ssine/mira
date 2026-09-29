@@ -109,6 +109,28 @@ unknown direct parentage.
 
 `GET /v1/claude/sessions/:id/costs?turnId=...` returns per-turn estimates.
 `GET /v1/claude/accounts/cost-history?name=...&range=24h|7d|30d&timezone=...`
-returns daily/hourly SDK estimates for a Claude account name. These routes require
+returns daily/per-turn SDK estimates (at most 128 adjacent turn groups per day) for a Claude account name. These routes require
 administrator authentication. Engine namespaces keep same-name Codex/Claude totals
 separate. See `docs/claude-code-integration.md` for cumulative-result and rebuild rules.
+
+## Disposable transcript cache (Mira 1.0.61)
+
+Desktop Nodes advertise `claudeSessionCacheV1` alongside `claudeRuntimeV1`.
+Administrator+CSRF `POST runtimes/{nodeId}/cache-status` returns
+`{maxBytes,usedBytes,entries,cleanupPending}`. `cache-configure` accepts only
+`{maxBytes}` (a nonnegative safe integer; 0 disables). Both are private Claude
+runtime controls, not dynamic tools. Settings are Node-local; Server never supplies
+a filesystem path. Older Nodes reject these actions explicitly. No database
+migration or change to Codex storage is involved.
+
+An optional `GET sessions/{id}/entries?subpath=&cache=1&after=N&prefix=SHA256`
+validates the cached final raw payload against the immutable sequence in PostgreSQL
+under the existing ownership/session lock. A stale cursor or mismatched prefix resets
+to a full read. Responses carry `X-Mira-Claude-Cache-Version: 1`,
+`X-Mira-Claude-Cache-Start` (exclusive), `X-Mira-Claude-Cache-End` (inclusive), and
+`X-Mira-Claude-Cache-Prefix` (SHA-256 of the last raw JSON payload, excluding the
+NDJSON newline; empty for no entries). An unchanged prefix returns an empty body
+with equal Start/End. Clients verify the received record count. Absent cache headers
+mean a complete legacy stream and must never be appended to a cached prefix.
+Ordinary GET is unchanged. Authentication/revision/ownership checks always apply,
+including cache hits, and storage failure never authorizes an offline resume.

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { loadTranscript } from "./session-cache.mjs";
 
 export function serverClient({
   endpoint,
@@ -6,6 +7,7 @@ export function serverClient({
   sessionId,
   turnId,
   revision,
+  cache,
 }) {
   const base = new URL(endpoint);
   if (
@@ -55,23 +57,7 @@ export function serverClient({
     async load(key) {
       if (key.sessionId !== sessionId)
         throw new Error("Unexpected native Claude session identity");
-      const response = await request(
-        `/entries?subpath=${encodeURIComponent(key.subpath ?? "")}`,
-      );
-      const entries = [];
-      let remainder = "";
-      for await (const chunk of response.body.pipeThrough(
-        new TextDecoderStream(),
-      )) {
-        remainder += chunk;
-        let index;
-        while ((index = remainder.indexOf("\n")) >= 0) {
-          const line = remainder.slice(0, index);
-          remainder = remainder.slice(index + 1);
-          if (line) entries.push(JSON.parse(line));
-        }
-      }
-      if (remainder.trim()) entries.push(JSON.parse(remainder));
+      const entries = await loadTranscript({ cache, endpoint, sessionId, subpath: key.subpath, request });
       // Never let managed resume silently fall back to a local transcript.
       if (!entries.length && !key.subpath)
         throw new Error(

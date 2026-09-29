@@ -165,6 +165,32 @@ JSON field extraction itself can reject escaped NUL anywhere in a raw object.
 Wire endpoints and ownership rules are in
 [Claude sessions v1](../protocol/claude-sessions-v1.md).
 
+## Node-local session cache
+
+The device workbench's overview includes **Claude Code / 本地会话缓存** on
+capable Nodes. The default budget is 4 GiB; the administrator can choose another
+nonnegative size or set 0 to disable it. Settings persist in
+`<identity-directory>/claude-cache.json`, independently of SDK versions and
+Mira updates. Cache files live under `cache/claude-sessions` in that directory.
+Only execution Nodes populate this cache; configuration does not prepare the SDK.
+
+Every resume validates a cached cursor/prefix against Server ownership and its
+immutable canonical records, then downloads the missing suffix. Cache keys separate
+Server origins, session UUIDs and native child subpaths. Local byte counts and full
+SHA-256 digests detect truncated or changed files; corrupt/missing caches are rebuilt
+from Server. Legacy Servers still return full history. No offline fallback is used.
+This reduces network transfer, not model prompt tokens or the SDK's full-history
+memory requirement. Provider prompt caching is independent of this disk budget.
+
+One writer lock bounds total data/metadata across SDK workers. Writes append missing
+records, sync data, and replace commit metadata. Reads accept only the committed byte
+range. The Node Manager repairs dead-worker locks before new turns or settings reads;
+busy cache writers are skipped without delaying native history loading. Least recently
+used transcripts are evicted to fit the budget; oversized transcripts remain usable
+without caching. Shrinking or disabling prunes immediately when no writer is active;
+otherwise the UI reports pending cleanup, retried on the next use or refresh. Cache
+I/O failures never substitute local data for Server or replay a model/tool request.
+
 ## Validation
 
 The original integration was validated on main `b2f255f` (Mira 1.0.43).
