@@ -32,6 +32,49 @@ test("native projections replace stream prose, merge tool results, and retain na
  assert.equal(claudeTrace([...rows,{seq:99,payload:{type:"mira_answer",questionId:"q",answers:{a:"yes"}}}]).questions.size,0);
 });
 
+test("Claude block completion keeps streaming identity until the whole message stops", async () => {
+ for (const reloaded of [false,true]) {
+  let seq=0, data=[];
+  const runtime=new ClaudeRuntime(async()=>({data,cursor:seq,earliest:1,session:{}}));
+  const poll=async(...payloads)=>{
+   data=payloads.map(payload=>({seq:++seq,turnId:"turn",payload}));
+   return (await runtime.history({threadId:"s",sessionId:"s"},{poll:true})).trace;
+  };
+  const stream=event=>({type:"stream_event",event});
+  const prose=trace=>trace.filter(item=>item.kind==="assistant").map(item=>item.body);
+  const saved=(uuid,type,value)=>({type:"assistant",uuid,message:{id:"m",content:[{type,[type=== "thinking"?"thinking":"text"]:value}]}});
+  if (!reloaded) await poll(stream({type:"message_start",message:{id:"m"}}));
+  await poll(saved("thinking","thinking","Consider the question"));
+  await poll(stream({type:"content_block_stop",index:0}),stream({type:"content_block_start",index:1,content_block:{type:"text",text:""}}));
+  assert.deepEqual(prose(await poll(stream({type:"content_block_delta",index:1,delta:{type:"text_delta",text:"Hello"}}))),["Hello"],"body remains live after the thinking block is saved");
+  assert.deepEqual(prose(await poll(stream({type:"content_block_delta",index:1,delta:{type:"text_delta",text:" world"}}))),["Hello world"]);
+  assert.deepEqual(prose(await poll(saved("text","text","Hello world"))),["Hello world"],"saved text replaces the transient body before message_stop");
+  const final=await poll(stream({type:"content_block_stop",index:1}),stream({type:"message_stop"}),{type:"result",duration_ms:50});
+  assert.deepEqual(prose(final),["Hello world"]);
+  assert.equal(final.find(item=>item.kind==="assistant").turnElapsedMs,50);
+  assert.equal([...runtime.rows.values()].some(row=>row.payload.type==="stream_event"),false,"stopped message deltas are released");
+  assert.deepEqual(prose(await poll({type:"assistant",uuid:"another-answer",message:{id:"another-message",content:[{type:"text",text:"Hello world"}]}})),["Hello world","Hello world"],"different messages with identical prose remain distinct");
+ }
+});
+
+test("a child message ending between parent deltas does not clear the parent stream", async () => {
+ let seq=0,data=[];
+ const runtime=new ClaudeRuntime(async()=>({data,cursor:seq,session:{}}));
+ const poll=async(...payloads)=>{
+  data=payloads.map(payload=>({seq:++seq,turnId:"turn",payload}));
+  return (await runtime.history({threadId:"s",sessionId:"s"},{poll:true})).trace;
+ };
+ const stream=(event,parent_tool_use_id=null)=>({type:"stream_event",event,parent_tool_use_id});
+ await poll(stream({type:"message_start",message:{id:"parent"}}),stream({type:"content_block_delta",index:0,delta:{type:"text_delta",text:"First "}}));
+ await poll(stream({type:"message_start",message:{id:"child"}},"tool"),stream({type:"content_block_delta",index:0,delta:{type:"text_delta",text:"Child text"}},"tool"));
+ await poll({type:"assistant",parent_tool_use_id:"tool",message:{id:"child",content:[{type:"text",text:"Child text"}]}},stream({type:"message_stop"},"tool"));
+ const live=await poll(stream({type:"content_block_delta",index:0,delta:{type:"text_delta",text:"answer"}}));
+ assert.deepEqual(live.filter(item=>item.kind==="assistant").map(item=>item.body),["First answer"]);
+ const final=await poll({type:"assistant",message:{id:"parent",content:[{type:"text",text:"First answer"}]}},stream({type:"message_stop"}));
+ assert.deepEqual(final.filter(item=>item.kind==="assistant").map(item=>item.body),["First answer"]);
+ assert.equal([...runtime.rows.values()].some(row=>row.payload.type==="stream_event"),false);
+});
+
 test("mixed pagination keeps both cursors, all projects, and does not restart an exhausted engine", async () => {
  const calls=[];
  const reader=conversationPageReader(async url=>{

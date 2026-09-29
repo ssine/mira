@@ -38,7 +38,10 @@ try {
     if (path.endsWith("/turns")) { session.nodeAccountId = body.nodeAccountId; session.model = body.model; session.activeTurn = session.lastTurn = randomUUID(); return route.fulfill({ json: { turnId: session.activeTurn } }); }
     if (path.endsWith("/costs")) return route.fulfill({json:{generation:1,turnCostEstimates:{}}});
     if (path.endsWith("/children")) return route.fulfill({ json: { data: [] } });
-    if (path.endsWith("/events")) return route.fulfill({ json: { data: [], cursor: 0, earliest: 0, session, hasMore: false } });
+    if (path.endsWith("/events")) {
+      const after = Number(new URL(req.url()).searchParams.get("after") || 0), events = session.events || [];
+      return route.fulfill({ json: { data: events.filter(e => e.seq > after), cursor: events.at(-1)?.seq || 0, earliest: events.length ? 1 : 0, session, hasMore: false } });
+    }
     return route.fulfill({ json: session });
   });
   const page = await context.newPage(), errors = [];
@@ -79,8 +82,21 @@ try {
   assert.equal(await view.locator(`[data-thread-activity="${sessions[0].sessionId}"]`).getAttribute("title"), "Claude 正在运行");
   await view.locator("#conversationDetailsToggle").click();
   await view.locator("#conversationDetails #claudeReconcile").waitFor({ state: "visible" });
+  const emit = payload => {
+    const events = sessions[0].events ||= [];
+    events.push({ seq: events.length + 1, turnId: sessions[0].activeTurn, payload });
+  };
+  emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-reply" } } });
+  emit({ type: "assistant", uuid: "thinking", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Consider the question" }] } });
+  await view.locator("#conversationTrace .trace-card.reasoning").waitFor();
+  emit({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "One live answer" } } });
+  await view.locator("#conversationTrace .trace-card.assistant").filter({ hasText: "One live answer" }).waitFor();
+  emit({ type: "assistant", uuid: "answer", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
+  emit({ type: "stream_event", event: { type: "message_stop" } });
+  emit({ type: "result", duration_ms: 100 });
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#conversationAccount").disabled);
+  assert.equal(await view.locator("#conversationTrace .trace-card.assistant").count(), 1, "the final reply replaces streamed prose without requiring a reload");
   await view.locator("#claudeReconcile").waitFor({ state: "hidden" });
   await view.locator("#conversationDetailsClose").click();
   await view.locator("#conversationAccount").selectOption(ids[0]);

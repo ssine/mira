@@ -1,7 +1,33 @@
 // Native Claude events -> shared, ephemeral transcript items. No Codex rollouts.
+const streamScope = row => JSON.stringify([row.turnId ?? null, row.payload.parent_tool_use_id ?? null]);
+
+function pruneCompletedStreams(rows) {
+  const active = new Map(), messages = new Map();
+  for (const row of [...rows.values()].sort((a, b) => a.seq - b.seq)) {
+    const e = row.payload, scope = streamScope(row);
+    const id = e.type === "assistant" ? e.message?.id : e.type === "stream_event" && e.event?.type === "message_start" ? e.event.message?.id : null;
+    if (id) {
+      const key = JSON.stringify([scope, id]);
+      if (!messages.has(key)) messages.set(key, { rows: [], saved: false, stopped: false });
+      active.set(scope, messages.get(key));
+    }
+    const message = active.get(scope);
+    if (!message) continue;
+    if (e.type === "assistant" && id) message.saved = true;
+    if (e.type !== "stream_event") continue;
+    message.rows.push(row.seq);
+    if (e.event?.type === "message_stop") { message.stopped = true; active.delete(scope); }
+  }
+  // SDK assistant events complete individual blocks (thinking, text, tools).
+  // Keep message identity and deltas until the entire message has stopped.
+  for (const message of messages.values()) {
+    if (message.saved && message.stopped) for (const seq of message.rows) rows.delete(seq);
+  }
+}
+
 export function claudeTrace(rows, { child = false } = {}) {
-  const items = new Map(), questions = new Map();
-  let stream = "", interrupted = false;
+  const items = new Map(), questions = new Map(), streams = new Map();
+  let interrupted = false;
   const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, ...extra });
   function blocks(message, key, role, turnId) {
     const content = typeof message?.content === "string" ? [{ type: "text", text: message.content }] : message?.content || [];
@@ -21,23 +47,28 @@ export function claudeTrace(rows, { child = false } = {}) {
     }
   }
   for (const row of rows) {
-    const e = row.payload, turnId = row.turnId, key = `claude:${e.uuid || row.seq}`;
+    const e = row.payload, turnId = row.turnId, key = `claude:${e.uuid || row.seq}`, scope = streamScope(row);
     if (!child && e.parent_tool_use_id && ["assistant", "user", "stream_event"].includes(e.type)) continue;
     if (e.type === "mira_user") {
       interrupted = false;
       put(key, "user", "你", [e.text, ...(e.attachments || []).map(f => `附件：${f.name || f.path}`)].filter(Boolean).join("\n"), turnId);
       blocks({ content: (e.message?.content || []).filter(b => b.type === "image") }, `${key}:image`, "user", turnId);
     } else if (e.type === "assistant") {
-      for (const k of items.keys()) if (k.startsWith(`stream:${e.message?.id}:`)) items.delete(k);
+      // A transcript reload omits stream events. A saved block still identifies
+      // the message for later deltas from that message's remaining blocks.
+      if (e.message?.id) streams.set(scope, e.message.id);
+      for (const k of items.keys()) if (k.startsWith(`stream:${scope}:${e.message?.id}:`)) items.delete(k);
       blocks(e.message, key, "assistant", turnId);
     } else if (e.type === "user" && (child || e.message?.content?.some?.(b => b.type === "tool_result"))) blocks(e.message, key, "user", turnId);
     else if (e.type === "stream_event") {
       const raw = e.event;
-      if (raw?.type === "message_start") stream = raw.message.id;
-      if (raw?.type === "content_block_delta" && raw.delta?.type === "text_delta") {
-        const k = `stream:${stream}:${raw.index}`;
+      if (raw?.type === "message_start") streams.set(scope, raw.message.id);
+      const stream = streams.get(scope);
+      if (stream && raw?.type === "content_block_delta" && raw.delta?.type === "text_delta") {
+        const k = `stream:${scope}:${stream}:${raw.index}`;
         put(k, "assistant", "Claude", (items.get(k)?.body || "") + raw.delta.text, turnId);
       }
+      if (raw?.type === "message_stop") streams.delete(scope);
     } else if (e.type === "mira_question") {
       questions.set(e.questionId, { ...e, turnId });
       put(`question:${e.questionId}`, "assistant", "需要你的选择", "", turnId, { questionId: e.questionId });
@@ -90,14 +121,7 @@ export class ClaudeRuntime {
     for (const row of result.data) this.rows.set(row.seq, row);
     if (!older) this.cursor = Math.max(this.cursor, result.cursor || 0);
     if (!poll) this.earliest = result.data.length ? result.earliest : null;
-    // Completed messages supersede transient delta history, keeping polling memory bounded.
-    const completed = new Set([...this.rows.values()].filter(r => r.payload.type === "assistant").map(r => r.payload.message?.id));
-    let message = "";
-    for (const [seq, row] of [...this.rows].sort((a,b) => a[0]-b[0])) {
-      if (row.payload.type !== "stream_event") continue;
-      if (row.payload.event?.type === "message_start") message = row.payload.event.message.id;
-      if (completed.has(message)) this.rows.delete(seq);
-    }
+    pruneCompletedStreams(this.rows);
     return { ...claudeTrace([...this.rows.values()].sort((a,b) => a.seq-b.seq), { child: !!thread.subpath }), session: result.session,
       nextCursor: this.earliest, changed: result.data.length > 0, more: poll && result.data.length > 0 };
   }
