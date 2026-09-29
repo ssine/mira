@@ -7,6 +7,9 @@ const source = await fs.readFile(new URL("../server/public/app.js", import.meta.
 const start = source.indexOf("async function startAgentRuntime(");
 const end = source.indexOf("async function stopAgentRuntime()", start);
 assert(start > 0 && end > start);
+const selectionStart = source.indexOf("function runtimeAccountSelection()");
+const selectionEnd = source.indexOf("function selectedAccountNode(", selectionStart);
+assert(selectionStart > 0 && selectionEnd > selectionStart);
 
 function fixture(states, { managed = true, stopAt = Infinity, retiredRuntime = null } = {}) {
   let now = 0, requests = 0, starts = 0, connected = false;
@@ -17,6 +20,7 @@ function fixture(states, { managed = true, stopAt = Infinity, retiredRuntime = n
     agent, dashboardNodes: new Map([["fixture", node]]),
     accountNode: node => node,
     retiredAccountRuntimes: new Map(retiredRuntime ? [["fixture", retiredRuntime]] : []),
+    document: { body: { dataset: { view: "agentView" } } },
     $: () => ({ value: "fixture" }),
     Date: { now: () => now },
     setTimeout(resolve, delay) { now += delay; if (now >= stopAt) agent.runtimeStartEpoch++; resolve(); },
@@ -29,9 +33,18 @@ function fixture(states, { managed = true, stopAt = Infinity, retiredRuntime = n
     },
     async connectAgentSocket() { connected = true; },
   });
-  vm.runInContext(source.slice(start, end), context);
+  vm.runInContext(source.slice(selectionStart, selectionEnd) + source.slice(start, end), context);
   return { run: (options) => context.startAgentRuntime(options), messages, connected: () => connected, requests: () => requests, starts: () => starts };
 }
+
+test("runtime controls use their Codex account while a Claude conversation is selected", () => {
+  const document = { body: { dataset: { view: "runtimeView" } } };
+  const context = vm.createContext({ document, $: selector => ({ value: selector === "#agentRuntimeAccount" ? "codex-account" : "claude-account" }) });
+  vm.runInContext(source.slice(selectionStart, selectionEnd), context);
+  assert.equal(context.runtimeAccountSelection(), "codex-account");
+  document.body.dataset.view = "agentView";
+  assert.equal(context.runtimeAccountSelection(), "claude-account");
+});
 
 test("first Codex download can exceed 30 seconds and preparation is not an error", async () => {
   const subject = fixture((now) => now < 60_000
