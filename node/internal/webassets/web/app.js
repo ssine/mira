@@ -302,8 +302,11 @@ const automaticRecovery = new AutomaticRecovery($("#conversationAutomaticRecover
 
 const retiredAccountRuntimes = new Map();
 
+function runtimeAccountSelection() {
+  return document.body.dataset.view === "runtimeView" ? $("#agentRuntimeAccount").value : $("#conversationAccount").value;
+}
 function selectedAccountNode(nodeId = $("#agentRuntimeNode").value) {
-  return accountNode(dashboardNodes.get(nodeId), nodeId === $("#agentRuntimeNode").value ? $("#conversationAccount").value : "");
+  return accountNode(dashboardNodes.get(nodeId), nodeId === $("#agentRuntimeNode").value ? runtimeAccountSelection() : "");
 }
 
 function acceptClaudeSummary(thread) {
@@ -5368,7 +5371,14 @@ function threadPageButton(view, key, loaded, total) {
 }
 
 async function loadThreadPath(threadId, epoch) {
-  if (engineOf(threadId) === "claude") return;
+  if (engineOf(threadId) === "claude") {
+    const child = agent.threads.find(t => t.threadId === threadId);
+    if (child?.subpath && !agent.threads.some(t => t.threadId === child.sessionId)) {
+      const root = await api(`/v1/claude/conversations/${child.sessionId}`);
+      if (epoch === agent.selectionEpoch) { acceptClaudeSummary(root); agent.subagentOpen.set(root.threadId, true); }
+    }
+    return;
+  }
   const pager = threadPager(), filterEpoch = pager.epoch, seen = new Set();
   while (threadId && !seen.has(threadId)) {
     seen.add(threadId);
@@ -5585,10 +5595,10 @@ async function importLocalSession(index, button) {
 
 async function startAgentRuntime({ allowStart = true } = {}) {
   const nodeId = $("#agentRuntimeNode").value;
-  const bindingId = $("#conversationAccount").value;
+  const bindingId = runtimeAccountSelection();
   if (!nodeId) throw new Error("没有可运行 Codex 的节点");
   if (allowStart) agent.connectionWanted = true;
-  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId && agent.socketAccountId === $("#conversationAccount").value) return;
+  if (agent.socketInitialized && agent.socket?.readyState === WebSocket.OPEN && agent.socketNodeId === nodeId && agent.socketAccountId === runtimeAccountSelection()) return;
   if (agent.runtimePromise?.nodeId === nodeId && agent.runtimePromise?.bindingId === bindingId) return agent.runtimePromise.promise;
   const promise = connectAgentRuntime(nodeId, allowStart);
   agent.runtimePromise = { nodeId, bindingId, promise };
@@ -5599,25 +5609,25 @@ async function startAgentRuntime({ allowStart = true } = {}) {
 async function connectAgentRuntime(nodeId, allowStart) {
   closeAgentSocket({ preserveSubmission: true });
   const epoch = agent.runtimeStartEpoch;
-  const bindingId = $("#conversationAccount").value;
+  const bindingId = runtimeAccountSelection();
   const ready = node => node?.reportedAppServer?.status === "running" &&
     (!retiredAccountRuntimes.has(bindingId) || node.reportedAppServer.runtimeId !== retiredAccountRuntimes.get(bindingId));
   let node = await api(`/v1/nodes/${nodeId}`);
-  if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || $("#conversationAccount").value !== bindingId)) throw new Error("连接已取消");
+  if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || runtimeAccountSelection() !== bindingId)) throw new Error("连接已取消");
   dashboardNodes.set(node.nodeId, node);
   node = accountNode(node, bindingId);
   if (!node) throw new Error("所选账号已不可用");
-  if (ready(node)) return connectAgentSocket(nodeId);
+  if (ready(node)) return connectAgentSocket(nodeId, bindingId);
   if (!allowStart) throw new Error("运行节点尚未就绪");
   setAgentRuntimeState("正在启动运行节点…", "offline");
-  await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: $("#conversationAccount").value }) });
+  await api(`/v1/codex/runtimes/${nodeId}/start`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: runtimeAccountSelection() }) });
   // A fresh Node may need its independent Codex package before it can start.
   // Keep the page responsive and show preparation instead of a 30-second timeout.
   const deadline = Date.now() + (dashboardNodes.get(nodeId)?.capabilities?.codexRuntimeDownload ? 21 * 60_000 : 30_000);
   let lastError = "";
   let errorSince = 0;
   while (Date.now() < deadline) {
-    if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || $("#conversationAccount").value !== bindingId)) throw new Error("已取消等待 App Server 启动");
+    if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || runtimeAccountSelection() !== bindingId)) throw new Error("已取消等待 App Server 启动");
     node = await api(`/v1/nodes/${nodeId}`);
     dashboardNodes.set(node.nodeId, node);
     node = accountNode(node, bindingId);
@@ -5635,15 +5645,15 @@ async function connectAgentRuntime(nodeId, allowStart) {
     await new Promise((resolve) => setTimeout(resolve, preparing ? 2_000 : 500));
   }
   if (!ready(node)) throw new Error("App Server 启动超时");
-  if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || $("#conversationAccount").value !== bindingId)) throw new Error("已取消等待 App Server 启动");
-  await connectAgentSocket(nodeId);
+  if (epoch !== agent.runtimeStartEpoch || ($("#agentRuntimeNode").value !== nodeId || runtimeAccountSelection() !== bindingId)) throw new Error("已取消等待 App Server 启动");
+  await connectAgentSocket(nodeId, bindingId);
 }
 
 async function stopAgentRuntime() {
   const nodeId = $("#agentRuntimeNode").value;
   if (!nodeId) return;
   stopAgentRecovery();
-  await api(`/v1/codex/runtimes/${nodeId}/stop`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: $("#conversationAccount").value }) });
+  await api(`/v1/codex/runtimes/${nodeId}/stop`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: runtimeAccountSelection() }) });
   setAgentRuntimeState("已请求停止 App Server", "offline");
 }
 
@@ -5880,7 +5890,13 @@ async function selectComposerDraft(key) {
   syncConversationSendUi();
   setComposerDraftStatus("", false, true);
   try {
-    const draft = await composerDrafts.read(key);
+    let draft = await composerDrafts.read(key);
+    const legacyKey = key.startsWith("personal:thread:") ? `claude:${key.slice("personal:thread:".length)}`
+      : conversationEngine() === "claude" ? "claude:new" : null;
+    if (draft === undefined && legacyKey) {
+      draft = await composerDrafts.read(legacyKey);
+      if (draft !== undefined) await composerDrafts.write(key, draft, { removeKey: legacyKey });
+    }
     if (epoch !== composerDraftEpoch) return;
     $("#conversationInput").value = agent.composerValue = draft?.text ?? "";
     agent.attachments = draft?.files ?? [];
@@ -6288,7 +6304,12 @@ $("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch(
 $("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
 for (const id of ["globalAccounts", "agentManageAccounts"]) $("#" + id).addEventListener("click", () => navigateGlobal("nodes").then(() => codexAccounts.focusNode("")).catch(error => toast(error.message)));
-for (const id of ["conversationAccount", "agentRuntimeAccount", "conversationDetailsAccount"]) $("#" + id).addEventListener("change", event => selectConversationAccount(event.target.value));
+for (const id of ["conversationAccount", "conversationDetailsAccount"]) $("#" + id).addEventListener("change", event => selectConversationAccount(event.target.value));
+
+$("#agentRuntimeAccount").addEventListener("change", event => {
+  if (agent.threadId && engineOf(agent.threadId) === "claude") { closeAgentSocket(); return; }
+  selectConversationAccount(event.target.value);
+});
 
 $("#agentConsoleButton").addEventListener("click", () => openAgentConsole().catch((error) => toast(error.message)));
 $("#runtimeOpenChat").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));

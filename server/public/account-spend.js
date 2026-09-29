@@ -79,6 +79,10 @@ export class AccountSpend extends AccountHistory {
       freshness.hidden = !data?.cache?.updatedAt && !progress;
       freshness.textContent = [data?.cache?.updatedAt ? `统计更新于 ${new Date(data.cache.updatedAt).toLocaleString()}${data.cache.stale ? data.cache.refreshing ? " · 正在更新，暂显示上次统计" : " · 更新暂不可用，显示上次统计" : ""}` : "", progress].filter(Boolean).join(" · ");
     }
+    const basis = this.root.querySelector("[data-spend-basis]");
+    if (basis) basis.textContent = data?.basis === "claude_sdk"
+      ? "Claude SDK 价格估算，包含子 Agent；网关实际扣费可能不同。缺失或无法归属的记录不计入。"
+      : "按已记录请求的标准 API 价格估算；服务商实际账单可能不同。无归属或未定价的用量不计入金额。";
     const attribution = this.root.querySelector("[data-spend-attribution]");
     if (attribution) attribution.hidden = !data?.estimate?.reasons?.includes("historical_provider_attribution");
     const series = spendingSeries(data).filter(day => Number.isFinite(day.amount));
