@@ -1223,7 +1223,7 @@ function renderNodes(nodes) {
         const refreshModels = actionButton("刷新模型", "refresh-models", node.nodeId, "secondary");
         refreshModels.disabled = node.status !== "online";
         refreshModels.title = node.status === "online" ? "刷新此节点的 Codex 模型目录" : "节点离线，无法刷新模型";
-        actions.append(refreshModels, actionButton(`账号 (${node.codexAccounts?.length ?? 1})`, "accounts", node.nodeId, "secondary"));
+        actions.append(refreshModels, actionButton(`账号 (${(node.codexAccounts?.length ?? 1) + (node.claudeAccounts?.length ?? 0)})`, "accounts", node.nodeId, "secondary"));
       }
       actions.append(actionButton("撤销设备", "revoke", node.nodeId, "danger"));
     }

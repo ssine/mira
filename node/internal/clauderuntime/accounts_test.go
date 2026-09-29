@@ -3,6 +3,7 @@ package clauderuntime
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,11 @@ func TestAccountCredentialsStayLocalAndIsolated(t *testing.T) {
 			t.Fatal("account credentials/config directory crossed")
 		}
 		info, err := os.Stat(filepath.Join(env["CLAUDE_CONFIG_DIR"], "mira-account.json"))
-		if err != nil || info.Mode().Perm() != 0600 {
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Windows reports DOS attributes here, not POSIX permission bits.
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 			t.Fatalf("private account file permissions: %v", err)
 		}
 	}
