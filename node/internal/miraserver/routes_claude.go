@@ -754,15 +754,9 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 				if event.Failed {
 					status = "failed"
 				}
-				if status == "completed" {
-					var title string
-					if err = tx.QueryRow(ctx, `SELECT title FROM mira_claude_sessions WHERE session_id=$1`, id).Scan(&title); err != nil {
-						return err
-					}
-					if err = enqueuePush(ctx, tx, "claude", "", id, 1, turn, title); err != nil {
-						return err
-					}
-				}
+				// Push and native notification queues currently resolve Codex
+				// ThreadStore identities only. Claude completion must not depend
+				// on whether the administrator has subscribed to those queues.
 				_, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status=$2,completed_at=now() WHERE turn_id=$1`, turn, status)
 				if err != nil {
 					return err

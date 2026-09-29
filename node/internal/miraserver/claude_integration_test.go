@@ -163,6 +163,33 @@ func (f *claudeFixture) reserved() (string, string, map[string]string) {
 	}
 	return id, turn, map[string]string{"Authorization": "Bearer " + f.token, "X-Mira-Claude-Turn": turn, "X-Mira-Claude-Revision": "1"}
 }
+func TestClaudeCompletionWithCodexPushSubscription(t *testing.T) {
+	f := newClaudeFixture(t)
+	f.call("GET", "/v1/push/config", nil)
+	f.call("POST", "/v1/push/subscription", testPushSubscription(t))
+	id, _, headers := f.reserved()
+	route := "/v1/claude/sessions/" + id
+	status, raw := f.request("POST", route+"/entries?operationId="+uuidClaude(), "{\"type\":\"user\",\"uuid\":\""+uuidClaude()+"\"}\n", headers)
+	if status != 200 {
+		t.Fatalf("append: %d %s", status, raw)
+	}
+	body := map[string]any{"eventId": uuidClaude(), "payload": map[string]any{"type": "mira_completed"}}
+	for range 2 {
+		status, raw = f.request("POST", route+"/events", body, headers)
+		if status != 200 {
+			t.Fatalf("completion with push subscription: %d %s", status, raw)
+		}
+	}
+	s := f.call("GET", route, nil)
+	if s["activeTurn"] != nil || s["persistence"] != "saved" {
+		t.Fatalf("completion did not commit: %#v", s)
+	}
+	var deliveries int
+	if err := f.server.pool.QueryRow(context.Background(), `SELECT count(*) FROM mira_push_deliveries`).Scan(&deliveries); err != nil || deliveries != 0 {
+		t.Fatalf("Claude entered the Codex-only notification queue: %d %v", deliveries, err)
+	}
+}
+
 func TestClaudeNativeStorage(t *testing.T) {
 	f := newClaudeFixture(t)
 	id, _, headers := f.reserved()
