@@ -47,6 +47,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
       throw Error(method);
     },
     currentAgentThread: () => agent.threads.find(row => row.threadId === agent.threadId),
+    selectedAccountNode: () => ({ nodeId: "node", engine: "codex", nodeAccountId: "" }),
     selectedConversationModel: () => "model", conversationModelKey: () => "catalog",
     projectForThread: () => ({ key: "project" }),
     clear: value => value, element: () => ({}),
@@ -63,7 +64,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
     "refreshAccountChoices",
   ]) context[name] = () => {};
   for (const name of [
-    "modelCatalogForConversation", "conversationModelDefinition", "conversationEffortOptions",
+    "modelCatalogForConversation", "conversationModelDefinition", "conversationEffortOptions", "lastUsedConversationSettings",
     "selectedConversationEffort", "resumeAgentThread", "restoreAgentThread", "sendAgentMessage",
   ]) vm.runInContext(source(name), context);
   context.resumeAgentThreadOnSocket = id => context.restoreAgentThread(id, agent.socket);
@@ -108,4 +109,17 @@ test("legacy threads without effort retain the configured default", async () => 
   const { context } = fixture({ effort: null });
   await context.resumeAgentThread("thread-a");
   assert.equal(context.selectedConversationEffort(), "medium");
+});
+
+test("a new draft starts from the account's most recently used model and effort", () => {
+  const { context, agent, row } = fixture();
+  agent.threads = [
+    { ...row, threadId: "older", reasoningEffort: "medium", updatedAt: "2026-09-01T00:00:00Z" },
+    { ...row, threadId: "newer", reasoningEffort: "xhigh", updatedAt: "2026-09-02T00:00:00Z" },
+    { ...row, threadId: "child", reasoningEffort: "ultra", parentThreadId: "newer", updatedAt: "2026-09-03T00:00:00Z" },
+    { ...row, threadId: "other", reasoningEffort: "ultra", nodeAccountId: "another", updatedAt: "2026-09-04T00:00:00Z" },
+  ];
+  assert.equal(context.selectedConversationEffort(), "xhigh");
+  agent.threads = agent.threads.map(value => ({ ...value, model: "retired" }));
+  assert.equal(context.selectedConversationEffort(), "medium", "an unavailable model falls back to the catalog default");
 });

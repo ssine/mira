@@ -1,4 +1,5 @@
 import { weeklyQuota } from "./account-quota.js";
+import { compareThreadsByRecency } from "./thread-list.js";
 
 export function accountNode(node, bindingId = "") {
   if (!node) return null;
@@ -40,6 +41,19 @@ export function accountGroups(nodes) {
     });
   }
   return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+}
+
+// Keys of the distinct account groups behind the most recently active top-level conversations.
+export function recentAccountKeys(groups, threads, limit = 2) {
+  const keys = [];
+  for (const thread of [...threads].sort(compareThreadsByRecency)) {
+    if (keys.length >= limit) break;
+    if (!thread.nodeAccountId || thread.parentThreadId || thread.subpath || thread.archived) continue;
+    const engine = thread.engine || "codex";
+    const group = groups.find(value => value.engine === engine && value.members.some(member => member.account.nodeAccountId === thread.nodeAccountId));
+    if (group && !keys.includes(group.key)) keys.push(group.key);
+  }
+  return keys;
 }
 
 export function accountQuery(bindingId) { return bindingId ? `&nodeAccountId=${encodeURIComponent(bindingId)}` : ""; }

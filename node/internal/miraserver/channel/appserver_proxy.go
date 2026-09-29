@@ -838,17 +838,17 @@ func (channel *Channel) nodeDeveloperInstructions(ctx context.Context, proxy *pr
 	proxy.mu.Lock()
 	target := proxy.target
 	proxy.mu.Unlock()
-	return channel.readRuntimeInstructionsFile(ctx, target, proxy.targetNodeID, requestID, codexInstructionsFile)
+	return channel.readRuntimeInstructionsFile(ctx, target, proxy.targetNodeID, requestID)
 }
 
-func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target *nodes.Node, targetNodeID string, requestID any, file instructionsFile) (string, error) {
-	path, err := targetInstructionsFile(target, file)
+func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target *nodes.Node, targetNodeID string, requestID any) (string, error) {
+	path, err := targetDeveloperInstructionsFile(target)
 	if err != nil || path == "" {
 		return "", err
 	}
 	files, _ := target.Capabilities["files"].(bool)
 	if !files || channel.capabilities == nil {
-		return "", channelError("the configured Node "+file.label+" file cannot be read because file access is unavailable", 409, "developer_instructions_file_unavailable")
+		return "", channelError("the configured Node Developer instructions file cannot be read because file access is unavailable", 409, "developer_instructions_file_unavailable")
 	}
 	actor := &foundation.Principal{Kind: "node", NodeID: targetNodeID, ClientType: "app-server", Transport: "internal"}
 	requestKey := ""
@@ -857,17 +857,17 @@ func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target 
 	}
 	result, err := channel.capabilities.Invoke(ctx, actor, targetNodeID, "file", map[string]any{
 		"action": "read", "path": path, "offset": int64(0), "length": int64(MaxDeveloperInstructionsFile + 1), "encoding": "base64",
-	}, InvokeContext{RequestID: requestKey, Timeout: 5 * time.Second, AuditMetadata: map[string]any{"source": file.source}})
+	}, InvokeContext{RequestID: requestKey, Timeout: 5 * time.Second, AuditMetadata: map[string]any{"source": "app-server-developer-instructions"}})
 	if err != nil {
 		status := 500
 		if typed, ok := err.(*Error); ok {
 			status = typed.Status
 		}
-		return "", channelError("could not read the configured Node "+file.label+" file: "+err.Error(), status, "developer_instructions_file_read_failed")
+		return "", channelError("could not read the configured Node Developer instructions file: "+err.Error(), status, "developer_instructions_file_read_failed")
 	}
 	record, ok := result.(map[string]any)
 	if !ok {
-		return "", invalidDeveloperInstructionsResponse(file)
+		return "", invalidDeveloperInstructionsResponse()
 	}
 	content, contentOK := record["content"].(string)
 	encoding, encodingOK := record["encoding"].(string)
@@ -875,25 +875,25 @@ func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target 
 	eof, eofOK := record["eof"].(bool)
 	decoded, decodeErr := base64.StdEncoding.DecodeString(content)
 	if !contentOK || !encodingOK || encoding != "base64" || !integerOK || bytesRead < 0 || !eofOK || decodeErr != nil || base64.StdEncoding.EncodeToString(decoded) != content {
-		return "", invalidDeveloperInstructionsResponse(file)
+		return "", invalidDeveloperInstructionsResponse()
 	}
 	if int64(len(decoded)) != bytesRead {
-		return "", channelError("the Node returned an inconsistent "+file.label+" file length", 502, "invalid_developer_instructions_file_response")
+		return "", channelError("the Node returned an inconsistent Developer instructions file length", 502, "invalid_developer_instructions_file_response")
 	}
 	if len(decoded) > MaxDeveloperInstructionsFile || !eof {
-		return "", channelError(fmt.Sprintf("the configured Node %s file exceeds %d bytes", file.label, MaxDeveloperInstructionsFile), 413, "developer_instructions_file_too_large")
+		return "", channelError(fmt.Sprintf("the configured Node Developer instructions file exceeds %d bytes", MaxDeveloperInstructionsFile), 413, "developer_instructions_file_too_large")
 	}
 	if !utf8.Valid(decoded) {
-		return "", channelError("the configured Node "+file.label+" file is not valid UTF-8", 400, "invalid_developer_instructions_file_encoding")
+		return "", channelError("the configured Node Developer instructions file is not valid UTF-8", 400, "invalid_developer_instructions_file_encoding")
 	}
 	contentText := string(decoded)
 	for _, marker := range []string{miraCLIInstructionsBegin, miraCLIInstructionsEnd, nodeDeveloperInstructionsBegin, nodeDeveloperInstructionsEnd} {
 		if strings.Contains(contentText, marker) {
-			return "", channelError("the configured Node "+file.label+" file contains reserved Mira content", 400, "invalid_developer_instructions_file_content")
+			return "", channelError("the configured Node Developer instructions file contains reserved Mira content", 400, "invalid_developer_instructions_file_content")
 		}
 	}
 	if strings.ContainsRune(contentText, 0) {
-		return "", channelError("the configured Node "+file.label+" file contains reserved Mira content", 400, "invalid_developer_instructions_file_content")
+		return "", channelError("the configured Node Developer instructions file contains reserved Mira content", 400, "invalid_developer_instructions_file_content")
 	}
 	if contentText == "" {
 		return "", nil
@@ -901,8 +901,8 @@ func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target 
 	return strings.Join([]string{nodeDeveloperInstructionsBegin, "The following persistent Developer instructions were loaded by Mira for this execution Node.", contentText, nodeDeveloperInstructionsEnd}, "\n"), nil
 }
 
-func invalidDeveloperInstructionsResponse(file instructionsFile) error {
-	return channelError("the Node returned an invalid "+file.label+" file response", 502, "invalid_developer_instructions_file_response")
+func invalidDeveloperInstructionsResponse() error {
+	return channelError("the Node returned an invalid Developer instructions file response", 502, "invalid_developer_instructions_file_response")
 }
 
 func (channel *Channel) assertThreadsNotDeleted(ctx context.Context, storeID string, ids []string) error {
@@ -942,14 +942,14 @@ func isTurnStartMethod(method string) bool {
 	return method == "turn/start" || method == "mira/thread/recover"
 }
 
-// ClaudeInstructions reuses the bounded file reader and CLI injection for the
-// managed Claude runtime, reading the Node's Claude-specific instructions file.
-func (channel *Channel) ClaudeInstructions(ctx context.Context, nodeID string) (string, error) {
+// RuntimeInstructions shares the existing bounded policy and CLI injection with
+// other managed runtimes without changing their native conversation protocols.
+func (channel *Channel) RuntimeInstructions(ctx context.Context, nodeID string) (string, error) {
 	target, err := channel.nodes.Get(ctx, nodeID, false)
 	if err != nil {
 		return "", err
 	}
-	content, err := channel.readRuntimeInstructionsFile(ctx, target, nodeID, nil, claudeInstructionsFile)
+	content, err := channel.readRuntimeInstructionsFile(ctx, target, nodeID, nil)
 	if err != nil {
 		return "", err
 	}

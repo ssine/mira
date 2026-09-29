@@ -123,24 +123,11 @@ func targetDefaultCWD(target *nodes.Node) string {
 	return ""
 }
 
-// instructionsFile names one Node-level desired setting whose file content is
-// injected into a managed runtime's system context.
-type instructionsFile struct {
-	key    string
-	label  string
-	source string
-}
-
-var (
-	codexInstructionsFile  = instructionsFile{key: "developerInstructionsFile", label: "Developer instructions", source: "app-server-developer-instructions"}
-	claudeInstructionsFile = instructionsFile{key: "claudeInstructionsFile", label: "Claude instructions", source: "claude-runtime-instructions"}
-)
-
-func targetInstructionsFile(target *nodes.Node, file instructionsFile) (string, error) {
+func targetDeveloperInstructionsFile(target *nodes.Node) (string, error) {
 	if target == nil {
 		return "", nil
 	}
-	value := target.DesiredAppServer[file.key]
+	value := target.DesiredAppServer["developerInstructionsFile"]
 	if value == nil || value == "" {
 		return "", nil
 	}
@@ -148,7 +135,7 @@ func targetInstructionsFile(target *nodes.Node, file instructionsFile) (string, 
 	if ok && validNativeAbsolutePath(path, target.Platform) {
 		return path, nil
 	}
-	return "", channelError("the configured Node "+file.label+" file is not a valid native absolute path", 500, "invalid_developer_instructions_file")
+	return "", channelError("the configured Node Developer instructions file is not a valid native absolute path", 500, "invalid_developer_instructions_file")
 }
 
 func shellInvocation(path, platform string) string {

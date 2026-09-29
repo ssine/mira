@@ -16,7 +16,8 @@ node.codexAccounts = [{ nodeAccountId: codexId, name: "Messages account", enable
 const calls = [], sessions = [];
 let cacheBytes = 4 * 1024 ** 3;
 const summary = s => ({ ...s, threadId:s.sessionId, engine:"claude", runtimeNodeId:s.nodeId, generation:1, itemCount:1, listRoot:true, childCount:0,
- updatedAt: new Date().toISOString(), activity:{state:s.activeTurn?"running":"idle",turnId:s.activeTurn || s.lastTurn,generation:1,itemCount:1}, costEstimate:{amount:.4,status:"complete",basis:"claude_sdk"} });
+ updatedAt: new Date().toISOString(), activity:{state:s.activeTurn?"running":"idle",turnId:s.activeTurn || s.lastTurn,generation:1,itemCount:1,
+ ...(s.activeTurn ? {costEstimate:{amount:.12,status:"complete",basis:"claude_sdk",running:true,note:"运行中估算"}} : {})}, costEstimate:{amount:.4,status:"complete",basis:"claude_sdk"} });
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ viewport: { width: 1200, height: 900 } });
@@ -26,7 +27,7 @@ try {
   await context.route("**/v1/codex/threads/*?*", route => route.fulfill({status:404,json:{error:"missing"}}));
   await context.route("**/v1/claude/**", route => {
     const req = route.request(), path = new URL(req.url()).pathname, body = req.postData() ? req.postDataJSON() : null;
-    calls.push({ path, body });
+    calls.push({ path, body, query: new URL(req.url()).search });
     if (path.endsWith("cost-history")) {
       const at = Date.parse("2026-09-30T00:00:00Z"), date = "2026-09-30";
       return route.fulfill({json:{basis:"claude_sdk",estimate:{amount:.4,status:"complete"},from:at,to:at+3600000,
@@ -103,6 +104,7 @@ try {
   assert.equal(await view.locator("#conversationAccount").inputValue(), ids[1]);
   await view.locator("#conversationActivity:not(.hidden)").waitFor();
   assert.match(await view.locator("#conversationActivityText").textContent(), /^Claude /);
+  await page.waitForFunction(() => document.querySelector("#conversationActivityCost").textContent === "本轮约 $0.12");
   assert.equal(await view.locator("#conversationComposer #claudeReconcile").count(), 0);
   assert.equal(await view.locator(`[data-thread-activity="${sessions[0].sessionId}"]`).getAttribute("title"), "Claude 正在运行");
   await view.locator("#conversationDetailsToggle").click();
@@ -118,6 +120,8 @@ try {
   await view.locator("#conversationTrace .trace-card.assistant").filter({ hasText: "One live answer" }).waitFor();
   emit({ type: "assistant", uuid: "answer", timestamp: "2026-09-30T01:02:03.456Z", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
   emit({ type: "stream_event", event: { type: "message_stop" } });
+  const running = sessions[0].activeTurn;
+  assert.equal(calls.some(c => c.path.endsWith("/costs") && c.query.includes(running)), false, "the summary prices a running turn");
   emit({ type: "result", duration_ms: 100 });
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#conversationAccount").disabled);
@@ -126,7 +130,8 @@ try {
   assert.equal(await clock.isVisible(), true, "Claude messages retain their native record time");
   assert.match(await clock.textContent(), /\d{2}:\d{2}:\d{2}/);
   assert.equal(await clock.getAttribute("title"), "消息记录时间");
-  assert.match(await view.locator("#conversationTrace .trace-card.assistant .trace-cost").textContent(), /0\.40/);
+  await page.waitForFunction(() => /0\.40/.test(document.querySelector("#conversationTrace .trace-card.assistant .trace-cost").textContent));
+  assert.equal(await view.locator("#conversationActivityCost").isVisible(), false);
   await view.locator("#claudeReconcile").waitFor({ state: "hidden" });
   await view.locator("#conversationDetailsClose").click();
   await view.locator("#conversationAccount").selectOption(ids[0]);
@@ -136,7 +141,10 @@ try {
   assert.equal(calls.filter(c => c.path.endsWith("/turns")).at(-1).body.nodeAccountId, ids[0]);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="codex"]').count(),1);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="claude"]').count(),2);
-  await view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"}).click();
+  const awsRow = view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"});
+  assert.equal(await awsRow.isVisible(), false, "accounts outside the recent conversations stay folded");
+  await view.locator("[data-account-more]").click();
+  await awsRow.click();
   const curve = view.locator("#agentAccountDetails .spend-line");
   await curve.waitFor();
   assert.equal((await curve.getAttribute("d")).match(/L/g).length, 3, "each same-hour turn contributes a separate curve point");

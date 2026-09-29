@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountGroups } from "../server/public/codex-accounts.js";
+import { accountGroups, recentAccountKeys } from "../server/public/codex-accounts.js";
 import { spendingSeries, spendProjectionStatus, spendCacheLifetime } from "../server/public/account-spend.js";
 import { AccountSidebar } from "../server/public/account-status.js";
 
@@ -29,6 +29,32 @@ test("account names combine every Node and keep the freshest valid balance, incl
   assert.equal(groups[1].members[0].account.nodeAccountId, "c");
 });
 
+test("the fold keeps the distinct accounts of the two most recent top-level conversations", () => {
+  const node = { nodeId: "n", status: "online", codexAccounts: [{ nodeAccountId: "a", name: "Alpha", authType: "apiKey" }, { nodeAccountId: "b", name: "Beta", authType: "apiKey" }],
+    claudeAccounts: [{ engine: "claude", nodeAccountId: "c", name: "Alpha" }, { engine: "claude", nodeAccountId: "d", name: "Delta" }] };
+  const groups = accountGroups([node]);
+  const at = minutes => new Date(Date.UTC(2026, 8, 30, 0, minutes)).toISOString();
+  const threads = [
+    { threadId: "old", nodeAccountId: "b", updatedAt: at(1) },
+    { threadId: "claude", engine: "claude", nodeAccountId: "c", updatedAt: at(5) },
+    { threadId: "child", nodeAccountId: "b", parentThreadId: "claude", updatedAt: at(9) },
+    { threadId: "same", engine: "claude", nodeAccountId: "c", updatedAt: at(4) },
+    { threadId: "unbound", updatedAt: at(8) },
+    { threadId: "codex", nodeAccountId: "a", updatedAt: at(3) },
+  ];
+  assert.deepEqual(recentAccountKeys(groups, threads), [JSON.stringify(["claude", "Alpha"]), JSON.stringify(["codex", "Alpha"])]);
+  const sidebar = Object.assign(Object.create(AccountSidebar.prototype), { groups, threads, expanded: false });
+  let view = sidebar.visibleGroups();
+  assert.deepEqual(view.visible.map(group => group.key), groups.map(group => group.key).filter(key => recentAccountKeys(groups, threads).includes(key)),
+    "pinned rows keep the account name order");
+  assert.equal(view.folded, 2);
+  sidebar.threads = [];
+  view = sidebar.visibleGroups();
+  assert.equal(view.visible.length, 2, "without history the first two accounts stay visible");
+  sidebar.expanded = true;
+  assert.equal(sidebar.visibleGroups().visible.length, 4);
+});
+
 test("spending curves sum hourly costs inside each calendar day and reset at midnight", () => {
   const result = spendingSeries({ to: 380, days: [{ date: "day1", at: 0, end: 200, amount: 5 }, { date: "day2", at: 200, end: 400, amount: 4 }],
     points: [{ date: "day2", at: 300, amount: 4 }, { date: "day1", at: 150, amount: 3 }, { date: "day1", at: 100, amount: 2 }, { date: "day1", at: 160, amount: null }] });
@@ -53,7 +79,7 @@ test("seven-day summaries bound concurrent reads, reuse totals and discard repli
   const originalFetch = globalThis.fetch, pending = [];
   globalThis.fetch = (url, { signal }) => new Promise(resolve => pending.push({ url, signal, resolve }));
   const sidebar = Object.assign(Object.create(AccountSidebar.prototype), {
-    active: false, summariesActive: true, intervalMs: 300_000, summaryJobs: new Map(), summaries: new Map(),
+    active: false, summariesActive: true, intervalMs: 300_000, summaryJobs: new Map(), summaries: new Map(), threads: [], expanded: true,
     groups: ["A", "B", "C"].map(name => ({ name, key: name, members: [{ account: {} }] })),
     spend: { urlFor: (name, range) => `${name}:${range}`, cacheSummary() {} },
     renderOverview() { this.loadSummaries(); },

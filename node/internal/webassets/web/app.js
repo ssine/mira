@@ -337,7 +337,7 @@ async function loadClaudeTranscript(threadId, options = {}) {
     if (!options.poll || activeBefore !== result.session.activeTurn || Date.now() - (thread._claudeReadAt || 0) > 10_000) {
       const summary = await readConversation(threadId);
       if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
-      summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary);
+      summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary); renderReplyProgress();
     }
     if (!options.poll || result.changed) {
       const follow = !options.prepend && traceNearBottom();
@@ -349,7 +349,6 @@ async function loadClaudeTranscript(threadId, options = {}) {
       agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
       agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
       renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
-      if (!thread.subpath) scheduleTranscriptCosts(threadId, { trace: result.trace, generation: 1, itemCount: currentAgentThread()?.itemCount });
       for (const item of result.trace) {
         const card = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(item.key)}"]`);
         if (!card) continue;
@@ -368,6 +367,10 @@ async function loadClaudeTranscript(threadId, options = {}) {
       if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId && item.kind === "assistant" && item.body?.trim()))) replyProgress.finish(progress);
       renderReplyProgress();
       if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
+    }
+    // A turn can settle without new events; its footer still needs the final cost.
+    if (!thread.subpath && (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null))) {
+      scheduleTranscriptCosts(threadId, { trace: agent.transcriptItems, generation: 1, itemCount: currentAgentThread()?.itemCount });
     }
     syncActiveTurnUi();
     return result;
@@ -481,7 +484,6 @@ function selectConversationAccount(bindingId) {
   agent.accountSelections.set(nodeId, bindingId); refreshAccountChoices(bindingId);
   stopAgentRecovery(); closeAgentSocket(); agent.modelChoice = null; agent.effortChoice = null;
   agent.modelCatalog = null; agent.modelCatalogKey = null;
-  if (selectedAccountNode()?.engine === "claude") agent.modelChoice = selectedAccountNode()?.reportedAppServer?.provider?.model || null;
   syncAccountSidebar(); syncConversationSendUi(); void loadConversationModels();
   if (!agent.threadId && agent.draftProject) void selectComposerDraft(`personal:new:${agent.draftProject.key}:${bindingId}`);
   if (agent.threadId) {
@@ -579,6 +581,12 @@ function renderTurnActivity(submitting) {
   const text = activity.state === "unknown" ? activityLabel(activity, agent.threadId) : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
   const label = $("#conversationActivityText");
   if (visible && label.textContent !== text) label.textContent = text;
+  const stored = agent.persistedActivity.get(agent.threadId);
+  const estimate = visible && turnId && stored?.turnId === turnId ? stored.costEstimate : null;
+  const cost = $("#conversationActivityCost");
+  cost.hidden = !estimate;
+  cost.textContent = estimate ? `本轮约 ${compactCost(estimate)}` : "";
+  cost.title = estimate?.note ?? "";
 }
 
 function activityLabel(activity, threadId) {
@@ -2767,9 +2775,24 @@ function conversationModelKey() {
   return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim(), node?.nodeAccountId ?? "", node?.accountRevision ?? 0, node?.reportedAppServer?.runtimeId ?? "", node?.engine ?? "codex"]);
 }
 
+// A new conversation starts from the settings of the selected account's most recently active one.
+function lastUsedConversationSettings() {
+  const node = selectedAccountNode(), catalog = modelCatalogForConversation();
+  if (agent.threadId || !node || !catalog) return null;
+  const engine = node.engine || "codex", binding = node.nodeAccountId || "";
+  let latest = null;
+  for (const thread of agent.threads) {
+    if ((thread.engine || "codex") !== engine || thread.parentThreadId || thread.subpath || !thread.model) continue;
+    if ((thread.nodeAccountId || "") !== binding || (thread.runtimeNodeId || thread.sourceNodeId) !== node.nodeId) continue;
+    if (!latest || (Date.parse(thread.updatedAt) || 0) > (Date.parse(latest.updatedAt) || 0)) latest = thread;
+  }
+  if (!latest || !catalog.models.some(item => item.model === latest.model)) return null;
+  return { model: latest.model, effort: latest.reasoningEffort || null };
+}
+
 function selectedConversationModel() {
-  return agent.modelChoice || currentAgentThread()?.model ||
-    (agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog?.defaultModel : null) || null;
+  const catalog = modelCatalogForConversation();
+  return agent.modelChoice || currentAgentThread()?.model || lastUsedConversationSettings()?.model || catalog?.defaultModel || null;
 }
 
 const reasoningEffortLabels = {
@@ -2801,8 +2824,10 @@ function conversationEffortOptions() {
 function selectedConversationEffort() {
   const catalog = modelCatalogForConversation(), definition = conversationModelDefinition();
   const supported = new Set(conversationEffortOptions().map(option => option.reasoningEffort));
+  const model = selectedConversationModel(), lastUsed = lastUsedConversationSettings();
   for (const value of [agent.effortChoice, agent.threadReasoningEffort,
-    selectedConversationModel() === catalog?.defaultModel ? catalog?.configuredReasoningEffort : null,
+    lastUsed?.model === model ? lastUsed.effort : null,
+    model === catalog?.defaultModel ? catalog?.configuredReasoningEffort : null,
     definition?.defaultReasoningEffort]) {
     if (typeof value === "string" && value && supported.has(value)) return value;
   }
@@ -3223,6 +3248,7 @@ function refreshTurnFooters(turnId = null) {
         ? `API 估算：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
         : "暂无法估算本轮费用：缺少请求用量、模型或对应价格";
     if (costEstimate?.basis === "claude_sdk") cost.title = `Claude SDK 估算：${formatEstimatedCost(costEstimate.amount)}，网关实际扣费可能不同${costEstimate.status === "partial" ? "；部分记录缺失" : ""}`;
+    if (costEstimate?.running) cost.title = costEstimate.note;
     const clock = last.querySelector(".trace-completed");
     if (clock.hidden && traceClock(completedAt)) {
       clock.textContent = traceClock(completedAt);
@@ -3899,8 +3925,11 @@ async function loadToolDetails(card) {
 }
 
 function scheduleTranscriptCosts(threadId, transcript) {
+  // A running Claude turn is priced by its summary; fetch its footer once it settles.
+  const running = engineOf(threadId) === "claude" ? agent.activeTurns.get(threadId) : null;
   const turnIds = [...new Set((transcript.trace ?? [])
-    .filter((item) => item.kind === "assistant" && item.turnId && item.turnCostEstimate == null)
+    .filter((item) => item.kind === "assistant" && item.turnId && item.turnId !== running &&
+      (item.turnCostEstimate == null || item.turnCostEstimate.running))
     .map((item) => item.turnId))];
   if (!turnIds.length) return;
   const key = JSON.stringify([threadId, transcript.generation, transcript.itemCount, turnIds]);
@@ -4507,7 +4536,6 @@ async function refreshAgentNodes() {
   const defaultCwd = selected?.desiredAppServer?.defaultCwd ?? "";
   $("#agentRuntimeDefaultCwd").value = defaultCwd;
   $("#agentRuntimeDeveloperInstructionsFile").value = selected?.desiredAppServer?.developerInstructionsFile ?? "";
-  $("#agentRuntimeClaudeInstructionsFile").value = dashboardNodes.get(runtimeSelect.value)?.desiredAppServer?.claudeInstructionsFile ?? "";
   if (!agent.threadId && !$("#conversationCwd").value.trim()) $("#conversationCwd").value = defaultCwd;
   if (selected && agent.socketNodeId !== selected.nodeId) {
     setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
@@ -4551,24 +4579,6 @@ async function saveAgentRuntimeDeveloperInstructionsFile() {
   dashboardNodes.set(nodeId, node);
   $("#agentRuntimeDeveloperInstructionsFile").value = result.desiredAppServer.developerInstructionsFile ?? "";
   toast(developerInstructionsFile ? "已保存该节点的 Developer Message 文件" : "已清除该节点的 Developer Message 文件");
-}
-
-async function saveAgentRuntimeClaudeInstructionsFile() {
-  const nodeId = $("#agentRuntimeNode").value;
-  const node = dashboardNodes.get(nodeId);
-  if (!node) throw new Error("没有可配置的运行节点");
-  const claudeInstructionsFile = $("#agentRuntimeClaudeInstructionsFile").value.trim();
-  const result = await api(`/v1/nodes/${nodeId}/desired-app-server`, {
-    method: "PUT",
-    body: JSON.stringify({
-      running: node.desiredAppServer?.running === true,
-      claudeInstructionsFile: claudeInstructionsFile || null,
-    }),
-  });
-  node.desiredAppServer = result.desiredAppServer;
-  dashboardNodes.set(nodeId, node);
-  $("#agentRuntimeClaudeInstructionsFile").value = result.desiredAppServer.claudeInstructionsFile ?? "";
-  toast(claudeInstructionsFile ? "已保存该节点的 Claude 指令文件" : "已清除该节点的 Claude 指令文件");
 }
 
 function projectForThread(thread) {
@@ -4663,6 +4673,7 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
 }
 
 function renderAgentThreads(revealSelection = false) {
+  accountSidebar.setThreads(agent.threads);
   const list = $("#agentThreadList"), scrollTop = list.scrollTop;
   const active = list.contains(document.activeElement) ? document.activeElement : null;
   const focusKey = active?.dataset.threadId ? ["threadId", active.dataset.threadId]
@@ -6478,7 +6489,6 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveDeveloperInstructions").addEventListener("click", () => saveAgentRuntimeDeveloperInstructionsFile().catch((error) => toast(error.message)));
-$("#agentRuntimeSaveClaudeInstructions").addEventListener("click", () => saveAgentRuntimeClaudeInstructionsFile().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
   refreshAccountChoices();
   agent.modelChoice = null;
@@ -6489,7 +6499,6 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   $("#agentRuntimeDeveloperInstructionsFile").value = node?.desiredAppServer?.developerInstructionsFile ?? "";
-  $("#agentRuntimeClaudeInstructionsFile").value = node?.desiredAppServer?.claudeInstructionsFile ?? "";
   if (!agent.threadId) {
     $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
     setConversationMeta($("#conversationCwd").value);

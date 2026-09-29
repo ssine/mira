@@ -25,13 +25,159 @@ func claudeEstimate(amount *float64, partial bool) map[string]any {
 		"note": "Claude SDK 价格估算，包含子 Agent；API 网关实际扣费可能不同。"}
 }
 
-func (server *Server) claudeUsage(ctx context.Context, id string) (map[string]any, error) {
+// Public Claude API list prices in nanodollars per token, longest prefix first.
+// They only price a turn that has no SDK result yet.
+type claudePrice struct{ input, output, cacheRead int64 }
+
+var claudePrices = []struct {
+	prefix string
+	price  claudePrice
+}{
+	{"claude-fable-5-1", claudePrice{10_000, 50_000, 250}},
+	{"claude-mythos-5-1", claudePrice{10_000, 50_000, 250}},
+	{"claude-fable-5", claudePrice{10_000, 50_000, 1_000}},
+	{"claude-mythos-5", claudePrice{10_000, 50_000, 1_000}},
+	{"claude-opus-5-5", claudePrice{4_000, 20_000, 200}},
+	{"claude-opus-5", claudePrice{5_000, 25_000, 500}},
+	{"claude-opus-4-8", claudePrice{5_000, 25_000, 500}},
+	{"claude-opus-4-7", claudePrice{5_000, 25_000, 500}},
+	{"claude-opus-4-6", claudePrice{5_000, 25_000, 500}},
+	{"claude-opus-4-5", claudePrice{5_000, 25_000, 500}},
+	{"claude-opus-4", claudePrice{15_000, 75_000, 1_500}},
+	{"claude-sonnet-5", claudePrice{2_000, 10_000, 200}},
+	{"claude-sonnet-4", claudePrice{3_000, 15_000, 300}},
+	{"claude-haiku-4-5", claudePrice{1_000, 5_000, 100}},
+}
+
+func claudeModelPrice(model string) (claudePrice, bool) {
+	// Bedrock and Vertex identifiers wrap the same model names.
+	if index := strings.Index(model, "claude-"); index >= 0 {
+		model = model[index:]
+	}
+	for _, entry := range claudePrices {
+		if strings.HasPrefix(model, entry.prefix) {
+			return entry.price, true
+		}
+	}
+	return claudePrice{}, false
+}
+
+type claudeLive struct {
+	amount                float64
+	input, output, cached int64
+	unpriced              bool
+}
+
+// claudeLiveUsage prices a running turn from the latest usage of each API
+// response, subagents included. It returns nil once the SDK result is stored.
+func (server *Server) claudeLiveUsage(ctx context.Context, s claudeSession) (*claudeLive, error) {
+	if s.ActiveTurn == nil {
+		return nil, nil
+	}
+	var settled bool
+	err := server.pool.QueryRow(ctx, `SELECT coalesce((SELECT source_seq>0 FROM mira_claude_usage WHERE turn_id=$1),false)`, *s.ActiveTurn).Scan(&settled)
+	if err != nil || settled {
+		return nil, err
+	}
+	rows, err := server.pool.Query(ctx, `SELECT DISTINCT ON (coalesce(payload->'message'->>'id',seq::text))
+ coalesce(payload->'message'->>'model',''),coalesce(payload->'message'->'usage','{}')::text
+ FROM mira_claude_events WHERE turn_id=$1 AND event_type='assistant' ORDER BY coalesce(payload->'message'->>'id',seq::text),seq DESC`, *s.ActiveTurn)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	live := &claudeLive{}
+	for rows.Next() {
+		var model, raw string
+		if err = rows.Scan(&model, &raw); err != nil {
+			return nil, err
+		}
+		var usage struct {
+			Input      int64 `json:"input_tokens"`
+			Output     int64 `json:"output_tokens"`
+			CacheRead  int64 `json:"cache_read_input_tokens"`
+			CacheWrite int64 `json:"cache_creation_input_tokens"`
+			Creation   *struct {
+				Short int64 `json:"ephemeral_5m_input_tokens"`
+				Long  int64 `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
+			Tools struct {
+				Searches int64 `json:"web_search_requests"`
+			} `json:"server_tool_use"`
+		}
+		if json.Unmarshal([]byte(raw), &usage) != nil {
+			live.unpriced = true
+			continue
+		}
+		short, long := usage.CacheWrite, int64(0)
+		if usage.Creation != nil {
+			short, long = usage.Creation.Short, usage.Creation.Long
+		}
+		counts := []int64{usage.Input, usage.Output, usage.CacheRead, usage.CacheWrite, short, long, usage.Tools.Searches}
+		valid, used := true, false
+		for _, count := range counts {
+			valid = valid && count >= 0 && count < 1<<32
+			used = used || count > 0
+		}
+		if !valid {
+			live.unpriced = true
+			continue
+		}
+		if !used {
+			continue // synthetic and error messages carry no billable usage
+		}
+		live.input += usage.Input + usage.CacheRead + usage.CacheWrite
+		live.output += usage.Output
+		live.cached += usage.CacheRead
+		if model == "" {
+			model = s.Model
+		}
+		price, ok := claudeModelPrice(model)
+		if !ok {
+			live.unpriced = true
+			continue
+		}
+		// Cache writes cost 1.25x input for 5 minutes and 2x for 1 hour; searches $10/1000.
+		nanodollars := usage.Input*price.input + usage.Output*price.output + usage.CacheRead*price.cacheRead +
+			short*price.input*5/4 + long*price.input*2 + usage.Tools.Searches*10_000_000
+		live.amount += float64(nanodollars) / 1e9
+	}
+	return live, rows.Err()
+}
+
+func claudeLiveEstimate(amount *float64, partial bool) map[string]any {
+	estimate := claudeEstimate(amount, partial)
+	estimate["running"] = true
+	estimate["note"] = "运行中的本轮按 Claude 公开价累计已完成的请求，结束后改用 Claude SDK 结果；API 网关实际扣费可能不同。"
+	return estimate
+}
+
+func (server *Server) claudeUsage(ctx context.Context, s claudeSession, live *claudeLive) (map[string]any, error) {
 	var amount *float64
 	var input, output, cached, selfInput, selfOutput, selfCached *int64
 	var partial, usagePartial bool
+	var active *string
+	if live != nil {
+		active = s.ActiveTurn
+	}
+	// The running turn has no result snapshot yet; its live estimate replaces the empty row.
 	err := server.pool.QueryRow(ctx, `SELECT sum(cost_delta)::float8,sum(input_delta)::bigint,sum(output_delta)::bigint,sum(cached_delta)::bigint,
  sum(self_input)::bigint,sum(self_output)::bigint,sum(self_cached)::bigint,coalesce(bool_or(cost_partial),false),coalesce(bool_or(usage_partial),false)
- FROM mira_claude_usage_deltas WHERE session_id=$1`, id).Scan(&amount, &input, &output, &cached, &selfInput, &selfOutput, &selfCached, &partial, &usagePartial)
+ FROM mira_claude_usage_deltas WHERE session_id=$1 AND turn_id IS DISTINCT FROM $2::uuid`, s.ID, active).Scan(&amount, &input, &output, &cached, &selfInput, &selfOutput, &selfCached, &partial, &usagePartial)
+	if live != nil {
+		plus := func(total *int64, value int64) *int64 {
+			if total != nil {
+				value += *total
+			}
+			return &value
+		}
+		spent := live.amount
+		if amount != nil {
+			spent += *amount
+		}
+		amount, input, output, cached = &spent, plus(input, live.input), plus(output, live.output), plus(cached, live.cached)
+		partial = partial || live.unpriced
+	}
 	status := "complete"
 	if usagePartial {
 		status = "partial"
@@ -41,11 +187,19 @@ func (server *Server) claudeUsage(ctx context.Context, id string) (map[string]an
 	}
 	total := map[string]any{"inputTokens": input, "outputTokens": output, "cachedInputTokens": cached, "status": status}
 	self := map[string]any{"inputTokens": selfInput, "outputTokens": selfOutput, "cachedInputTokens": selfCached}
-	return map[string]any{"costEstimate": claudeEstimate(amount, partial), "tokenUsage": total, "tokenUsageSummary": map[string]any{"total": total, "self": self, "includesSubagents": true, "scope": "claude_session"}}, err
+	estimate := claudeEstimate(amount, partial)
+	if live != nil {
+		estimate = claudeLiveEstimate(amount, partial)
+	}
+	return map[string]any{"costEstimate": estimate, "tokenUsage": total, "tokenUsageSummary": map[string]any{"total": total, "self": self, "includesSubagents": true, "scope": "claude_session"}}, err
 }
 
 func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[string]any, error) {
-	result, err := server.claudeUsage(ctx, s.ID)
+	live, err := server.claudeLiveUsage(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	result, err := server.claudeUsage(ctx, s, live)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +243,9 @@ func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[s
 		activity = status
 	}
 	result["activity"] = map[string]any{"state": activity, "turnId": lastTurn, "generation": 1, "itemCount": seq}
+	if live != nil {
+		result["activity"].(map[string]any)["costEstimate"] = claudeLiveEstimate(&live.amount, live.unpriced)
+	}
 	return result, nil
 }
 

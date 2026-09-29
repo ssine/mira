@@ -275,8 +275,8 @@ tokens stay local and must not be included in desired state. A Node may also kee
 that UTF-8 file through the Node's bounded file capability and injects its content as Developer
 instructions on `thread/start`, `thread/resume` and `thread/fork`; read or validation failures stop the
 request instead of silently dropping policy. Tool-free ephemeral title threads skip the file. The
-setting does not apply to `mira codex` CLI sessions. Managed Claude turns use the separate
-`desiredAppServer.claudeInstructionsFile` through the same reader and failure policy.
+setting does not apply to `mira codex` CLI sessions. Managed Claude turns share the same file and
+append it to their system prompt on every turn.
 Nodes also discover rollout JSONL files under their configured, environment and default Codex homes.
 Discovery is read-only. Import is an explicit administrator action: preserve every original record in
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing

@@ -103,10 +103,10 @@ supplies an effort, the account's default `effort` is used; otherwise the SDK de
 applies. The account `model` is usually a full model ID while the native catalog lists
 aliases, so clients match it to catalog entries through `resolvedModel`.
 
-Each turn appends the Node's `desiredAppServer.claudeInstructionsFile` to the Claude
-Code system prompt. It is independent of the Codex `developerInstructionsFile`, uses
-the same bounded file-capability reader (UTF-8, at most 256 KiB), is read on every
-turn, and blocks the turn when it cannot be read or validated.
+Each turn appends the Node's `desiredAppServer.developerInstructionsFile`, shared with
+Codex, to the Claude Code system prompt. It uses the same bounded file-capability
+reader (UTF-8, at most 256 KiB), is read on every turn, and blocks the turn when it
+cannot be read or validated.
 
 ## Shared conversation read projections (Mira 1.0.59)
 

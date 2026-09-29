@@ -391,6 +391,9 @@ tbody tr:hover { background: var(--hover); }
 .sidebar-account-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 38px; padding: 7px 8px; border: 0; background: transparent; text-align: left; }
 .sidebar-account-row:hover, .sidebar-account-row[aria-expanded="true"] { background: var(--hover); }
 .sidebar-account-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.sidebar-account-row[hidden], .sidebar-account-more[hidden] { display: none; }
+.sidebar-account-more { display: block; width: 100%; min-height: 28px; padding: 4px 8px; border: 0; background: transparent; color: var(--muted); font-size: 11px; text-align: left; }
+.sidebar-account-more:hover { color: var(--text); background: var(--hover); }
 .sidebar-account-row > span { flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .spend-bar { fill: var(--accent); fill-opacity: .18; }
 @media (pointer: coarse) { .sidebar-account-row { min-height: 44px; } }
@@ -586,7 +589,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-composer { position: relative; z-index: 4; width: min(100%, 808px); margin: 0 auto; padding: 4px 0 max(8px, env(safe-area-inset-bottom)); border: 0; background: var(--canvas); }
 .conversation-progress { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 2px 6px; color: var(--muted); font-size: 10px; }
 #conversationProgressText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#conversationProgressTime { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#conversationProgressTime, #conversationActivityCost { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reply-spinner { width: 11px; height: 11px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: reply-spin 1s linear infinite; }
 .activity-unknown .reply-spinner { animation: none; border-color: var(--muted); border-style: dotted; }
 .conversation-drop-zone { border: 1px solid color-mix(in srgb, var(--input-border) 55%, var(--canvas)); border-radius: 8px; background: var(--canvas); box-shadow: 0 2px 8px rgb(22 34 52 / 4%); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }

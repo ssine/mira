@@ -512,12 +512,8 @@ Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件�
 每个运行节点可在 Web 的“运行节点”页配置一个本机 UTF-8 Developer Message 文件。Mira Server
 会在托管 App Server 的 `thread/start`、`thread/resume` 和 `thread/fork` 请求中，通过该 Node
 的文件能力读取最多 256 KiB 并注入 `developerInstructions`；读取失败会阻止请求，避免策略被
-静默忽略。内容会进入 Codex 会话的长期上下文，因此不应包含密钥。该设置不影响 `mira codex`
-CLI。
-
-同一页面还可单独配置 Claude 指令文件（`desiredAppServer.claudeInstructionsFile`）。托管
-Claude Code 每轮对话开始时以相同的限制读取该文件，并追加到系统提示词；未配置时不注入，
-也不会回退到 Codex 的 Developer Message 文件。
+静默忽略。托管 Claude Code 共用同一文件：每轮对话开始时以相同限制读取，并追加到系统提示词。
+内容会进入会话的长期上下文，因此不应包含密钥。该设置不影响 `mira codex` CLI。
 
 ## 验证
 

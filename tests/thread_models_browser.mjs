@@ -55,7 +55,7 @@ try {
         reply({thread:{id:threadId},cwd:request.params.cwd,model:request.params.model,
           reasoningEffort:request.params.config?.model_reasoning_effort});
       } else if (request.method === 'turn/start') {
-        rows[0].model=request.params.model;
+        rows[0].model=request.params.model;rows[0].reasoningEffort=request.params.effort;rows[0].updatedAt=new Date().toISOString();
         reply({turn:{id:crypto.randomUUID(),status:'completed'}});
       } else if (request.method === 'thread/resume') reply({thread:{id:threadId,status:{type:'idle'}},cwd:'/work',model:'gpt-6-astra',reasoningEffort:'high'});
       else if (request.method === 'thread/loaded/list') reply({data:[threadId]});
@@ -132,12 +132,14 @@ try {
   assert.equal(await picker.evaluate(element=>element.value),'gpt-5.6-luna','details shares the next-turn model');
   assert.equal(await effortValue(),'low');
   await page.locator('#conversationDetailsClose').click();
-  // A new draft uses the Node default, not the previous thread's override.
+  // A new draft starts from the settings last sent on this account, not the details-panel draft.
   const reads=modelCalls.length;
   await page.locator('#agentNewThread').click();
-  await page.waitForFunction(()=>document.querySelector('#conversationModelSelect').value==='gpt-6-astra');
+  await page.waitForFunction(()=>document.querySelector('#conversationModelSelect').value==='gpt-5.6-sol');
   assert.equal(await effortValue(),'medium');
   assert.equal(modelCalls.length,reads,'same-node/project defaults are cached');
+  // Once the last-used model leaves the catalog, drafts fall back to the Node default.
+  rows[0].model='retired-model';
   configured='custom-provider-model';
   await goToNodes();
   const nodeRefresh=page.locator(`[data-action="refresh-models"][data-id="${nodeId}"]`);

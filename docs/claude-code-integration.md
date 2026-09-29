@@ -26,11 +26,10 @@ Implemented:
 - Native `AskUserQuestion` prompts appear in the conversation and answers return
   to the waiting SDK invocation. Ordinary tools use the same unrestricted OS-user
   execution policy as Mira's default Codex configuration.
-- Mira device tools use the shared MCP adapter. Each Node has a Claude-specific
-  `claudeInstructionsFile`, read on every turn by the same bounded reader as the
-  Codex Developer instructions file and appended to the system prompt together with
-  the absolute Mira SSH/SCP/SFTP instructions. The two files are configured
-  separately. Native user/project/local Claude settings and `CLAUDE.md` still apply.
+- Mira device tools use the shared MCP adapter. The Node's Developer instructions
+  file is shared with Codex: the same bounded reader loads it on every Claude turn and
+  appends it to the system prompt together with the absolute Mira SSH/SCP/SFTP
+  instructions. Native user/project/local Claude settings and `CLAUDE.md` still apply.
 - Claude accounts may set a default reasoning effort for their default model. The
   model picker maps the account's full model ID to the SDK alias that resolves to it,
   so its effort levels remain selectable.
@@ -73,6 +72,14 @@ timestamps, grouping adjacent turns only on dense days (at most 128 points/day),
 without discarding costs or incomplete status.
 No unsupported per-child cost split is inferred. See the
 [official cost semantics](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+
+A running turn has no result yet. Until its result lands, conversation summaries price it
+from the latest `usage` of each `assistant` response (deduplicated by message ID,
+subagents included) with the public Claude list prices in `claude_views.go`. Cache
+writes use their 5-minute/1-hour multipliers. The estimate is marked `running`; unknown
+models or invalid usage make it partial. The Web shows it beside the running indicator
+and in the conversation total, then fetches the turn footer from the SDK result once the
+turn settles. Schema 37 only adds the per-turn `assistant` event index for this lookup.
 
 Rebuild the projection by reloading attribution from `mira_claude_turns`, then applying
 `mira_claude_project_result(turn_id, seq, payload)` to the latest root `result` event per

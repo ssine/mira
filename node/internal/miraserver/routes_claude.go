@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -388,6 +389,15 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if err = rows.Err(); err != nil {
 			return true, err
 		}
+		if s.ActiveTurn != nil && slices.Contains(ids, *s.ActiveTurn) {
+			live, err := server.claudeLiveUsage(ctx, s)
+			if err != nil {
+				return true, err
+			}
+			if live != nil {
+				estimates[*s.ActiveTurn] = claudeLiveEstimate(&live.amount, live.unpriced)
+			}
+		}
 		return true, writeJSON(w, 200, map[string]any{"generation": 1, "turnCostEstimates": estimates})
 	}
 	if op == "children" && r.Method == "GET" {
@@ -540,7 +550,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 	if state["status"] != "ready" {
 		return claudeError(409, "Prepare the Claude runtime before sending")
 	}
-	instructions, err := server.channel.ClaudeInstructions(ctx, nodeID)
+	instructions, err := server.channel.RuntimeInstructions(ctx, nodeID)
 	if err != nil {
 		return err
 	}
