@@ -97,3 +97,18 @@ ambient credentials. Account row locks serialize reservation with credential
 changes; the Node also refuses changes while one of that account's workers runs.
 The account binding is durable metadata, independent of native transcript entries.
 Runtime `describe` accepts the same binding for native model/account discovery.
+
+## Shared conversation read projections (Mira 1.0.59)
+
+`GET /v1/claude/conversations` exposes bounded keyset pages (`view=roots|children`,
+`archived`, `projectKey`, `parentThreadId`, `cursor`) and the complete root project
+directory. Cursors are scoped to filters. `GET /v1/claude/conversations/:id` resolves
+root and native child identities to shared Web summaries. These are read projections,
+not Codex ThreadStore records. Native child collection membership does not assert
+unknown direct parentage.
+
+`GET /v1/claude/sessions/:id/costs?turnId=...` returns per-turn estimates.
+`GET /v1/claude/accounts/cost-history?name=...&range=24h|7d|30d&timezone=...`
+returns daily/hourly SDK estimates for a Claude account name. These routes require
+administrator authentication. Engine namespaces keep same-name Codex/Claude totals
+separate. See `docs/claude-code-integration.md` for cumulative-result and rebuild rules.

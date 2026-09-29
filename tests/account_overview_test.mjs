@@ -54,7 +54,7 @@ test("seven-day summaries bound concurrent reads, reuse totals and discard repli
   globalThis.fetch = (url, { signal }) => new Promise(resolve => pending.push({ url, signal, resolve }));
   const sidebar = Object.assign(Object.create(AccountSidebar.prototype), {
     active: false, summariesActive: true, intervalMs: 300_000, summaryJobs: new Map(), summaries: new Map(),
-    groups: ["A", "B", "C"].map(name => ({ name, members: [{ account: {} }] })),
+    groups: ["A", "B", "C"].map(name => ({ name, key: name, members: [{ account: {} }] })),
     spend: { urlFor: (name, range) => `${name}:${range}`, cacheSummary() {} },
     renderOverview() { this.loadSummaries(); },
   });

@@ -1,4 +1,5 @@
-import { createClaudeConsole } from "/claude.js";
+import { ClaudeRuntime } from "/claude.js";
+import { conversationPageReader } from "/conversation-pages.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
@@ -38,7 +39,8 @@ let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
 let nodeMetadataTarget = null;
 
-const claudeConsole = createClaudeConsole({api, show, navigateCodex: () => navigateGlobal("agent"), toast});
+const claudeRuntime = new ClaudeRuntime(api);
+let claudePollTimer = null, claudeHistoryJob = null;
 
 const themeStorageKey = "mira.theme";
 const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
@@ -73,16 +75,14 @@ function writeBrowserRoute(view, threadId = null, { replace = false } = {}) {
 async function restoreBrowserRoute() {
   const epoch = ++browserRouteEpoch;
   const url = new URL(window.location.href);
-  const threadId = url.searchParams.get("thread");
-  const view = threadId ? "agent" : url.searchParams.get("view");
+  const threadId = url.searchParams.get("thread") || url.searchParams.get("claude");
+  const view = threadId || url.searchParams.get("view") === "claude" ? "agent" : url.searchParams.get("view");
   rememberAppRoute();
   if (agent.sendPromise) {
     writeBrowserRoute("agent", agent.threadId, { replace: true });
     return;
   }
-  if (view === "claude") {
-    await claudeConsole.open(url.searchParams.get("claude"));
-  } else if (view === "agent") {
+  if (view === "agent") {
     show("agentView");
     const list = loadAgentThreads();
     if (threadId) {
@@ -306,15 +306,168 @@ function selectedAccountNode(nodeId = $("#agentRuntimeNode").value) {
   return accountNode(dashboardNodes.get(nodeId), nodeId === $("#agentRuntimeNode").value ? $("#conversationAccount").value : "");
 }
 
+function acceptClaudeSummary(thread) {
+  agent.threads = mergeThreadPages(agent.threads, [thread]);
+  acceptThreadActivity(thread); rememberThreadCost(thread);
+  if (thread.threadId === agent.threadId) {
+    agent.threadRuntimeNodeId = thread.runtimeNodeId;
+    setConversationTitle(thread.title || "Claude 会话");
+  }
+}
+
+async function loadClaudeTranscript(threadId, options = {}) {
+  const thread = agent.threads.find(t => t.threadId === threadId);
+  if (!thread || agent.threadId !== threadId) return;
+  if (claudeHistoryJob?.threadId === threadId) return claudeHistoryJob.promise;
+  clearTimeout(claudePollTimer);
+  const epoch = agent.selectionEpoch, job = { threadId };
+  claudeHistoryJob = job;
+  job.promise = (async () => {
+    const result = await claudeRuntime.history(thread, { older: !!options.prepend, poll: !!options.poll });
+    if (!result || agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
+    const activeBefore = agent.activeTurns.get(threadId) ?? null;
+    if (!thread.subpath) {
+      if (result.session.activeTurn) agent.activeTurns.set(threadId, result.session.activeTurn);
+      else agent.activeTurns.delete(threadId);
+      Object.assign(thread, { persistence: result.session.persistence });
+    }
+    if (!options.poll || activeBefore !== result.session.activeTurn || Date.now() - (thread._claudeReadAt || 0) > 10_000) {
+      const summary = await readConversation(threadId);
+      if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
+      summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary);
+    }
+    if (!options.poll || result.changed) {
+      const follow = !options.prepend && traceNearBottom();
+      const viewport = options.prepend ? { mode: "prepend", top: traceScroller().scrollTop, height: traceScroller().scrollHeight } : follow ? null : captureTraceViewport();
+      const forms = new Map([...$("#conversationTrace").querySelectorAll("form[data-claude-question]")].map(form => [form.dataset.claudeQuestion, form]));
+      agent.transcriptThreadId = threadId; agent.transcriptGeneration = 1;
+      const previousCosts = new Map(agent.transcriptItems.filter(i => i.turnCostEstimate).map(i => [i.key, i.turnCostEstimate]));
+      for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
+      agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
+      agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
+      renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
+      if (!thread.subpath) scheduleTranscriptCosts(threadId, { trace: result.trace, generation: 1, itemCount: currentAgentThread()?.itemCount });
+      for (const item of result.trace) {
+        const card = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(item.key)}"]`);
+        if (!card) continue;
+        const body = card.querySelector(".trace-body");
+        if (item.nativeImage && !body.querySelector("img")) {
+          const img = element("img", "trace-image"); img.src = item.nativeImage; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
+        }
+        const q = result.questions.get(item.questionId);
+        if (q) {
+          const form = forms.get(q.questionId) || claudeQuestionForm(q, thread.sessionId);
+          body.replaceChildren(form);
+          for (const control of form.elements) control.disabled = !result.session.activeTurn || q.turnId !== result.session.activeTurn || form.dataset.submitted === "true";
+        }
+      }
+      const progress = replyProgress.current(threadId);
+      if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId && item.kind === "assistant" && item.body?.trim()))) replyProgress.finish(progress);
+      renderReplyProgress();
+      if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
+    }
+    syncActiveTurnUi();
+    return result;
+  })();
+  try { return await job.promise; }
+  finally {
+    if (claudeHistoryJob === job) claudeHistoryJob = null;
+    if (agent.threadId === threadId && agent.selectionEpoch === epoch && document.body.dataset.view === "agentView") {
+      claudePollTimer = setTimeout(() => {
+        if (document.hidden) return;
+        void loadClaudeTranscript(threadId, { poll: true }).catch(error => setConversationNotice(`连接暂时中断，恢复后会继续加载：${error.message}`, "error"));
+      }, agent.activeTurns.has(threadId) ? 750 : 3000);
+    }
+  }
+}
+
+function claudeQuestionForm(question, sessionId) {
+  const form = element("form", "request-form"); form.dataset.claudeQuestion = question.questionId;
+  for (const q of question.questions || []) {
+    const label = element("label", "", q.question), input = element("input"); input.name = q.question; input.required = true;
+    label.append(input); form.append(label);
+    for (const o of q.options || []) {
+      const button = element("button", "secondary", o.label); button.type = "button"; button.title = o.description || "";
+      button.addEventListener("click", () => { input.value = q.multiSelect ? [input.value, o.label].filter(Boolean).join(", ") : o.label; }); form.append(button);
+    }
+  }
+  const send = element("button", "primary", "回答"); send.type = "submit"; form.append(send);
+  form.addEventListener("submit", async e => {
+    e.preventDefault(); send.disabled = true;
+    try { await claudeRuntime.call(`sessions/${sessionId}/answer`, { questionId: question.questionId, answers: Object.fromEntries(new FormData(form)) }); form.dataset.submitted = "true"; }
+    catch (error) { toast(error.message); send.disabled = false; }
+  });
+  return form;
+}
+
+async function sendClaudeMessage(text, attachments, progress) {
+  if (agent.activeTurns.has(agent.threadId)) throw new Error("请等待本轮结束后再发送");
+  if (currentAgentThread()?.subpath) throw new Error("请在主会话中继续子 Agent 的工作");
+  const node = selectedAccountNode();
+  const nodeId = node?.nodeId, nodeAccountId = node?.nodeAccountId || "";
+  if (!node || node.status !== "online") throw new Error("请选择在线的 Claude 运行节点");
+  const cwd = $("#conversationCwd").value.trim();
+  if (!cwd) throw new Error("请填写执行节点上的项目目录");
+  stopAgentRecovery(); closeAgentSocket({ preserveSubmission: true });
+  updateReplyProgress(progress, { phase: "正在准备 Claude…" });
+  await claudeRuntime.prepare(nodeId, phase => updateReplyProgress(progress, { phase }));
+  if (!agent.threadId) {
+    if (!agent.newThreadRequestId) {
+      agent.newThreadRequestId = crypto.randomUUID();
+      agent.newThreadRequestSignature = JSON.stringify({ requestId: agent.newThreadRequestId, nodeId, nodeAccountId, cwd, title: text.slice(0, 100), model: selectedConversationModel() || "" });
+    }
+    const session = await claudeRuntime.call("sessions", JSON.parse(agent.newThreadRequestSignature));
+    const thread = await api(`/v1/claude/conversations/${session.sessionId}`);
+    agent.threadId = thread.threadId; acceptClaudeSummary(thread); claudeRuntime.reset(thread.threadId);
+    composerDraftRemoveKey = composerDraftKey; composerDraftKey = `personal:thread:${thread.threadId}`; saveComposerDraft();
+    agent.newThreadRequestId = agent.newThreadRequestSignature = null;
+    writeBrowserRoute("agent", thread.threadId, { replace: true });
+    agent.draftProject = null; agent.projectOpen.set(projectForThread(thread).key, true);
+    refreshAccountChoices(nodeAccountId); renderAgentThreads();
+    updateReplyProgress(progress, { threadId: thread.threadId });
+  }
+  const thread = currentAgentThread();
+  let body = claudeRuntime.turnRequests.get(thread.sessionId);
+  if (!body) {
+    const uploaded = await prepareTurnInput(text, attachments, progress);
+    body = { text: text || "请查看附件。", attachments: uploaded.nativeAttachments, nodeId, nodeAccountId, cwd,
+      model: selectedConversationModel() || "", effort: selectedConversationEffort() || "", continueAcknowledgedHistory: $("#claudeContinue").checked };
+  }
+  const result = await claudeRuntime.send(thread, body);
+  agent.activeTurns.set(thread.threadId, result.turnId);
+  updateReplyProgress(progress, { threadId: thread.threadId, turnId: result.turnId, phase: "Claude 正在处理，等待回复…" });
+  $("#claudeContinue").checked = false;
+  await loadClaudeTranscript(thread.threadId, { poll: claudeRuntime.cursor > 0 });
+  void loadAgentThreads().catch(() => {});
+}
+
+$("#claudeReconcile").addEventListener("click", async () => {
+  const thread = currentAgentThread(); if (thread?.engine !== "claude") return;
+  try { await claudeRuntime.call(`sessions/${thread.sessionId}/reconcile`, {}); await loadClaudeTranscript(thread.threadId, { poll: true }); }
+  catch (error) { toast(error.message); }
+});
+
+function engineOf(threadId) { return agent.threads.find(t => t.threadId === threadId)?.engine || "codex"; }
+function conversationEngine() { return agent.threadId ? engineOf(agent.threadId) : selectedAccountNode()?.engine || "codex"; }
+async function readConversation(threadId, { includeCost = false, ...options } = {}) {
+  if (engineOf(threadId) === "claude") return api(`/v1/claude/conversations/${encodeURIComponent(threadId)}`, options);
+  try { return await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal${includeCost ? "&includeCost=1" : ""}`, options); }
+  catch (error) { if (error.status !== 404) throw error; return api(`/v1/claude/conversations/${encodeURIComponent(threadId)}`, options); }
+}
 function refreshAccountChoices(preferred) {
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
+  const engine = agent.threadId ? engineOf(agent.threadId) : null;
   const previous = preferred ?? agent.accountSelections.get(node?.nodeId) ?? "";
-  const accounts = node?.codexAccounts ?? [];
+  const codex = node?.capabilities?.appServer ? node.codexAccounts?.length ? node.codexAccounts : [{ name: "默认账号", nodeAccountId: "", enabled: true, isDefault: true }] : [];
+  const claude = node?.capabilities?.claudeRuntimeV1 ? [...(node.claudeAccounts || []), { engine: "claude", name: "Node 默认配置", nodeAccountId: "claude-default", enabled: true, configured: true }] : [];
   for (const select of [$("#conversationAccount"), $("#agentRuntimeAccount"), $("#conversationDetailsAccount")]) {
-    select.replaceChildren(...(accounts.length ? accounts.map(account => {
-      const option = new Option(account.name, account.nodeAccountId); option.disabled = !account.enabled; return option;
-    }) : [new Option("默认账号", "")]));
-    select.value = accounts.some(account => account.nodeAccountId === previous) ? previous : accounts.find(account => account.isDefault)?.nodeAccountId ?? "";
+    const accounts = select.id === "agentRuntimeAccount" ? codex : [...codex, ...claude].filter(a => !engine || (a.engine || "codex") === engine);
+    select.replaceChildren(...accounts.map(account => {
+      const option = new Option(`${account.engine === "claude" ? "Claude" : "Codex"} · ${account.name}`, account.nodeAccountId);
+      option.disabled = !account.enabled || account.engine === "claude" && !account.configured; return option;
+    }));
+    const wanted = engine === "claude" && !previous ? "claude-default" : previous;
+    select.value = accounts.some(a => a.nodeAccountId === wanted) ? wanted : accounts.find(a => a.isDefault)?.nodeAccountId ?? accounts.find(a => a.enabled)?.nodeAccountId ?? "";
   }
   if (node) agent.accountSelections.set(node.nodeId, $("#conversationAccount").value);
 }
@@ -324,16 +477,17 @@ function selectConversationAccount(bindingId) {
   agent.accountSelections.set(nodeId, bindingId); refreshAccountChoices(bindingId);
   stopAgentRecovery(); closeAgentSocket(); agent.modelChoice = null; agent.effortChoice = null;
   agent.modelCatalog = null; agent.modelCatalogKey = null;
+  if (selectedAccountNode()?.engine === "claude") agent.modelChoice = selectedAccountNode()?.reportedAppServer?.provider?.model || null;
   syncAccountSidebar(); syncConversationSendUi(); void loadConversationModels();
   if (!agent.threadId && agent.draftProject) void selectComposerDraft(`personal:new:${agent.draftProject.key}:${bindingId}`);
   if (agent.threadId) {
     const boundId = agent.threads.find(thread => thread.threadId === agent.threadId)?.nodeAccountId;
-    const accounts = dashboardNodes.get(nodeId)?.codexAccounts ?? [];
+    const accounts = [...(dashboardNodes.get(nodeId)?.codexAccounts ?? []), ...(dashboardNodes.get(nodeId)?.claudeAccounts ?? [])];
     const bound = accounts.find(account => account.nodeAccountId === boundId)?.name;
     const target = accounts.find(account => account.nodeAccountId === bindingId)?.name ?? "所选账号";
     setConversationNotice(`${bound ? `当前对话绑定：${bound}。` : ""}下次发送将尝试使用 ${target}；切换成功后才会更新绑定。`, "info");
   }
-  accountRecovery.select(agent.threadId, bindingId);
+  accountRecovery.select(conversationEngine() === "claude" ? null : agent.threadId, bindingId);
 }
 const conversationDetailsWide = window.matchMedia("(min-width: 1100px)");
 let conversationDetailsCloseTimer = null;
@@ -491,8 +645,8 @@ function renderConversationTokenUsage(threadId) {
     [summary?.includesSubagents ? "合计输出 Token" : "累计输出 Token", tokenCount(usage?.outputTokens)],
   ]);
   const components = $("#conversationTokenUsageComponents");
-  components.hidden = !summary?.includesSubagents;
-  if (summary?.includesSubagents) navigationFacts(components, [
+  components.hidden = !summary?.includesSubagents || !summary?.subagents;
+  if (summary?.includesSubagents && summary.subagents) navigationFacts(components, [
     ["自身用量", `输入 ${tokenCount(summary.self.inputTokens)} · 缓存 ${tokenCount(summary.self.cachedInputTokens)} · 输出 ${tokenCount(summary.self.outputTokens)}`],
     [`子 Agent 用量（含下级，共 ${summary.subagentCount} 个）`, `输入 ${tokenCount(summary.subagents.inputTokens)} · 缓存 ${tokenCount(summary.subagents.cachedInputTokens)} · 输出 ${tokenCount(summary.subagents.outputTokens)}`],
   ]);
@@ -507,6 +661,7 @@ function renderConversationTokenUsage(threadId) {
 
 function acceptThreadActivity(thread, checkedAt = Date.now()) {
   acceptThreadTokenUsage(thread, checkedAt);
+  if (thread.engine === "claude") rememberThreadCost(thread);
   if (thread.readState) acceptThreadReadState(thread.threadId, thread.readState);
   const incoming = thread.activity;
   if (!incoming) return;
@@ -623,7 +778,7 @@ function loadVisibleSidebarCosts() {
     if (row.closest("details:not([open])")) continue;
     const rect = row.getBoundingClientRect();
     if (!rect.height || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
-    const job = api(`/v1/codex/threads/${encodeURIComponent(id)}?storeId=personal&includeCost=1`, { signal: AbortSignal.timeout(15_000) });
+    const job = readConversation(id, { includeCost: true, signal: AbortSignal.timeout(15_000) });
     agent.costRequests.set(id, job);
     void job.then(thread => {
       // Reject stale generations; a newer token snapshot can briefly lead history.
@@ -662,6 +817,7 @@ function visibleReadPosition() {
 }
 
 function scheduleThreadRead() {
+  if (conversationEngine() === "claude") return;
   const position = visibleReadPosition();
   if (!position) { clearTimeout(agent.readTimer); agent.readTimer = null; return; }
   if (agent.readTimer || agent.readRequest) return;
@@ -706,6 +862,7 @@ async function refreshThreadActivity() {
         await loadAgentThreads();
         return;
       }
+      if (pager.enabled) void refreshThreadHeads(pager, stale);
       const signal = AbortSignal.timeout(12_000);
       let response;
       if (pager?.enabled) {
@@ -720,7 +877,7 @@ async function refreshThreadActivity() {
           if (rect.height && rect.bottom > bounds.top && rect.top < bounds.bottom) ids.add(row.dataset.threadRow);
         }
         const query = new URLSearchParams({ storeId: "personal", view: "refresh", limit: "100", archived: archived ? "1" : "0" });
-        for (const id of ids) query.append("id", id);
+        for (const id of ids) if (engineOf(id) !== "claude") query.append("id", id);
         response = await api(`/v1/codex/threads?${query}`, { signal });
         if (stale()) return;
 
@@ -729,7 +886,7 @@ async function refreshThreadActivity() {
       const rows = response.data ?? [];
       const selected = agent.threadId;
       if (selected && !rows.some(thread => thread.threadId === selected)) {
-        rows.push(await api(`/v1/codex/threads/${encodeURIComponent(selected)}?storeId=personal`, { signal }));
+        rows.push(await readConversation(selected, { signal }));
       }
       if (stale()) return;
       agent.activityCheckedAt = Date.now();
@@ -742,7 +899,7 @@ async function refreshThreadActivity() {
       // A read-only window may have no App Server subscription (including CLI
       // threads on another Node). Follow the canonical history in every window.
       // Avoid interrupting older-page loads or resetting a reader's position.
-      if (current && Number.isSafeInteger(current.itemCount) && !agent.transcriptLoadingOlder &&
+      if (current && current.engine !== "claude" && Number.isSafeInteger(current.itemCount) && !agent.transcriptLoadingOlder &&
           (agent.transcriptGap || agent.transcriptGeneration !== current.generation || agent.transcriptActivityCount !== current.itemCount)) {
         await syncPersistedTranscript(current.threadId, signal);
       }
@@ -856,14 +1013,13 @@ function clear(value) {
 }
 
 function show(view) {
-  if (view !== "claudeView") claudeConsole.hide();
-  $("#globalClaude").classList.toggle("active", view === "claudeView");
+  if (view !== "agentView") clearTimeout(claudePollTimer);
   closeSidebarPopovers();
   if (view !== "agentView") $("#conversationDetails").close();
-  for (const id of ["loginView", "setupView", "connectionView", "dashboardView", "workspaceView", "agentView", "runtimeView", "claudeView"]) {
+  for (const id of ["loginView", "setupView", "connectionView", "dashboardView", "workspaceView", "agentView", "runtimeView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
-  const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView", "claudeView"].includes(view);
+  const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView"].includes(view);
   completionNotifications?.setAuthenticated(authenticated);
   if (!authenticated) accountSidebar.clear();
   $("#logoutButton").classList.toggle("hidden", !authenticated);
@@ -877,7 +1033,10 @@ function show(view) {
   document.body.dataset.view = view;
   scheduleThreadActivity();
   document.title = view === "agentView" ? `${$("#conversationTitle").textContent} · Mira` : "Mira";
-  if (view === "agentView") setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
+  if (view === "agentView") {
+    setAgentThreadDrawer(agentThreadDrawerOpen, { focus: false });
+    if (agent.threadId && engineOf(agent.threadId) === "claude") void loadClaudeTranscript(agent.threadId, { poll: true }).catch(() => {});
+  }
   else if (!agentSidebarDocked) setAgentThreadDrawer(false);
   syncAccountSidebar();
   scheduleThreadRead();
@@ -2336,6 +2495,7 @@ function threadResidencyTarget(thread) {
 }
 
 function renderThreadResidency(indicator, thread) {
+  if (thread?.engine === "claude") { indicator.hidden = true; return; }
   const { node, key } = threadResidencyTarget(thread);
   const observation = agent.residency.entries.get(key)?.observation;
   const stale = observation?.checkedAt && Date.now() - Date.parse(observation.checkedAt) > 30_000;
@@ -2359,7 +2519,7 @@ function refreshConversationResidency({ force = false } = {}) {
   const bounds = $("#agentThreadList").getBoundingClientRect();
   for (const indicator of $("#agentThreadList").querySelectorAll("[data-thread-residency]")) {
     const thread = threads.get(indicator.dataset.threadResidency);
-    if (!thread) continue;
+    if (!thread || thread.engine === "claude") continue;
     renderThreadResidency(indicator, thread);
     const rect = indicator.getBoundingClientRect();
     if (!agentThreadDrawerOpen || !rect.height || rect.bottom < bounds.top || rect.top > bounds.bottom) continue;
@@ -2426,6 +2586,10 @@ function scheduleAgentHeartbeat() {
 }
 
 async function recoverAgentSession({ probe = false, refresh = true } = {}) {
+  if (conversationEngine() === "claude") {
+    if (agent.threadId && !document.hidden && document.body.dataset.view === "agentView") await loadClaudeTranscript(agent.threadId, { poll: true }).catch(() => {});
+    return;
+  }
   if (!agentRecoveryAllowed()) return;
   if (agent.recoveryPromise) return agent.recoveryPromise;
   const epoch = agent.selectionEpoch;
@@ -2448,7 +2612,7 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
         // before reattaching; explicit preparation and sending still take priority.
         if (threadId && agent.resumeRequestedThreadId === threadId && (!agent.socketInitialized || !agent.loadedThreadIds.has(threadId)) &&
           !agent.sendPromise && !agent.resumePromises.has(threadId) && !agent.runtimePromise) {
-          const current = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal: AbortSignal.timeout(12_000) });
+          const current = await readConversation(threadId, { signal: AbortSignal.timeout(12_000) });
           if (epoch !== agent.selectionEpoch || threadId !== agent.threadId) return;
           acceptThreadActivity(current);
           syncActiveTurnUi();
@@ -2536,23 +2700,29 @@ function syncConversationSendUi() {
   $("#threadDelete").disabled = busy;
   syncTitleMenu();
   const running = agent.activeTurns.has(agent.threadId);
+  const native = conversationEngine() === "claude", child = !!currentAgentThread()?.subpath;
   const stopping = agent.interruptRequests.has(JSON.stringify([agent.threadId, agent.turnId]));
   $("#conversationSend").classList.toggle("hidden", running);
-  $("#conversationSend").disabled = busy || !composerDraftKey || composerDraftLoading || !selectedNode;
-  $("#conversationInput").disabled = !composerDraftKey || composerDraftLoading;
+  $("#conversationSend").disabled = busy || !composerDraftKey || composerDraftLoading || !selectedNode || native && (running || child);
+  $("#conversationInput").disabled = !composerDraftKey || composerDraftLoading || child;
+  $("#conversationInput").placeholder = native ? "给 Claude 发消息…" : "给 Codex 发消息…";
+  $("#conversationInput").setAttribute("aria-label", native ? "给 Claude 发消息" : "给 Codex 发消息");
   const stop = $("#agentInterrupt");
   stop.classList.toggle("hidden", !running);
   stop.disabled = stopping || !agent.turnId;
   stop.title = stopping ? "正在停止…" : !agent.turnId ? "正在确认运行状态…" : "停止 Agent";
   stop.setAttribute("aria-label", stop.title);
   $("#agentRuntimeNode").disabled = busy;
-  $("#conversationAccount").disabled = busy;
+  $("#conversationAccount").disabled = busy || native && (running || child);
   $("#agentRuntimeAccount").disabled = busy;
-  $("#conversationDetailsAccount").disabled = busy;
+  $("#conversationDetailsAccount").disabled = busy || native && (running || child);
   $("#agentNewThread").disabled = busy;
   $("#agentNewProject").disabled = busy;
   $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
-  $("#conversationCwd").disabled = busy;
+  $("#conversationCwd").disabled = busy || child;
+  $("#claudePersistence").hidden = !native || currentAgentThread()?.persistence !== "incomplete";
+  $("#claudeReconcile").hidden = !native || !running;
+  $(".conversation-recovery-settings").classList.toggle("hidden", native);
   renderConversationModel();
   for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy || composerDraftLoading;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
@@ -2561,7 +2731,7 @@ function syncConversationSendUi() {
 
 function conversationModelKey() {
   const node = selectedAccountNode();
-  return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim(), node?.nodeAccountId ?? "", node?.accountRevision ?? 0, node?.reportedAppServer?.runtimeId ?? ""]);
+  return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim(), node?.nodeAccountId ?? "", node?.accountRevision ?? 0, node?.reportedAppServer?.runtimeId ?? "", node?.engine ?? "codex"]);
 }
 
 function selectedConversationModel() {
@@ -2570,7 +2740,7 @@ function selectedConversationModel() {
 }
 
 const reasoningEffortLabels = {
-  minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", ultra: "极高",
+  max: "最高", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "很高", ultra: "极高",
 };
 
 function modelCatalogForConversation() {
@@ -2756,13 +2926,13 @@ async function loadConversationModels({ refresh = false } = {}) {
   if (!refresh && agent.modelCatalogKey === key && agent.modelCatalog && Date.now() - agent.modelCatalogLoadedAt < 300_000) { renderConversationModel(); return; }
   if (agent.modelCatalogKey !== key) { agent.modelCatalog = null; agent.modelCatalogError = ""; }
   agent.modelCatalogKey = key;
-  if (node?.status !== "online" || node.reportedAppServer?.status !== "running") { renderConversationModel(); return; }
+  if (node?.status !== "online" || node.engine !== "claude" && node.reportedAppServer?.status !== "running") { renderConversationModel(); return; }
   const job = { key };
   agent.modelCatalogJob = job;
   renderConversationModel();
   job.promise = (async () => {
     try {
-      const catalog = await readModelCatalog(node.nodeId, $("#conversationCwd").value.trim(), { refresh, nodeAccountId: node.nodeAccountId, accountRevision: node.accountRevision, runtimeId: node.reportedAppServer?.runtimeId });
+      const catalog = node.engine === "claude" ? await claudeRuntime.models(node) : await readModelCatalog(node.nodeId, $("#conversationCwd").value.trim(), { refresh, nodeAccountId: node.nodeAccountId, accountRevision: node.accountRevision, runtimeId: node.reportedAppServer?.runtimeId });
       if (conversationModelKey() !== key || agent.modelCatalogJob !== job) return;
       agent.modelCatalog = catalog;
       agent.modelCatalogLoadedAt = Date.now();
@@ -3018,6 +3188,7 @@ function refreshTurnFooters(turnId = null) {
       : costEstimate?.status === "complete"
         ? `API 估算：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
         : "暂无法估算本轮费用：缺少请求用量、模型或对应价格";
+    if (costEstimate?.basis === "claude_sdk") cost.title = `Claude SDK 估算：${formatEstimatedCost(costEstimate.amount)}，网关实际扣费可能不同${costEstimate.status === "partial" ? "；部分记录缺失" : ""}`;
     const clock = last.querySelector(".trace-completed");
     if (clock.hidden && traceClock(completedAt)) {
       clock.textContent = traceClock(completedAt);
@@ -3702,7 +3873,7 @@ function scheduleTranscriptCosts(threadId, transcript) {
   if (agent.transcriptCostRequests.has(key)) return;
   const query = new URLSearchParams({ storeId: "personal" });
   for (const turnId of turnIds) query.append("turnId", turnId);
-  const job = api(`/v1/codex/threads/${encodeURIComponent(threadId)}/costs?${query}`);
+  const job = api(`${engineOf(threadId) === "claude" ? "/v1/claude/sessions" : "/v1/codex/threads"}/${encodeURIComponent(threadId)}/costs?${query}`);
   agent.transcriptCostRequests.set(key, job);
   void job.then((result) => {
     if (agent.threadId !== threadId || agent.transcriptGeneration !== result.generation) return;
@@ -3922,6 +4093,7 @@ function renderTranscript(fallbackThread, options = {}) {
 }
 
 async function loadAgentTranscript(threadId, fallbackThread = null, options = {}) {
+  if (engineOf(threadId) === "claude") return loadClaudeTranscript(threadId, options);
   const epoch = agent.selectionEpoch;
   const request = ++agent.transcriptRequest;
   const liveRevision = agent.liveRevision;
@@ -4284,7 +4456,7 @@ async function refreshAgentNodes() {
   const previousSource = sourceSelect.value;
   clear(runtimeSelect);
   clear(sourceSelect);
-  for (const node of nodes.filter((value) => value.capabilities?.appServer === true)) {
+  for (const node of nodes.filter((value) => (value.capabilities?.appServer === true || value.capabilities?.claudeRuntimeV1 === true))) {
     const option = element("option", "", `${nodeUserName(node)} · ${node.platform} · ${node.status}`);
     option.value = node.nodeId;
     runtimeSelect.append(option);
@@ -4384,6 +4556,7 @@ function renderAgentThreadRow(thread) {
   renderThreadResidency(residency, thread);
   meta.append(residency, status, usage, cost);
   button.append(element("strong", "", button.title), meta);
+  meta.prepend(element("span", "thread-engine", thread.engine === "claude" ? "Claude" : "Codex"));
   const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
   menu.type = "button";
   menu.dataset.threadMenu = thread.threadId;
@@ -4403,7 +4576,7 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
   children.dataset.subagentParent = entry.threadId;
   children.open = agent.subagentOpen.get(entry.threadId) ?? selectedAncestors.has(entry.threadId);
   const summary = element("summary", "thread-subagents-summary");
-  summary.title = `${entry.thread.title || "未命名会话"} 的子 Agent（含下级）`;
+  summary.title = `${entry.thread.title || "未命名会话"} 的${entry.thread.engine === "claude" ? "原生子 Agent 记录" : "子 Agent（含下级）"}`;
   summary.append(element("span", "thread-subagents-label", `子 Agent · ${entry.descendantCount}`),
     element("span", "thread-subagents-activity"));
   const list = element("div", "thread-subagent-threads");
@@ -4491,7 +4664,7 @@ function renderAgentThreads(revealSelection = false) {
     const add = element("button", "chat-icon-button project-new-thread", "+");
     add.type = "button";
     add.dataset.projectNew = group.key;
-    add.dataset.projectNode = node?.capabilities?.appServer === true ? group.nodeId : "";
+    add.dataset.projectNode = (node?.capabilities?.appServer === true || node?.capabilities?.claudeRuntimeV1 === true) ? group.nodeId : "";
     add.dataset.projectPath = group.cwd;
     add.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise) || !add.dataset.projectNode;
     add.title = add.dataset.projectNode ? `在 ${group.cwd || "默认目录"} 新建对话` : "该项目未关联可运行 Codex 的机器";
@@ -4635,7 +4808,7 @@ function conversationCostKey(threadId) {
 function renderConversationCost(estimate, placeholder = "正在计算…") {
   $("#conversationCostAmount").textContent = estimate ? `${estimate.status === "partial" && estimate.amount !== null ? "已估算部分 " : ""}${estimate.amount === null ? "暂无法估算" : formatEstimatedCost(estimate.amount)}` : placeholder;
   const components = $("#conversationCostComponents");
-  components.hidden = !estimate?.includesSubagents;
+  components.hidden = !estimate?.includesSubagents || estimate?.basis === "claude_sdk";
   components.textContent = estimate?.includesSubagents
     ? `自身 ${formatEstimatedCost(estimate.selfAmount)} · 子 Agent ${formatEstimatedCost(estimate.subagentAmount)}（含下级，共 ${estimate.subagentCount} 个）` : "";
   const parts = estimate?.breakdown;
@@ -4647,7 +4820,9 @@ function renderConversationCost(estimate, placeholder = "正在计算…") {
     ? "缺少请求用量、模型或对应价格。" : estimate.status === "partial"
       ? `${scope}部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。`
       : `${scope}按历史请求模型估算 Token 费用；服务端临时重路由可能不同，非套餐实际扣费。`;
-  $("#conversationCostPricing").textContent = `Standard 公开价${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
+  $("#conversationCostPricing").href = estimate?.basis === "claude_sdk" ? "https://code.claude.com/docs/en/agent-sdk/cost-tracking" : "https://developers.openai.com/api/docs/pricing";
+  $("#conversationCostPricing").textContent = estimate?.basis === "claude_sdk" ? "Claude SDK 价格估算" : `Standard 公开价${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
+  if (estimate?.basis === "claude_sdk") $("#conversationCostNote").textContent = `${estimate.note} ${estimate.status === "partial" ? "部分记录缺失或累计用量重置，仅显示可确认的费用。" : ""}`;
 }
 
 async function refreshConversationCost() {
@@ -4658,7 +4833,7 @@ async function refreshConversationCost() {
   const job = { key, revision: panel._miraRevision };
   panel._miraCostRequest = job;
   try {
-    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal&includeCost=1`);
+    const thread = await readConversation(threadId, { includeCost: true });
     if (!panel.open || panel._miraRevision !== job.revision || conversationCostKey(threadId) !== key) return;
     panel._miraCostKey = key;
     panel._miraCostAt = Date.now();
@@ -4850,7 +5025,7 @@ function installConversationDetailsGestures() {
 }
 
 async function openConversationDetails(threadId) {
-  void automaticRecovery.select(threadId);
+  void automaticRecovery.select(engineOf(threadId) === "claude" ? null : threadId);
   const panel = $("#conversationDetails");
   const revision = (panel._miraRevision ?? 0) + 1;
   panel._miraRevision = revision;
@@ -4870,7 +5045,7 @@ async function openConversationDetails(threadId) {
     return;
   }
   try {
-    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal&includeCost=1`);
+    const thread = await readConversation(threadId, { includeCost: true });
     if (!panel.open || panel._miraRevision !== revision) return;
     acceptThreadTokenUsage(thread, checkedAt);
     rememberThreadCost(thread);
@@ -4890,6 +5065,9 @@ async function openConversationDetails(threadId) {
 function openThreadMenu(threadId, anchor, point = null) {
   if (!threadId) return;
   agent.menuThreadId = threadId;
+  const native = engineOf(threadId) === "claude";
+  for (const id of ["threadFork", "threadRegenerateTitle", "threadDelete"]) $("#"+id).classList.toggle("hidden", native);
+  for (const id of ["threadArchive", "threadRename"]) $("#"+id).classList.toggle("hidden", !!agent.threads.find(t => t.threadId === threadId)?.subpath);
   syncTitleMenu();
   const menu = $("#threadOptionsMenu");
   $("#threadOpenWindow").href = `/?thread=${encodeURIComponent(threadId)}`;
@@ -4906,8 +5084,8 @@ async function editThreadTitle() {
   if (!agent.titleJobs.get(threadId)?.saving) agent.titleJobs.get(threadId)?.controller.abort();
   $("#threadOptionsMenu").hidePopover();
   // Fetch the latest name for compare-and-swap, including edits from another window.
-  const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
-  agent.rename = { threadId, expectedName: thread.name ?? null, generation: thread.generation };
+  const thread = await readConversation(threadId);
+  agent.rename = { engine: thread.engine, threadId, expectedName: thread.name ?? null, generation: thread.generation };
   $("#threadRenameInput").value = thread.title || "";
   $("#threadRenameError").textContent = "";
   $("#threadRenameDialog").showModal();
@@ -4934,7 +5112,7 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
     let source;
     // A new thread's canonical projection can arrive just after turn/start's acknowledgement.
     for (let attempt = 0; ; attempt++) {
-      try { source = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal }); }
+      try { source = await readConversation(threadId, { signal }); }
       catch (error) { if (!automatic || error.status !== 404 || attempt >= 9) throw error; }
       if (!automatic || attempt >= 9 || (Number.isSafeInteger(source?.generation) && (source.runtimeNodeId || source.sourceNodeId))) break;
       await new Promise(resolve => setTimeout(resolve, 300));
@@ -5133,7 +5311,7 @@ async function showProjectDialog() {
 
 function threadPager() {
   agent.threadPager ??= new ThreadPager(
-    query => api(`/v1/codex/threads?${query}`, { signal: AbortSignal.timeout(15_000) }),
+    conversationPageReader(api, engineOf),
     page => {
       const previous = new Map(agent.threads.map(thread => [thread.threadId, thread.updatedAt]));
       const changed = mergeAgentThreadSummaries(page.data ?? [], page.removed);
@@ -5190,6 +5368,7 @@ function threadPageButton(view, key, loaded, total) {
 }
 
 async function loadThreadPath(threadId, epoch) {
+  if (engineOf(threadId) === "claude") return;
   const pager = threadPager(), filterEpoch = pager.epoch, seen = new Set();
   while (threadId && !seen.has(threadId)) {
     seen.add(threadId);
@@ -5239,8 +5418,9 @@ async function archiveThreadFromMenu() {
   const action = agent.threads.find(thread => thread.threadId === threadId)?.archived ? "restore" : "archive";
   $("#threadOptionsMenu").hidePopover();
   const operation = (async () => {
-    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
-    await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/${action}?storeId=personal`, {
+    const thread = await readConversation(threadId);
+    if (thread.engine === "claude") await api(`/v1/claude/sessions/${thread.sessionId}`, { method: "PATCH", body: JSON.stringify({ archived: action === "archive" }) });
+    else await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/${action}?storeId=personal`, {
       method: "POST", body: JSON.stringify({ generation: thread.generation, operationId: crypto.randomUUID() }),
     });
     removeThreadFromWindow(threadId, false);
@@ -5257,7 +5437,7 @@ async function showDeleteThreadDialog() {
   const threadId = agent.menuThreadId;
   $("#threadOptionsMenu").hidePopover();
   if (agent.activeTurns.has(threadId)) { toast("请先停止此对话的运行，再删除。"); return; }
-  const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+  const thread = await readConversation(threadId);
   agent.deleteTarget = { ...thread, operationId: crypto.randomUUID() };
   $("#threadDeleteName").textContent = thread.title || "未命名会话";
   $("#threadDeleteError").textContent = "";
@@ -5543,7 +5723,7 @@ async function refreshActiveTurn(threadId, socket) {
     try {
       // Legacy Codex turns/list reconstructs the full history even with
       // itemsView=notLoaded. The Server projection already carries turn state.
-      const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal: AbortSignal.timeout(12_000) });
+      const thread = await readConversation(threadId, { signal: AbortSignal.timeout(12_000) });
       if (agent.socket !== socket || agent.threadId !== threadId || agent.selectionEpoch !== epoch || agent.liveRevision !== revision) return;
       agent.activityCheckedAt = Date.now();
       const wasActive = agent.activeTurns.has(threadId);
@@ -5559,6 +5739,7 @@ async function refreshActiveTurn(threadId, socket) {
 
 async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (agent.sendPromise) return;
+  clearTimeout(claudePollTimer); claudeRuntime.reset();
   if (updateRoute) writeBrowserRoute("agent", threadId);
   const epoch = ++agent.selectionEpoch;
   agent.modelChoice = null;
@@ -5566,6 +5747,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   agent.threadReasoningEffort = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
+  $("#claudeContinue").checked = false;
   clearTimeout(agent.reconnectTimer);
   clearTimeout(agent.heartbeatTimer);
   $("#conversationConnection").classList.add("hidden");
@@ -5580,7 +5762,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   let projected = currentAgentThread();
   if (!projected) {
     try {
-      projected = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
+      projected = await readConversation(threadId);
       if (epoch !== agent.selectionEpoch) return;
       agent.threads.push(projected);
       acceptThreadActivity(projected);
@@ -5599,6 +5781,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
     await loadThreadPath(threadId, epoch);
     if (epoch === agent.selectionEpoch) renderAgentThreads(true);
   })().catch(error => { if (epoch === agent.selectionEpoch) toast(`父级列表暂未加载：${error.message}`); });
+  if (projected?.engine === "claude") { stopAgentRecovery(); closeAgentSocket(); }
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
   agent.threadReasoningEffort = typeof projected?.reasoningEffort === "string" ? projected.reasoningEffort : null;
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
@@ -5616,11 +5799,12 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   // Browsing only reads the authoritative transcript. If editing began while
   // its metadata was loading, prepare the runtime now that its Node is known.
   if (agent.resumeRequestedThreadId === threadId) void prepareEditedThread(threadId, epoch);
-  accountRecovery.select(threadId, $("#conversationAccount").value);
+  accountRecovery.select(projected?.engine === "claude" ? null : threadId, $("#conversationAccount").value);
   await loadAgentTranscript(threadId);
 }
 
 async function prepareEditedThread(threadId, epoch) {
+  if (engineOf(threadId) === "claude") return;
   if (!currentAgentThread() || agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
   try {
     await startAgentRuntime();
@@ -5648,6 +5832,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   if (updateRoute) writeBrowserRoute("agent");
   agent.selectionEpoch++;
   agent.threadId = null;
+  clearTimeout(claudePollTimer); claudeRuntime.reset(); refreshAccountChoices();
   accountRecovery.select(null, "");
   agent.modelChoice = null;
   agent.effortChoice = null;
@@ -5669,7 +5854,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   void composerDrafts.write("personal:new-project", draftProject).catch(() => {});
   void selectComposerDraft(`personal:new:${draftProject.key}:${$("#conversationAccount").value}`);
   void loadConversationModels();
-  clear($("#conversationTrace")).append(element("div", "conversation-empty", "输入消息开始新的 Codex 会话。"));
+  clear($("#conversationTrace")).append(element("div", "conversation-empty", "选择账号，输入消息开始新的会话。"));
   renderAgentThreads();
 }
 
@@ -5793,7 +5978,8 @@ async function prepareTurnInput(text, attachments, progress) {
   let directory = null;
   let uploaded = 0;
   const total = attachments.reduce((sum, file) => sum + file.size, 0);
-  const nodeId = agent.socketNodeId;
+  const nodeId = conversationEngine() === "claude" ? $("#agentRuntimeNode").value : agent.socketNodeId;
+  const nativeAttachments = [];
   $("#conversationUploadCancel").classList.toggle("hidden", !attachments.length);
   try {
     if (attachments.length) {
@@ -5822,6 +6008,7 @@ async function prepareTurnInput(text, attachments, progress) {
           signal.throwIfAborted();
         } while (offset < file.size);
         staged.push({ file, path });
+        nativeAttachments.push({ path, name: file.name, mime: file.type });
         if (nativeImageAttachment(file)) inputs.push({ type: "localImage", path });
       }
       annotations.push([
@@ -5831,7 +6018,7 @@ async function prepareTurnInput(text, attachments, progress) {
     }
     const message = [text, ...annotations].filter(Boolean).join("\n\n");
     if (message) inputs.unshift({ type: "text", text: message });
-    return { inputs, message };
+    return { inputs, message, nativeAttachments };
   } catch (error) {
     if (directory) {
       try { await invokeNode(nodeId, "file", { action: "remove", path: directory, recursive: true }, 60_000); }
@@ -5885,6 +6072,7 @@ function addComposerFiles(files) {
 }
 
 async function sendAgentMessage(text, attachments = [], progress = null) {
+  if (conversationEngine() === "claude") return sendClaudeMessage(text, attachments, progress);
   const requestedModel = selectedConversationModel();
   const requestedEffort = selectedConversationEffort();
   updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
@@ -6022,7 +6210,7 @@ async function openAgentConsole() {
     try { project = await composerDrafts.read("personal:new-project"); } catch { /* Reported by the composer. */ }
     newAgentThread({ project });
   }
-  if (agent.threadId && agent.resumeRequestedThreadId === agent.threadId) {
+  if (agent.threadId && engineOf(agent.threadId) !== "claude" && agent.resumeRequestedThreadId === agent.threadId) {
     agent.connectionWanted = true;
     void recoverAgentSession({ probe: true });
   }
@@ -6096,7 +6284,7 @@ $("#logoutButton").addEventListener("click", async () => {
 $("#themeToggle").addEventListener("click", toggleTheme);
 $("#agentThemeToggle").addEventListener("click", toggleTheme);
 $("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
-for (const id of ["globalClaude", "agentClaude"]) $("#"+id).addEventListener("click", () => claudeConsole.open().catch(e=>toast(e.message)));
+
 $("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
 for (const id of ["globalAccounts", "agentManageAccounts"]) $("#" + id).addEventListener("click", () => navigateGlobal("nodes").then(() => codexAccounts.focusNode("")).catch(error => toast(error.message)));
@@ -6491,8 +6679,9 @@ $("#agentInterrupt").addEventListener("click", async () => {
   agent.interruptRequests.add(key);
   syncConversationSendUi();
   try {
-    const thread = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`);
-    await interruptThread({ threadId, turnId, nodeId: thread.runtimeNodeId, nodeAccountId: thread.nodeAccountId });
+    const thread = await readConversation(threadId);
+    if (thread.engine === "claude") { await claudeRuntime.call(`sessions/${thread.sessionId}/interrupt`, {}); await loadClaudeTranscript(threadId, { poll: true }); }
+    else await interruptThread({ threadId, turnId, nodeId: thread.runtimeNodeId, nodeAccountId: thread.nodeAccountId });
     void refreshThreadActivity();
   }
   catch (error) { toast(error.message); }
@@ -6587,7 +6776,10 @@ $("#threadRenameForm").addEventListener("submit", async (event) => {
   save.disabled = true;
   $("#threadRenameError").textContent = "";
   try {
-    const thread = await api(`/v1/codex/threads/${encodeURIComponent(rename.threadId)}?storeId=personal`, {
+    const thread = rename.engine === "claude" ? await (async () => {
+      await api(`/v1/claude/sessions/${rename.threadId}`, { method: "PATCH", body: JSON.stringify({ title: name }) });
+      return readConversation(rename.threadId);
+    })() : await api(`/v1/codex/threads/${encodeURIComponent(rename.threadId)}?storeId=personal`, {
       method: "PATCH", body: JSON.stringify({ name, expectedName: rename.expectedName, generation: rename.generation, operationId: rename.operationId }),
     });
     agent.threads = agent.threads.map((value) => value.threadId === thread.threadId ? { ...value, ...thread, listRoot: value.listRoot } : value);

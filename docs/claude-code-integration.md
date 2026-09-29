@@ -5,8 +5,12 @@ Linux acceptance also verified real Messages and Bedrock gateway APIs on 2026-09
 
 ## User experience
 
-The administrator console has a **Claude** entry, also accessible from the Codex
-conversation menu. Choose an execution Node and an absolute workspace directory.
+Mira 1.0.59 uses one **Conversations** page for Codex and Claude: the same project
+sidebar, transcript renderer, composer, model controls, drafts, attachments and account
+popover. New conversations choose their engine through the selected account. Existing
+conversations offer accounts from the same engine only; native histories are not converted.
+The sidebar distinguishes same-name accounts by engine. Old Claude links resolve into
+this shared page. Choose an execution Node and an absolute workspace directory.
 The first send prepares the pinned SDK on that Node. Subsequent turns reuse its
 installed package and resume the native session from Mira's acknowledged history.
 
@@ -33,11 +37,38 @@ Implemented:
   The user chooses a compatible workspace there. An active turn prevents ownership
   transfer; old Node/revision writers are rejected after a new turn is reserved.
 
-The two engines currently have separate conversation lists in the same console.
-The Claude interface does not yet implement active-turn steering, conversation
-forking, a `mira claude` CLI wrapper, or aggregate account/
-subagent cost accounting. It shows the SDK's reported usage and cost for a run.
-Workspace files and attachment paths are not automatically copied between Nodes.
+The Claude adapter does not yet implement active-turn steering, conversation forking,
+permanent deletion, automatic title generation or a `mira claude` CLI wrapper.
+Unsupported actions are omitted from its menu. Native child records are grouped beneath
+the owning session for browsing, without asserting unknown nested parentage. Continue
+child work through its root session. Workspace files and attachment paths are not
+automatically copied between Nodes.
+
+## Usage and cost projection
+
+Schema 36 adds immutable per-turn account attribution and a rebuildable, indexed
+usage projection. It leaves Codex tables and migrations 1–35 unchanged. Historical
+account attribution uses explicit immutable turn requests only; ambiguous historical
+accounts stay unassigned. Account names are captured when a turn starts, so switching
+or renaming an account cannot move previously attributed spend.
+
+Each native result replaces that turn's cumulative snapshot. Session totals and per-turn
+costs difference consecutive snapshots before filtering by date/account. They never add
+assistant block usage or child totals to the already inclusive result. Counter resets,
+missing results and unprojectable raw JSON remain partial/unavailable; real reported
+zero stays zero. The append transaction updates the projection once, so an acknowledged
+retry cannot charge twice. SDK events containing escaped NUL remain valid authoritative
+records even if PostgreSQL cannot extract their projection.
+
+The same conversation details, turn footers and account cost charts show Claude's SDK
+estimate in USD, including cache usage. This is not a gateway billing API. Whole-session
+tokens use `modelUsage`, including subagent requests; native `usage` is main-loop-only.
+No unsupported per-child cost split is inferred. See the
+[official cost semantics](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+
+Rebuild the projection by reloading attribution from `mira_claude_turns`, then applying
+`mira_claude_project_result(turn_id, seq, payload)` to the latest root `result` event per
+turn. Reads scan the small usage projection, never the raw conversation history.
 
 ## Installation and authentication
 
@@ -128,7 +159,7 @@ Wire endpoints and ownership rules are in
 ## Validation
 
 The original integration was validated on main `b2f255f` (Mira 1.0.43).
-The release integration uses schema 35; released migrations 1–34 remain unchanged.
+The unified conversation release uses schema 36; released migrations 1–35 remain unchanged.
 Regression validation passed the full Go suite, 109 JavaScript unit tests,
 Windows/Android compile checks, PostgreSQL migration/import/channel tests,
 v1/v2 storage, Web/Node capabilities, and native Codex CLI/App Server resume,

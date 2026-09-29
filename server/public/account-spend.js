@@ -59,7 +59,9 @@ export class AccountSpend extends AccountHistory {
   }
 
   urlFor(name, range) {
-    return `/v1/codex/accounts/cost-history?${new URLSearchParams({ name, range, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })}`;
+    let engine = "codex";
+    try { const key = JSON.parse(name); if (Array.isArray(key) && ["codex", "claude"].includes(key[0])) [engine, name] = key; } catch { /* Legacy account name. */ }
+    return `/v1/${engine}/accounts/cost-history?${new URLSearchParams({ name, range, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone })}`;
   }
 
   cacheSummary(name, data, expiresAt) {

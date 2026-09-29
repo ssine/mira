@@ -93,6 +93,27 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 	if err != nil || actor == nil {
 		return true, err
 	}
+	if r.Method == "GET" && len(parts) == 2 && parts[0] == "accounts" && parts[1] == "cost-history" {
+		result, err := server.claudeAccountCosts(ctx, r)
+		if err != nil {
+			return true, err
+		}
+		return true, writeJSON(w, 200, result)
+	}
+	if r.Method == "GET" && parts[0] == "conversations" {
+		var result map[string]any
+		if len(parts) == 1 {
+			result, err = server.claudeConversationList(ctx, r)
+		} else if len(parts) == 2 && claudeUUID(parts[1]) {
+			result, err = server.claudeConversation(ctx, parts[1])
+		} else {
+			return true, claudeError(404, "Unknown conversation")
+		}
+		if err != nil {
+			return true, err
+		}
+		return true, writeJSON(w, 200, result)
+	}
 	if len(parts) > 0 && parts[0] == "accounts" {
 		return true, server.routeClaudeAccounts(ctx, w, r, actor, parts)
 	}
@@ -271,17 +292,17 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if before < 0 {
 			return true, claudeError(400, "Invalid history cursor")
 		}
-		query := `SELECT seq,payload FROM mira_claude_events WHERE session_id=$1 AND seq>$2 ORDER BY seq LIMIT 200`
+		query := `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND seq>$2 ORDER BY seq LIMIT 200`
 		args := []any{id, cursor}
 		if op == "history" {
-			query = `SELECT seq,payload FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$3 ORDER BY seq LIMIT 200`
+			query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$3 ORDER BY seq LIMIT 200`
 			args = append(args, r.URL.Query().Get("subpath"))
 		}
 		if backward {
 			args = []any{id, before}
-			query = `SELECT seq,payload FROM mira_claude_events WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND event_type<>'stream_event' ORDER BY seq DESC LIMIT 200`
+			query = `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND event_type<>'stream_event' ORDER BY seq DESC LIMIT 200`
 			if op == "history" {
-				query = `SELECT seq,payload FROM mira_claude_entries WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND subpath=$3 ORDER BY seq DESC LIMIT 200`
+				query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND subpath=$3 ORDER BY seq DESC LIMIT 200`
 				args = append(args, r.URL.Query().Get("subpath"))
 			}
 		}
@@ -295,14 +316,15 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		for rows.Next() {
 			var seq int64
 			var raw json.RawMessage
-			if err = rows.Scan(&seq, &raw); err != nil {
+			var turnID *string
+			if err = rows.Scan(&seq, &raw, &turnID); err != nil {
 				return true, err
 			}
 			if len(data) > 0 && pageBytes+len(raw) > 4*1024*1024 {
 				break
 			}
 			pageBytes += len(raw)
-			data = append(data, map[string]any{"seq": seq, "payload": raw})
+			data = append(data, map[string]any{"seq": seq, "payload": raw, "turnId": turnID})
 			cursor = seq
 		}
 		if err = rows.Err(); err != nil {
@@ -317,6 +339,36 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 			}
 		}
 		return true, writeJSON(w, 200, map[string]any{"data": data, "cursor": cursor, "earliest": earliest, "session": s, "hasMore": len(data) > 0})
+	}
+	if op == "costs" && r.Method == "GET" {
+		ids := r.URL.Query()["turnId"]
+		if len(ids) > 200 {
+			return true, claudeError(400, "Too many turn IDs")
+		}
+		for _, id := range ids {
+			if !claudeUUID(id) {
+				return true, claudeError(400, "Invalid turn ID")
+			}
+		}
+		rows, err := server.pool.Query(ctx, `SELECT turn_id::text,cost_delta::float8,cost_partial FROM mira_claude_usage_deltas WHERE session_id=$1 AND turn_id=ANY($2::uuid[])`, s.ID, ids)
+		if err != nil {
+			return true, err
+		}
+		defer rows.Close()
+		estimates := map[string]any{}
+		for rows.Next() {
+			var id string
+			var amount *float64
+			var partial bool
+			if err = rows.Scan(&id, &amount, &partial); err != nil {
+				return true, err
+			}
+			estimates[id] = claudeEstimate(amount, partial)
+		}
+		if err = rows.Err(); err != nil {
+			return true, err
+		}
+		return true, writeJSON(w, 200, map[string]any{"generation": 1, "turnCostEstimates": estimates})
 	}
 	if op == "children" && r.Method == "GET" {
 		rows, err := server.pool.Query(ctx, `SELECT thread_id::text,subpath,parent_thread_id::text FROM mira_claude_transcripts WHERE session_id=$1 AND subpath<>'' ORDER BY subpath`, id)
@@ -551,7 +603,8 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		return claudeError(400, "Invalid effort")
 	}
 
-	_, err = tx.Exec(ctx, `INSERT INTO mira_claude_turns(turn_id,session_id,node_id,revision,request,runtime_id) VALUES($1,$2,$3,$4,$5::json,$6)`, turnID, s.ID, nodeID, revision, request, state["runtimeId"])
+	_, err = tx.Exec(ctx, `INSERT INTO mira_claude_turns(turn_id,session_id,node_id,revision,request,runtime_id,node_account_id,account_name)
+ VALUES($1,$2,$3,$4,$5::json,$6,NULLIF($7,'')::uuid,(SELECT name FROM mira_claude_accounts WHERE node_account_id=NULLIF($7,'')::uuid))`, turnID, s.ID, nodeID, revision, request, state["runtimeId"], accountID)
 	if err != nil {
 		return err
 	}

@@ -76,6 +76,7 @@ function recoveryFixture(error) {
   const context = vm.createContext({
     agent: { selectionEpoch: 1, connectionWanted: true, threadId: "thread", socketInitialized: false },
     WebSocket: { OPEN: 1 },
+    conversationEngine: () => "codex",
     agentRecoveryAllowed: () => true, traceNearBottom: () => false,
     loadAgentTranscript: async () => {}, startAgentRuntime: async () => { throw error; },
     stopAgentRecovery: () => { context.agent.connectionWanted = false; },
