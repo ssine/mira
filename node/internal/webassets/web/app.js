@@ -178,6 +178,7 @@ const agent = {
   recoveryNotice: null,
   connectionWanted: false,
   resumeRequestedThreadId: null,
+  residency: { entries: new Map(), running: 0 },
   composerValue: "",
   socketInitialized: false,
   reconnectTimer: null,
@@ -356,7 +357,7 @@ function syncAccountSidebar() {
 async function refreshAccountSidebarNodes() {
   if (accountNodesController) return;
   const controller = new AbortController(); accountNodesController = controller;
-  accountNodesNextAt = Date.now() + 5 * 60_000;
+  accountNodesNextAt = Date.now() + ($("#agentAccountDetails").matches(":popover-open") ? 10_000 : 5 * 60_000);
   const deadline = setTimeout(() => controller.abort(), 15_000);
   try {
     const response = await api("/v1/nodes", { signal: controller.signal });
@@ -684,6 +685,7 @@ function scheduleThreadActivity(delay = threadActivity(agent.threadId).state ===
 }
 
 async function refreshThreadActivity() {
+  void refreshConversationResidency();
   if (agent.activityRequest) return agent.activityRequest;
   const checkedAt = Date.now();
   const listRequest = agent.threadListRequest, archived = agent.showArchived, selectionEpoch = agent.selectionEpoch;
@@ -2320,6 +2322,58 @@ function setConversationMeta(cwd, model) {
   $("#conversationMeta").replaceChildren(directory, element("span", "conversation-meta-separator", "·"), runtimeModel);
 }
 
+function threadResidencyTarget(thread) {
+  const node = accountNode(dashboardNodes.get(thread?.runtimeNodeId || thread?.sourceNodeId), thread?.nodeAccountId || "");
+  return { node, key: JSON.stringify([thread?.threadId, node?.nodeId, node?.nodeAccountId, node?.reportedAppServer?.runtimeId]) };
+}
+
+function renderThreadResidency(indicator, thread) {
+  const { node, key } = threadResidencyTarget(thread);
+  const observation = agent.residency.entries.get(key)?.observation;
+  const stale = observation?.checkedAt && Date.now() - Date.parse(observation.checkedAt) > 30_000;
+  const state = navigator.onLine === false || node?.status === "offline" ? "offline" : stale ? "unknown" : observation?.state ?? "unknown";
+  const labels = { loaded: "已加载 · 驻留在内存中", unloaded: "已卸载 · 继续执行时恢复", offline: "节点离线 · 无法确认驻留状态",
+    stopped: "运行实例已停止", unknown: "暂时无法确认驻留状态" };
+  const details = [labels[state] ?? labels.unknown, node ? `节点：${node.displayName || node.hostname || node.nodeId}` : "尚未确定运行节点",
+    node?.accountName && `账号：${node.accountName}`, stale ? "上次检查已过期" : observation?.message,
+    observation?.checkedAt && `检查时间：${new Date(observation.checkedAt).toLocaleTimeString()}`].filter(Boolean).join("\n");
+  indicator.dataset.state = state;
+  indicator.title = details;
+  indicator.setAttribute("aria-label", details);
+}
+
+// Observe only visible rows with bounded concurrency. This is independent of
+// the browser's socket subscriptions: checking residency must never resume.
+function refreshConversationResidency({ force = false } = {}) {
+  if (document.hidden || document.body.dataset.view !== "agentView") return;
+  const state = agent.residency;
+  const threads = new Map(agent.threads.map(thread => [thread.threadId, thread]));
+  const bounds = $("#agentThreadList").getBoundingClientRect();
+  for (const indicator of $("#agentThreadList").querySelectorAll("[data-thread-residency]")) {
+    const thread = threads.get(indicator.dataset.threadResidency);
+    if (!thread) continue;
+    renderThreadResidency(indicator, thread);
+    const rect = indicator.getBoundingClientRect();
+    if (!agentThreadDrawerOpen || !rect.height || rect.bottom < bounds.top || rect.top > bounds.bottom) continue;
+    const { node, key } = threadResidencyTarget(thread);
+    if (!node?.nodeAccountId || navigator.onLine === false) continue;
+    let entry = state.entries.get(key);
+    if (entry?.pending || state.running >= 3 || (!(force && thread.threadId === agent.threadId) && entry?.nextAt > Date.now())) continue;
+    if (!entry) {
+      // Only completed observations can be discarded while their requests run.
+      if (state.entries.size >= 256) for (const [oldKey, old] of state.entries) {
+        if (!old.pending) { state.entries.delete(oldKey); break; }
+      }
+      entry = {}; state.entries.set(key, entry);
+    }
+    entry.pending = true; entry.nextAt = Date.now() + 10_000; state.running++;
+    void api(`/v1/nodes/${encodeURIComponent(node.nodeId)}/codex-accounts/${encodeURIComponent(node.nodeAccountId)}/residency?threadId=${encodeURIComponent(thread.threadId)}`, { signal: AbortSignal.timeout(10_000) })
+      .then(observation => { entry.observation = observation; })
+      .catch(() => { entry.observation = { state: "unknown", message: "状态检查暂不可用" }; })
+      .finally(() => { entry.pending = false; state.running--; refreshConversationResidency(); });
+  }
+}
+
 function setAgentRuntimeState(message, status = "offline") {
   $("#agentRuntimeState").textContent = message;
   $("#agentRuntimeBadge").textContent = status;
@@ -2381,6 +2435,25 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
         ? loadAgentTranscript(threadId, null, { preserveLoaded: true, anchorBottom: traceNearBottom() })
         : Promise.resolve();
       const connection = (async () => {
+        // A previous edit/send is not permanent permission to reload an idle
+        // conversation after every disconnect. Confirm current durable activity
+        // before reattaching; explicit preparation and sending still take priority.
+        if (threadId && agent.resumeRequestedThreadId === threadId && (!agent.socketInitialized || !agent.loadedThreadIds.has(threadId)) &&
+          !agent.sendPromise && !agent.resumePromises.has(threadId) && !agent.runtimePromise) {
+          const current = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal: AbortSignal.timeout(12_000) });
+          if (epoch !== agent.selectionEpoch || threadId !== agent.threadId) return;
+          acceptThreadActivity(current);
+          syncActiveTurnUi();
+          if (!agent.sendPromise && !agent.resumePromises.has(threadId) && !agent.runtimePromise &&
+            ["idle", "interrupted", "failed"].includes(threadActivity(threadId).state)) {
+            agent.resumeRequestedThreadId = null;
+            agent.connectionWanted = false;
+            clearTimeout(agent.reconnectTimer);
+            clearTimeout(agent.heartbeatTimer);
+            $("#conversationConnection").classList.add("hidden");
+            return;
+          }
+        }
         await startAgentRuntime({ allowStart: false });
         if (epoch !== agent.selectionEpoch || !agentRecoveryAllowed()) return;
         if (threadId && agent.resumeRequestedThreadId === threadId && !agent.loadedThreadIds.has(threadId)) await resumeAgentThreadOnSocket(threadId);
@@ -2447,6 +2520,7 @@ function syncActiveTurnUi() {
 
 function syncConversationSendUi() {
   syncAccountSidebar();
+  void refreshConversationResidency();
   const selectedNode = $("#agentRuntimeNode")?.value;
   const busy = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
   $("#threadFork").disabled = busy;
@@ -4296,7 +4370,11 @@ function renderAgentThreadRow(thread) {
   const cost = element("span", "thread-cost");
   cost.dataset.threadCost = thread.threadId;
   cost.hidden = true;
-  meta.append(status, usage, cost);
+  const residency = element("span", "thread-residency");
+  residency.dataset.threadResidency = thread.threadId;
+  residency.setAttribute("role", "img");
+  renderThreadResidency(residency, thread);
+  meta.append(residency, status, usage, cost);
   button.append(element("strong", "", button.title), meta);
   const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
   menu.type = "button";
@@ -5405,6 +5483,7 @@ async function resumeAgentThreadOnSocket(threadId) {
     clearInterval(timer);
     if (agent.resumePromises.get(threadId)?.promise === promise) agent.resumePromises.delete(threadId);
     if (!agent.resumePromises.has(agent.threadId)) $("#resumeProgress").classList.add("hidden");
+    if (agent.threadId === threadId) void refreshConversationResidency({ force: true });
   }
 }
 
@@ -6040,6 +6119,9 @@ $("#agentAccount [data-account-refresh]").addEventListener("click", () => {
   if (accountSidebar.groups?.length) void refreshAccountSidebarNodes();
 });
 $("#agentAccountDetails").addEventListener("toggle", event => {
+  clearTimeout(accountNodesTimer); accountNodesTimer = null;
+  accountNodesNextAt = event.newState === "open" ? 0 : Date.now() + 5 * 60_000;
+  syncAccountSidebar();
   accountSidebar.render();
   for (const trigger of $("#agentAccount [data-account-list]").children) {
     trigger.setAttribute("aria-expanded", String(event.newState === "open" && trigger.dataset.accountName === accountSidebar.selectedName));

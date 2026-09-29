@@ -203,6 +203,26 @@ their draft; this closes the browser channel, not the accepted runtime operation
 Connection probes do not queue behind an in-flight resume and mistake that delay
 for a dead connection. An explicit offline event closes the stale channel.
 
+Browsing stays on the canonical transcript API. Editing still prewarms the
+runtime, and sending still waits for resume. After a disconnect, an old edit/send
+marker alone no longer reloads a completed conversation: the Web client checks
+durable activity first, retaining automatic reattachment for live turns and
+in-flight submission/preparation.
+
+Execution claims queue by conversation root before taking a database transaction.
+A bounded admission gate uses at most half the pool (capped at eight), leaving
+room for persistence, authentication and heartbeats; queued operations expire
+after two minutes or cancellation. Node/account lookups inside the transaction
+reuse its connection. Same-account/runtime reconnects validate family ownership
+under a shared store gate and update only the requested thread. Actual handoffs
+still drain the selected tree before exclusive storage locks and atomically move
+all members. Family queries join parent edges once rather than rescanning them
+per row, and disable transaction-local JIT for this metadata traversal.
+
+The Server defaults to 20 database connections. Set
+`MIRA_NODE_DATABASE_POOL_SIZE` (4–128) in the Server environment to override it;
+restart the Server for changes to take effect. This limit is per Server process.
+
 When a browser disconnects, Node drains accepted account requests until their
 replies arrive or the runtime connection closes. The existing account request
 capacity bounds retained sockets. A ten-second deadline cannot safely discard
@@ -220,7 +240,7 @@ request deadlines.
 
 Cold per-thread cost scans share two Server-wide reader slots across all clients.
 Cached totals bypass the slots; cancelled queued requests never acquire a database
-connection. This keeps statistics from filling the ten-connection pool needed by
+connection. This keeps statistics from filling the shared pool needed by
 conversation reads, writes and health checks. The cost-capacity PostgreSQL test
 holds both scans open while a separate request still obtains a connection.
 Conversation totals restore compatible account-cost checkpoints in bounded
@@ -423,3 +443,18 @@ not block heartbeats. The setting is local to each execution Node and takes effe
 on restart. Warm resume with identical injected developer instructions and the
 same reasoning effort reuses the loaded session; changed or unknown overrides
 retain upstream reload behavior.
+
+The Web sidebar observes loaded IDs through the read-only
+`GET /v1/nodes/:nodeId/codex-accounts/:bindingId/residency?threadId=:threadId`
+endpoint. Its bounded native loaded-list probe neither resumes nor subscribes to
+the conversation, reads history, or renews residency leases. Observations are
+cached for five seconds per thread/account/runtime; failures mean unknown,
+never unloaded. The Web checks visible rows with three concurrent requests and
+refreshes each observation about every ten seconds.
+
+Account details show the Node's shared budget and total managed App Server RSS,
+plus the selected account process's RSS when provided. These include history
+caches, loaded sessions and process overhead, so the history adapter's 2 GiB
+serialized cache budget is not added to the residency budget. Samples include
+their collection time; old/offline readings are marked as past observations.
+Per-conversation memory is unavailable and is not estimated from history size.

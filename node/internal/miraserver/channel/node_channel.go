@@ -76,13 +76,14 @@ type activeThreadStart struct {
 }
 
 type Channel struct {
-	db          Database
-	nodes       NodeRegistry
-	auth        Authenticator
-	audit       AuditFunc
-	logger      *slog.Logger
-	upgrader    websocket.Upgrader
-	detachGrace time.Duration
+	executionQueue executionQueue
+	db             Database
+	nodes          NodeRegistry
+	auth           Authenticator
+	audit          AuditFunc
+	logger         *slog.Logger
+	upgrader       websocket.Upgrader
+	detachGrace    time.Duration
 
 	mu           sync.Mutex
 	nodeSockets  map[string]*socket
@@ -592,6 +593,7 @@ func (channel *Channel) Close() error {
 		pending.done <- invocationResult{err: channelError("Server shutting down", 503, "node_offline")}
 	}
 	channel.mu.Unlock()
+	channel.executionQueue.close()
 	channel.accounts.Close()
 	channel.ssh.Close()
 	for _, connection := range nodes {

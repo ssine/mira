@@ -447,6 +447,10 @@ tbody tr:hover { background: var(--hover); }
 .agent-thread-row[data-unread="true"] strong { font-weight: 650; }
 .agent-thread { container: thread-row / inline-size; }
 .thread-meta { display: flex; align-items: baseline; gap: .3em; min-width: 0; }
+.thread-residency { display: inline-block; flex: 0 0 8px; width: 8px; height: 8px; margin-right: 3px; border: 1.5px solid var(--quiet); border-radius: 50%; align-self: center; }
+.thread-residency[data-state="loaded"] { background: var(--good); border-color: var(--good); }
+.thread-residency[data-state="unknown"] { background: var(--warning-soft); border-color: var(--warning); }
+.thread-residency[data-state="offline"], .thread-residency[data-state="stopped"] { background: linear-gradient(135deg, transparent 39%, var(--quiet) 40%, var(--quiet) 60%, transparent 61%); }
 .thread-meta .thread-state-label { flex: 1; min-width: 0; }
 .thread-token-usage, .thread-cost { flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .thread-token-usage[hidden], .thread-cost[hidden] { display: none; }
@@ -787,6 +791,15 @@ progress { width: 100%; accent-color: var(--accent); }
 [data-account-summary-credits] { font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .sidebar-popover { position: fixed; inset: auto; width: min(320px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); margin: 0; padding: 14px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); color: var(--text); box-shadow: var(--shadow-float); }
 .account-popover { width: min(460px, calc(100vw - 16px)); }
+.account-memory { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 12px; }
+.account-memory-row { display: grid; gap: 5px; margin-top: 10px; }
+.account-memory-node { color: var(--muted); }
+.account-memory-value { font-variant-numeric: tabular-nums; }
+.account-memory-bar { display: flex; height: 9px; overflow: hidden; border-radius: 4px; background: var(--line); }
+.account-memory-bar > span { height: 100%; }
+.account-memory-own { background: var(--accent); }
+.account-memory-other { background: var(--quiet); }
+.account-memory-note { margin: 9px 0 0; color: var(--muted); line-height: 1.5; }
 .account-history { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .account-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
 .account-history-heading select { width: auto; min-height: 30px; padding: 3px 6px; font-size: 12px; }

@@ -13,7 +13,7 @@ const (
 	DefaultListenPort         = 8787
 	DefaultDatabaseURL        = "postgresql://mira:mira-local@127.0.0.1:55432/mira"
 	DefaultMaxBodyBytes int64 = 64 * 1024 * 1024
-	DefaultPoolSize     int32 = 10
+	DefaultPoolSize     int32 = 20
 )
 
 // Config contains the process-independent Mira Server foundation settings.
@@ -54,12 +54,16 @@ func ConfigFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	}
 	secureCookies, securePresent := lookup("MIRA_SECURE_COOKIES")
 	trustProxy, _ := lookup("MIRA_TRUST_PROXY_HEADERS")
+	poolSize, err := strconv.ParseInt(envOr(lookup, "MIRA_NODE_DATABASE_POOL_SIZE", strconv.Itoa(int(DefaultPoolSize))), 10, 32)
+	if err != nil || poolSize < 4 || poolSize > 128 {
+		return Config{}, fmt.Errorf("MIRA_NODE_DATABASE_POOL_SIZE must be an integer between 4 and 128")
+	}
 	return Config{
 		ListenHost: host, ListenPort: port, DatabaseURL: databaseURL,
 		CodexStoreEndpoint: endpoint,
 		SecureCookies:      !securePresent || secureCookies != "false",
 		TrustProxyHeaders:  trustProxy == "true",
-		MaxBodyBytes:       DefaultMaxBodyBytes, PoolSize: DefaultPoolSize,
+		MaxBodyBytes:       DefaultMaxBodyBytes, PoolSize: int32(poolSize),
 	}, nil
 }
 

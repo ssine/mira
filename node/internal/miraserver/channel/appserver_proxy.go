@@ -708,6 +708,14 @@ func (channel *Channel) forwardProxyClientMessage(ctx context.Context, proxy *pr
 				channel.sendProxyError(proxy, message["id"], err.Error(), -32009)
 				return nil
 			}
+			// The execution binding is already committed. The resume response and
+			// its notifications must not claim the same family a second time.
+			proxy.mu.Lock()
+			if proxy.boundThreadIDs == nil {
+				proxy.boundThreadIDs = map[string]bool{}
+			}
+			proxy.boundThreadIDs[threadID] = true
+			proxy.mu.Unlock()
 		}
 	}
 	if threadID, ok := params["threadId"].(string); ok && methodUsesExistingThread(method) {

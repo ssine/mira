@@ -144,7 +144,7 @@ export class AccountSidebar {
   select(node, active) {
     const cacheKey = node?.nodeId ? JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.runtimeId, node.reportedAppServer?.codexHome, node.reportedAppServer?.codexPath, node.accountSnapshot]) : null;
     const key = active ? JSON.stringify([cacheKey, node?.status, node?.reportedAppServer?.status]) : "";
-    if (key === this.key) return;
+    if (key === this.key) { this.node = active ? node : null; this.renderMemory(); return; }
     this.key = key;
     this.stop();
     this.cacheKey = active ? cacheKey : null;
@@ -312,6 +312,56 @@ export class AccountSidebar {
     }
   }
 
+  renderMemory() {
+    const target = this.root.querySelector("[data-account-memory]");
+    if (!target) return;
+    const group = this.groups?.find(group => group.name === this.selectedName);
+    const members = group?.members ?? (this.node ? [{ node: this.node, account: { reportedAppServer: this.node.reportedAppServer } }] : []);
+    const el = (tag, text, className) => {
+      const value = document.createElement(tag); value.textContent = text; if (className) value.className = className; return value;
+    };
+    const bytes = value => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(2)} GiB` : `${(value / 1024 ** 2).toFixed(0)} MiB`;
+    const fragment = document.createDocumentFragment();
+    fragment.append(el("strong", "Codex 内存 · 节点共享"));
+    const seen = new Set();
+    for (const { node, account } of members) {
+      if (seen.has(node.nodeId)) continue;
+      seen.add(node.nodeId);
+      const row = el("div", "", "account-memory-row");
+      row.append(el("span", node.displayName || node.hostname || "运行节点", "account-memory-node"));
+      const memory = account.reportedAppServer?.memoryResidency;
+      const valid = Number.isFinite(memory?.budgetBytes) && memory.budgetBytes > 0 &&
+        Number.isFinite(memory?.residentBytes) && memory.residentBytes >= 0 && memory.status !== "unavailable";
+      const stale = node.status !== "online" || account.reportedAppServer?.status !== "running" || !memory?.sampledAt || Date.now() - memory.sampledAt > 60_000;
+      if (!valid) {
+        row.append(el("span", node.status !== "online" ? "节点离线 · 内存数据不可用" : "尚无可用内存采样", "muted"));
+        fragment.append(row); continue;
+      }
+      const used = memory.residentBytes, budget = memory.budgetBytes;
+      const own = Number.isFinite(memory.processBytes) && memory.processBytes >= 0 ? Math.min(used, memory.processBytes) : null;
+      const description = `${bytes(used)} / ${bytes(budget)} · ${Math.round(used / budget * 100)}%${stale ? " · 上次采样" : ""}`;
+      row.append(el("span", description, "account-memory-value"));
+      const bar = el("div", "", "account-memory-bar");
+      bar.setAttribute("role", "img"); bar.setAttribute("aria-label", `已用内存 / 共享软预算：${description}`);
+      bar.title = description;
+      const segment = (amount, className, label) => {
+        const part = el("span", "", className);
+        part.style.width = `${amount / Math.max(used, budget) * 100}%`;
+        part.title = `${label}：${bytes(amount)}`; bar.append(part);
+      };
+      if (own !== null) segment(own, "account-memory-own", "当前账号进程");
+      segment(used - (own ?? 0), "account-memory-other", own === null ? "节点全部账号进程" : "其余账号进程");
+      row.append(bar);
+      const detail = own === null ? "节点总占用；当前节点版本未提供账号拆分" : `蓝色 · 当前账号 ${bytes(own)}　灰色 · 其余 ${bytes(used - own)}`;
+      row.append(el("small", detail, "muted"));
+      if (memory.sampledAt) row.title = `采样时间：${new Date(memory.sampledAt).toLocaleString()}`;
+      fragment.append(row);
+    }
+    if (!members.length) fragment.append(el("p", "选择账号后显示内存采样", "muted"));
+    fragment.append(el("p", "包含历史缓存、已加载会话和进程开销。预算由节点上的账号共享，可暂时超出；暂不支持按会话拆分。", "account-memory-note"));
+    target.replaceChildren(fragment);
+  }
+
   render() {
     const find = selector => this.root.querySelector(selector);
     const { remaining, resetsAt, resetCount } = weeklyQuota(this.limits);
@@ -355,5 +405,6 @@ export class AccountSidebar {
     this.history.select(this.node, this.account, Boolean(this.key) && !spending);
     this.spend.select(group ? { nodeId: group.name } : null, null, Boolean(this.key) && spending && find("#agentAccountDetails").matches(":popover-open"));
     this.renderOverview();
+    this.renderMemory();
   }
 }

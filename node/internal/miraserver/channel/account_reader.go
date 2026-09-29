@@ -34,12 +34,14 @@ type accountSession struct {
 }
 
 type AccountReader struct {
-	mu       sync.Mutex
-	send     func(string, any) bool
-	timeout  time.Duration
-	sessions map[string]*accountSession
-	logins   map[string]*accountSession
-	retired  map[string]time.Time
+	loaded        map[string]*loadedProbe
+	loadedRunning int
+	mu            sync.Mutex
+	send          func(string, any) bool
+	timeout       time.Duration
+	sessions      map[string]*accountSession
+	logins        map[string]*accountSession
+	retired       map[string]time.Time
 }
 
 type AccountSnapshot struct {

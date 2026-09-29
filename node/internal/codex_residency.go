@@ -8,11 +8,13 @@ import (
 )
 
 type codexResidencyStatus struct {
-	Status               string `json:"status"`
-	BudgetBytes          uint64 `json:"budgetBytes"`
-	ResidentBytes        uint64 `json:"residentBytes"`
-	EffectiveMemoryBytes uint64 `json:"effectiveMemoryBytes"`
-	Error                string `json:"error,omitempty"`
+	Status               string  `json:"status"`
+	BudgetBytes          uint64  `json:"budgetBytes"`
+	ResidentBytes        uint64  `json:"residentBytes"`
+	EffectiveMemoryBytes uint64  `json:"effectiveMemoryBytes"`
+	ProcessBytes         *uint64 `json:"processBytes,omitempty"`
+	SampledAt            int64   `json:"sampledAt"`
+	Error                string  `json:"error,omitempty"`
 }
 
 type residencyRuntime struct {
@@ -78,13 +80,15 @@ func (controller *codexResidencyController) poll(ctx context.Context, runtimes [
 		return
 	}
 	total, err := controller.total()
-	status := codexResidencyStatus{Status: "active", EffectiveMemoryBytes: total, BudgetBytes: controller.budget.resolve(total)}
-	for _, runtime := range runtimes {
+	status := codexResidencyStatus{Status: "active", EffectiveMemoryBytes: total, BudgetBytes: controller.budget.resolve(total), SampledAt: now.UnixMilli()}
+	processBytes := make([]uint64, len(runtimes))
+	for index, runtime := range runtimes {
 		rss, sampleErr := controller.resident(runtime.instance.command.Process.Pid)
 		if sampleErr != nil {
 			err = sampleErr
 		}
 		status.ResidentBytes += rss
+		processBytes[index] = rss
 	}
 	if err != nil || total == 0 || status.BudgetBytes == 0 {
 		status.Status = "unavailable"
@@ -131,6 +135,7 @@ func (controller *codexResidencyController) poll(ctx context.Context, runtimes [
 	for index, runtime := range runtimes {
 		observation := observations[index]
 		current := status
+		current.ProcessBytes = &processBytes[index]
 		switch {
 		case runtime.unsupported || errors.Is(observation.err, errResidencyUnsupported):
 			current.Status = "unsupported"
