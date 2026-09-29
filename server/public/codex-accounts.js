@@ -2,6 +2,10 @@ import { weeklyQuota } from "./account-quota.js";
 
 export function accountNode(node, bindingId = "") {
   if (!node) return null;
+  if (bindingId === "claude-default") return { ...node, engine: "claude", nodeAccountId: "", accountName: "Node 默认配置", reportedAppServer: { status: "ready" } };
+  const claude = (node.claudeAccounts || []).find(a => a.nodeAccountId === bindingId);
+  if (claude) return { ...node, engine: "claude", nodeAccountId: claude.nodeAccountId, accountName: claude.name, accountRevision: claude.credentialRevision,
+    reportedAppServer: claude.reportedAppServer, accountSnapshot: null };
   const account = (node.codexAccounts ?? []).find(value => bindingId ? value.nodeAccountId === bindingId : value.isDefault);
   if (!account) return bindingId ? null : node;
   return { ...node, nodeAccountId: account.nodeAccountId, accountName: account.name, accountRevision: account.credentialRevision ?? account.revision,
@@ -14,7 +18,7 @@ export function accountGroups(nodes) {
   const groups = new Map();
   for (const node of nodes) {
     if (node.approvalStatus && node.approvalStatus !== "approved") continue;
-    for (const account of node.codexAccounts ?? []) {
+    for (const account of [...(node.codexAccounts ?? []), ...(node.claudeAccounts ?? [])]) {
       const name = account.name?.trim();
       if (!name) continue;
       const provider = account.reportedAppServer?.provider;
@@ -22,8 +26,9 @@ export function accountGroups(nodes) {
         Number(account.credentialRevision ?? 1) > 1 || account.authType && account.authType !== "chatgpt" ||
         account.provider && account.provider !== "openai" || provider?.credentialSource && provider.credentialSource !== "chatgpt";
       if (account.isDefault && name === "默认账号" && !configured) continue;
-      if (!groups.has(name)) groups.set(name, { name, members: [] });
-      groups.get(name).members.push({ node, account });
+      const engine = account.engine || "codex", key = JSON.stringify([engine, name]);
+      if (!groups.has(key)) groups.set(key, { name, engine, key, members: [] });
+      groups.get(key).members.push({ node, account });
     }
   }
   for (const group of groups.values()) {
@@ -226,7 +231,7 @@ export class CodexAccounts {
     const account = node?.claudeAccounts?.find(value => value.nodeAccountId === this.current.account.nodeAccountId);
     if (account) this.current = { node, account };
     this.dialog.querySelector("[data-account-actions]").hidden = false;
-    this.dialog.querySelector("[data-account-profile]").textContent = "Claude 账号已保存，可在 Claude 对话中选择使用。";
+    this.dialog.querySelector("[data-account-profile]").textContent = "Claude 账号已保存，可在对话的账号列表中选择使用。";
   }
 
   async action(action) {

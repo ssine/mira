@@ -27,6 +27,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
     ] },
   };
   const context = vm.createContext({
+    claudePollTimer: null, claudeRuntime: { reset() {} }, conversationEngine: () => "codex", engineOf: () => "codex", readConversation: async () => structuredClone(row),
     agent, console, clearTimeout, Date, WebSocket: { OPEN: 1 },
     $: selector => {
       if (!controls.has(selector)) controls.set(selector, {

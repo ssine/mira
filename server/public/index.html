@@ -24,7 +24,6 @@
       <nav id="globalNav" class="global-nav hidden" aria-label="主要导航">
         <button id="globalNodes" class="global-nav-item" type="button">设备</button>
         <button id="globalAgent" class="global-nav-item" type="button">对话</button>
-        <button id="globalClaude" class="global-nav-item" type="button">Claude</button>
         <button id="globalRuntime" class="global-nav-item" type="button">运行</button>
 		<button id="globalAccounts" class="global-nav-item" type="button">账号</button>
       </nav>
@@ -110,36 +109,7 @@
       </section>
 
 
-      <section id="claudeView" class="agent-console claude-console hidden" aria-label="Claude Code 对话">
-        <div class="claude-shell">
-          <button data-sidebar-backdrop class="claude-sidebar-backdrop" type="button" aria-label="关闭 Claude 会话列表"></button>
-          <aside class="claude-sidebar">
-            <div class="chat-drawer-nav"><button data-codex class="ghost" type="button">← Codex</button><button data-new class="ghost" type="button">＋ 新对话</button></div>
-            <label class="muted"><input data-archived type="checkbox"> 归档对话</label>
-            <div data-list class="claude-list"></div><button data-more class="secondary" type="button" hidden>加载更多</button>
-          </aside>
-          <section class="conversation-card">
-            <header class="conversation-head"><button data-sidebar-toggle class="ghost claude-sidebar-toggle" type="button" aria-label="打开 Claude 会话列表" aria-expanded="false">☰</button><div><h2 data-title>新 Claude 对话</h2><p data-state class="muted" role="status"></p></div><button data-rename class="ghost" type="button">重命名</button><button data-archive class="ghost" type="button">归档 / 恢复</button></header>
-            <div class="claude-settings"><label>执行 Node<select data-node></select></label><label>账号<select data-account aria-label="Claude 账号"></select></label><label>工作目录<input data-cwd placeholder="执行 Node 上的绝对路径"></label><button data-connect class="secondary" type="button">连接 · 读取模型</button><select data-child aria-label="查看主会话或子 Agent" hidden></select></div>
-            <p data-notice class="workspace-notice" role="status"></p>
-            <label data-incomplete class="workspace-notice warning" hidden><input data-continue type="checkbox"> 历史未完整保存。我已检查记录，继续使用 Mira 已确认保存的历史。</label>
-            <div data-scroll class="conversation-scroll"><button data-history-more class="secondary" type="button" hidden>加载更早的历史</button><div data-trace class="conversation-trace" aria-live="polite"></div></div>
-            <div class="conversation-compose-area"><form data-form class="conversation-composer">
-              <div class="conversation-drop-zone"><textarea data-input rows="2" aria-label="给 Claude 发消息" placeholder="给 Claude 发消息…"></textarea>
-              <p data-file-names class="muted"></p><div class="composer-toolbar">
-                <label class="composer-choice">附件<input data-files type="file" multiple aria-label="添加图片或文件"></label>
-                <label class="composer-choice">模型<input data-model list="claudeModels" placeholder="Node 默认模型" aria-label="Claude 模型"><datalist id="claudeModels" data-models></datalist></label>
-                <select data-effort aria-label="思考强度"><option value="" selected>思考强度：默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="max">最高</option></select>
-                <button data-stop class="secondary" type="button" hidden>停止</button><button data-send class="primary" type="submit">发送 ↑</button>
-                <button data-cancel-upload class="secondary" type="button" hidden>取消上传</button>
-              </div></div>
-              <p data-usage class="muted"></p><button data-reconcile class="ghost" type="button" hidden>检查运行状态</button>
-            </form></div>
-          </section>
-        </div>
-      </section>
-
-      <section id="agentView" class="agent-console hidden" aria-label="Codex 对话">
+      <section id="agentView" class="agent-console hidden" aria-label="Agent 对话">
         <div class="chat-shell">
           <div id="agentSidebarResize" class="sidebar-resize" role="separator" tabindex="0" aria-orientation="vertical" aria-label="调整会话侧边栏宽度" aria-valuemin="240" aria-valuemax="480" aria-valuenow="300"></div>
           <button id="agentThreadDrawerBackdrop" class="chat-drawer-backdrop" type="button" aria-label="关闭会话侧边栏" tabindex="-1"></button>
@@ -149,9 +119,8 @@
               <button id="agentNewThread" class="ghost sidebar-new-thread" type="button">＋ 新对话</button>
               <div id="agentNavMenu" class="sidebar-popover sidebar-nav-menu" popover="auto" role="menu" aria-label="Mira 菜单">
                 <button id="agentHome" type="button" role="menuitem">Mira 主页</button>
-                <button id="agentClaude" type="button" role="menuitem">Claude Code 对话</button>
                 <button id="agentNewProject" type="button" role="menuitem">新建项目</button>
-				<button id="agentManageAccounts" type="button" role="menuitem">管理 Codex 账号</button>
+				<button id="agentManageAccounts" type="button" role="menuitem">管理 Agent 账号</button>
                 <button id="agentArchiveToggle" type="button" role="menuitemcheckbox" aria-checked="false" aria-pressed="false"><span id="agentArchiveLabel">归档对话</span></button>
                 <hr>
                 <div class="sidebar-layout-menu" role="group" aria-labelledby="agentSidebarLayoutLabel">
@@ -173,7 +142,7 @@
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
-              <section id="agentAccount" class="sidebar-account" aria-label="所有节点的 Codex 账号与额度">
+              <section id="agentAccount" class="sidebar-account" aria-label="所有节点的 Agent 账号与额度">
                 <div data-account-list class="sidebar-account-list"></div>
                 <button id="agentAccountToggle" class="sidebar-account-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="agentAccountDetails">
                   <span data-account-summary-email>Codex 账户</span><span data-account-summary-plan></span>
@@ -202,7 +171,7 @@
                   <p data-history-empty class="account-history-empty">正在读取费用…</p>
                   <svg class="quota-chart hidden" viewBox="0 0 600 210" role="img" tabindex="0" aria-label="每日估算费用柱状图与日内累计曲线"></svg>
                   <p class="quota-legend" data-history-legend>柱 · 每日费用　线 · 日内累计（每小时）</p>
-                  <p class="quota-legend">按已记录请求的标准 API 价格估算；服务商实际账单可能不同。无归属或未定价的用量不计入金额。</p>
+                  <p class="quota-legend" data-spend-basis>按已记录请求的标准 API 价格估算；服务商实际账单可能不同。无归属或未定价的用量不计入金额。</p>
                   <p class="quota-legend" data-spend-attribution hidden>部分历史费用按当时使用的服务商归属；无法确认账号的用量未计入。</p>
                   <p class="quota-legend" data-spend-freshness hidden></p>
                 </section>
@@ -239,6 +208,8 @@
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             </div>
             <div id="conversationComposer" class="conversation-compose-area">
+            <label id="claudePersistence" class="workspace-notice warning" hidden><input id="claudeContinue" type="checkbox">历史未完整保存。我已检查记录，继续使用已保存的历史。</label>
+            <button id="claudeReconcile" class="ghost" type="button" hidden>检查运行状态</button>
             <form id="conversationForm" class="conversation-composer">
               <p id="conversationConnection" class="hidden" role="status"></p>
               <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span></div>
@@ -540,7 +511,7 @@
     </dialog>
     <dialog id="codexAccountDialog" class="codex-account-dialog" aria-labelledby="codexAccountTitle">
       <form id="codexAccountForm" autocomplete="off">
-        <div class="panel-head"><h2 id="codexAccountTitle" data-account-title>添加 Codex 账号</h2><button data-account-close class="ghost" type="button" aria-label="关闭账号管理">×</button></div>
+        <div class="panel-head"><h2 id="codexAccountTitle" data-account-title>添加 Agent 账号</h2><button data-account-close class="ghost" type="button" aria-label="关闭账号管理">×</button></div>
         <label>Agent 引擎<select name="engine"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
         <label>运行节点<select name="node" required></select></label>
         <label>账号名称<input name="name" maxlength="128" required></label>

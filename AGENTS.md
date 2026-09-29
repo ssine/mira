@@ -180,6 +180,10 @@ Keep device tool definitions and capability execution independent of the runtime
 Codex dynamicTools and Claude MCP are adapters over the same bounded capabilities.
 Managed runtime, native storage, Web experience and reproducible SDK validation
 are described in `docs/claude-code-integration.md` and `protocol/claude-sessions-v1.md`.
+The Web conversation page and account selector are shared by both engines. New conversations
+choose an engine through their account; existing conversations only switch same-engine accounts.
+Keep account cost namespaces separate, even when names match. Claude SDK cumulative costs
+include resumed history and subagents; difference snapshots before account/date aggregation.
 Claude sessions remain separate from Codex ThreadStore; never translate native
 Claude history into authoritative Codex rollout records. SDK preparation is optional
 and asynchronous on the execution Node, with pinned dependencies and bounded workers.

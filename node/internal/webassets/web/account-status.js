@@ -37,7 +37,7 @@ export class AccountSidebar {
     // Live Node account subscriptions still follow the drawer's active state.
     this.summariesActive = summariesActive;
     if (!summariesActive) this.stopSummaries();
-    const names = new Set(this.groups.map(group => group.name));
+    const names = new Set(this.groups.map(group => group.key));
     for (const name of this.summaries.keys()) if (!names.has(name)) this.summaries.delete(name);
     for (const [name, controller] of this.summaryJobs) if (!names.has(name)) { controller.abort(); this.summaryJobs.delete(name); }
     const overview = this.groups.length > 0;
@@ -51,13 +51,13 @@ export class AccountSidebar {
       if (emptyCatalog && this.root.querySelector("#agentAccountDetails").matches(":popover-open")) this.root.querySelector("#agentAccountDetails").hidePopover();
       return;
     }
-    if (!this.groups.some(group => group.name === this.selectedName)) this.selectedName = this.groups[0].name;
+    if (!this.groups.some(group => group.key === this.selectedName)) this.selectedName = this.groups[0].key;
     this.selectGroup(this.selectedName);
     this.renderOverview();
   }
 
   selectGroup(name) {
-    const group = this.groups?.find(group => group.name === name);
+    const group = this.groups?.find(group => group.key === name);
     if (!group) return;
     this.selectedName = name;
     const { node, account } = group.members[0];
@@ -66,6 +66,7 @@ export class AccountSidebar {
   }
 
   groupQuota(group) {
+    if (group.engine === "claude") return weeklyQuota(null);
     const account = group.members[0].account;
     return weeklyQuota(this.node?.nodeAccountId === account.nodeAccountId && this.limits ? this.limits : account.snapshot?.limits);
   }
@@ -75,27 +76,28 @@ export class AccountSidebar {
     if (!list || !this.groups?.length) return;
     const existing = new Map([...list.children].map(row => [row.dataset.accountName, row]));
     for (const group of this.groups) {
-      let row = existing.get(group.name);
+      let row = existing.get(group.key);
       if (!row) {
         row = document.createElement("button"); row.type = "button"; row.className = "sidebar-account-row";
-        row.dataset.accountName = group.name; row.setAttribute("aria-haspopup", "dialog"); row.setAttribute("aria-controls", "agentAccountDetails");
+        row.dataset.accountName = group.key; row.setAttribute("aria-haspopup", "dialog"); row.setAttribute("aria-controls", "agentAccountDetails");
         row.append(document.createElement("strong"), document.createElement("span"));
         list.append(row);
       }
-      existing.delete(group.name);
+      existing.delete(group.key);
       const { node } = group.members[0];
       const quota = this.groupQuota(group);
-      row.firstChild.textContent = group.name;
-      const summary = this.summaries.get(group.name), estimate = summary?.data?.estimate;
+      row.firstChild.textContent = `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name}`;
+      row.dataset.accountEngine = group.engine;
+      const summary = this.summaries.get(group.key), estimate = summary?.data?.estimate;
       const cost = Number.isFinite(estimate?.amount) ? `7 天 ${estimate.status === "partial" ? "≥ " : ""}$${estimate.amount.toFixed(2)}`
         : spendProjectionStatus(summary?.data) || summary?.message || (summary ? "7 天暂无可估费用" : "7 天费用…");
       row.lastChild.textContent = quota.remaining === null ? cost : `剩余 ${Number(quota.remaining.toFixed(1))}%`;
       if (quota.remaining === null && Number.isFinite(estimate?.amount) && spendProjectionStatus(summary?.data)) row.lastChild.textContent += " · 汇总中";
       if (quota.remaining === null && summary?.data?.cache?.stale) row.lastChild.textContent += " · 上次统计";
-      row.title = `${group.name} · ${[...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join("、")}${node.status !== "online" ? " · 上次记录" : ""}`;
+      row.title = `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name} · ${[...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join("、")}${node.status !== "online" ? " · 上次记录" : ""}`;
       if (quota.remaining === null) row.title += " · 最近 7 天标准 API 价格估算，点击查看每日费用";
       if (quota.remaining === null && summary?.message) row.title += ` · ${summary.message}`;
-      row.setAttribute("aria-label", `${group.name}，${row.lastChild.textContent}`);
+      row.setAttribute("aria-label", `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name}，${row.lastChild.textContent}`);
     }
     for (const row of existing.values()) row.remove();
     this.loadSummaries();
@@ -112,13 +114,13 @@ export class AccountSidebar {
     if (!this.summariesActive || navigator.onLine === false) return;
     for (const group of this.groups ?? []) {
       if (this.summaryJobs.size >= 2) break;
-      if (this.groupQuota(group).remaining !== null || this.summaryJobs.has(group.name) ||
-        (this.summaries.get(group.name)?.expiresAt ?? 0) > Date.now()) continue;
-      const controller = new AbortController(); this.summaryJobs.set(group.name, controller);
-      void this.loadSummary(group.name, controller);
+      if (this.groupQuota(group).remaining !== null || this.summaryJobs.has(group.key) ||
+        (this.summaries.get(group.key)?.expiresAt ?? 0) > Date.now()) continue;
+      const controller = new AbortController(); this.summaryJobs.set(group.key, controller);
+      void this.loadSummary(group.key, controller);
     }
-    const next = (this.groups ?? []).filter(group => this.groupQuota(group).remaining === null && !this.summaryJobs.has(group.name))
-      .map(group => this.summaries.get(group.name)?.expiresAt).filter(expiresAt => expiresAt > Date.now());
+    const next = (this.groups ?? []).filter(group => this.groupQuota(group).remaining === null && !this.summaryJobs.has(group.key))
+      .map(group => this.summaries.get(group.key)?.expiresAt).filter(expiresAt => expiresAt > Date.now());
     if (next.length) this.summaryTimer = setTimeout(() => this.loadSummaries(), Math.max(1, Math.min(...next) - Date.now()));
   }
 
@@ -154,7 +156,8 @@ export class AccountSidebar {
     this.limits = cached?.limits ?? (active ? node?.accountSnapshot?.limits : null) ?? null;
     this.message = !active ? "" : !node ? "请选择运行节点" : node.status !== "online" ? "运行节点离线"
       : node.reportedAppServer?.status !== "running" ? "Codex 尚未启动" : cached ? cached.message : "正在读取账户…";
-    this.available = Boolean(active && node?.status === "online" && node?.reportedAppServer?.status === "running");
+    this.available = Boolean(active && node?.engine !== "claude" && node?.status === "online" && node?.reportedAppServer?.status === "running");
+    if (node?.engine === "claude") this.message = "Claude SDK 价格估算；网关实际扣费可能不同。";
     this.render();
     if (this.available) {
       if (cached && Date.now() - cached.updatedAt < this.intervalMs) this.schedule();
@@ -315,13 +318,14 @@ export class AccountSidebar {
   renderMemory() {
     const target = this.root.querySelector("[data-account-memory]");
     if (!target) return;
-    const group = this.groups?.find(group => group.name === this.selectedName);
+    const group = this.groups?.find(group => group.key === this.selectedName);
     const members = group?.members ?? (this.node ? [{ node: this.node, account: { reportedAppServer: this.node.reportedAppServer } }] : []);
     const el = (tag, text, className) => {
       const value = document.createElement(tag); value.textContent = text; if (className) value.className = className; return value;
     };
     const bytes = value => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(2)} GiB` : `${(value / 1024 ** 2).toFixed(0)} MiB`;
     const fragment = document.createDocumentFragment();
+    if (group?.engine === "claude") { target.replaceChildren(); return; }
     fragment.append(el("strong", "Codex 内存 · 节点共享"));
     const seen = new Set();
     for (const { node, account } of members) {
@@ -369,7 +373,7 @@ export class AccountSidebar {
     find("[data-account-email]").textContent = email;
     find("[data-account-email]").title = email;
     const mode = this.node?.nodeMode === "wsl" ? " · WSL" : this.node?.platform === "windows" ? " · Windows" : "";
-    const group = this.groups?.find(group => group.name === this.selectedName);
+    const group = this.groups?.find(group => group.key === this.selectedName);
     const nodeLabel = group ? [...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join(" · ") : this.node ? `${this.node.displayName?.trim() || this.node.hostname}${mode}` : "当前运行节点";
     find("[data-account-node]").textContent = nodeLabel;
     find("[data-account-node]").title = nodeLabel;
@@ -382,7 +386,7 @@ export class AccountSidebar {
     const summary = remaining === null ? "查看账户与额度" : resetsAt === null ? `剩余 ${remainingText} · 时间未提供`
       : deadline === "等待更新" ? "已到重置时间，等待更新" : `${deadline} 前剩余 ${remainingText}`;
     const summaryNode = find("[data-account-summary-remaining]");
-    summaryNode.textContent = this.node && !this.available ? (this.node.status !== "online" ? "运行节点离线" : "Codex 尚未启动") : summary;
+    summaryNode.textContent = this.node?.engine === "claude" ? "Claude API · 查看估算费用" : this.node && !this.available ? (this.node.status !== "online" ? "运行节点离线" : "Codex 尚未启动") : summary;
     summaryNode.title = this.message || summary;
     const summaryCredits = find("[data-account-summary-credits]");
     summaryCredits.textContent = this.account?.type !== "chatgpt" ? "" : resetCount === null ? "重置未提供" : `重置 ${resetCount} 次`;
@@ -403,7 +407,7 @@ export class AccountSidebar {
     find("[data-account-history]").classList.toggle("hidden", spending);
     find("[data-account-spend]").classList.toggle("hidden", !spending);
     this.history.select(this.node, this.account, Boolean(this.key) && !spending);
-    this.spend.select(group ? { nodeId: group.name } : null, null, Boolean(this.key) && spending && find("#agentAccountDetails").matches(":popover-open"));
+    this.spend.select(group ? { nodeId: group.key } : null, null, Boolean(this.key) && spending && find("#agentAccountDetails").matches(":popover-open"));
     this.renderOverview();
     this.renderMemory();
   }
