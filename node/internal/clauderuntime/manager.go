@@ -25,14 +25,16 @@ import (
 var assets embed.FS
 
 type process struct {
-	command *exec.Cmd
-	input   io.WriteCloser
-	done    chan struct{}
-	write   sync.Mutex
+	accountID string
+	command   *exec.Cmd
+	input     io.WriteCloser
+	done      chan struct{}
+	write     sync.Mutex
 }
 type Manager struct {
 	mu                          sync.Mutex
 	root, dir, state, lastError string
+	accountsRoot                string
 	runtimeID                   string
 	preparing                   bool
 	closed                      bool
@@ -43,7 +45,7 @@ type Manager struct {
 }
 
 func New(identityDir string) *Manager {
-	return &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}}
+	return &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}}
 }
 func nodeBinary() string {
 	if s := os.Getenv("MIRA_NODE_CLAUDE_NODE"); s != "" {
@@ -153,11 +155,19 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	}
 	action, _ := params["action"].(string)
 	id, _ := params["turnId"].(string)
+	accountID, _ := params["nodeAccountId"].(string)
 	switch action {
+	case "account/configure":
+		return m.configureAccount(params)
 	case "prepare":
 		m.prepare()
 		fallthrough
 	case "status":
+		if accountID != "" {
+			if _, err := m.accountEnvironment(accountID); err != nil {
+				return nil, err
+			}
+		}
 		return map[string]any{"runtimeId": m.runtimeID, "status": m.state, "error": m.lastError, "active": m.processes[id] != nil, "accepted": m.accepted[id]}, nil
 	case "describe":
 		if m.state != "ready" {
@@ -166,6 +176,11 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
+		env, err := m.accountEnvironment(accountID)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Env = env
 		cmd.Dir = m.dir
 		configureCommand(cmd)
 		cmd.Stdin = strings.NewReader("{\"action\":\"describe\"}\n")
@@ -173,7 +188,7 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		cmd.WaitDelay = 5 * time.Second
 		output := &boundedOutput{limit: 4 * 1024 * 1024}
 		cmd.Stdout = output
-		err := cmd.Run()
+		err = cmd.Run()
 		if err != nil {
 			return nil, errors.New("Could not read Claude models or Node-local authentication")
 		}
@@ -197,6 +212,11 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 			return nil, errors.New("turnId is required")
 		}
 		cmd := exec.Command(nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
+		env, err := m.accountEnvironment(accountID)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Env = env
 		cmd.Dir = m.dir
 		configureCommand(cmd)
 		input, err := cmd.StdinPipe()
@@ -210,7 +230,7 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 			input.Close()
 			return nil, err
 		}
-		p := &process{command: cmd, input: input, done: make(chan struct{})}
+		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{})}
 		m.processes[id] = p
 		m.accepted[id] = true
 		if len(m.accepted) > 4096 {

@@ -99,7 +99,7 @@ try {
   await page.waitForFunction(()=>document.querySelector('#conversationEffortSelect').getAttribute('aria-expanded')==='false');
   assert.equal(await effortPicker.getAttribute('aria-expanded'),'false');
   const inputBox=await page.locator('#conversationInput').boundingBox(), zoneBox=await page.locator('#conversationDropZone').boundingBox();
-  const toolbarBox=await page.locator('.composer-toolbar').boundingBox();
+  const toolbarBox=await page.locator('#agentView .composer-toolbar').boundingBox();
   assert.ok(inputBox.width>zoneBox.width-24,'message input owns the full first row');
   assert.ok(inputBox.y+inputBox.height<=toolbarBox.y+1,'attachment, model, effort and send controls stay on the bottom row');
   assert.equal(await page.locator('.composer-toolbar #conversationAttach').count(),1);

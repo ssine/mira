@@ -3952,7 +3952,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
       ? captureTraceViewport()
       : null;
   if (options.prepend) {
-    const top = $(".conversation-head").getBoundingClientRect().bottom;
+    const top = $("#agentView .conversation-head").getBoundingClientRect().bottom;
     const anchor = [...trace.querySelectorAll(".trace-card[data-trace-key]")].find((card) => card.getBoundingClientRect().bottom > top);
     if (anchor) Object.assign(preserveViewport, { anchorKey: anchor.dataset.traceKey, anchorTop: anchor.getBoundingClientRect().top });
   }
@@ -6282,8 +6282,8 @@ function scheduleConversationMeasurements() {
   // delivery phase so the resulting layout is observed on the next frame.
   conversationMeasureFrame = requestAnimationFrame(() => {
     conversationMeasureFrame = null;
-    const card = $(".conversation-card"), scroll = traceScroller();
-    const head = $(".conversation-head").getBoundingClientRect().bottom - card.getBoundingClientRect().top;
+    const card = $("#agentView .conversation-card"), scroll = traceScroller();
+    const head = $("#agentView .conversation-head").getBoundingClientRect().bottom - card.getBoundingClientRect().top;
     const noticeHeight = $(".conversation-notices").getBoundingClientRect().height;
     const style = getComputedStyle(scroll);
     const values = {
@@ -6298,7 +6298,7 @@ function scheduleConversationMeasurements() {
 }
 const conversationOverlayObserver = new ResizeObserver(scheduleConversationMeasurements);
 window.addEventListener("resize", scheduleConversationMeasurements);
-conversationOverlayObserver.observe($(".conversation-head"));
+conversationOverlayObserver.observe($("#agentView .conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
 conversationOverlayObserver.observe($(".conversation-notices"));
 const conversationWidthObserver = new ResizeObserver(scheduleConversationMeasurements);

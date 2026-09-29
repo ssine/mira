@@ -46,6 +46,7 @@ type claudeSession struct {
 	Title       string    `json:"title"`
 	Model       string    `json:"model"`
 	Effort      string    `json:"effort"`
+	AccountID   string    `json:"nodeAccountId"`
 	Archived    bool      `json:"archived"`
 	Revision    int64     `json:"revision"`
 	ActiveTurn  *string   `json:"activeTurn"`
@@ -54,11 +55,11 @@ type claudeSession struct {
 	UpdatedAt   time.Time `json:"updatedAt"`
 }
 
-const claudeColumns = `session_id::text,node_id::text,cwd,title,model,effort,archived,revision,active_turn::text,persistence,created_at,updated_at`
+const claudeColumns = `session_id::text,node_id::text,cwd,title,model,effort,archived,revision,active_turn::text,persistence,created_at,updated_at,COALESCE(node_account_id::text,'')`
 
 func scanClaude(row pgx.Row) (claudeSession, error) {
 	var s claudeSession
-	err := row.Scan(&s.ID, &s.NodeID, &s.Cwd, &s.Title, &s.Model, &s.Effort, &s.Archived, &s.Revision, &s.ActiveTurn, &s.Persistence, &s.CreatedAt, &s.UpdatedAt)
+	err := row.Scan(&s.ID, &s.NodeID, &s.Cwd, &s.Title, &s.Model, &s.Effort, &s.Archived, &s.Revision, &s.ActiveTurn, &s.Persistence, &s.CreatedAt, &s.UpdatedAt, &s.AccountID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = claudeError(404, "Claude session not found")
 	}
@@ -92,6 +93,9 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 	if err != nil || actor == nil {
 		return true, err
 	}
+	if len(parts) > 0 && parts[0] == "accounts" {
+		return true, server.routeClaudeAccounts(ctx, w, r, actor, parts)
+	}
 	if len(parts) == 3 && parts[0] == "runtimes" && claudeUUID(parts[1]) && r.Method == "POST" {
 		action := parts[2]
 		if action != "prepare" && action != "status" && action != "describe" {
@@ -104,7 +108,24 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if node == nil || node.Capabilities["claudeRuntimeV1"] != true {
 			return true, claudeError(409, "Node does not support managed Claude")
 		}
-		result, err := server.channel.Invoke(ctx, parts[1], "claude", map[string]any{"action": action}, 30*time.Second)
+		body, err := server.readBody(r)
+		if err != nil {
+			return true, err
+		}
+		accountID := claudeString(body, "nodeAccountId")
+		if accountID != "" {
+			var valid bool
+			if !claudeUUID(accountID) {
+				return true, claudeError(400, "Invalid Claude account")
+			}
+			if err = server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_accounts WHERE node_account_id=$1 AND node_id=$2 AND enabled AND configured)`, accountID, parts[1]).Scan(&valid); err != nil {
+				return true, err
+			}
+			if !valid {
+				return true, claudeError(409, "Claude account is unavailable on this Node")
+			}
+		}
+		result, err := server.channel.Invoke(ctx, parts[1], "claude", map[string]any{"action": action, "nodeAccountId": accountID}, 30*time.Second)
 		if err != nil {
 			return true, err
 		}
@@ -163,11 +184,24 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 				return true, claudeError(400, "cwd must be an absolute path on the execution Node")
 			}
 			id, _ := randomUUID()
+			accountID := claudeString(body, "nodeAccountId")
+			if accountID != "" {
+				var valid bool
+				if !claudeUUID(accountID) {
+					return true, claudeError(400, "Invalid Claude account")
+				}
+				if err = server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_accounts WHERE node_account_id=$1 AND node_id=$2)`, accountID, nodeID).Scan(&valid); err != nil {
+					return true, err
+				}
+				if !valid {
+					return true, claudeError(409, "Claude account is unavailable on this Node")
+				}
+			}
 			title := strings.ReplaceAll(claudeString(body, "title"), "\x00", "")
 			if len(title) > 512 {
 				title = string([]rune(title)[:min(128, len([]rune(title)))])
 			}
-			_, err = server.pool.Exec(ctx, `INSERT INTO mira_claude_sessions(session_id,request_id,node_id,cwd,title,model,create_digest) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(request_id) DO NOTHING`, id, requestID, nodeID, cwd, title, claudeString(body, "model"), creationDigest)
+			_, err = server.pool.Exec(ctx, `INSERT INTO mira_claude_sessions(session_id,request_id,node_id,cwd,title,model,create_digest,node_account_id) VALUES($1,$2,$3,$4,$5,$6,$7,NULLIF($8,'')::uuid) ON CONFLICT(request_id) DO NOTHING`, id, requestID, nodeID, cwd, title, claudeString(body, "model"), creationDigest, accountID)
 			if err != nil {
 				return true, err
 			}
@@ -482,8 +516,37 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		return claudeError(409, "Claude history is incomplete. Inspect the saved history before explicitly continuing with acknowledged history.")
 	}
 	revision := s.Revision + 1
+	accountID := s.AccountID
+	if raw, present := b["nodeAccountId"]; present {
+		var valid bool
+		accountID, valid = raw.(string)
+		if !valid {
+			return claudeError(400, "Invalid Claude account")
+		}
+	}
+	defaultModel, err := claudeAccountForTurn(ctx, tx, nodeID, accountID)
+	if err != nil {
+		return err
+	}
+	if accountID != "" {
+		if node.Capabilities["claudeAccountsV1"] != true {
+			return claudeError(409, "Upgrade this Node to use managed Claude accounts")
+		}
+		if _, err = server.channel.Invoke(ctx, nodeID, "claude", map[string]any{"action": "status", "nodeAccountId": accountID}, 30*time.Second); err != nil {
+			return err
+		}
+	}
 	model := claudeString(b, "model")
+	if _, provided := b["model"]; !provided && accountID == s.AccountID {
+		model = s.Model
+	}
+	if model == "" {
+		model = defaultModel
+	}
 	effort := claudeString(b, "effort")
+	if _, provided := b["effort"]; !provided {
+		effort = s.Effort
+	}
 	if effort != "" && effort != "low" && effort != "medium" && effort != "high" && effort != "xhigh" && effort != "max" {
 		return claudeError(400, "Invalid effort")
 	}
@@ -492,7 +555,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET active_turn=$2,node_id=$3,revision=$4,model=$5,effort=$6,cwd=$7,persistence=CASE WHEN persistence='incomplete' THEN persistence ELSE 'pending' END,updated_at=now() WHERE session_id=$1`, s.ID, turnID, nodeID, revision, model, effort, cwd)
+	_, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET active_turn=$2,node_id=$3,revision=$4,model=$5,effort=$6,cwd=$7,node_account_id=NULLIF($8,'')::uuid,persistence=CASE WHEN persistence='incomplete' THEN persistence ELSE 'pending' END,updated_at=now() WHERE session_id=$1`, s.ID, turnID, nodeID, revision, model, effort, cwd, accountID)
 	if err != nil {
 		return err
 	}
@@ -500,7 +563,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		return err
 	}
 
-	params := map[string]any{"runtimeId": state["runtimeId"], "action": "start", "sessionId": s.ID, "turnId": turnID, "revision": revision, "cwd": cwd, "model": model, "effort": effort, "text": text, "attachments": b["attachments"], "resume": count > 0, "instructions": instructions}
+	params := map[string]any{"runtimeId": state["runtimeId"], "action": "start", "sessionId": s.ID, "turnId": turnID, "revision": revision, "cwd": cwd, "model": model, "effort": effort, "text": text, "attachments": b["attachments"], "resume": count > 0, "instructions": instructions, "nodeAccountId": accountID}
 	result, err := server.channel.Invoke(ctx, nodeID, "claude", params, 30*time.Second)
 	// A timeout is ambiguous. Keep the reservation until the owner reports exit;
 	// neither an HTTP retry nor a reconnect may run the prompt again.

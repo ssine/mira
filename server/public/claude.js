@@ -113,9 +113,10 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
     $("[data-stop]").hidden = !s?.activeTurn;
     $("[data-send]").disabled = busy || !!s?.activeTurn || !!subpath;
     for (const field of root.querySelectorAll(
-      "[data-node],[data-cwd],[data-model],[data-files],[data-input],[data-connect],[data-new]",
+      "[data-node],[data-account],[data-cwd],[data-model],[data-files],[data-input],[data-connect],[data-new]",
     ))
       field.disabled = busy;
+    $("[data-account]").disabled = busy || !!s?.activeTurn;
 
     $("[data-effort]").disabled =
       busy ||
@@ -510,6 +511,7 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
     $("[data-child]").value = "";
     state(s);
     $("[data-node]").value = s.nodeId;
+    renderAccounts(s.nodeAccountId || "");
     $("[data-cwd]").value = s.cwd;
     $("[data-model]").value = s.model;
     $("[data-effort]").value = s.effort || "";
@@ -574,8 +576,25 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
     )
       select.value = previous;
   }
+  function renderAccounts(selected) {
+    const node = nodes.find(n => n.nodeId === $("[data-node]").value);
+    const accounts = node?.claudeAccounts || [];
+    const select = $("[data-account]");
+    select.replaceChildren();
+    for (const account of accounts) {
+      const available = account.enabled && account.configured;
+      const option = new Option(`${account.name}${available ? "" : "（不可用）"}`, account.nodeAccountId);
+      option.disabled = !available;
+      select.add(option);
+    }
+    select.add(new Option("Node 默认配置", ""));
+    const wanted = selected ?? accounts.find(a => a.enabled && a.configured)?.nodeAccountId ?? "";
+    if (![...select.options].some(o => o.value === wanted)) select.add(new Option("原账号不可用", wanted));
+    select.value = wanted;
+  }
   async function prepare() {
     const id = $("[data-node]").value;
+    const nodeAccountId = $("[data-account]").value;
     if (!id) throw new Error("请选择可运行 Claude 的在线 Node");
     let result = await call(`runtimes/${id}/prepare`, {});
     const deadline = Date.now() + 11 * 60_000;
@@ -589,10 +608,12 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
     if (result.status !== "ready")
       throw new Error(result.error || "Claude 未就绪");
     notify("");
-    if (runtimeNode !== id) {
-      runtimeNode = id;
+    const runtimeKey = `${id}:${nodeAccountId}`;
+    if (runtimeNode !== runtimeKey) {
       try {
-        const info = await call(`runtimes/${id}/describe`, {});
+        const info = await call(`runtimes/${id}/describe`, { nodeAccountId });
+        if ($("[data-node]").value !== id || $("[data-account]").value !== nodeAccountId) throw new Error("已切换执行账号");
+        runtimeNode = runtimeKey;
         models = info.models || [];
         const current = $("[data-model]").value;
         $("[data-models]").replaceChildren();
@@ -668,6 +689,7 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
         createRequest ??= {
           requestId: crypto.randomUUID(),
           nodeId: $("[data-node]").value,
+          nodeAccountId: $("[data-account]").value,
           cwd: $("[data-cwd]").value.trim(),
           title: text.slice(0, 100),
           model: $("[data-model]").value,
@@ -692,6 +714,7 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
           requestId: crypto.randomUUID(),
           text,
           nodeId: $("[data-node]").value,
+          nodeAccountId: $("[data-account]").value,
           cwd: $("[data-cwd]").value.trim(),
           model: $("[data-model]").value,
           effort: $("[data-effort]").value,
@@ -733,6 +756,16 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
   $("[data-form]").onsubmit = send;
   $("[data-connect]").onclick = () => prepare().catch((e) => notify(e.message));
   $("[data-model]").onchange = renderEffort;
+  $("[data-account]").onchange = () => {
+    runtimeNode = "";
+    models = [];
+    $("[data-models]").replaceChildren();
+    const node = nodes.find(n => n.nodeId === $("[data-node]").value);
+    const account = node?.claudeAccounts?.find(a => a.nodeAccountId === $("[data-account]").value);
+    $("[data-model]").value = account?.reportedAppServer?.provider?.model || "";
+    renderEffort();
+    if (!session) createRequest = null;
+  };
   $("[data-input]").oninput = saveDraft;
   $("[data-input]").onkeydown = (e) => {
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
@@ -811,6 +844,8 @@ export function createClaudeConsole({ api, show, navigateCodex, toast }) {
     const node = nodes.find((n) => n.nodeId === $("[data-node]").value);
     if (!session)
       $("[data-cwd]").value = node?.desiredAppServer?.defaultCwd || "";
+    renderAccounts();
+    $("[data-account]").onchange();
   };
   return {
     async open(id) {

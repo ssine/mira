@@ -52,7 +52,7 @@ try {
     assert.equal(await drawer.evaluate(element => element.inert), !open);
     assert.equal(await page.locator("#agentThreadDrawerBackdrop.open").isVisible(), open && !docked);
     assert.equal(await resize.isVisible(), open && docked);
-    const rect = await page.locator(".conversation-card").boundingBox();
+    const rect = await page.locator("#agentView .conversation-card").boundingBox();
     const sidebarWidth = open && docked ? (await drawer.boundingBox()).width : 0;
     assert.ok(Math.abs(rect.x - sidebarWidth) <= 1, "only a docked sidebar reserves a column");
     assert.ok(Math.abs(rect.width - (page.viewportSize().width - sidebarWidth - (details ? 300 : 0))) <= 1);

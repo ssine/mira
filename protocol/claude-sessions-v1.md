@@ -78,3 +78,22 @@ Neither a failed batch nor a missing display event authorizes replaying tool eff
 Transport is the existing outbound Node channel for control and HTTPS to Mira
 Server for storage. The private `claude` control capability is not advertised as
 an Agent device tool and is not accepted through the generic invoke API.
+
+## Managed accounts
+
+The existing administrator account UI includes Claude bindings, exposed as
+`claudeAccounts` on Node views. `POST /v1/claude/accounts` creates a Node binding
+from `nodeId` and `name`; `PATCH /v1/claude/accounts/:id` changes `name` or `enabled`.
+`POST /v1/claude/accounts/:id/configure` sends a typed `provider` (`id`: `anthropic`
+or `bedrock`, `baseUrl`, `model`, and Bedrock `region`) and an optional `apiKey`
+through the private Node channel. Omit `apiKey` to retain it; an empty key clears it.
+Keys never enter PostgreSQL, account responses, desired state, or audit metadata.
+
+Session creation and turn submission accept `nodeAccountId`. Turns inherit the
+session's binding when omitted; an explicit empty string selects native Node
+configuration. The Node/account pair is checked before turn reservation. Unknown,
+disabled, unconfigured and foreign-Node bindings fail without falling back to
+ambient credentials. Account row locks serialize reservation with credential
+changes; the Node also refuses changes while one of that account's workers runs.
+The account binding is durable metadata, independent of native transcript entries.
+Runtime `describe` accepts the same binding for native model/account discovery.

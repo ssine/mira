@@ -3,10 +3,19 @@ package foundation
 // Claude native records are independent of Codex ThreadStore generations.
 // JSON (not JSONB) preserves escaped NUL and future native fields.
 const claudeSessionsSQL = `
+CREATE TABLE mira_claude_accounts (
+ node_account_id UUID PRIMARY KEY, node_id UUID NOT NULL REFERENCES codex_nodes(node_id),
+ name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+ enabled BOOLEAN NOT NULL DEFAULT TRUE, configured BOOLEAN NOT NULL DEFAULT FALSE,
+ provider JSONB NOT NULL DEFAULT '{}', credential_revision BIGINT NOT NULL DEFAULT 1,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX mira_claude_accounts_node ON mira_claude_accounts(node_id);
 CREATE TABLE mira_claude_sessions (
  session_id UUID PRIMARY KEY, request_id UUID NOT NULL UNIQUE, create_digest TEXT NOT NULL DEFAULT '',
  node_id UUID NOT NULL REFERENCES codex_nodes(node_id), cwd TEXT NOT NULL,
  title TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', effort TEXT NOT NULL DEFAULT '',
+ node_account_id UUID REFERENCES mira_claude_accounts(node_account_id),
  archived BOOLEAN NOT NULL DEFAULT FALSE, revision BIGINT NOT NULL DEFAULT 1,
  active_turn UUID, persistence TEXT NOT NULL DEFAULT 'pending',
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()

@@ -52,7 +52,7 @@ func newClaudeFixture(t *testing.T) *claudeFixture {
 	secret := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	hash, _ := foundation.NodeSecretHash(secret)
 	token := "mira_node_" + credentialID + "_" + secret
-	if _, err = pool.Exec(ctx, `INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status,approved_at,last_seen_at) VALUES($1::uuid,$1::text,'claude-test','linux','amd64','linux','test','{"claudeRuntimeV1":true,"files":true}','[]','approved',NOW(),NOW())`, nodeID); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status,approved_at,last_seen_at) VALUES($1::uuid,$1::text,'claude-test','linux','amd64','linux','test','{"claudeRuntimeV1":true,"claudeAccountsV1":true,"files":true}','[]','approved',NOW(),NOW())`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO mira_node_credentials(credential_id,node_id,secret_hash) VALUES($1,$2,$3)`, credentialID, nodeID, hash); err != nil {
@@ -255,6 +255,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
 	t.Setenv("ENABLE_TOOL_SEARCH", "false")
 	var requests atomic.Int32
+	var modelAuth atomic.Value
 	var imageSeen atomic.Bool
 	var resumed atomic.Bool
 	var hold atomic.Bool
@@ -269,6 +270,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 			return
 		}
 		requests.Add(1)
+		modelAuth.Store(r.Header.Get("x-api-key"))
 		bytes, _ := json.Marshal(b["messages"])
 		if strings.Contains(string(bytes), `"type":"image"`) {
 			imageSeen.Store(true)
@@ -571,6 +573,47 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Shared account management keeps API credentials local and persists an
+	// explicit per-session account binding, including an idle account switch.
+	accountIDs := []string{}
+	for _, name := range []string{"Messages A", "Messages B"} {
+		account := f.call("POST", "/v1/claude/accounts", map[string]any{"nodeId": f.nodeID, "name": name})
+		accountID := account["nodeAccountId"].(string)
+		accountIDs = append(accountIDs, accountID)
+		f.call("POST", "/v1/claude/accounts/"+accountID+"/configure", map[string]any{"provider": map[string]any{"id": "anthropic", "baseUrl": model.URL, "model": "claude-sonnet-4-6"}, "apiKey": "private-test-" + accountID})
+	}
+	managed := f.call("POST", "/v1/claude/sessions", map[string]any{"requestId": uuidClaude(), "nodeId": f.nodeID, "cwd": workspace, "nodeAccountId": accountIDs[0]})
+	managedRoute := "/v1/claude/sessions/" + managed["sessionId"].(string)
+	for index, accountID := range accountIDs {
+		resumed.Store(false)
+		f.call("POST", managedRoute+"/turns", map[string]any{"requestId": uuidClaude(), "text": "Remember the marker and use the Mira status tool.", "nodeAccountId": accountID})
+		wait("managed account turn", 60*time.Second, func() bool { return f.call("GET", managedRoute, nil)["activeTurn"] == nil })
+		state := f.call("GET", managedRoute, nil)
+		if state["nodeAccountId"] != accountID || state["persistence"] != "saved" || modelAuth.Load() != "private-test-"+accountID {
+			t.Fatalf("account routing/binding failed: %#v", state)
+		}
+		if index == 1 && !resumed.Load() {
+			t.Fatal("account switch lost native context")
+		}
+	}
+	public := f.call("GET", "/v1/nodes/"+f.nodeID, nil)
+	encoded, _ := json.Marshal(public)
+	if strings.Contains(string(encoded), "private-test-") {
+		t.Fatal("credential appeared in public account metadata")
+	}
+	if len(public["claudeAccounts"].([]any)) != 2 {
+		t.Fatal("managed accounts missing from shared Node account view")
+	}
+	f.call("PATCH", "/v1/claude/accounts/"+accountIDs[1], map[string]any{"enabled": false})
+	status, _ = f.request("POST", managedRoute+"/turns", map[string]any{"requestId": uuidClaude(), "text": "Disabled account must not run"}, nil)
+	if status != 409 || f.call("GET", managedRoute, nil)["activeTurn"] != nil {
+		t.Fatal("disabled account reserved a turn")
+	}
+	status, _ = f.request("POST", "/v1/claude/sessions", map[string]any{"requestId": uuidClaude(), "nodeId": secondNode, "cwd": workspace, "nodeAccountId": accountIDs[0]}, nil)
+	if status != 409 {
+		t.Fatal("account accepted on a different Node")
+	}
+	f.call("PATCH", "/v1/claude/accounts/"+accountIDs[1], map[string]any{"enabled": true})
 	if preview := os.Getenv("MIRA_CLAUDE_PREVIEW_FILE"); preview != "" {
 		hold.Store(false)
 		if err := os.WriteFile(preview, []byte(f.endpoint), 0600); err != nil {

@@ -35,7 +35,7 @@ Implemented:
 
 The two engines currently have separate conversation lists in the same console.
 The Claude interface does not yet implement active-turn steering, conversation
-forking, a `mira claude` CLI wrapper, Codex account switching, or aggregate account/
+forking, a `mira claude` CLI wrapper, or aggregate account/
 subagent cost accounting. It shows the SDK's reported usage and cost for a run.
 Workspace files and attachment paths are not automatically copied between Nodes.
 
@@ -51,9 +51,19 @@ A Node runs at most eight active Claude turn processes. Preparation is asynchron
 and does not stop heartbeats. Shutdown interrupts workers, then kills their process
 trees after a grace period. Windows child processes do not create console windows.
 
-Authentication belongs to the Node's OS user: its Claude login/configuration or
-provider environment is used. There is no model login or credential in Server
-state. A Windows service does not automatically inherit an interactive user's
+The existing **Accounts** page manages both Codex and Claude accounts. Select
+Claude Code when adding an account, then configure a Messages or Bedrock API,
+default model and API key. Credentials are sent over the approved Node channel
+and saved with private permissions under `<identity-directory>/accounts/<id>/claude/`.
+Only the account name, provider metadata, enabled state and revision are stored
+on Server. Claude conversations persist their selected Node account and can
+switch accounts between turns; active turns prevent configuration changes.
+Model discovery and native child processes use that account's isolated environment.
+The shared page supports renaming, updating credentials, and enabling/disabling
+Claude accounts. Claude API quotas are not presented as Codex subscription quotas.
+
+Without a managed account, the Node's existing native Claude login/configuration
+or provider environment remains available as **Node default configuration**. A Windows service does not automatically inherit an interactive user's
 Claude login. These optional, local environment settings are supported:
 
 | Variable | Purpose |
@@ -81,7 +91,7 @@ Claude writes local transcripts and then mirrors batches through `SessionStore`.
 This **does not provide Codex's pre-sampling durability barrier**. A failed batch
 can emit `system/mirror_error` while model/tool execution continues.
 
-Schema 35 adds independent Claude sessions, turns, native transcript collections,
+Schema 35 adds Node-local Claude account metadata and independent sessions, turns, native transcript collections,
 raw entries, operation receipts and SDK events. It does not rewrite Codex tables
 or change released migrations. Raw entries/events use PostgreSQL **JSON**, preserving
 unknown fields and escaped NUL. The event-type projection is separate: PostgreSQL
