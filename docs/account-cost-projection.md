@@ -15,7 +15,9 @@ flowchart LR
   C --> W
   E --> Q[Account and calendar aggregation]
   X[Execution events and account metadata] --> Q
-  Q --> A[Short response cache and Web UI]
+  Q --> A[Shared timezone snapshot]
+  A --> R[In-memory account and range selection]
+  R --> U[Web UI]
 ```
 
 ## Persistence and restart
@@ -26,6 +28,14 @@ processed sequence and bounded parser state. `mira_account_cost_entries` stores
 only charge deltas and attribution inputs: request time, turn, provider, exact
 integer nanodollar amounts, pricing coverage and reasons. It contains neither
 conversation text nor credentials. PostgreSQL raw history remains authoritative.
+
+Schema 37 adds the stored generated scalar `cost_forked_from_id` to the thread
+projection. Source selection and fingerprint validation read that scalar instead
+of decompressing each thread's JSON state on every poll. PostgreSQL derives it
+from `state`, backfills existing rows during migration and maintains it for both
+new and previous Server writers. The migration rewrites the projection table
+once under a table lock; it does not scan or rewrite canonical events. Rebuilding
+thread projections also rebuilds the scalar.
 
 One Server-owned worker selects at most 16 threads in oldest-serviced order and
 processes at most 1024 relevant records per thread transaction. It waits 25 ms
@@ -83,11 +93,17 @@ pending unrelated threads can conservatively mark an account result partial.
 While building, known amounts carry `projection_pending`; missing amounts stay
 unknown. The UI shows progress instead of presenting a partial build as final.
 
-The bounded response cache still merges identical concurrent reads, permits two
-aggregations and retains at most 64 account/range/timezone/date keys. Successful
-results expire after one minute, or five seconds while the projector is pending.
-Query failures retain the previous result with the existing stale marker and a
-30-second retry. Cache timestamps describe aggregation time, while `projection`
+The Server shares one immutable 30-day snapshot across all accounts and ranges
+in a timezone. Switching accounts or ranges slices and merges in-memory daily
+and hourly totals without another SQL aggregation. The bounded cache permits two
+aggregations and retains at most eight timezone/local-date snapshots. Local
+midnight starts a new window. Successful snapshots expire after one minute,
+including while the projector is pending; partial backfill no longer triggers
+an expensive aggregation every five seconds. Concurrent callers share refresh
+work, and client cancellation does not cancel a shared refresh. Stale snapshots
+return immediately while replacement work runs. Query failures retain the
+previous result with the existing stale marker and a 30-second retry. Cache
+timestamps describe aggregation time, while `projection`
 describes whether source processing has caught up.
 
 To rebuild derived costs, an administrator can delete selected checkpoint rows;

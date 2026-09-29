@@ -106,7 +106,9 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	server := &Server{
 		config: configuration, pool: pool, auth: auth, nodes: nodeService, channel: broker,
 		views: viewService, imports: importService, sampler: sampler, authState: authState,
-		accountCosts: newAccountCostCache(ctx, viewService.AccountCostHistory),
+		accountCosts: newAccountCostCache(ctx, func(ctx context.Context, zone string) (accountCostSnapshot, error) {
+			return viewService.LoadAccountCostSnapshot(ctx, zone)
+		}),
 	}
 	// A dispatched retry may have reached Codex before the previous Server
 	// stopped. Surface uncertainty without ever submitting it again.
