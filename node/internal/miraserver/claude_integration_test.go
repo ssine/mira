@@ -2,7 +2,9 @@ package miraserver
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -52,7 +54,7 @@ func newClaudeFixture(t *testing.T) *claudeFixture {
 	secret := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	hash, _ := foundation.NodeSecretHash(secret)
 	token := "mira_node_" + credentialID + "_" + secret
-	if _, err = pool.Exec(ctx, `INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status,approved_at,last_seen_at) VALUES($1::uuid,$1::text,'claude-test','linux','amd64','linux','test','{"claudeRuntimeV1":true,"claudeAccountsV1":true,"files":true}','[]','approved',NOW(),NOW())`, nodeID); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status,approved_at,last_seen_at) VALUES($1::uuid,$1::text,'claude-test','linux','amd64','linux','test','{"claudeRuntimeV1":true,"claudeAccountsV1":true,"claudeSessionCacheV1":true,"files":true}','[]','approved',NOW(),NOW())`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO mira_node_credentials(credential_id,node_id,secret_hash) VALUES($1,$2,$3)`, credentialID, nodeID, hash); err != nil {
@@ -207,6 +209,38 @@ func TestClaudeNativeStorage(t *testing.T) {
 	if status != 200 || string(raw) != batch {
 		t.Fatalf("round trip: %d %s", status, raw)
 	}
+	first := strings.Split(batch, "\n")[0]
+	digest := sha256.Sum256([]byte(first))
+	prefix := hex.EncodeToString(digest[:])
+	for _, check := range []struct{ query, want, start string }{
+		{"cache=1&after=0", batch, "0"},
+		{"cache=1&after=1&prefix=" + prefix, strings.Split(batch, "\n")[1] + "\n", "1"},
+		{"cache=1&after=1&prefix=stale", batch, "0"},
+		{"cache=1&after=3", batch, "0"},
+	} {
+		req, _ := http.NewRequest("GET", f.endpoint+route+"/entries?"+check.query, nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 || string(data) != check.want || res.Header.Get("X-Mira-Claude-Cache-Version") != "1" || res.Header.Get("X-Mira-Claude-Cache-Start") != check.start || res.Header.Get("X-Mira-Claude-Cache-End") != "2" || len(res.Header.Get("X-Mira-Claude-Cache-Prefix")) != 64 {
+			t.Fatalf("cache wire %s: %d %v %s", check.query, res.StatusCode, res.Header, data)
+		}
+	}
+	status, _ = f.request("GET", route+"/entries?cache=1&after=-1", nil, headers)
+	if status != 400 {
+		t.Fatalf("negative cache cursor: %d", status)
+	}
+	staleHeaders := map[string]string{"Authorization": headers["Authorization"], "X-Mira-Claude-Turn": headers["X-Mira-Claude-Turn"], "X-Mira-Claude-Revision": "2"}
+	status, _ = f.request("GET", route+"/entries?cache=1&after=1&prefix="+prefix, nil, staleHeaders)
+	if status != 409 {
+		t.Fatalf("stale cache reader: %d", status)
+	}
 	status, _ = f.request("POST", route+"/entries?operationId="+operation, batch+"{}\n", headers)
 	if status != 409 {
 		t.Fatalf("changed replay: %d", status)
@@ -288,6 +322,11 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var hold atomic.Bool
 	var ask atomic.Bool
 	var child atomic.Bool
+	var background, backgroundPhase, backgroundDone atomic.Bool
+	backgroundStarted := make(chan struct{}, 1)
+	backgroundRelease := make(chan struct{})
+	var releaseBackground sync.Once
+	defer releaseBackground.Do(func() { close(backgroundRelease) })
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
@@ -327,6 +366,48 @@ func TestClaudeManagedSDK(t *testing.T) {
 			block = map[string]any{"type": "text", "text": "CHILD_NATIVE_TEST"}
 			stop = "end_turn"
 		}
+		if backgroundPhase.Load() {
+			isChild := false
+			for _, raw := range b["messages"].([]any) {
+				message := raw.(map[string]any)
+				if message["role"] != "user" {
+					continue
+				}
+				switch content := message["content"].(type) {
+				case string:
+					isChild = isChild || strings.Contains(content, "BACKGROUND_CHILD_REQUEST")
+				case []any:
+					for _, raw := range content {
+						entry := raw.(map[string]any)
+						if text, _ := entry["text"].(string); entry["type"] == "text" && strings.Contains(text, "BACKGROUND_CHILD_REQUEST") {
+							isChild = true
+						}
+					}
+				}
+			}
+			text := "BACKGROUND_PARENT_WAIT"
+			if isChild {
+				select {
+				case backgroundStarted <- struct{}{}:
+				default:
+				}
+				select {
+				case <-backgroundRelease:
+				case <-r.Context().Done():
+					return
+				}
+				backgroundDone.Store(true)
+				text = "BACKGROUND_CHILD_FINAL"
+			} else if backgroundDone.Load() {
+				text = "BACKGROUND_PARENT_FINAL"
+			}
+			block = map[string]any{"type": "text", "text": text}
+			stop = "end_turn"
+		}
+		if background.CompareAndSwap(true, false) {
+			block = map[string]any{"type": "tool_use", "id": "tool_" + uuidClaude(), "name": "Agent", "input": map[string]any{"description": "Delayed background validation", "prompt": "BACKGROUND_CHILD_REQUEST: reply with the final marker", "subagent_type": "general-purpose", "run_in_background": true}}
+			stop = "tool_use"
+		}
 		usage := map[string]any{"input_tokens": 10, "output_tokens": 4}
 		message := map[string]any{"id": "msg_" + uuidClaude(), "type": "message", "role": "assistant", "model": b["model"], "content": []any{block}, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
 		if b["stream"] != true {
@@ -356,7 +437,8 @@ func TestClaudeManagedSDK(t *testing.T) {
 	}))
 	defer model.Close()
 	t.Setenv("ANTHROPIC_BASE_URL", model.URL)
-	manager := clauderuntime.New(t.TempDir())
+	runtimeRoot := t.TempDir()
+	manager := clauderuntime.New(runtimeRoot)
 	defer manager.Close()
 	dialer := websocket.Dialer{Subprotocols: []string{"mira-node-v1", "auth." + base64.RawURLEncoding.EncodeToString([]byte(f.token))}}
 	ws, _, err := dialer.Dial("ws"+strings.TrimPrefix(f.endpoint, "http")+"/v1/nodes/"+f.nodeID+"/connect", nil)
@@ -401,6 +483,21 @@ func TestClaudeManagedSDK(t *testing.T) {
 		t.Fatalf("timeout: %s", name)
 	}
 	wait("channel", 5*time.Second, func() bool { return f.server.channel.IsConnected(f.nodeID) })
+	cacheRoute := "/v1/claude/runtimes/" + f.nodeID
+	settings := f.call("POST", cacheRoute+"/cache-status", map[string]any{})
+	if settings["maxBytes"] != float64(4*1024*1024*1024) {
+		t.Fatalf("cache default: %v", settings)
+	}
+	settings = f.call("POST", cacheRoute+"/cache-configure", map[string]any{"maxBytes": 1024 * 1024})
+	if settings["maxBytes"] != float64(1024*1024) {
+		t.Fatalf("cache configure: %v", settings)
+	}
+	for _, invalid := range []any{-1, 0.5, "4", nil} {
+		code, _ := f.request("POST", cacheRoute+"/cache-configure", map[string]any{"maxBytes": invalid}, nil)
+		if code != 400 {
+			t.Fatalf("invalid cache limit %v: %d", invalid, code)
+		}
+	}
 	f.call("POST", "/v1/claude/runtimes/"+f.nodeID+"/prepare", map[string]any{})
 	wait("runtime preparation", 3*time.Minute, func() bool {
 		s := f.call("POST", "/v1/claude/runtimes/"+f.nodeID+"/status", map[string]any{})
@@ -467,6 +564,11 @@ func TestClaudeManagedSDK(t *testing.T) {
 	}
 	runTurn("What marker was saved?")
 	wait("resume without local history", 60*time.Second, completed)
+	settings = f.call("POST", cacheRoute+"/cache-status", map[string]any{})
+	if settings["usedBytes"].(float64) <= 0 || settings["entries"].(float64) <= 0 {
+		t.Fatalf("native resume did not populate the disposable cache: %v", settings)
+	}
+
 	if !resumed.Load() {
 		t.Fatal("native resume lost previous messages")
 	}
@@ -494,6 +596,35 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if len(children["data"].([]any)) == 0 {
 		t.Fatal("native subagent transcript was not mirrored")
 	}
+
+	// A result can be an interim parent reply while research is still running.
+	// The input stream must stay open so its notification can wake the parent.
+	backgroundPhase.Store(true)
+	background.Store(true)
+	backgroundTurn := runTurn("Run a delayed background agent, then synthesize its findings.")
+	wait("background request", 30*time.Second, func() bool {
+		select {
+		case <-backgroundStarted:
+			return true
+		default:
+			return false
+		}
+	})
+	wait("interim parent result", 30*time.Second, func() bool {
+		var count int
+		_ = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result'`, backgroundTurn).Scan(&count)
+		return count > 0
+	})
+	if f.call("GET", route, nil)["activeTurn"] == nil {
+		t.Fatal("background work was marked complete at the interim parent result")
+	}
+	releaseBackground.Do(func() { close(backgroundRelease) })
+	wait("parent synthesis after background task", 45*time.Second, completed)
+	var final string
+	if err = f.server.pool.QueryRow(ctx, `SELECT payload->>'result' FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' ORDER BY seq DESC LIMIT 1`, backgroundTurn).Scan(&final); err != nil || final != "BACKGROUND_PARENT_FINAL" {
+		t.Fatalf("background result did not reach the parent: %q %v", final, err)
+	}
+	backgroundPhase.Store(false)
 
 	// A second approved Node uses a fresh SDK cache/config directory. Server ownership
 	// moves only after completion, and the old writer remains fenced out.

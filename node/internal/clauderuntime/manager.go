@@ -35,6 +35,7 @@ type Manager struct {
 	mu                          sync.Mutex
 	root, dir, state, lastError string
 	accountsRoot                string
+	cacheRoot, cacheConfig      string
 	runtimeID                   string
 	preparing                   bool
 	closed                      bool
@@ -45,7 +46,9 @@ type Manager struct {
 }
 
 func New(identityDir string) *Manager {
-	return &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}}
+	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}}
+	m.cachePaths(identityDir)
+	return m
 }
 func nodeBinary() string {
 	if s := os.Getenv("MIRA_NODE_CLAUDE_NODE"); s != "" {
@@ -157,6 +160,8 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	id, _ := params["turnId"].(string)
 	accountID, _ := params["nodeAccountId"].(string)
 	switch action {
+	case "cache-status", "cache-configure":
+		return m.cacheCall(action, params["maxBytes"])
 	case "account/configure":
 		return m.configureAccount(params)
 	case "prepare":
@@ -211,6 +216,10 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		if id == "" {
 			return nil, errors.New("turnId is required")
 		}
+		// Cache failures never prevent native execution. Maintenance repairs locks
+		// left by a crashed SDK worker before the next turn starts.
+		_, _ = m.cacheCall("cache-status", nil)
+		params["cache"] = map[string]string{"root": m.cacheRoot, "config": m.cacheConfig}
 		cmd := exec.Command(nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
 		env, err := m.accountEnvironment(accountID)
 		if err != nil {

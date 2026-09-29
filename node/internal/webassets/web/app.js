@@ -2011,6 +2011,34 @@ function renderProcessCount(result, fallback = {}) {
     : `${managedRunning} 个由 Mira 启动的进程正在运行`;
 }
 
+let claudeCacheRequest = 0;
+async function loadClaudeCacheSettings(save = false) {
+  const node = workspace.node, request = ++claudeCacheRequest;
+  const card = $("#claudeCacheCard"), input = $("#claudeCacheLimit"), status = $("#claudeCacheStatus");
+  card.classList.toggle("hidden", !node?.capabilities?.claudeRuntimeV1);
+  const supported = node?.status === "online" && node?.capabilities?.claudeSessionCacheV1;
+  for (const control of $("#claudeCacheForm").elements) control.disabled = true;
+  if (!supported) {
+    status.textContent = node?.status !== "online" ? "节点离线，连接后可配置。" : "升级此节点后可配置缓存。";
+    return;
+  }
+  status.textContent = save ? "正在保存…" : "正在读取…";
+  try {
+    const maxBytes = Math.round(Number(input.value) * 1024 ** 3);
+    if (save && (!input.value.trim() || !Number.isSafeInteger(maxBytes) || maxBytes < 0)) throw new Error("请输入有效的非负容量");
+    const result = await claudeRuntime.call(`runtimes/${node.nodeId}/${save ? "cache-configure" : "cache-status"}`, save ? { maxBytes } : {});
+    if (workspace.node?.nodeId !== node.nodeId || request !== claudeCacheRequest) return;
+    input.value = String(result.maxBytes / 1024 ** 3);
+    status.textContent = `${result.maxBytes === 0 ? "已关闭" : `已用 ${formatBytes(result.usedBytes)} / ${formatBytes(result.maxBytes)}`} · ${result.entries} 份历史缓存${result.cleanupPending ? " · 当前写入结束后，将在下次使用或刷新时清理" : ""}`;
+    if (save) toast("已保存此节点的 Claude 缓存容量");
+  } catch (error) {
+    if (workspace.node?.nodeId === node.nodeId && request === claudeCacheRequest) status.textContent = error.message;
+  } finally {
+    if (workspace.node?.nodeId === node.nodeId && request === claudeCacheRequest)
+      for (const control of $("#claudeCacheForm").elements) control.disabled = false;
+  }
+}
+
 async function loadOverview() {
   const nodeId = workspace.node?.nodeId;
   const fallbackStatus = {
@@ -2023,6 +2051,7 @@ async function loadOverview() {
   $("#systemProcessCount").textContent = "…";
   $("#processCountHint").textContent = "正在读取系统进程数";
   renderCapabilities();
+  void loadClaudeCacheSettings();
   if (!nodeId || workspace.node.status !== "online") {
     renderProcessCount(null, fallbackStatus);
     $("#processCountHint").textContent = workspace.node?.machineStatus?.processCount === undefined ? "节点离线" : "节点离线 · 显示最后一次心跳采样";
@@ -6862,6 +6891,8 @@ $("#nodeMetadataForm").addEventListener("submit", async event => {
   }
 });
 $("#workspaceBack").addEventListener("click", () => leaveWorkspace().catch((error) => toast(error.message)));
+$("#claudeCacheForm").addEventListener("submit", event => { event.preventDefault(); void loadClaudeCacheSettings(true); });
+$("#claudeCacheRefresh").addEventListener("click", () => { void loadClaudeCacheSettings(); });
 $("#workspaceRefresh").addEventListener("click", () => refreshWorkspace().then(() => toast("节点已刷新")).catch((error) => toast(error.message)));
 $("#previewClose").addEventListener("click", clearPreview);
 

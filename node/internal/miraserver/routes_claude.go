@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"path"
 	"strconv"
@@ -119,7 +120,7 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 	}
 	if len(parts) == 3 && parts[0] == "runtimes" && claudeUUID(parts[1]) && r.Method == "POST" {
 		action := parts[2]
-		if action != "prepare" && action != "status" && action != "describe" {
+		if action != "prepare" && action != "status" && action != "describe" && action != "cache-status" && action != "cache-configure" {
 			return true, claudeError(404, "Unknown runtime action")
 		}
 		node, err := server.nodes.Get(ctx, parts[1], false)
@@ -132,6 +133,24 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		body, err := server.readBody(r)
 		if err != nil {
 			return true, err
+		}
+		if action == "cache-status" || action == "cache-configure" {
+			if node.Capabilities["claudeSessionCacheV1"] != true {
+				return true, claudeError(409, "Upgrade this Node to configure the Claude session cache")
+			}
+			params := map[string]any{"action": action}
+			if action == "cache-configure" {
+				limit, ok := body["maxBytes"].(float64)
+				if !ok || limit < 0 || limit > 9007199254740991 || limit != math.Trunc(limit) {
+					return true, claudeError(400, "maxBytes must be a nonnegative safe integer")
+				}
+				params["maxBytes"] = limit
+			}
+			result, err := server.channel.Invoke(ctx, parts[1], "claude", params, 20*time.Second)
+			if err != nil {
+				return true, err
+			}
+			return true, writeJSON(w, 200, result)
 		}
 		accountID := claudeString(body, "nodeAccountId")
 		if accountID != "" {
@@ -672,7 +691,47 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		return writeJSON(w, 200, map[string]any{"subkeys": keys})
 	}
 	if op == "entries" && r.Method == "GET" {
-		rows, err := tx.Query(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 ORDER BY seq`, id, subpath)
+		var after int64
+		if r.URL.Query().Get("cache") == "1" {
+			var end int64
+			if err = tx.QueryRow(ctx, `SELECT coalesce((SELECT next_seq-1 FROM mira_claude_transcripts WHERE session_id=$1 AND subpath=$2),0)`, id, subpath).Scan(&end); err != nil {
+				return err
+			}
+			after, err = strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+			if err != nil || after < 0 {
+				return claudeError(400, "Invalid native cache cursor")
+			}
+			// Raw records are immutable and contiguous. Validate the cached prefix
+			// against PostgreSQL before returning only its missing suffix. A stale
+			// cursor (including after a restore) falls back to the complete stream.
+			if after > end {
+				after = 0
+			}
+			if after > 0 {
+				var raw []byte
+				if err = tx.QueryRow(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3`, id, subpath, after).Scan(&raw); err != nil {
+					return err
+				}
+				digest := sha256.Sum256(raw)
+				if hex.EncodeToString(digest[:]) != r.URL.Query().Get("prefix") {
+					after = 0
+				}
+			}
+			var prefix string
+			if end > 0 {
+				var raw []byte
+				if err = tx.QueryRow(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3`, id, subpath, end).Scan(&raw); err != nil {
+					return err
+				}
+				digest := sha256.Sum256(raw)
+				prefix = hex.EncodeToString(digest[:])
+			}
+			w.Header().Set("X-Mira-Claude-Cache-Version", "1")
+			w.Header().Set("X-Mira-Claude-Cache-Start", strconv.FormatInt(after, 10))
+			w.Header().Set("X-Mira-Claude-Cache-End", strconv.FormatInt(end, 10))
+			w.Header().Set("X-Mira-Claude-Cache-Prefix", prefix)
+		}
+		rows, err := tx.Query(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq>$3 ORDER BY seq`, id, subpath, after)
 		if err != nil {
 			return err
 		}
