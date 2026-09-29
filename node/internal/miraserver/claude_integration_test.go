@@ -317,6 +317,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 	t.Setenv("ENABLE_TOOL_SEARCH", "false")
 	var requests atomic.Int32
 	var modelAuth atomic.Value
+	var systemPrompt atomic.Value
 	var imageSeen atomic.Bool
 	var resumed atomic.Bool
 	var hold atomic.Bool
@@ -337,6 +338,9 @@ func TestClaudeManagedSDK(t *testing.T) {
 		}
 		requests.Add(1)
 		modelAuth.Store(r.Header.Get("x-api-key"))
+		if system, _ := json.Marshal(b["system"]); strings.Contains(string(system), "Use home_nodes MCP tools") {
+			systemPrompt.Store(string(system))
+		}
 		bytes, _ := json.Marshal(b["messages"])
 		if strings.Contains(string(bytes), `"type":"image"`) {
 			imageSeen.Store(true)
@@ -458,9 +462,19 @@ func TestClaudeManagedSDK(t *testing.T) {
 			}
 			go func(b map[string]any) {
 				params, _ := b["params"].(map[string]any)
-				params["endpoint"] = f.endpoint
-				params["credential"] = f.token
-				value, err := manager.Call(params)
+				var value any
+				var err error
+				if b["capability"] == "file" {
+					// The Server reads Node instruction files through the bounded file capability.
+					var data []byte
+					if data, err = os.ReadFile(params["path"].(string)); err == nil {
+						value = map[string]any{"content": base64.StdEncoding.EncodeToString(data), "encoding": "base64", "bytesRead": len(data), "eof": true}
+					}
+				} else {
+					params["endpoint"] = f.endpoint
+					params["credential"] = f.token
+					value, err = manager.Call(params)
+				}
 				reply := map[string]any{"type": "response", "requestId": b["requestId"], "ok": err == nil, "result": value}
 				if err != nil {
 					reply["error"] = map[string]any{"message": err.Error()}
@@ -510,6 +524,14 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if len(description["models"].([]any)) == 0 {
 		t.Fatal("empty native model catalog")
 	}
+	codexInstructions, claudeInstructions := filepath.Join(t.TempDir(), "codex.md"), filepath.Join(t.TempDir(), "claude.md")
+	if err = os.WriteFile(codexInstructions, []byte("CODEX_ONLY_INSTRUCTION_MARKER"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(claudeInstructions, []byte("CLAUDE_NODE_INSTRUCTION_MARKER"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.call("PUT", "/v1/nodes/"+f.nodeID+"/desired-app-server", map[string]any{"running": false, "developerInstructionsFile": codexInstructions, "claudeInstructionsFile": claudeInstructions})
 	created := f.call("POST", "/v1/claude/sessions", map[string]any{"requestId": uuidClaude(), "nodeId": f.nodeID, "cwd": workspace, "title": "SDK test"})
 	id := created["sessionId"].(string)
 	route := "/v1/claude/sessions/" + id
@@ -558,6 +580,9 @@ func TestClaudeManagedSDK(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Fatalf("duplicate execution or no tool: %d", requests.Load())
+	}
+	if system, _ := systemPrompt.Load().(string); !strings.Contains(system, "CLAUDE_NODE_INSTRUCTION_MARKER") || strings.Contains(system, "CODEX_ONLY_INSTRUCTION_MARKER") {
+		t.Fatalf("Claude system prompt did not use only the Claude instructions file: %s", system)
 	}
 	if err = os.RemoveAll(configDir); err != nil {
 		t.Fatal(err)

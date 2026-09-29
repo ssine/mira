@@ -108,9 +108,16 @@ export class ClaudeRuntime {
   async models(node, progress) {
     await this.prepare(node.nodeId, progress);
     const info = await this.call(`runtimes/${node.nodeId}/describe`, { nodeAccountId: node.nodeAccountId || "" });
-    return { defaultModel: node.reportedAppServer?.provider?.model || info.models?.[0]?.value,
-      models: (info.models || []).map(m => ({ model: m.value || m.id, displayName: m.displayName || m.value, description: m.description,
-        supportedReasoningEfforts: m.supportsEffort === false ? [] : (m.supportedEffortLevels || []).map(reasoningEffort => ({ reasoningEffort })) })) };
+    const provider = node.reportedAppServer?.provider || {}, catalog = info.models || [];
+    const efforts = m => m.supportsEffort === false ? [] : (m.supportedEffortLevels || []).map(reasoningEffort => ({ reasoningEffort }));
+    const models = catalog.map(m => ({ model: m.value || m.id, displayName: m.displayName || m.value, description: m.description, supportedReasoningEfforts: efforts(m) }));
+    // The SDK lists aliases; an account's full model ID borrows the capabilities of the alias resolving to it.
+    if (provider.model && !models.some(m => m.model === provider.model)) {
+      const base = id => String(id || "").replace(/\[1m\]$/i, "");
+      const match = catalog.find(m => m.resolvedModel === provider.model) || catalog.find(m => base(m.resolvedModel) === base(provider.model));
+      models.unshift({ model: provider.model, displayName: match?.displayName || provider.model, description: "账号默认模型", supportedReasoningEfforts: match ? efforts(match) : [] });
+    }
+    return { defaultModel: provider.model || models[0]?.model, configuredReasoningEffort: provider.effort || null, models };
   }
   async history(thread, { older = false, poll = false } = {}) {
     if (this.id !== thread.threadId) this.reset(thread.threadId);

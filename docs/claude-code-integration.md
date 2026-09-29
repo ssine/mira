@@ -26,9 +26,14 @@ Implemented:
 - Native `AskUserQuestion` prompts appear in the conversation and answers return
   to the waiting SDK invocation. Ordinary tools use the same unrestricted OS-user
   execution policy as Mira's default Codex configuration.
-- Mira device tools use the shared MCP adapter. The existing bounded Developer
-  instructions file reader and absolute Mira SSH/SCP/SFTP instructions are shared
-  with Codex. Native user/project/local Claude settings and `CLAUDE.md` still apply.
+- Mira device tools use the shared MCP adapter. Each Node has a Claude-specific
+  `claudeInstructionsFile`, read on every turn by the same bounded reader as the
+  Codex Developer instructions file and appended to the system prompt together with
+  the absolute Mira SSH/SCP/SFTP instructions. The two files are configured
+  separately. Native user/project/local Claude settings and `CLAUDE.md` still apply.
+- Claude accounts may set a default reasoning effort for their default model. The
+  model picker maps the account's full model ID to the SDK alias that resolves to it,
+  so its effort levels remain selectable.
 - Native subagent transcripts are mirrored independently and selectable from the
   conversation. Root membership is durable; unknown nested parent relationships
   remain unknown rather than being inferred from a filename. Original native

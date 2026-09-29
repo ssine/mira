@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/clauderuntime"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 )
 
@@ -539,7 +540,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 	if state["status"] != "ready" {
 		return claudeError(409, "Prepare the Claude runtime before sending")
 	}
-	instructions, err := server.channel.RuntimeInstructions(ctx, nodeID)
+	instructions, err := server.channel.ClaudeInstructions(ctx, nodeID)
 	if err != nil {
 		return err
 	}
@@ -595,7 +596,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 			return claudeError(400, "Invalid Claude account")
 		}
 	}
-	defaultModel, err := claudeAccountForTurn(ctx, tx, nodeID, accountID)
+	account, err := claudeAccountForTurn(ctx, tx, nodeID, accountID)
 	if err != nil {
 		return err
 	}
@@ -612,13 +613,16 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		model = s.Model
 	}
 	if model == "" {
-		model = defaultModel
+		model = account.Model
 	}
 	effort := claudeString(b, "effort")
 	if _, provided := b["effort"]; !provided {
 		effort = s.Effort
 	}
-	if effort != "" && effort != "low" && effort != "medium" && effort != "high" && effort != "xhigh" && effort != "max" {
+	if effort == "" && model == account.Model {
+		effort = account.Effort
+	}
+	if !clauderuntime.ValidEffort(effort) {
 		return claudeError(400, "Invalid effort")
 	}
 

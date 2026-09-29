@@ -4507,6 +4507,7 @@ async function refreshAgentNodes() {
   const defaultCwd = selected?.desiredAppServer?.defaultCwd ?? "";
   $("#agentRuntimeDefaultCwd").value = defaultCwd;
   $("#agentRuntimeDeveloperInstructionsFile").value = selected?.desiredAppServer?.developerInstructionsFile ?? "";
+  $("#agentRuntimeClaudeInstructionsFile").value = dashboardNodes.get(runtimeSelect.value)?.desiredAppServer?.claudeInstructionsFile ?? "";
   if (!agent.threadId && !$("#conversationCwd").value.trim()) $("#conversationCwd").value = defaultCwd;
   if (selected && agent.socketNodeId !== selected.nodeId) {
     setAgentRuntimeState(`${selected.reportedAppServer?.status ?? "stopped"} · ${selected.hostname}`, selected.status === "online" ? "online" : "offline");
@@ -4550,6 +4551,24 @@ async function saveAgentRuntimeDeveloperInstructionsFile() {
   dashboardNodes.set(nodeId, node);
   $("#agentRuntimeDeveloperInstructionsFile").value = result.desiredAppServer.developerInstructionsFile ?? "";
   toast(developerInstructionsFile ? "已保存该节点的 Developer Message 文件" : "已清除该节点的 Developer Message 文件");
+}
+
+async function saveAgentRuntimeClaudeInstructionsFile() {
+  const nodeId = $("#agentRuntimeNode").value;
+  const node = dashboardNodes.get(nodeId);
+  if (!node) throw new Error("没有可配置的运行节点");
+  const claudeInstructionsFile = $("#agentRuntimeClaudeInstructionsFile").value.trim();
+  const result = await api(`/v1/nodes/${nodeId}/desired-app-server`, {
+    method: "PUT",
+    body: JSON.stringify({
+      running: node.desiredAppServer?.running === true,
+      claudeInstructionsFile: claudeInstructionsFile || null,
+    }),
+  });
+  node.desiredAppServer = result.desiredAppServer;
+  dashboardNodes.set(nodeId, node);
+  $("#agentRuntimeClaudeInstructionsFile").value = result.desiredAppServer.claudeInstructionsFile ?? "";
+  toast(claudeInstructionsFile ? "已保存该节点的 Claude 指令文件" : "已清除该节点的 Claude 指令文件");
 }
 
 function projectForThread(thread) {
@@ -6459,6 +6478,7 @@ $("#agentRuntimeStart").addEventListener("click", () => startAgentRuntime().catc
 $("#agentRuntimeStop").addEventListener("click", () => stopAgentRuntime().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveCwd").addEventListener("click", () => saveAgentRuntimeDefaultCwd().catch((error) => toast(error.message)));
 $("#agentRuntimeSaveDeveloperInstructions").addEventListener("click", () => saveAgentRuntimeDeveloperInstructionsFile().catch((error) => toast(error.message)));
+$("#agentRuntimeSaveClaudeInstructions").addEventListener("click", () => saveAgentRuntimeClaudeInstructionsFile().catch((error) => toast(error.message)));
 $("#agentRuntimeNode").addEventListener("change", () => {
   refreshAccountChoices();
   agent.modelChoice = null;
@@ -6469,6 +6489,7 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   $("#agentRuntimeDefaultCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
   $("#agentRuntimeDeveloperInstructionsFile").value = node?.desiredAppServer?.developerInstructionsFile ?? "";
+  $("#agentRuntimeClaudeInstructionsFile").value = node?.desiredAppServer?.claudeInstructionsFile ?? "";
   if (!agent.threadId) {
     $("#conversationCwd").value = node?.desiredAppServer?.defaultCwd ?? "";
     setConversationMeta($("#conversationCwd").value);

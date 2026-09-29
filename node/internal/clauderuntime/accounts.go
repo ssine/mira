@@ -17,6 +17,18 @@ type AccountProvider struct {
 	BaseURL string `json:"baseUrl"`
 	Region  string `json:"region,omitempty"`
 	Model   string `json:"model"`
+	// Effort is the default reasoning effort for turns that use Model; empty
+	// leaves the SDK's own default.
+	Effort string `json:"effort,omitempty"`
+}
+
+// ValidEffort reports whether value is empty or an SDK reasoning effort level.
+func ValidEffort(value string) bool {
+	switch value {
+	case "", "low", "medium", "high", "xhigh", "max":
+		return true
+	}
+	return false
 }
 
 func (p AccountProvider) Validate() error {
@@ -26,6 +38,9 @@ func (p AccountProvider) Validate() error {
 	}
 	if (p.ID != "anthropic" && p.ID != "bedrock") || p.Model == "" || len(p.Model) > 200 || strings.ContainsAny(p.Model+p.Region, "\r\n\x00") || len(p.Region) > 64 || (p.ID == "bedrock" && p.Region == "") {
 		return errors.New("Choose a Claude Messages or Bedrock provider, model and Bedrock region")
+	}
+	if !ValidEffort(p.Effort) {
+		return errors.New("Choose a Claude reasoning effort: low, medium, high, xhigh or max")
 	}
 	return nil
 }

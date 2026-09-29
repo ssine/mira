@@ -5,7 +5,8 @@ const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8787";
 const nodeId = randomUUID(), ids = [randomUUID(), randomUUID()];
 const account = (id, name, provider) => ({ engine: "claude", nodeAccountId: id, accountId: id, nodeId, name,
   enabled: true, configured: true, provider, reportedAppServer: { status: "ready", provider: {
-    id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example" } } });
+    id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example",
+    ...(provider === "anthropic" ? { effort: "xhigh" } : {}) } } });
 const node = { nodeId, hostname: "WSL fixture", platform: "linux", status: "online", approvalStatus: "approved",
   capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true },
   desiredAppServer: { defaultCwd: "/work" }, reportedAppServer: { status: "stopped" }, codexAccounts: [],
@@ -39,7 +40,7 @@ try {
       if (path.endsWith("/cache-configure")) cacheBytes = body.maxBytes;
       return route.fulfill({ json: { maxBytes: cacheBytes, usedBytes: 0, entries: 0, cleanupPending: false } });
     }
-    if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "claude-example", displayName: "Claude" }] } : { status: "ready" } });
+    if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "opus", resolvedModel: "claude-example", displayName: "Claude", supportedEffortLevels: ["low", "high", "xhigh"] }] } : { status: "ready" } });
     if (path === "/v1/claude/sessions") {
       if (req.method() === "POST") { const session = { ...body, sessionId: randomUUID(), persistence: "saved", activeTurn: null }; sessions.push(session); return route.fulfill({ json: session }); }
       return route.fulfill({ json: { data: sessions, nextOffset: null } });
@@ -76,10 +77,13 @@ try {
   const dialog = page.locator("#codexAccountDialog");
   assert.equal(await dialog.locator("[name=engine]").inputValue(), "claude");
   assert.equal(await dialog.locator("[data-account-login]").isVisible(), false);
+  assert.equal(await dialog.locator("[name=claudeEffort]").inputValue(), "");
+  await dialog.locator("[name=claudeEffort]").selectOption("high");
   await dialog.locator("[name=apiKey]").fill("synthetic-claude-browser-secret");
   await dialog.locator("button[type=submit]").click();
   await dialog.getByText("Claude 账号已保存，可在对话的账号列表中选择使用。", { exact: true }).waitFor();
   assert.equal(calls.find(c => c.path.endsWith("/configure")).body.apiKey, "synthetic-claude-browser-secret");
+  assert.equal(calls.find(c => c.path.endsWith("/configure")).body.provider.effort, "high");
   assert.equal(await dialog.locator("[name=apiKey]").inputValue(), "");
   assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("synthetic-claude-browser-secret")), false);
   await dialog.locator("[data-account-close]").click();
@@ -139,6 +143,14 @@ try {
   await page.evaluate(() => document.querySelector("#agentAccountDetails").hidePopover());
   await view.locator("#agentNewThread").click();
   assert.equal(await view.locator(`#conversationAccount option[value="${codexId}"]`).count(),1,"new sessions can select Codex again");
+  await view.locator("#conversationAccount").selectOption(ids[0]);
+  await page.waitForFunction(() => document.querySelector("#conversationEffortLabel").textContent === "思考 · 很高");
+  assert.equal(await view.locator("#conversationModelLabel").textContent(), "Claude", "the account model ID uses its SDK alias capabilities");
+  await view.locator("#conversationInput").fill("Use the account default effort");
+  await view.locator("#conversationSend").click();
+  await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
+  const defaultTurn = calls.filter(c => c.path.endsWith("/turns")).at(-1).body;
+  assert.deepEqual([defaultTurn.nodeAccountId, defaultTurn.model, defaultTurn.effort], [ids[0], "claude-example", "xhigh"]);
   assert.deepEqual(errors, []);
   console.log("PASS: shared Claude account management, secret clearing, provider models, binding reload and idle account switch");
 } finally { await browser.close(); }

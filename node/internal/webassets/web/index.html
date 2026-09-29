@@ -307,6 +307,9 @@
             <label>Developer Message 文件<input id="agentRuntimeDeveloperInstructionsFile" type="text" placeholder="节点上的 UTF-8 绝对路径"></label>
             <button id="agentRuntimeSaveDeveloperInstructions" class="secondary runtime-setting" type="button">保存 Developer Message 文件</button>
             <p class="muted">在新建、恢复或分叉会话时读取（最大 256 KiB）。内容会发送给 Codex 并随会话长期存在，请勿存放密钥。</p>
+            <label>Claude 指令文件<input id="agentRuntimeClaudeInstructionsFile" type="text" placeholder="节点上的 UTF-8 绝对路径"></label>
+            <button id="agentRuntimeSaveClaudeInstructions" class="secondary runtime-setting" type="button">保存 Claude 指令文件</button>
+            <p class="muted">每轮 Claude Code 对话开始时读取（最大 256 KiB），追加到系统提示词。与 Codex 的 Developer Message 文件相互独立，请勿存放密钥。</p>
             <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
             <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
           </section>
@@ -530,6 +533,7 @@
         <label data-account-home hidden>节点上的 Codex home<input name="home" placeholder="配置目录的绝对路径"></label>
         <label data-account-provider hidden>服务商 API 地址<input name="baseUrl" type="url" placeholder="https://provider.example/v1"></label>
         <label data-account-claude-model hidden>默认模型<input name="claudeModel" maxlength="200" placeholder="claude-opus-5-5"></label>
+        <label data-account-claude-effort hidden>默认思考强度<select name="claudeEffort"><option value="">Claude Code 默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">很高</option><option value="max">最高</option></select></label>
         <label data-account-region hidden>AWS 区域<input name="region" value="us-east-1" maxlength="64"></label>
         <label>API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="32768"></label>
         <p data-account-key-hint class="muted"></p>

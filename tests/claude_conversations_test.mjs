@@ -115,3 +115,22 @@ test("sending or reselecting during a native history read starts a fresh poll", 
  reads[0](null);await old;assert.equal(timers.length,0);
  reads[1](null);await current;assert.equal(timers.length,1,"current selection keeps polling");
 });
+
+test("account model IDs borrow effort levels from the SDK alias and expose the account default effort", async () => {
+ const efforts=["low","medium","high","xhigh","max"];
+ const catalog=[{value:"default",resolvedModel:"claude-opus-5-5[1m]",displayName:"Default",supportedEffortLevels:efforts},
+  {value:"opus",resolvedModel:"claude-opus-5-5",displayName:"Opus 5.5",supportedEffortLevels:efforts},
+  {value:"legacy",resolvedModel:"claude-legacy",displayName:"Legacy",supportsEffort:false}];
+ const runtime=new ClaudeRuntime(async url=>url.endsWith("/describe")?{models:catalog}:{status:"ready"});
+ const node=provider=>({nodeId:"wsl",nodeAccountId:"a",reportedAppServer:{provider}});
+ const configured=await runtime.models(node({model:"claude-opus-5-5",effort:"xhigh"}));
+ assert.equal(configured.defaultModel,"claude-opus-5-5");assert.equal(configured.configuredReasoningEffort,"xhigh");
+ assert.deepEqual(configured.models[0],{model:"claude-opus-5-5",displayName:"Opus 5.5",description:"账号默认模型",supportedReasoningEfforts:efforts.map(reasoningEffort=>({reasoningEffort}))});
+ const longContext=await runtime.models(node({model:"claude-opus-5-5[1m]"}));
+ assert.equal(longContext.models[0].displayName,"Default");assert.equal(longContext.models[0].supportedReasoningEfforts.length,5);
+ assert.equal(longContext.configuredReasoningEffort,null);
+ assert.equal((await runtime.models(node({model:"opus"}))).models.length,3,"catalog values are not duplicated");
+ const unknown=await runtime.models(node({model:"claude-unknown"}));
+ assert.deepEqual(unknown.models[0].supportedReasoningEfforts,[]);
+ assert.equal((await runtime.models(node({model:"legacy"}))).models.length,3);
+});

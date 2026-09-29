@@ -91,6 +91,16 @@ func TestPostgresLifecycle(t *testing.T) {
 	if err != nil || desired.Status != 200 || desired.Body.(map[string]any)["desiredAppServer"].(map[string]any)["revision"] == nil {
 		t.Fatalf("set desired App Server = %#v, %v", desired, err)
 	}
+	claude, err := service.SetDesiredAppServer(ctx, nodeID, map[string]any{"running": true, "claudeInstructionsFile": "/srv/work/CLAUDE.md"})
+	if err != nil || claude.Status != 200 {
+		t.Fatalf("set Claude instructions file = %#v, %v", claude, err)
+	}
+	if stored := claude.Body.(map[string]any)["desiredAppServer"].(map[string]any); stored["claudeInstructionsFile"] != "/srv/work/CLAUDE.md" || stored["developerInstructionsFile"] != "/srv/work/AGENTS.md" {
+		t.Fatalf("Claude and Codex instruction files were not stored independently: %#v", stored)
+	}
+	if rejected, err := service.SetDesiredAppServer(ctx, nodeID, map[string]any{"running": true, "claudeInstructionsFile": `C:\\CLAUDE.md`}); err != nil || rejected.Status != 400 {
+		t.Fatalf("foreign-platform Claude instructions path = %#v, %v", rejected, err)
+	}
 	if err := service.SetNodeChannelStatus(ctx, nodeID, map[string]any{"connected": true}); err != nil {
 		t.Fatal(err)
 	}

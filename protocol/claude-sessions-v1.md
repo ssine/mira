@@ -85,7 +85,8 @@ The existing administrator account UI includes Claude bindings, exposed as
 `claudeAccounts` on Node views. `POST /v1/claude/accounts` creates a Node binding
 from `nodeId` and `name`; `PATCH /v1/claude/accounts/:id` changes `name` or `enabled`.
 `POST /v1/claude/accounts/:id/configure` sends a typed `provider` (`id`: `anthropic`
-or `bedrock`, `baseUrl`, `model`, and Bedrock `region`) and an optional `apiKey`
+or `bedrock`, `baseUrl`, `model`, Bedrock `region`, and optional default `effort`:
+`low`, `medium`, `high`, `xhigh` or `max`) and an optional `apiKey`
 through the private Node channel. Omit `apiKey` to retain it; an empty key clears it.
 Keys never enter PostgreSQL, account responses, desired state, or audit metadata.
 
@@ -97,6 +98,15 @@ ambient credentials. Account row locks serialize reservation with credential
 changes; the Node also refuses changes while one of that account's workers runs.
 The account binding is durable metadata, independent of native transcript entries.
 Runtime `describe` accepts the same binding for native model/account discovery.
+When a turn resolves to the account's `model` and neither the request nor the session
+supplies an effort, the account's default `effort` is used; otherwise the SDK default
+applies. The account `model` is usually a full model ID while the native catalog lists
+aliases, so clients match it to catalog entries through `resolvedModel`.
+
+Each turn appends the Node's `desiredAppServer.claudeInstructionsFile` to the Claude
+Code system prompt. It is independent of the Codex `developerInstructionsFile`, uses
+the same bounded file-capability reader (UTF-8, at most 256 KiB), is read on every
+turn, and blocks the turn when it cannot be read or validated.
 
 ## Shared conversation read projections (Mira 1.0.59)
 

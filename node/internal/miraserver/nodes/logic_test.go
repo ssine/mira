@@ -65,7 +65,7 @@ func TestDesiredStateValidation(t *testing.T) {
 	service := &Service{now: func() int64 { return 123456789 }}
 	desired, err := service.normalizedDesiredState(map[string]any{
 		"running": true, "configOverrides": []any{"model=fast"}, "defaultCwd": `C:\\work`,
-		"developerInstructionsFile": `C:\\work\\AGENTS.md`, "codexPath": nil,
+		"developerInstructionsFile": `C:\\work\\AGENTS.md`, "claudeInstructionsFile": `C:\\work\\CLAUDE.md`, "codexPath": nil,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,9 +76,13 @@ func TestDesiredStateValidation(t *testing.T) {
 	if desired.DefaultCwd.Value == nil || !nativeAbsolutePath(*desired.DefaultCwd.Value, "windows") {
 		t.Fatal("Windows path was not retained")
 	}
+	if desired.JSON["claudeInstructionsFile"] != `C:\\work\\CLAUDE.md` || desired.ClaudeInstructionsFile.Value == nil {
+		t.Fatalf("Claude instructions file was not retained: %#v", desired.JSON)
+	}
 	for _, body := range []map[string]any{
 		{"running": "yes"},
 		{"running": true, "defaultCwd": "relative/path"},
+		{"running": true, "claudeInstructionsFile": "relative/CLAUDE.md"},
 		{"running": true, "configOverrides": []any{"api_key=leak"}},
 		{"running": true, "configOverrides": []any{strings.Repeat("x", 2049)}},
 	} {

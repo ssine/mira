@@ -116,6 +116,7 @@ export class CodexAccounts {
     this.form.elements.inheritEnv.value = (account?.desiredAppServer?.inheritEnv ?? []).join(", ");
     this.form.elements.baseUrl.value = account?.reportedAppServer?.provider?.baseUrl || "";
     this.form.elements.claudeModel.value = account?.reportedAppServer?.provider?.model || "";
+    this.form.elements.claudeEffort.value = account?.reportedAppServer?.provider?.effort || "";
     this.form.elements.region.value = account?.reportedAppServer?.provider?.region || "us-east-1";
     this.dialog.querySelector("[data-account-actions]").hidden = !account;
     this.dialog.querySelector("[data-account-title]").textContent = `${account ? "管理" : "添加"} ${account?.engine === "claude" ? "Claude" : "Codex"} 账号`;
@@ -143,6 +144,7 @@ export class CodexAccounts {
     this.form.elements.claudeModel.required = claude;
     this.form.elements.region.required = claude && mode === "bedrock";
     this.dialog.querySelector("[data-account-claude-model]").hidden = !claude;
+    this.dialog.querySelector("[data-account-claude-effort]").hidden = !claude;
     this.dialog.querySelector("[data-account-region]").hidden = !claude || mode !== "bedrock";
     this.dialog.querySelector("[data-account-environment]").hidden = claude;
     this.dialog.querySelector("[data-account-start]").textContent = claude ? "启用" : "启动";
@@ -213,7 +215,7 @@ export class CodexAccounts {
 
   async saveClaude() {
     const fields = this.form.elements;
-    const provider = { id: fields.mode.value, baseUrl: fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
+    const provider = { id: fields.mode.value, baseUrl: fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.claudeEffort.value ? { effort: fields.claudeEffort.value } : {}), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
     if (!this.current) {
       const created = await this.api("/v1/claude/accounts", { method: "POST", body: JSON.stringify({ nodeId: fields.node.value, name: fields.name.value.trim() }) });
       this.current = { node: { nodeId: fields.node.value }, account: created };
@@ -223,7 +225,7 @@ export class CodexAccounts {
     if (fields.apiKey.value) body.apiKey = fields.apiKey.value;
     else if (fields.clearKey.checked) body.apiKey = "";
     const previous = this.current.account.reportedAppServer?.provider || {};
-    const changed = "apiKey" in body || ["id", "baseUrl", "model", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
+    const changed = "apiKey" in body || ["id", "baseUrl", "model", "effort", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
     try { if (changed) await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}/configure`, { method: "POST", body: JSON.stringify(body) }); }
     finally { this.clearSecrets(); }
     await this.refresh();

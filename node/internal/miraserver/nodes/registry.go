@@ -397,6 +397,7 @@ type desiredState struct {
 	JSON                      map[string]any
 	DefaultCwd                optionalPath
 	DeveloperInstructionsFile optionalPath
+	ClaudeInstructionsFile    optionalPath
 }
 
 func (service *Service) normalizedDesiredState(body map[string]any) (desiredState, error) {
@@ -428,6 +429,10 @@ func (service *Service) normalizedDesiredState(body map[string]any) (desiredStat
 		return desiredState{}, err
 	}
 	instructions, err := optionalAbsolutePath("developerInstructionsFile", body)
+	if err != nil {
+		return desiredState{}, err
+	}
+	claudeInstructions, err := optionalAbsolutePath("claudeInstructionsFile", body)
 	if err != nil {
 		return desiredState{}, err
 	}
@@ -485,7 +490,10 @@ func (service *Service) normalizedDesiredState(body map[string]any) (desiredStat
 	if instructions.Present {
 		desired["developerInstructionsFile"] = nullableString(instructions.Value)
 	}
-	return desiredState{JSON: desired, DefaultCwd: defaultCwd, DeveloperInstructionsFile: instructions}, nil
+	if claudeInstructions.Present {
+		desired["claudeInstructionsFile"] = nullableString(claudeInstructions.Value)
+	}
+	return desiredState{JSON: desired, DefaultCwd: defaultCwd, DeveloperInstructionsFile: instructions, ClaudeInstructionsFile: claudeInstructions}, nil
 }
 
 // SetDesiredAppServer merges validated desired App Server fields into the
@@ -496,7 +504,8 @@ func (service *Service) SetDesiredAppServer(ctx context.Context, nodeID string, 
 		return result(400, map[string]any{"error": err.Error(), "code": "invalid_request"}), nil
 	}
 	if (desired.DefaultCwd.Present && desired.DefaultCwd.Value != nil) ||
-		(desired.DeveloperInstructionsFile.Present && desired.DeveloperInstructionsFile.Value != nil) || body["environmentFiles"] != nil || body["codexHome"] != nil || body["codexPath"] != nil {
+		(desired.DeveloperInstructionsFile.Present && desired.DeveloperInstructionsFile.Value != nil) ||
+		(desired.ClaudeInstructionsFile.Present && desired.ClaudeInstructionsFile.Value != nil) || body["environmentFiles"] != nil || body["codexHome"] != nil || body["codexPath"] != nil {
 		var platform string
 		err := service.db.QueryRow(ctx, `SELECT platform FROM codex_nodes WHERE node_id = $1::uuid AND approval_status = 'approved'`, nodeID).Scan(&platform)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -511,7 +520,7 @@ func (service *Service) SetDesiredAppServer(ctx context.Context, nodeID string, 
 		for _, field := range []struct {
 			name string
 			path optionalPath
-		}{{"defaultCwd", desired.DefaultCwd}, {"developerInstructionsFile", desired.DeveloperInstructionsFile}} {
+		}{{"defaultCwd", desired.DefaultCwd}, {"developerInstructionsFile", desired.DeveloperInstructionsFile}, {"claudeInstructionsFile", desired.ClaudeInstructionsFile}} {
 			if field.path.Present && field.path.Value != nil && !nativeAbsolutePath(*field.path.Value, platform) {
 				return result(400, map[string]any{
 					"error": field.name + " must be an absolute " + platform + " path", "code": "invalid_request",
