@@ -73,8 +73,16 @@ try {
   await page.reload();
   await page.waitForFunction(() => document.querySelector("#conversationTitle").textContent === "Remember this account");
   assert.equal(await view.locator("#conversationAccount").inputValue(), ids[1]);
+  await view.locator("#conversationActivity:not(.hidden)").waitFor();
+  assert.match(await view.locator("#conversationActivityText").textContent(), /^Claude /);
+  assert.equal(await view.locator("#conversationComposer #claudeReconcile").count(), 0);
+  assert.equal(await view.locator(`[data-thread-activity="${sessions[0].sessionId}"]`).getAttribute("title"), "Claude 正在运行");
+  await view.locator("#conversationDetailsToggle").click();
+  await view.locator("#conversationDetails #claudeReconcile").waitFor({ state: "visible" });
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#conversationAccount").disabled);
+  await view.locator("#claudeReconcile").waitFor({ state: "hidden" });
+  await view.locator("#conversationDetailsClose").click();
   await view.locator("#conversationAccount").selectOption(ids[0]);
   await view.locator("#conversationInput").fill("Switch the idle conversation");
   await view.locator("#conversationSend").click();

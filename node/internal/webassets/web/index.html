@@ -209,7 +209,6 @@
             </div>
             <div id="conversationComposer" class="conversation-compose-area">
             <label id="claudePersistence" class="workspace-notice warning" hidden><input id="claudeContinue" type="checkbox">历史未完整保存。我已检查记录，继续使用已保存的历史。</label>
-            <button id="claudeReconcile" class="ghost" type="button" hidden>检查运行状态</button>
             <form id="conversationForm" class="conversation-composer">
               <p id="conversationConnection" class="hidden" role="status"></p>
               <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span></div>
@@ -263,6 +262,7 @@
         <select id="conversationDetailsEffort" disabled></select>
         <p id="conversationDetailsModelStatus" class="muted" role="status"></p>
       </section>
+      <button id="claudeReconcile" class="ghost" type="button" title="运行状态长时间未更新时，向运行节点重新检查" hidden>检查运行状态</button>
       <section class="conversation-recovery-settings" aria-label="上下文自动恢复">
         <label class="toggle"><input id="conversationAutomaticRecovery" type="checkbox" checked disabled><span></span>自动处理不兼容上下文并重试</label>
         <p id="conversationAutomaticRecoveryStatus" class="muted" role="status"></p>
