@@ -445,7 +445,8 @@ async function sendClaudeMessage(text, attachments, progress) {
 }
 
 $("#claudeReconcile").addEventListener("click", async () => {
-  const thread = currentAgentThread(); if (thread?.engine !== "claude") return;
+  const thread = currentAgentThread();
+  if (thread?.engine !== "claude" || thread.subpath || $("#conversationDetails").dataset.threadId !== thread.threadId) return;
   try { await claudeRuntime.call(`sessions/${thread.sessionId}/reconcile`, {}); await loadClaudeTranscript(thread.threadId, { poll: true }); }
   catch (error) { toast(error.message); }
 });
@@ -574,13 +575,14 @@ function renderTurnActivity(submitting) {
     status.classList.toggle("hidden", !visible);
     if (follow) scrollTraceToBottom();
   }
-  const text = activity.state === "unknown" ? activityLabel(activity) : phase === "replying" ? "Codex 正在回复…" : phase === "tool" ? "Codex 正在调用工具…" : "Codex 仍在处理中…";
+  const engine = engineOf(agent.threadId) === "claude" ? "Claude" : "Codex";
+  const text = activity.state === "unknown" ? activityLabel(activity, agent.threadId) : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
   const label = $("#conversationActivityText");
   if (visible && label.textContent !== text) label.textContent = text;
 }
 
-function activityLabel(activity) {
-  if (activity.state === "running") return "Codex 正在运行";
+function activityLabel(activity, threadId) {
+  if (activity.state === "running") return `${engineOf(threadId) === "claude" ? "Claude" : "Codex"} 正在运行`;
   if (activity.state === "failed") return "上轮运行失败";
   if (activity.state === "interrupted") return "上轮已中断";
   if (activity.reason === "offline") return "节点离线，运行状态待确认";
@@ -713,7 +715,7 @@ function renderThreadStates() {
     if (label.dataset.updatedAt) label.dataset.recency = agent.titleJobs.has(id) ? "正在生成标题…" : `${label.dataset.subagent === "true" ? "子对话 · " : ""}${threadTimestamp(label.dataset.updatedAt)}`;
     label.textContent = stateLabel || label.dataset.recency || "";
     label.dataset.state = activity.state;
-    label.title = stateLabel ? activity.state === "idle" ? stateLabel : activityLabel(activity) : label.dataset.recency || "";
+    label.title = stateLabel ? activity.state === "idle" ? stateLabel : activityLabel(activity, id) : label.dataset.recency || "";
     const { usage, summary } = threadTokenDisplay(id, threadsById.get(id));
     const usageLabel = row.querySelector("[data-thread-token-usage]");
     if (usageLabel) {
@@ -2724,7 +2726,6 @@ function syncConversationSendUi() {
   $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
   $("#conversationCwd").disabled = busy || child;
   $("#claudePersistence").hidden = !native || currentAgentThread()?.persistence !== "incomplete";
-  $("#claudeReconcile").hidden = !native || !running;
   $(".conversation-recovery-settings").classList.toggle("hidden", native);
   renderConversationModel();
   for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy || composerDraftLoading;
@@ -2863,6 +2864,7 @@ function renderConversationModel() {
   const details = $("#conversationDetails");
   const current = (details.dataset.threadId || null) === (agent.threadId || null);
   $("#conversationDetailsSettings").classList.toggle("hidden", !current);
+  $("#claudeReconcile").hidden = !current || conversationEngine() !== "claude" || !!currentAgentThread()?.subpath || !agent.activeTurns.has(agent.threadId);
   const detailsModel = $("#conversationDetailsModel"), detailsEffort = $("#conversationDetailsEffort");
   if (detailsModel.dataset.signature !== signature) {
     detailsModel.replaceChildren(...(models.length ? models.map(item => new Option(item.displayName || item.model, item.model)) : [new Option(placeholder, "")]));
