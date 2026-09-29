@@ -1,7 +1,7 @@
 # Managed Claude Code
 
-Status: implemented, with local integration validation on 2026-09-27. Not deployed
-by this change. The model endpoint used in automated tests is a local fixture.
+Included in Mira 1.0.57. Automated tests use a local model fixture; separate
+Linux acceptance also verified real Messages and Bedrock gateway APIs on 2026-09-30.
 
 ## User experience
 
@@ -61,6 +61,13 @@ Claude login. These optional, local environment settings are supported:
 | `MIRA_NODE_CLAUDE_NODE` | Select an installed Node.js executable. npm must also be available. |
 | `MIRA_NODE_CLAUDE_CONFIG_DIR` | Select the local Claude configuration/auth directory. |
 | `MIRA_NODE_CLAUDE_BINARY` | Explicit native Claude executable override for the pinned SDK. |
+
+An executable wrapper used with `MIRA_NODE_CLAUDE_BINARY` must preserve any
+existing `CLAUDE_CONFIG_DIR`: the SDK sets it to a temporary directory when
+restoring a remote session. Overriding that directory breaks native resume.
+Provider credentials may be supplied by the Node environment or such a wrapper;
+Messages-compatible gateways use native Anthropic settings, while AWS gateways
+use native Bedrock settings. No Chat Completions translation is required.
 
 Mira's existing Node credential is passed privately to the adapter over stdin,
 not through process arguments. Runtime storage and tool calls use Mira Server;
@@ -144,9 +151,11 @@ The earlier isolated [SDK probe](../experiments/claude-code/README.md) remains
 available; its direct PostgreSQL adapter is test scaffolding only.
 
 Local acceptance covers Linux amd64. Windows amd64 and Android arm64 are compile
-checks; Android advertises no Claude runtime. Native Windows execution, real
-provider authentication/billing, platform-to-platform filesystem portability and
-long-running background Claude tasks have not been accepted by these tests.
+checks; Android advertises no Claude runtime. Real-provider Linux acceptance verified local Claude tool execution and resume,
+managed MCP tools, acknowledged persistence and restoration after Node restart
+and deletion of local history through both Messages and Bedrock gateways.
+Native Windows execution, platform-to-platform filesystem portability and
+long-running background Claude tasks remain outside this acceptance.
 
 Official references: [programmatic usage](https://code.claude.com/docs/en/headless),
 [custom tools](https://code.claude.com/docs/en/agent-sdk/custom-tools),
