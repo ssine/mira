@@ -319,6 +319,11 @@ func (server *Server) applyInputRecovery(ctx context.Context, request *http.Requ
 	if !supported {
 		return &HTTPError{Status: 409, Code: "runtime_upgrade_required", Message: "此 Codex 运行包尚不支持无损的输入兼容处理，请先更新运行包"}
 	}
+	ctx, _, leaveQueue, err := server.channel.QueueExecution(ctx, storeID, threadID)
+	if err != nil {
+		return err
+	}
+	defer leaveQueue()
 	tx, err := server.pool.Begin(ctx)
 	if err != nil {
 		return err

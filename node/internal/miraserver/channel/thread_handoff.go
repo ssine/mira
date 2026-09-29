@@ -12,8 +12,8 @@ import (
 
 // The returned release keeps the Node's thread gate until the database route
 // transaction has committed or rolled back. Other conversations keep running.
-func (channel *Channel) unloadAccountThreads(ctx context.Context, source executionSource, root string, ids []string) (func(), error) {
-	node, err := channel.nodes.Get(ctx, source.Node, false)
+func (channel *Channel) unloadAccountThreads(ctx context.Context, tx pgx.Tx, source executionSource, root string, ids []string) (func(), error) {
+	node, err := channel.executionNode(ctx, tx, source.Node)
 	if err != nil {
 		return nil, err
 	}
@@ -97,5 +97,5 @@ func (channel *Channel) PrepareInputRecovery(ctx context.Context, tx pgx.Tx, sto
 	if inPlace {
 		return func() {}, nil
 	}
-	return channel.unloadAccountThreads(ctx, executionSource{Node: nodeID, Binding: bindingID, Runtime: runtimeID}, root, ids)
+	return channel.unloadAccountThreads(ctx, tx, executionSource{Node: nodeID, Binding: bindingID, Runtime: runtimeID}, root, ids)
 }

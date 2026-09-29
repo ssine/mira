@@ -145,7 +145,7 @@ func (service *Service) ReportAccounts(ctx context.Context, nodeID string, raw a
 					view[key] = value
 				}
 			}
-			for _, key := range []string{"budgetBytes", "residentBytes", "effectiveMemoryBytes"} {
+			for _, key := range []string{"budgetBytes", "residentBytes", "effectiveMemoryBytes", "processBytes", "sampledAt"} {
 				if value, ok := integer(residency[key]); ok && value >= 0 {
 					view[key] = value
 				}

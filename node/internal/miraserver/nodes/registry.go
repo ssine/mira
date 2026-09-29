@@ -188,7 +188,14 @@ func (service *Service) List(ctx context.Context, includeRevoked bool) ([]Node, 
 
 // Get returns a Node by immutable ID.
 func (service *Service) Get(ctx context.Context, nodeID string, includeRevoked bool) (*Node, error) {
-	row, err := scanNode(service.db.QueryRow(ctx, `SELECT `+selectNodeColumns+` FROM codex_nodes nodes
+	return service.GetWithQuery(ctx, service.db, nodeID, includeRevoked)
+}
+
+// GetWithQuery keeps registry reads on an existing transaction's connection.
+// Acquiring another pool connection while holding execution locks can deadlock
+// when other claims occupy the pool waiting for those same locks.
+func (service *Service) GetWithQuery(ctx context.Context, query Querier, nodeID string, includeRevoked bool) (*Node, error) {
+	row, err := scanNode(query.QueryRow(ctx, `SELECT `+selectNodeColumns+` FROM codex_nodes nodes
      WHERE nodes.node_id = $1::uuid AND ($2::boolean OR nodes.approval_status = 'approved')`, nodeID, includeRevoked), false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil

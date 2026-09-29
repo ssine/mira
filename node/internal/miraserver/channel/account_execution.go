@@ -23,12 +23,106 @@ type executionRoute struct {
 	State      string
 }
 
-// A route is a rebuildable projection of execution events, independent of
-// canonical history. The transaction lock serializes handoff with turn/start.
+// Ordinary reconnects validate the current family under shared storage gates.
+// Only a real account/runtime transition uses the full drain-and-handoff path.
 func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, threadID string, handoff, turn bool) (int64, error) {
 	if proxy.nodeAccountID == "" {
 		return 0, nil
 	}
+	ctx, root, release, err := channel.QueueExecution(ctx, proxy.storeID, threadID)
+	if err != nil {
+		return 0, err
+	}
+	defer release()
+	revision, handled, err := channel.claimCurrentExecution(ctx, proxy, threadID, root, turn)
+	if err != nil || handled {
+		return revision, err
+	}
+	if !handoff {
+		return 0, errors.New("此对话或父子会话已切换到其他账号，请重新打开主会话后再发送")
+	}
+	return channel.claimExecutionHandoff(ctx, proxy, threadID, root, turn)
+}
+
+func (channel *Channel) claimCurrentExecution(ctx context.Context, proxy *proxy, threadID, root string, turn bool) (int64, bool, error) {
+	db, ok := channel.db.(transactionDatabase)
+	if !ok {
+		return 0, false, errors.New("execution transactions are unavailable")
+	}
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	defer tx.Rollback(context.Background())
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "mira-execution:"+proxy.storeID+":"+root); err != nil {
+		return 0, false, err
+	}
+	gate, _ := json.Marshal([]string{"mira-store", proxy.storeID})
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))`, string(gate)); err != nil {
+		return 0, false, err
+	}
+	family, lockedRoot, err := readExecutionFamily(ctx, tx, proxy.storeID, threadID)
+	if err != nil {
+		return 0, false, err
+	}
+	if root != lockedRoot {
+		return 0, false, errors.New("会话父子关系已变更，请重新打开")
+	}
+	current, err := channel.executionNode(ctx, tx, proxy.targetNodeID)
+	if err != nil {
+		return 0, false, err
+	}
+	account, err := nodes.SelectAccount(current, proxy.nodeAccountID)
+	if err != nil || account == nil {
+		return 0, false, errors.New("所选账号已不可用")
+	}
+	if stringValue(account.Reported["runtimeId"]) != proxy.runtimeID || account.Reported["status"] != "running" {
+		return 0, false, errors.New("账号运行实例已变更，请重新连接")
+	}
+	var requested executionMember
+	for _, member := range family {
+		source, err := channel.executionSource(ctx, tx, member, proxy, account.IsDefault)
+		if err != nil {
+			return 0, false, err
+		}
+		if source != nil {
+			return 0, false, nil
+		}
+		if member.ID == threadID {
+			requested = member
+		}
+	}
+	if err := validateRecoveryFamily(ctx, tx, proxy, threadID, family, turn); err != nil {
+		return 0, false, err
+	}
+	key, _ := json.Marshal([]string{"mira-thread", proxy.storeID, threadID})
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, string(key)); err != nil {
+		return 0, false, err
+	}
+	revision, err := writeExecutionRoute(ctx, tx, proxy, requested, turn, root)
+	if err != nil {
+		return 0, false, err
+	}
+	return revision, true, tx.Commit(ctx)
+}
+
+func validateRecoveryFamily(ctx context.Context, tx pgx.Tx, proxy *proxy, threadID string, family []executionMember, turn bool) error {
+	if proxy.recoveryFailureID == "" {
+		return nil
+	}
+	recoveryThread := proxy.recoveryThreadID
+	if recoveryThread == "" {
+		recoveryThread = threadID
+	}
+	if threadID != recoveryThread && (turn || !isRecoveryAncestor(family, recoveryThread, threadID)) {
+		return errors.New("自动恢复只能加载当前对话的父节点")
+	}
+	return CheckAutomaticRecovery(ctx, tx, proxy.storeID, recoveryThread, proxy.recoveryFailureID)
+}
+
+// Queue admission is held across both transactions. Roll back the ordinary
+// path's shared store gate before waiting for old processes to flush writes.
+func (channel *Channel) claimExecutionHandoff(ctx context.Context, proxy *proxy, threadID, root string, turn bool) (int64, error) {
 	db, ok := channel.db.(transactionDatabase)
 	if !ok {
 		return 0, errors.New("execution transactions are unavailable")
@@ -37,12 +131,8 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 
-	family, root, err := readExecutionFamily(ctx, tx, proxy.storeID, threadID)
-	if err != nil {
-		return 0, err
-	}
 	// All members use the root's execution gate. Do not hold canonical storage
 	// locks while waiting for old processes to drain their outstanding writes.
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, "mira-execution:"+proxy.storeID+":"+root); err != nil {
@@ -55,19 +145,10 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 	if lockedRoot != root {
 		return 0, errors.New("会话父子关系已变更，请重新打开")
 	}
-	if proxy.recoveryFailureID != "" && (handoff || turn) {
-		recoveryThread := proxy.recoveryThreadID
-		if recoveryThread == "" {
-			recoveryThread = threadID
-		}
-		if threadID != recoveryThread && (turn || !isRecoveryAncestor(family, recoveryThread, threadID)) {
-			return 0, errors.New("自动恢复只能加载当前对话的父节点")
-		}
-		if err := CheckAutomaticRecovery(ctx, tx, proxy.storeID, recoveryThread, proxy.recoveryFailureID); err != nil {
-			return 0, err
-		}
+	if err := validateRecoveryFamily(ctx, tx, proxy, threadID, family, turn); err != nil {
+		return 0, err
 	}
-	current, err := channel.nodes.Get(ctx, proxy.targetNodeID, false)
+	current, err := channel.executionNode(ctx, tx, proxy.targetNodeID)
 	if err != nil {
 		return 0, err
 	}
@@ -85,7 +166,7 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		ids = append(ids, member.ID)
 	}
 	for _, member := range family {
-		source, err := channel.executionSource(ctx, member, proxy, account.IsDefault)
+		source, err := channel.executionSource(ctx, tx, member, proxy, account.IsDefault)
 		if err != nil {
 			return 0, err
 		}
@@ -94,9 +175,6 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		}
 		if proxy.recoveryFailureID != "" {
 			return 0, errors.New("会话树账号已变化，已取消自动恢复")
-		}
-		if !handoff {
-			return 0, errors.New("此对话或父子会话已切换到其他账号，请重新打开主会话后再发送")
 		}
 		if threadID != root {
 			return 0, errors.New("子 Agent 与主会话共用账号，请先从主会话切换账号")
@@ -107,12 +185,12 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 			}
 		}
 		if !drained[source.key()] {
-			release, unloadErr := channel.unloadAccountThreads(ctx, *source, root, ids)
+			release, unloadErr := channel.unloadAccountThreads(ctx, tx, *source, root, ids)
 			if unloadErr != nil {
 				return 0, unloadErr
 			}
 			defer func() {
-				_ = tx.Rollback(ctx)
+				_ = tx.Rollback(context.Background())
 				release()
 			}()
 			drained[source.key()] = true
@@ -122,10 +200,7 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 	// A handoff takes the store gate exclusively only after draining the selected threads. This
 	// freezes graph membership/generations and makes every route switch atomic.
 	gate, _ := json.Marshal([]string{"mira-store", proxy.storeID})
-	lock := "SELECT pg_advisory_xact_lock_shared(hashtextextended($1,0))"
-	if handoff {
-		lock = "SELECT pg_advisory_xact_lock(hashtextextended($1,0))"
-	}
+	lock := "SELECT pg_advisory_xact_lock(hashtextextended($1,0))"
 	if _, err = tx.Exec(ctx, lock, string(gate)); err != nil {
 		return 0, err
 	}
@@ -137,19 +212,16 @@ func (channel *Channel) claimExecution(ctx context.Context, proxy *proxy, thread
 		return 0, errors.New("会话父子关系已变更，请重新打开")
 	}
 	for _, member := range family {
-		source, err := channel.executionSource(ctx, member, proxy, account.IsDefault)
+		source, err := channel.executionSource(ctx, tx, member, proxy, account.IsDefault)
 		if err != nil {
 			return 0, err
 		}
-		if source != nil && (!handoff || !drained[source.key()]) {
+		if source != nil && !drained[source.key()] {
 			return 0, errors.New("会话树的执行账号已变更，请重新打开主会话")
 		}
 	}
 	var requestedRevision int64
 	for _, member := range family {
-		if !handoff && member.ID != threadID {
-			continue
-		}
 		key, _ := json.Marshal([]string{"mira-thread", proxy.storeID, member.ID})
 		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1,0))", string(key)); err != nil {
 			return 0, err
@@ -207,7 +279,7 @@ func (source executionSource) key() string {
 	return source.Node + ":" + source.Binding + ":" + source.Runtime
 }
 
-func (channel *Channel) executionSource(ctx context.Context, member executionMember, proxy *proxy, defaultAccount bool) (*executionSource, error) {
+func (channel *Channel) executionSource(ctx context.Context, tx pgx.Tx, member executionMember, proxy *proxy, defaultAccount bool) (*executionSource, error) {
 	if member.Previous.Binding != "" {
 		if member.Previous.Binding == proxy.nodeAccountID && member.Previous.Runtime == proxy.runtimeID {
 			return nil, nil
@@ -217,7 +289,7 @@ func (channel *Channel) executionSource(ctx context.Context, member executionMem
 	if member.LegacyNode == "" || (member.LegacyNode == proxy.targetNodeID && defaultAccount) {
 		return nil, nil
 	}
-	node, err := channel.nodes.Get(ctx, member.LegacyNode, false)
+	node, err := channel.executionNode(ctx, tx, member.LegacyNode)
 	if err != nil {
 		return nil, err
 	}
@@ -243,14 +315,20 @@ const executionFamilySQL = `WITH RECURSIVE edges AS (
 ), ancestors(id) AS (SELECT $2::text UNION SELECT e.parent FROM edges e JOIN ancestors a ON e.child=a.id),
 roots(id) AS (SELECT a.id FROM ancestors a WHERE NOT EXISTS(SELECT 1 FROM edges e WHERE e.child=a.id)),
 family(id) AS (SELECT id FROM roots UNION SELECT e.child FROM edges e JOIN family f ON e.parent=f.id)
-SELECT p.thread_id,p.active_generation,COALESCE(r.node_account_id::text,''),COALESCE(r.runtime_id,''),COALESCE(r.revision,0),COALESCE(r.generation,0),COALESCE(r.state,''),COALESCE(b.node_id::text,''),COALESCE(l.node_id::text,''),(SELECT count(*) FROM roots),(SELECT min(id) FROM roots),COALESCE((SELECT parent FROM edges WHERE child=p.thread_id),'')
+SELECT p.thread_id,p.active_generation,COALESCE(r.node_account_id::text,''),COALESCE(r.runtime_id,''),COALESCE(r.revision,0),COALESCE(r.generation,0),COALESCE(r.state,''),COALESCE(b.node_id::text,''),COALESCE(l.node_id::text,''),(SELECT count(*) FROM roots),(SELECT min(id) FROM roots),COALESCE(parent_edge.parent,'')
 FROM family f JOIN codex_thread_projections p ON p.store_id=$1 AND p.thread_id=f.id
+LEFT JOIN edges parent_edge ON parent_edge.child=p.thread_id
 LEFT JOIN mira_codex_execution_routes r ON r.store_id=p.store_id AND r.thread_id=p.thread_id
 LEFT JOIN mira_node_codex_accounts b USING(node_account_id)
 LEFT JOIN mira_codex_thread_runtimes l ON l.store_id=p.store_id AND l.thread_id=p.thread_id
 ORDER BY p.thread_id`
 
 func readExecutionFamily(ctx context.Context, tx pgx.Tx, storeID, threadID string) ([]executionMember, string, error) {
+	// Recursive row estimates can spuriously trigger seconds of JIT compilation
+	// for a small metadata traversal. Keep this transaction's queries interpreted.
+	if _, err := tx.Exec(ctx, "SET LOCAL jit=off"); err != nil {
+		return nil, "", err
+	}
 	rows, err := tx.Query(ctx, executionFamilySQL, storeID, threadID)
 	if err != nil {
 		return nil, "", err
@@ -355,7 +433,7 @@ func (channel *Channel) recordExecutionStatus(ctx context.Context, proxy *proxy,
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer tx.Rollback(context.Background())
 	// Serialize notification observations with history commits and new claims.
 	// In particular, read completion evidence AFTER acquiring the lock so a
 	// delayed start cannot use a snapshot taken before completion committed.

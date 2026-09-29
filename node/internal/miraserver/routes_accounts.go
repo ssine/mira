@@ -12,7 +12,7 @@ import (
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
 
-var nodeAccountsPattern = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/codex-accounts(?:/([0-9a-f-]{36})(?:/(quota|quota-history|login|logout|login-status|login-cancel|configure))?)?$`)
+var nodeAccountsPattern = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/codex-accounts(?:/([0-9a-f-]{36})(?:/(quota|quota-history|residency|login|logout|login-status|login-cancel|configure))?)?$`)
 
 func (server *Server) routeAccounts(ctx context.Context, response http.ResponseWriter, request *http.Request) (bool, error) {
 	path := request.URL.Path
@@ -103,6 +103,41 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 	}
 	runtimeID, _ := account.Reported["runtimeId"].(string)
 	reader := server.channel.Accounts()
+	if request.Method == http.MethodGet && match[3] == "residency" {
+		threadID := request.URL.Query().Get("threadId")
+		if !operationIDPattern.MatchString(threadID) {
+			return true, foundation.WriteErrorJSON(response, 400, "invalid thread id", "invalid_request")
+		}
+		state := "unknown"
+		checked := time.Now()
+		var message string
+		switch {
+		case node.Status != "online" || !server.channel.IsConnected(node.NodeID):
+			state = "offline"
+		case account.Reported["status"] == "stopped":
+			state = "stopped"
+		case account.Reported["status"] == "running" && runtimeID != "":
+			loaded, at, probeErr := reader.ThreadLoaded(ctx, node.NodeID, account.NodeAccountID, runtimeID, threadID)
+			if probeErr != nil {
+				message = "暂时无法确认会话驻留状态"
+			} else {
+				checked = at
+				state = "unloaded"
+				if loaded {
+					state = "loaded"
+				}
+				// Do not label an observation from a replaced process as current.
+				current, lookupErr := server.nodes.Get(ctx, node.NodeID, false)
+				selected, selectErr := nodes.SelectAccount(current, account.NodeAccountID)
+				if lookupErr != nil || selectErr != nil || selected == nil || selected.Reported["runtimeId"] != runtimeID || selected.Reported["status"] != "running" || current.Status != "online" {
+					state = "unknown"
+					message = "运行实例已变化，等待重新检查"
+				}
+			}
+		}
+		response.Header().Set("Cache-Control", "no-store")
+		return true, writeJSON(response, 200, map[string]any{"state": state, "threadId": threadID, "nodeId": node.NodeID, "nodeAccountId": account.NodeAccountID, "runtimeId": runtimeID, "checkedAt": checked.UTC().Format(time.RFC3339Nano), "message": message})
+	}
 	if request.Method == http.MethodGet && match[3] == "login-status" {
 		return true, writeJSON(response, 200, reader.LoginStatus(node.NodeID, account.NodeAccountID, request.URL.Query().Get("sessionId")))
 	}
