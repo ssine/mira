@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.61 补齐 Claude 回复的原始记录时间，并按每轮对话细分账号费用曲线；高密度记录合并相邻轮次，保留完整金额。
+1.0.61 修复 Claude 主回复先结束时后台子任务被提前收尾的问题，补齐回复时间，并按每轮对话细分账号费用曲线。
 
 1.0.59 将 Codex 与 Claude 放进同一个对话页：共用项目列表、消息区、输入框和账号选择；Claude 增加按轮次、会话与账号统计的 SDK 费用估算。
 

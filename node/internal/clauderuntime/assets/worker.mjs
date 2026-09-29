@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { readFile, stat } from "node:fs/promises";
 import { createMiraTools } from "./mira-tools.mjs";
 import { serverClient } from "./store.mjs";
+import { TurnLifecycle } from "./turn-lifecycle.mjs";
 
 const lines = createInterface({ input: process.stdin });
 let run,
@@ -132,6 +133,7 @@ async function main(spec) {
   client = serverClient(spec);
   let degraded = false,
     failed = false;
+  const lifecycle = new TurnLifecycle();
   try {
     input.push(await message(spec, spec.text, spec.attachments));
     await client.event({
@@ -200,12 +202,16 @@ async function main(spec) {
       if (event.type === "system" && event.subtype === "mirror_error")
         degraded = true;
       await client.event(event);
-      if (event.type === "result") {
+      if (event.type === "result" && !event.parent_tool_use_id) {
         failed ||= event.is_error === true && !interrupted;
+      }
+      if (lifecycle.observe(event)) {
         stopping = true;
         wake?.();
       }
     }
+    if (!lifecycle.finished && !interrupted)
+      throw new Error("Claude exited before its background work and final response completed");
   } catch (error) {
     failed = !interrupted;
     // SDK errors may contain provider output, but never include the Mira credential.

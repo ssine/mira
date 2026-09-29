@@ -288,6 +288,11 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var hold atomic.Bool
 	var ask atomic.Bool
 	var child atomic.Bool
+	var background, backgroundPhase, backgroundDone atomic.Bool
+	backgroundStarted := make(chan struct{}, 1)
+	backgroundRelease := make(chan struct{})
+	var releaseBackground sync.Once
+	defer releaseBackground.Do(func() { close(backgroundRelease) })
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&b)
@@ -326,6 +331,48 @@ func TestClaudeManagedSDK(t *testing.T) {
 		if strings.Contains(string(bytes), "CHILD_NATIVE_TEST") && !strings.Contains(string(bytes), "CLAUDE_MIRA_SAVED_MARKER") {
 			block = map[string]any{"type": "text", "text": "CHILD_NATIVE_TEST"}
 			stop = "end_turn"
+		}
+		if backgroundPhase.Load() {
+			isChild := false
+			for _, raw := range b["messages"].([]any) {
+				message := raw.(map[string]any)
+				if message["role"] != "user" {
+					continue
+				}
+				switch content := message["content"].(type) {
+				case string:
+					isChild = isChild || strings.Contains(content, "BACKGROUND_CHILD_REQUEST")
+				case []any:
+					for _, raw := range content {
+						entry := raw.(map[string]any)
+						if text, _ := entry["text"].(string); entry["type"] == "text" && strings.Contains(text, "BACKGROUND_CHILD_REQUEST") {
+							isChild = true
+						}
+					}
+				}
+			}
+			text := "BACKGROUND_PARENT_WAIT"
+			if isChild {
+				select {
+				case backgroundStarted <- struct{}{}:
+				default:
+				}
+				select {
+				case <-backgroundRelease:
+				case <-r.Context().Done():
+					return
+				}
+				backgroundDone.Store(true)
+				text = "BACKGROUND_CHILD_FINAL"
+			} else if backgroundDone.Load() {
+				text = "BACKGROUND_PARENT_FINAL"
+			}
+			block = map[string]any{"type": "text", "text": text}
+			stop = "end_turn"
+		}
+		if background.CompareAndSwap(true, false) {
+			block = map[string]any{"type": "tool_use", "id": "tool_" + uuidClaude(), "name": "Agent", "input": map[string]any{"description": "Delayed background validation", "prompt": "BACKGROUND_CHILD_REQUEST: reply with the final marker", "subagent_type": "general-purpose", "run_in_background": true}}
+			stop = "tool_use"
 		}
 		usage := map[string]any{"input_tokens": 10, "output_tokens": 4}
 		message := map[string]any{"id": "msg_" + uuidClaude(), "type": "message", "role": "assistant", "model": b["model"], "content": []any{block}, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
@@ -494,6 +541,35 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if len(children["data"].([]any)) == 0 {
 		t.Fatal("native subagent transcript was not mirrored")
 	}
+
+	// A result can be an interim parent reply while research is still running.
+	// The input stream must stay open so its notification can wake the parent.
+	backgroundPhase.Store(true)
+	background.Store(true)
+	backgroundTurn := runTurn("Run a delayed background agent, then synthesize its findings.")
+	wait("background request", 30*time.Second, func() bool {
+		select {
+		case <-backgroundStarted:
+			return true
+		default:
+			return false
+		}
+	})
+	wait("interim parent result", 30*time.Second, func() bool {
+		var count int
+		_ = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result'`, backgroundTurn).Scan(&count)
+		return count > 0
+	})
+	if f.call("GET", route, nil)["activeTurn"] == nil {
+		t.Fatal("background work was marked complete at the interim parent result")
+	}
+	releaseBackground.Do(func() { close(backgroundRelease) })
+	wait("parent synthesis after background task", 45*time.Second, completed)
+	var final string
+	if err = f.server.pool.QueryRow(ctx, `SELECT payload->>'result' FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' ORDER BY seq DESC LIMIT 1`, backgroundTurn).Scan(&final); err != nil || final != "BACKGROUND_PARENT_FINAL" {
+		t.Fatalf("background result did not reach the parent: %q %v", final, err)
+	}
+	backgroundPhase.Store(false)
 
 	// A second approved Node uses a fresh SDK cache/config directory. Server ownership
 	// moves only after completion, and the old writer remains fenced out.

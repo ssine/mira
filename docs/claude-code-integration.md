@@ -63,6 +63,9 @@ records even if PostgreSQL cannot extract their projection.
 The same conversation details, turn footers and account cost charts show Claude's SDK
 estimate in USD, including cache usage. This is not a gateway billing API. Whole-session
 tokens use `modelUsage`, including subagent requests; native `usage` is main-loop-only.
+Message footers retain native record timestamps. Account curves preserve per-turn
+timestamps, grouping adjacent turns only on dense days (at most 128 points/day),
+without discarding costs or incomplete status.
 No unsupported per-child cost split is inferred. See the
 [official cost semantics](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
 
@@ -136,6 +139,12 @@ JSON field extraction itself can reject escaped NUL anywhere in a raw object.
 - Turn completion and mirror status are independent. Degradation is sticky. The
   UI requires an explicit acknowledged-history choice before resuming a degraded
   conversation; subsequent successful batches do not silently erase missing history.
+- A foreground `result` is not the end of a Mira turn while native background
+  tasks remain active. Keep streaming input open using the SDK's replace-set
+  `background_tasks_changed` signal; task bookends are not ordered against that
+  signal. Wait for the parent's subsequent result after background work settles.
+  Ambient watchers do not keep a turn running. An unexpected SDK exit without
+  final completion is reported as a failure, never successful completion.
 - Managed resume throws when its main transcript is absent remotely, instead of
   letting the SDK fall back to arbitrary local history. It restores subagent keys
   through `listSubkeys` and keeps the native session ID across compatible Nodes.
@@ -174,6 +183,9 @@ context after deleting local history, native questions/answers, native subagent
 transcripts, cross-Node ownership/resume, interruption, and permanent mirror
 failure reporting. Model discovery also uses the native SDK. An unknown turn from a previous runtime
 instance remains reserved instead of being mistaken for a stopped process.
+The delayed-background regression holds a native child until the parent has
+emitted an interim result, then verifies that its completion wakes the parent
+and produces a final synthesis before Mira releases turn ownership.
 
 Browser acceptance covers creating/sending a conversation through the Web UI,
 restoring drafts after reload, native history/images/child selection, and the
@@ -196,7 +208,7 @@ checks; Android advertises no Claude runtime. Real-provider Linux acceptance ver
 managed MCP tools, acknowledged persistence and restoration after Node restart
 and deletion of local history through both Messages and Bedrock gateways.
 Native Windows execution, platform-to-platform filesystem portability and
-long-running background Claude tasks remain outside this acceptance.
+hours-long background workload stress testing remain outside this acceptance.
 
 Official references: [programmatic usage](https://code.claude.com/docs/en/headless),
 [custom tools](https://code.claude.com/docs/en/agent-sdk/custom-tools),
