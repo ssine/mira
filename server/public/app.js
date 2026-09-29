@@ -321,9 +321,9 @@ function acceptClaudeSummary(thread) {
 async function loadClaudeTranscript(threadId, options = {}) {
   const thread = agent.threads.find(t => t.threadId === threadId);
   if (!thread || agent.threadId !== threadId) return;
-  if (claudeHistoryJob?.threadId === threadId) return claudeHistoryJob.promise;
+  if (claudeHistoryJob?.threadId === threadId && claudeHistoryJob.epoch === agent.selectionEpoch) return claudeHistoryJob.promise;
   clearTimeout(claudePollTimer);
-  const epoch = agent.selectionEpoch, job = { threadId };
+  const epoch = agent.selectionEpoch, job = { threadId, epoch };
   claudeHistoryJob = job;
   job.promise = (async () => {
     const result = await claudeRuntime.history(thread, { older: !!options.prepend, poll: !!options.poll });
@@ -5791,7 +5791,11 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
     await loadThreadPath(threadId, epoch);
     if (epoch === agent.selectionEpoch) renderAgentThreads(true);
   })().catch(error => { if (epoch === agent.selectionEpoch) toast(`父级列表暂未加载：${error.message}`); });
-  if (projected?.engine === "claude") { stopAgentRecovery(); closeAgentSocket(); }
+  if (projected?.engine === "claude") {
+    // This selection already invalidated prior work. Preserve its epoch so
+    // child-path reads and native polling can complete for the new selection.
+    agent.connectionWanted = false; agent.runtimePromise = null; closeAgentSocket();
+  }
   agent.threadRuntimeNodeId = projected?.runtimeNodeId ?? null;
   agent.threadReasoningEffort = typeof projected?.reasoningEffort === "string" ? projected.reasoningEffort : null;
   const preferredNode = projected?.runtimeNodeId ?? projected?.sourceNodeId;
