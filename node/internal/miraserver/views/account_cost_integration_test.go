@@ -280,6 +280,48 @@ func TestAccountDailyCost(t *testing.T) {
 	}
 	projectedAccountCost(t, restarted, ctx, "Shared cost fixture", "7d", "Asia/Shanghai")
 
+	// One load must preserve exact account/range boundaries and completeness for
+	// all consumers, including unknown accounts and fractional-offset timezones.
+	for _, zone := range []string{"UTC", "Asia/Shanghai", "Asia/Kathmandu", "America/New_York"} {
+		snapshot, err := restarted.LoadAccountCostSnapshot(ctx, zone)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"Shared cost fixture", "Other cost fixture", "Unknown cost fixture"} {
+			for _, span := range []string{"24h", "7d", "30d"} {
+				want, err := restarted.scanAccountCostHistory(ctx, name, span, zone)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var wg sync.WaitGroup
+				for i := 0; i < 4; i++ {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						got, err := snapshot.History(name, span)
+						if err != nil {
+							t.Error(err)
+							return
+						}
+						for _, key := range []string{"name", "range", "timezone", "from", "to", "days", "points", "estimate"} {
+							if normalizeAccountCost(got[key]) != normalizeAccountCost(want[key]) {
+								t.Errorf("shared snapshot %s/%s/%s: %s differs", name, span, zone, key)
+							}
+						}
+						// Returned maps and nested metadata belong to this caller.
+						got["days"].([]map[string]any)[0]["amount"] = -1
+						estimate := got["estimate"].(map[string]any)
+						estimate["amount"] = -1
+						if models := estimate["models"].([]string); len(models) > 0 {
+							models[0] = "mutated"
+						}
+					}()
+				}
+				wg.Wait()
+			}
+		}
+	}
+
 	// Erasing canonical projections also erases all derived cost state.
 	exec(`DELETE FROM codex_thread_events WHERE store_id=$1 AND thread_id='long'`, store)
 	exec(`DELETE FROM codex_thread_projections WHERE store_id=$1 AND thread_id='long'`, store)

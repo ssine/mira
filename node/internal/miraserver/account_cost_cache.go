@@ -10,15 +10,21 @@ import (
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 )
 
-const accountCostCacheLimit = 64
+const accountCostCacheLimit = 8
 
-type accountCostKey struct{ name, rangeName, zone, day string }
+type accountCostKey struct{ zone, day string }
+
+// The snapshot contains all accounts and 30 days. Per-request account/range
+// selection is an in-memory operation, never another database aggregation.
+type accountCostSnapshot interface {
+	History(name, rangeName string) (map[string]any, error)
+}
 type accountCostJob struct {
 	done chan struct{}
 	err  error
 }
 type accountCostEntry struct {
-	data                                      map[string]any
+	data                                      accountCostSnapshot
 	updatedAt, expiresAt, retryAt, lastAccess time.Time
 	job                                       *accountCostJob
 	err                                       error
@@ -35,10 +41,10 @@ type accountCostCache struct {
 	closed  bool
 	slots   chan struct{}
 	now     func() time.Time
-	load    func(context.Context, string, string, string) (map[string]any, error)
+	load    func(context.Context, string) (accountCostSnapshot, error)
 }
 
-func newAccountCostCache(ctx context.Context, load func(context.Context, string, string, string) (map[string]any, error)) *accountCostCache {
+func newAccountCostCache(ctx context.Context, load func(context.Context, string) (accountCostSnapshot, error)) *accountCostCache {
 	ctx, cancel := context.WithCancel(ctx)
 	return &accountCostCache{entries: make(map[accountCostKey]*accountCostEntry), ctx: ctx, cancel: cancel,
 		slots: make(chan struct{}, 2), now: time.Now, load: load}
@@ -69,7 +75,7 @@ func (cache *accountCostCache) Get(ctx context.Context, name, rangeName, zone st
 	}
 	now := cache.now()
 	// Never reuse yesterday's calendar-day window across local midnight.
-	key := accountCostKey{name, rangeName, zone, now.In(location).Format("2006-01-02")}
+	key := accountCostKey{zone, now.In(location).Format("2006-01-02")}
 	cache.mu.Lock()
 	if cache.closed {
 		cache.mu.Unlock()
@@ -101,9 +107,9 @@ func (cache *accountCostCache) Get(ctx context.Context, name, rangeName, zone st
 		go cache.refresh(key, entry, entry.job)
 	}
 	if entry.data != nil {
-		result := accountCostResult(entry, now)
+		copy := *entry
 		cache.mu.Unlock()
-		return result, nil
+		return accountCostResult(&copy, now, name, rangeName)
 	}
 	job := entry.job
 	err = entry.err
@@ -116,29 +122,31 @@ func (cache *accountCostCache) Get(ctx context.Context, name, rangeName, zone st
 		return nil, ctx.Err()
 	case <-job.done:
 		cache.mu.Lock()
-		defer cache.mu.Unlock()
-		if job.err != nil {
-			return nil, job.err
+		copy := *entry
+		err := job.err
+		cache.mu.Unlock()
+		if err != nil {
+			return nil, err
 		}
-		return accountCostResult(entry, cache.now()), nil
+		return accountCostResult(&copy, cache.now(), name, rangeName)
 	}
 }
 
-func accountCostResult(entry *accountCostEntry, now time.Time) map[string]any {
-	result := make(map[string]any, len(entry.data)+1)
-	for key, value := range entry.data {
-		result[key] = value
+func accountCostResult(entry *accountCostEntry, now time.Time, name, rangeName string) (map[string]any, error) {
+	result, err := entry.data.History(name, rangeName)
+	if err != nil {
+		return nil, err
 	}
 	result["cache"] = map[string]any{"updatedAt": entry.updatedAt.UTC().Format(time.RFC3339Nano),
 		"expiresAt": entry.expiresAt.UTC().Format(time.RFC3339Nano), "stale": !now.Before(entry.expiresAt), "refreshing": entry.job != nil}
-	return result
+	return result, nil
 }
 
 func (cache *accountCostCache) refresh(key accountCostKey, entry *accountCostEntry, job *accountCostJob) {
 	defer cache.wg.Done()
 	ctx, cancel := context.WithTimeout(cache.ctx, 60*time.Second)
 	defer cancel()
-	var data map[string]any
+	var data accountCostSnapshot
 	var err error
 	defer func() {
 		if recover() != nil {
@@ -148,11 +156,9 @@ func (cache *accountCostCache) refresh(key accountCostKey, entry *accountCostEnt
 		defer cache.mu.Unlock()
 		if err == nil {
 			entry.data, entry.updatedAt = data, cache.now()
-			lifetime := time.Minute
-			if projection, ok := data["projection"].(map[string]any); ok && projection["status"] != "ready" {
-				lifetime = 5 * time.Second
-			}
-			entry.expiresAt = entry.updatedAt.Add(lifetime)
+			// Pending backfill does not make global aggregation cheaper. Share
+			// the same refresh budget while accurately exposing partial results.
+			entry.expiresAt = entry.updatedAt.Add(time.Minute)
 			entry.retryAt = time.Time{}
 		} else {
 			// Keep an earlier successful amount; never replace it with zero.
@@ -168,5 +174,5 @@ func (cache *accountCostCache) refresh(key accountCostKey, entry *accountCostEnt
 	case cache.slots <- struct{}{}:
 		defer func() { <-cache.slots }()
 	}
-	data, err = cache.load(ctx, key.name, key.rangeName, key.zone)
+	data, err = cache.load(ctx, key.zone)
 }

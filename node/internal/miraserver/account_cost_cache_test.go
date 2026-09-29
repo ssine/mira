@@ -10,10 +10,18 @@ import (
 	"time"
 )
 
+type testAccountCostSnapshot struct{ amount float64 }
+
+func (snapshot testAccountCostSnapshot) History(name, span string) (map[string]any, error) {
+	return map[string]any{"name": name, "range": span,
+		"projection": map[string]any{"status": "updating"},
+		"estimate":   map[string]any{"amount": snapshot.amount}}, nil
+}
+
 func TestAccountCostCacheSharesWorkAfterClientCancellation(t *testing.T) {
 	var calls atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
-	cache := newAccountCostCache(context.Background(), func(ctx context.Context, name, span, zone string) (map[string]any, error) {
+	cache := newAccountCostCache(context.Background(), func(ctx context.Context, zone string) (accountCostSnapshot, error) {
 		if calls.Add(1) == 1 {
 			close(started)
 		}
@@ -22,7 +30,7 @@ func TestAccountCostCacheSharesWorkAfterClientCancellation(t *testing.T) {
 			return nil, ctx.Err()
 		case <-release:
 		}
-		return map[string]any{"estimate": map[string]any{"amount": 13.0}}, nil
+		return testAccountCostSnapshot{13.0}, nil
 	})
 	defer cache.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -36,18 +44,19 @@ func TestAccountCostCacheSharesWorkAfterClientCancellation(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 12; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			result, err := cache.Get(context.Background(), " API ", "", "")
-			if err != nil || result["estimate"].(map[string]any)["amount"] != 13.0 {
+			name, span := fmt.Sprint(i), []string{"24h", "7d", "30d"}[i%3]
+			result, err := cache.Get(context.Background(), name, span, "")
+			if err != nil || result["name"] != name || result["range"] != span || result["estimate"].(map[string]any)["amount"] != 13.0 {
 				t.Errorf("shared result: %v, %v", result, err)
 			}
-		}()
+		}(i)
 	}
 	close(release)
 	wg.Wait()
 	if calls.Load() != 1 {
-		t.Fatalf("%d scans for identical requests", calls.Load())
+		t.Fatalf("%d scans across accounts and ranges", calls.Load())
 	}
 	result, err := cache.Get(context.Background(), "API", "7d", "UTC")
 	if err != nil || result["cache"].(map[string]any)["stale"] != false {
@@ -61,7 +70,7 @@ func TestAccountCostCacheStaleRefreshAndFailureBackoff(t *testing.T) {
 	var calls atomic.Int32
 	var fail atomic.Bool
 	gate := make(chan struct{})
-	cache := newAccountCostCache(context.Background(), func(ctx context.Context, _, _, _ string) (map[string]any, error) {
+	cache := newAccountCostCache(context.Background(), func(ctx context.Context, _ string) (accountCostSnapshot, error) {
 		call := calls.Add(1)
 		if call == 2 {
 			select {
@@ -73,7 +82,7 @@ func TestAccountCostCacheStaleRefreshAndFailureBackoff(t *testing.T) {
 		if fail.Load() {
 			return nil, errors.New("database unavailable")
 		}
-		return map[string]any{"estimate": map[string]any{"amount": float64(call)}}, nil
+		return testAccountCostSnapshot{float64(call)}, nil
 	})
 	cache.now = func() time.Time { return time.Unix(0, now.Load()) }
 	defer cache.Close()
@@ -113,9 +122,9 @@ func TestAccountCostCacheKeysBoundsAndShutdown(t *testing.T) {
 	var now atomic.Int64
 	now.Store(time.Date(2026, 9, 13, 23, 59, 0, 0, time.UTC).UnixNano())
 	var calls atomic.Int32
-	cache := newAccountCostCache(context.Background(), func(context.Context, string, string, string) (map[string]any, error) {
+	cache := newAccountCostCache(context.Background(), func(context.Context, string) (accountCostSnapshot, error) {
 		calls.Add(1)
-		return map[string]any{"estimate": map[string]any{"amount": 0.0}}, nil
+		return testAccountCostSnapshot{}, nil
 	})
 	cache.now = func() time.Time { return time.Unix(0, now.Load()) }
 	defer cache.Close()
@@ -129,16 +138,24 @@ func TestAccountCostCacheKeysBoundsAndShutdown(t *testing.T) {
 	get("API", "24h", "UTC")
 	get("API", "7d", "Asia/Shanghai")
 	get("Other", "7d", "UTC")
-	now.Add(int64(2 * time.Minute))
+	if calls.Load() != 2 {
+		t.Fatalf("accounts/ranges should share a timezone snapshot: %d", calls.Load())
+	}
+	now.Add(int64(10 * time.Second))
+	get("New account", "30d", "UTC")
+	if calls.Load() != 2 {
+		t.Fatal("pending projection bypassed the one-minute refresh budget")
+	}
+	now.Add(int64(110 * time.Second))
 	get("API", "7d", "UTC")
-	if calls.Load() != 5 {
-		t.Fatalf("account/range/timezone/local date mixed: %d", calls.Load())
+	if calls.Load() != 3 {
+		t.Fatalf("timezone/local date mixed: %d", calls.Load())
 	}
 	if _, err := cache.Get(context.Background(), "API", "invalid", "UTC"); err == nil {
 		t.Fatal("invalid range cached")
 	}
 	for i := 0; i < accountCostCacheLimit+5; i++ {
-		get(fmt.Sprint(i), "7d", "UTC")
+		get("API", "7d", fmt.Sprintf("Etc/GMT+%d", i))
 	}
 	if len(cache.entries) > accountCostCacheLimit {
 		t.Fatal("unbounded cache")
@@ -152,7 +169,7 @@ func TestAccountCostCacheKeysBoundsAndShutdown(t *testing.T) {
 func TestAccountCostCacheBoundsConcurrentScansAndCancelsShutdown(t *testing.T) {
 	var active, maximum atomic.Int32
 	started := make(chan struct{}, 8)
-	cache := newAccountCostCache(context.Background(), func(ctx context.Context, _, _, _ string) (map[string]any, error) {
+	cache := newAccountCostCache(context.Background(), func(ctx context.Context, _ string) (accountCostSnapshot, error) {
 		n := active.Add(1)
 		defer active.Add(-1)
 		for old := maximum.Load(); n > old; old = maximum.Load() {
@@ -170,7 +187,7 @@ func TestAccountCostCacheBoundsConcurrentScansAndCancelsShutdown(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, err := cache.Get(context.Background(), fmt.Sprint(i), "7d", "UTC")
+			_, err := cache.Get(context.Background(), "API", "7d", fmt.Sprintf("Etc/GMT+%d", i))
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("shutdown: %v", err)
 			}

@@ -38,8 +38,8 @@ var accountCostRevision = func() string {
 // Imports publish immutable provenance. A newly published import invalidates a
 // previous native-timestamp projection even if item_count did not change.
 const accountCostSourcesSQL = `SELECT p.store_id,p.thread_id,p.active_generation,p.item_count,
- coalesce(p.state#>>'{createdThread,forked_from_id}','') AS fork,
- jsonb_build_array(coalesce(p.state#>>'{createdThread,forked_from_id}',''),i.import_id)::text AS source_key
+ p.cost_forked_from_id AS fork,
+ jsonb_build_array(p.cost_forked_from_id,i.import_id)::text AS source_key
  FROM codex_thread_projections p LEFT JOIN LATERAL (
  SELECT import_id FROM mira_codex_session_imports WHERE store_id=p.store_id AND thread_id=p.thread_id AND status='imported'
  ORDER BY store_event_seq DESC,created_at DESC LIMIT 1) i ON true`

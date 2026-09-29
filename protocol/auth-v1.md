@@ -60,6 +60,11 @@ secret is required.
 Enrollment states are `pending`, `approved`, `rejected`, and `expired`. Approval and online state are
 separate: an approved Node is online only while its reverse channel and fresh heartbeat are present.
 
+Node authentication reads the current credential hash, revocation and approval status on every
+request. Successful checks do not update the legacy `last_used_at` or `last_authenticated_at`
+columns; those unused timestamps are retained only for schema rollback compatibility. Heartbeats
+continue to maintain Node liveness, and authorization results are not cached.
+
 ## Trusted-device permissions
 
 Every approved Node may list and inspect approved Nodes, invoke their advertised capabilities, use
