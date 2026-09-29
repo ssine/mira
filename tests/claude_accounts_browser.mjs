@@ -25,7 +25,12 @@ try {
   await context.route("**/v1/claude/**", route => {
     const req = route.request(), path = new URL(req.url()).pathname, body = req.postData() ? req.postDataJSON() : null;
     calls.push({ path, body });
-    if (path.endsWith("cost-history")) return route.fulfill({json:{estimate:{amount:.4,status:"complete"},days:[],points:[]}});
+    if (path.endsWith("cost-history")) {
+      const at = Date.parse("2026-09-30T00:00:00Z"), date = "2026-09-30";
+      return route.fulfill({json:{basis:"claude_sdk",estimate:{amount:.4,status:"complete"},from:at,to:at+3600000,
+        days:[{date,at,end:at+86400000,amount:.4,status:"complete"}],
+        points:[{date,at:at+600000,amount:.1,turnCount:1},{date,at:at+1200000,amount:.3,turnCount:1}]}});
+    }
     if (path === "/v1/claude/conversations") return route.fulfill({json:{data:sessions.map(summary),paged:true,projects:sessions.length?[{key:JSON.stringify([nodeId,"/work"]),nodeId,cwd:"/work",count:sessions.length}]:[]}});
     if (path.startsWith("/v1/claude/conversations/")) return route.fulfill({json:summary(sessions.find(s=>s.sessionId===path.split("/")[4]))});
     if (path.includes("/accounts/")) return route.fulfill({ json: { configured: true } });
@@ -36,7 +41,7 @@ try {
     }
     const session = sessions.find(s => s.sessionId === path.split("/")[4]);
     if (path.endsWith("/turns")) { session.nodeAccountId = body.nodeAccountId; session.model = body.model; session.activeTurn = session.lastTurn = randomUUID(); return route.fulfill({ json: { turnId: session.activeTurn } }); }
-    if (path.endsWith("/costs")) return route.fulfill({json:{generation:1,turnCostEstimates:{}}});
+    if (path.endsWith("/costs")) return route.fulfill({json:{generation:1,turnCostEstimates:{[session.lastTurn]:{amount:.4,status:"complete",basis:"claude_sdk"}}}});
     if (path.endsWith("/children")) return route.fulfill({ json: { data: [] } });
     if (path.endsWith("/events")) {
       const after = Number(new URL(req.url()).searchParams.get("after") || 0), events = session.events || [];
@@ -91,12 +96,17 @@ try {
   await view.locator("#conversationTrace .trace-card.reasoning").waitFor();
   emit({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "One live answer" } } });
   await view.locator("#conversationTrace .trace-card.assistant").filter({ hasText: "One live answer" }).waitFor();
-  emit({ type: "assistant", uuid: "answer", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
+  emit({ type: "assistant", uuid: "answer", timestamp: "2026-09-30T01:02:03.456Z", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
   emit({ type: "stream_event", event: { type: "message_stop" } });
   emit({ type: "result", duration_ms: 100 });
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#conversationAccount").disabled);
   assert.equal(await view.locator("#conversationTrace .trace-card.assistant").count(), 1, "the final reply replaces streamed prose without requiring a reload");
+  const clock = view.locator("#conversationTrace .trace-card.assistant .trace-completed");
+  assert.equal(await clock.isVisible(), true, "Claude messages retain their native record time");
+  assert.match(await clock.textContent(), /\d{2}:\d{2}:\d{2}/);
+  assert.equal(await clock.getAttribute("title"), "消息记录时间");
+  assert.match(await view.locator("#conversationTrace .trace-card.assistant .trace-cost").textContent(), /0\.40/);
   await view.locator("#claudeReconcile").waitFor({ state: "hidden" });
   await view.locator("#conversationDetailsClose").click();
   await view.locator("#conversationAccount").selectOption(ids[0]);
@@ -106,6 +116,11 @@ try {
   assert.equal(calls.filter(c => c.path.endsWith("/turns")).at(-1).body.nodeAccountId, ids[0]);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="codex"]').count(),1);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="claude"]').count(),2);
+  await view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"}).click();
+  const curve = view.locator("#agentAccountDetails .spend-line");
+  await curve.waitFor();
+  assert.equal((await curve.getAttribute("d")).match(/L/g).length, 3, "each same-hour turn contributes a separate curve point");
+  await page.evaluate(() => document.querySelector("#agentAccountDetails").hidePopover());
   await view.locator("#agentNewThread").click();
   assert.equal(await view.locator(`#conversationAccount option[value="${codexId}"]`).count(),1,"new sessions can select Codex again");
   assert.deepEqual(errors, []);

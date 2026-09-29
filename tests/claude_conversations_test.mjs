@@ -19,7 +19,7 @@ test("native projections replace stream prose, merge tool results, and retain na
  {type:"mira_user",text:"hello"},
  {type:"stream_event",event:{type:"message_start",message:{id:"m"}}},
  {type:"stream_event",event:{type:"content_block_delta",index:0,delta:{type:"text_delta",text:"part"}}},
- {type:"assistant",uuid:"final",message:{id:"m",content:[{type:"text",text:"full"},{type:"tool_use",id:"t",name:"Read",input:{path:"a"}}]}},
+ {type:"assistant",uuid:"final",timestamp:"2026-09-30T01:02:03.456Z",message:{id:"m",content:[{type:"text",text:"full"},{type:"tool_use",id:"t",name:"Read",input:{path:"a"}}]}},
  {type:"user",message:{content:[{type:"tool_result",tool_use_id:"t",content:"output"}]}},
  {type:"assistant",parent_tool_use_id:"t",message:{content:[{type:"text",text:"child only"}]}},
  {type:"mira_question",questionId:"q",questions:[{question:"Choose"}]},
@@ -27,6 +27,8 @@ test("native projections replace stream prose, merge tool results, and retain na
  ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
  const view=claudeTrace(rows);
  assert.deepEqual(view.trace.filter(x=>x.kind==="assistant"&&x.body).map(x=>x.body),["full"]);
+ assert.equal(view.trace.find(x=>x.kind==="assistant"&&x.body).completedAt,"2026-09-30T01:02:03.456Z");
+ assert.equal(view.trace.find(x=>x.kind==="assistant"&&x.body).timingScope,"recorded");
  assert.equal(view.trace.filter(x=>x.kind==="tool").length,1);assert.match(view.trace.find(x=>x.kind==="tool").body,/output/);
  assert.equal(view.questions.size,1);
  assert.equal(claudeTrace([...rows,{seq:99,payload:{type:"mira_answer",questionId:"q",answers:{a:"yes"}}}]).questions.size,0);

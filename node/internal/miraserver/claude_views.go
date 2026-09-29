@@ -276,8 +276,15 @@ func (server *Server) claudeAccountCosts(ctx context.Context, r *http.Request) (
 	}
 	now := time.Now().In(loc)
 	from := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc).AddDate(0, 0, 1-count)
-	rows, err := server.pool.Query(ctx, `SELECT to_char(happened_at AT TIME ZONE $4,'YYYY-MM-DD'),date_trunc('hour',happened_at),sum(cost_delta)::float8,bool_or(cost_partial)
- FROM mira_claude_usage_deltas WHERE account_name=$1 AND happened_at>=$2 AND happened_at<=$3 GROUP BY 1,2 ORDER BY 2`, name, from, now, zone)
+	// Preserve individual turns at their recorded times. Dense days combine only
+	// adjacent turns, keeping all costs while bounding the response to 128/day.
+	// Difference cumulative SDK totals in the view before account/date filtering.
+	rows, err := server.pool.Query(ctx, `WITH samples AS (
+ SELECT to_char(happened_at AT TIME ZONE $4,'YYYY-MM-DD') AS date,happened_at,cost_delta,cost_partial,
+ ntile(128) OVER (PARTITION BY to_char(happened_at AT TIME ZONE $4,'YYYY-MM-DD') ORDER BY happened_at,session_id,revision) AS bucket
+ FROM mira_claude_usage_deltas WHERE account_name=$1 AND happened_at>=$2 AND happened_at<=$3)
+ SELECT date,max(happened_at),sum(cost_delta)::float8,bool_or(cost_partial),count(*)
+ FROM samples GROUP BY date,bucket ORDER BY 2,date,bucket`, name, from, now, zone)
 	if err != nil {
 		return nil, err
 	}
@@ -295,10 +302,11 @@ func (server *Server) claudeAccountCosts(ctx context.Context, r *http.Request) (
 	}
 	for rows.Next() {
 		var date string
-		var hour time.Time
+		var at time.Time
 		var amount *float64
 		var p bool
-		if err = rows.Scan(&date, &hour, &amount, &p); err != nil {
+		var turns int64
+		if err = rows.Scan(&date, &at, &amount, &p, &turns); err != nil {
 			return nil, err
 		}
 		partial = partial || p
@@ -321,15 +329,7 @@ func (server *Server) claudeAccountCosts(ctx context.Context, r *http.Request) (
 		if p {
 			day["status"] = "partial"
 		}
-		at := hour.Add(time.Hour)
-		end := time.UnixMilli(day["end"].(int64))
-		if at.After(end) {
-			at = end
-		}
-		if at.After(now) {
-			at = now
-		}
-		points = append(points, map[string]any{"date": date, "at": at.UnixMilli(), "amount": amount, "status": claudeEstimate(amount, p)["status"]})
+		points = append(points, map[string]any{"date": date, "at": at.UnixMilli(), "amount": amount, "turnCount": turns, "status": claudeEstimate(amount, p)["status"]})
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err

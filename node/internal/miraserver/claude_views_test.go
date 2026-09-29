@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClaudeUnifiedUsage(t *testing.T) {
@@ -60,6 +61,69 @@ func TestClaudeUnifiedUsage(t *testing.T) {
 	summary = f.call("GET", "/v1/claude/conversations/"+id, nil)
 	if summary["costEstimate"].(map[string]any)["status"] != "partial" {
 		t.Fatal("counter reset must be partial")
+	}
+}
+
+func TestClaudeCostHistoryPreservesTurnsAndBoundsDenseDays(t *testing.T) {
+	f := newClaudeFixture(t)
+	ctx := context.Background()
+	p := f.server.pool
+	id, _, _ := f.reserved()
+	account := uuidClaude()
+	if _, err := p.Exec(ctx, `INSERT INTO mira_claude_accounts(node_account_id,node_id,name) VALUES($1,$2,'Curve')`, account, f.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Exec(ctx, `DELETE FROM mira_claude_turns WHERE session_id=$1`, id); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Truncate(24 * time.Hour).Add(-23 * time.Hour)
+	add := func(first, last int) {
+		t.Helper()
+		_, err := p.Exec(ctx, `WITH turns AS (
+ INSERT INTO mira_claude_turns(turn_id,session_id,node_id,revision,request,node_account_id,account_name,created_at)
+ SELECT gen_random_uuid(),$1,$2,n,'{}'::json,$3,'Curve',$4::timestamptz+n*interval '1 second'
+ FROM generate_series($5::int,$6::int) n RETURNING turn_id,revision)
+ INSERT INTO mira_claude_events(event_id,session_id,turn_id,event_type,payload)
+ SELECT gen_random_uuid(),$1,turn_id,'result',json_build_object('type','result','total_cost_usd',revision/10.0) FROM turns`, id, f.nodeID, account, start, first, last)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	history := func() map[string]any {
+		return f.call("GET", "/v1/claude/accounts/cost-history?name=Curve&range=7d&timezone=UTC", nil)
+	}
+	add(1, 2)
+	points := history()["points"].([]any)
+	if len(points) != 2 {
+		t.Fatalf("same-hour turns collapsed: %#v", points)
+	}
+	for i, raw := range points {
+		point := raw.(map[string]any)
+		if point["at"] != float64(start.Add(time.Duration(i+1)*time.Second).UnixMilli()) || point["amount"] != .1 || point["turnCount"] != float64(1) {
+			t.Fatalf("turn time or delta lost: %#v", point)
+		}
+	}
+	add(3, 260)
+	data := history()
+	points = data["points"].([]any)
+	amount := data["estimate"].(map[string]any)["amount"].(float64)
+	if len(points) > 128 || amount < 25.999999 || amount > 26.000001 {
+		t.Fatalf("unbounded or incomplete history: points=%d amount=%v", len(points), amount)
+	}
+	var sum, turns float64
+	var previous float64
+	for _, raw := range points {
+		point := raw.(map[string]any)
+		at := point["at"].(float64)
+		if at <= previous {
+			t.Fatal("dense groups must remain chronological")
+		}
+		previous = at
+		sum += point["amount"].(float64)
+		turns += point["turnCount"].(float64)
+	}
+	if sum < 25.999999 || sum > 26.000001 || turns != 260 {
+		t.Fatalf("dense grouping discarded costs: sum=%v turns=%v", sum, turns)
 	}
 }
 
