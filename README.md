@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.57 配合 Codex `0.155.1-mira.6` 修复子 Agent 的自动上下文恢复：保留运行中的父节点和兄弟节点，在原会话内后台重试；冷会话按父子顺序恢复，关闭或已被新任务替代的子节点不会被旧请求唤醒。
+1.0.58 配合 Codex `0.155.1-mira.6` 修复子 Agent 的自动上下文恢复：保留运行中的父节点和兄弟节点，在原会话内后台重试；冷会话按父子顺序恢复，关闭或已被新任务替代的子节点不会被旧请求唤醒。
 
 1.0.54 修复大批量会话摘要在冷缓存下反复超时的问题：小批次保留已完成的摘要，减少无关工具输出读取；正文不再等待侧栏或父级列表，分页首次失败时重试小页。
 
@@ -160,13 +160,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.57
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.58
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.57'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.58'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
