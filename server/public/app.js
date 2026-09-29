@@ -1,3 +1,4 @@
+import { createClaudeConsole } from "/claude.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
@@ -37,6 +38,8 @@ let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
 let nodeMetadataTarget = null;
 
+const claudeConsole = createClaudeConsole({api, show, navigateCodex: () => navigateGlobal("agent"), toast});
+
 const themeStorageKey = "mira.theme";
 const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
 // A 240px sidebar still leaves 480px for the conversation at this boundary.
@@ -57,6 +60,7 @@ let browserRouteEpoch = 0;
 function writeBrowserRoute(view, threadId = null, { replace = false } = {}) {
   const url = new URL(window.location.href);
   url.searchParams.delete("thread");
+  url.searchParams.delete("claude");
   url.searchParams.delete("view");
   if (view === "agent" && threadId) url.searchParams.set("thread", threadId);
   else if (view !== "nodes") url.searchParams.set("view", view);
@@ -76,7 +80,9 @@ async function restoreBrowserRoute() {
     writeBrowserRoute("agent", agent.threadId, { replace: true });
     return;
   }
-  if (view === "agent") {
+  if (view === "claude") {
+    await claudeConsole.open(url.searchParams.get("claude"));
+  } else if (view === "agent") {
     show("agentView");
     const list = loadAgentThreads();
     if (threadId) {
@@ -850,12 +856,14 @@ function clear(value) {
 }
 
 function show(view) {
+  if (view !== "claudeView") claudeConsole.hide();
+  $("#globalClaude").classList.toggle("active", view === "claudeView");
   closeSidebarPopovers();
   if (view !== "agentView") $("#conversationDetails").close();
-  for (const id of ["loginView", "setupView", "connectionView", "dashboardView", "workspaceView", "agentView", "runtimeView"]) {
+  for (const id of ["loginView", "setupView", "connectionView", "dashboardView", "workspaceView", "agentView", "runtimeView", "claudeView"]) {
     $("#" + id).classList.toggle("hidden", id !== view);
   }
-  const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView"].includes(view);
+  const authenticated = ["dashboardView", "workspaceView", "agentView", "runtimeView", "claudeView"].includes(view);
   completionNotifications?.setAuthenticated(authenticated);
   if (!authenticated) accountSidebar.clear();
   $("#logoutButton").classList.toggle("hidden", !authenticated);
@@ -1215,7 +1223,7 @@ function renderNodes(nodes) {
         const refreshModels = actionButton("刷新模型", "refresh-models", node.nodeId, "secondary");
         refreshModels.disabled = node.status !== "online";
         refreshModels.title = node.status === "online" ? "刷新此节点的 Codex 模型目录" : "节点离线，无法刷新模型";
-        actions.append(refreshModels, actionButton(`账号 (${node.codexAccounts?.length ?? 1})`, "accounts", node.nodeId, "secondary"));
+        actions.append(refreshModels, actionButton(`账号 (${(node.codexAccounts?.length ?? 1) + (node.claudeAccounts?.length ?? 0)})`, "accounts", node.nodeId, "secondary"));
       }
       actions.append(actionButton("撤销设备", "revoke", node.nodeId, "danger"));
     }
@@ -3944,7 +3952,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
       ? captureTraceViewport()
       : null;
   if (options.prepend) {
-    const top = $(".conversation-head").getBoundingClientRect().bottom;
+    const top = $("#agentView .conversation-head").getBoundingClientRect().bottom;
     const anchor = [...trace.querySelectorAll(".trace-card[data-trace-key]")].find((card) => card.getBoundingClientRect().bottom > top);
     if (anchor) Object.assign(preserveViewport, { anchorKey: anchor.dataset.traceKey, anchorTop: anchor.getBoundingClientRect().top });
   }
@@ -6088,6 +6096,7 @@ $("#logoutButton").addEventListener("click", async () => {
 $("#themeToggle").addEventListener("click", toggleTheme);
 $("#agentThemeToggle").addEventListener("click", toggleTheme);
 $("#globalNodes").addEventListener("click", () => navigateGlobal("nodes").catch((error) => toast(error.message)));
+for (const id of ["globalClaude", "agentClaude"]) $("#"+id).addEventListener("click", () => claudeConsole.open().catch(e=>toast(e.message)));
 $("#globalAgent").addEventListener("click", () => navigateGlobal("agent").catch((error) => toast(error.message)));
 $("#globalRuntime").addEventListener("click", () => navigateGlobal("runtime").catch((error) => toast(error.message)));
 for (const id of ["globalAccounts", "agentManageAccounts"]) $("#" + id).addEventListener("click", () => navigateGlobal("nodes").then(() => codexAccounts.focusNode("")).catch(error => toast(error.message)));
@@ -6273,8 +6282,8 @@ function scheduleConversationMeasurements() {
   // delivery phase so the resulting layout is observed on the next frame.
   conversationMeasureFrame = requestAnimationFrame(() => {
     conversationMeasureFrame = null;
-    const card = $(".conversation-card"), scroll = traceScroller();
-    const head = $(".conversation-head").getBoundingClientRect().bottom - card.getBoundingClientRect().top;
+    const card = $("#agentView .conversation-card"), scroll = traceScroller();
+    const head = $("#agentView .conversation-head").getBoundingClientRect().bottom - card.getBoundingClientRect().top;
     const noticeHeight = $(".conversation-notices").getBoundingClientRect().height;
     const style = getComputedStyle(scroll);
     const values = {
@@ -6289,7 +6298,7 @@ function scheduleConversationMeasurements() {
 }
 const conversationOverlayObserver = new ResizeObserver(scheduleConversationMeasurements);
 window.addEventListener("resize", scheduleConversationMeasurements);
-conversationOverlayObserver.observe($(".conversation-head"));
+conversationOverlayObserver.observe($("#agentView .conversation-head"));
 conversationOverlayObserver.observe($("#conversationNotice"));
 conversationOverlayObserver.observe($(".conversation-notices"));
 const conversationWidthObserver = new ResizeObserver(scheduleConversationMeasurements);

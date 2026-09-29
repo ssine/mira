@@ -1062,3 +1062,46 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-recovery-settings .toggle span { flex: 0 0 28px; }
 .conversation-recovery-settings .toggle input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
 .conversation-recovery-settings .toggle:has(input:disabled) { opacity: .65; cursor: wait; }
+/* Claude shares the conversation and transcript components with the Codex view. */
+.claude-shell { position:relative; display: grid; grid-template-columns: 260px minmax(0,1fr); height: 100%; min-height: 0; }
+.claude-sidebar { display: flex; flex-direction: column; min-height: 0; padding: 12px; border-right: 1px solid var(--line); gap: 12px; }
+.claude-list { overflow-y: auto; min-height: 0; flex: 1; }
+.claude-project { overflow-wrap: anywhere; margin: 16px 4px 6px; font-size: 11px; }
+.claude-thread { display: block; width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: transparent; border: 0; padding: 10px; }
+.claude-thread.active { background: var(--accent-soft); }
+.claude-settings { display: flex; gap: 12px; padding: 8px 20px; flex-wrap: wrap; border-bottom: 1px solid var(--line); }
+.claude-settings label { display: flex; gap: 8px; align-items: center; font-size: 12px; }
+.claude-settings input { min-width: 230px; }
+.claude-console .conversation-head { position: static; gap: 8px; align-items:center; flex:none; align-self:stretch; margin:12px 20px 0; }
+.claude-console .conversation-head > div { flex:1; min-width:0; overflow-wrap:anywhere; }
+.claude-console h2 { font-size: 16px; }
+.claude-console .conversation-compose-area { position:static; flex:none; padding-bottom:10px; }
+.claude-console textarea { width: 100%; resize: vertical; border: 0; background: transparent; min-height: 60px; }
+.claude-console .conversation-drop-zone { display:block; }
+.claude-console .composer-toolbar { display:flex; flex-wrap:wrap; gap:6px; }
+.claude-console .composer-choice { display:inline-flex; align-items:center; gap:4px; font-size:12px; }
+.claude-console .composer-choice input { max-width: 180px; }
+.claude-console input[type=file] { max-width: 110px; }
+.claude-console .workspace-notice:empty { display:none; }
+.claude-console [hidden] { display:none !important; }
+body[data-view="claudeView"] { display:flex; flex-direction:column; height:100dvh; overflow:hidden; }
+body[data-view="claudeView"] > main { height:auto; flex:1; width:100%; min-height:0; padding:0; }
+.claude-console {height:100%;min-height:0;}
+.claude-console .conversation-card { display:flex; flex-direction:column; grid-row:auto; grid-column:auto; }
+.claude-console .claude-settings { flex:none; }
+.claude-console .conversation-scroll { flex:1; padding:16px 24px 0; }
+
+body[data-view="claudeView"] > .topbar {flex:none;}
+
+.claude-sidebar-toggle,.claude-sidebar-backdrop {display:none;}
+.claude-settings > select {min-width:0;max-width:100%;}
+@media(max-width:720px){
+ .claude-shell {grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);}
+ .claude-sidebar-toggle {display:block;}
+ .claude-console h2 {display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
+ .claude-settings {padding:6px;}
+ .claude-settings input {min-width:100px;max-width:200px;}
+ .claude-sidebar {position:absolute;z-index:10;inset:0 auto 0 0;width:min(320px,90%);padding:12px;background:var(--canvas);border-right:1px solid var(--line);transform:translateX(-100%);visibility:hidden;}
+ .claude-shell.sidebar-open .claude-sidebar {transform:none;visibility:visible;}
+ .claude-shell.sidebar-open .claude-sidebar-backdrop {display:block;position:absolute;z-index:5;inset:0;border:0;border-radius:0;background:rgb(0 0 0 / 18%);}
+}

@@ -41,7 +41,7 @@ export function accountQuery(bindingId) { return bindingId ? `&nodeAccountId=${e
 
 function el(tag, text, className) { const node = document.createElement(tag); if (text) node.textContent = text; if (className) node.className = className; return node; }
 function lines(value) { return value.split(/[\n,]/u).map(item => item.trim()).filter(Boolean); }
-const stateLabel = { running: "已启动", starting: "启动中", stopped: "已停止", unsupported: "不支持" };
+const stateLabel = { running: "已启动", starting: "启动中", stopped: "已停止", unsupported: "不支持", ready: "可使用", unconfigured: "待配置密钥" };
 
 export class CodexAccounts {
   constructor(root, { api, refreshNodes, notice }) {
@@ -54,6 +54,7 @@ export class CodexAccounts {
     this.filter.addEventListener("change", () => this.render());
     this.form.addEventListener("submit", event => { event.preventDefault(); void this.run(() => this.save()); });
     this.form.elements.mode.addEventListener("change", () => this.modeChanged());
+    this.form.elements.engine.addEventListener("change", () => this.engineChanged());
     this.dialog.querySelector("[data-account-close]").addEventListener("click", () => this.dialog.close());
     this.dialog.addEventListener("close", () => { this.clearSecrets(); void this.cancelLogin(); });
     for (const action of ["start", "stop", "login", "logout", "cancel-login"]) {
@@ -62,7 +63,7 @@ export class CodexAccounts {
   }
 
   setNodes(nodes) {
-    this.nodes = nodes.filter(node => node.capabilities?.appServer);
+    this.nodes = nodes.filter(node => node.capabilities?.appServer || node.capabilities?.claudeAccountsV1);
     const previous = this.filter.value;
     this.filter.replaceChildren(new Option("全部节点", ""), ...this.nodes.map(node => new Option(node.displayName || node.hostname, node.nodeId)));
     this.filter.value = this.nodes.some(node => node.nodeId === previous) ? previous : "";
@@ -77,53 +78,75 @@ export class CodexAccounts {
     const list = this.root.querySelector("[data-accounts-list]"); list.replaceChildren();
     for (const node of this.nodes) {
       if (this.filter.value && this.filter.value !== node.nodeId) continue;
-      for (const account of node.codexAccounts ?? []) {
+      for (const account of [...(node.codexAccounts ?? []), ...(node.claudeAccounts ?? [])]) {
         const row = el("button", "", "codex-account-row"); row.type = "button";
-        const identity = el("span"); identity.append(el("strong", account.name), el("small", `${node.displayName || node.hostname} · ${account.reportedAppServer?.provider?.name || account.reportedAppServer?.provider?.id || account.provider}`));
+        const identity = el("span"); identity.append(el("strong", account.name), el("small", `${node.displayName || node.hostname} · ${account.engine === "claude" ? "Claude · " : "Codex · "}${account.reportedAppServer?.provider?.name || account.reportedAppServer?.provider?.id || account.provider || "待配置"}`));
         const snapshot = account.snapshot, quota = weeklyQuota(snapshot?.limits);
         const custom = account.reportedAppServer?.provider?.id && account.reportedAppServer.provider.id !== "openai";
-        const usage = custom ? "服务商未提供额度接口" : quota.remaining === null ? "尚无额度数据" : `周额度剩余 ${Number(quota.remaining.toFixed(1))}%`;
+        const usage = account.engine === "claude" ? account.reportedAppServer?.provider?.model || "Claude API 账号" : custom ? "服务商未提供额度接口" : quota.remaining === null ? "尚无额度数据" : `周额度剩余 ${Number(quota.remaining.toFixed(1))}%`;
         const state = node.status !== "online" ? "节点离线" : stateLabel[account.reportedAppServer?.status] || "等待节点确认";
         const status = el("span"); status.append(el("span", usage), el("small", snapshot?.account?.email || state));
         row.append(identity, status, el("span", state, "muted")); row.addEventListener("click", () => this.edit(node, account)); list.append(row);
       }
     }
-    if (!list.childElementCount) list.append(el("p", "此节点还没有可管理的 Codex 账号。", "muted"));
+    if (!list.childElementCount) list.append(el("p", "此节点还没有可管理的账号。", "muted"));
   }
 
   edit(node = null, account = null) {
     this.current = account ? { node, account } : null; this.form.reset(); this.clearSecrets();
     this.dialog.querySelector("[data-account-error]").textContent = "";
     this.dialog.querySelector("[data-account-login-info]").replaceChildren();
-    this.form.elements.node.replaceChildren(...this.nodes.filter(value => value.capabilities?.codexAccountsV1).map(value => new Option(value.displayName || value.hostname, value.nodeId)));
+    this.form.elements.engine.value = account?.engine || "codex";
+    this.form.elements.engine.disabled = Boolean(account);
+    this.engineChanged();
     this.form.elements.node.value = node?.nodeId || this.filter.value || this.form.elements.node.value;
     this.form.elements.node.disabled = Boolean(account);
     this.form.elements.name.value = account?.name || "";
     this.form.elements.mode.value = account?.isDefault || account?.desiredAppServer?.codexHome ? "adopt" : account?.authType === "providerConfig" ? "custom" : "chatgpt";
+    if (account?.engine === "claude") this.form.elements.mode.value = account.provider || "anthropic";
     this.form.elements.mode.disabled = Boolean(account);
     this.form.elements.home.value = account?.desiredAppServer?.codexHome || account?.reportedAppServer?.codexHome || "";
     this.form.elements.home.disabled = Boolean(account);
     this.form.elements.environmentFiles.value = (account?.desiredAppServer?.environmentFiles ?? []).join("\n");
     this.form.elements.inheritEnv.value = (account?.desiredAppServer?.inheritEnv ?? []).join(", ");
     this.form.elements.baseUrl.value = account?.reportedAppServer?.provider?.baseUrl || "";
+    this.form.elements.claudeModel.value = account?.reportedAppServer?.provider?.model || "";
+    this.form.elements.region.value = account?.reportedAppServer?.provider?.region || "us-east-1";
     this.dialog.querySelector("[data-account-actions]").hidden = !account;
-    this.dialog.querySelector("[data-account-title]").textContent = account ? "管理 Codex 账号" : "添加 Codex 账号";
+    this.dialog.querySelector("[data-account-title]").textContent = `${account ? "管理" : "添加"} ${account?.engine === "claude" ? "Claude" : "Codex"} 账号`;
     const provider = account?.reportedAppServer?.provider;
     this.dialog.querySelector("[data-account-profile]").textContent = account ? [stateLabel[account.reportedAppServer?.status] || "等待节点确认", provider?.id, provider?.credentialSource && `凭据来源：${provider.credentialSource}`, provider?.missingEnvironment?.length ? `缺少变量：${provider.missingEnvironment.join(", ")}` : "", account.reportedAppServer?.lastError].filter(Boolean).join(" · ") : "";
     this.modeChanged(); this.dialog.showModal();
   }
 
+  engineChanged() {
+    const claude = this.form.elements.engine.value === "claude", selected = this.form.elements.node.value;
+    this.form.elements.node.replaceChildren(...this.nodes.filter(node => node.capabilities?.[claude ? "claudeAccountsV1" : "codexAccountsV1"]).map(node => new Option(node.displayName || node.hostname, node.nodeId)));
+    if ([...this.form.elements.node.options].some(option => option.value === selected)) this.form.elements.node.value = selected;
+    this.form.elements.mode.replaceChildren(...(claude ? [["anthropic", "Anthropic / Messages API"], ["bedrock", "Amazon Bedrock / AWS 透传"]] : [["chatgpt", "ChatGPT / OpenAI API Key"], ["custom", "自定义 Responses 服务商"], ["adopt", "接管已有 Codex 配置"]]).map(([value, label]) => new Option(label, value)));
+    this.dialog.querySelector("[data-account-title]").textContent = `添加 ${claude ? "Claude" : "Codex"} 账号`;
+    this.modeChanged();
+  }
+
   modeChanged() {
     const mode = this.form.elements.mode.value;
+    const claude = this.form.elements.engine.value === "claude";
     this.dialog.querySelector("[data-account-home]").hidden = mode !== "adopt";
-    this.dialog.querySelector("[data-account-provider]").hidden = mode !== "custom";
+    this.dialog.querySelector("[data-account-provider]").hidden = !claude && mode !== "custom";
     this.form.elements.home.required = mode === "adopt";
-    this.form.elements.baseUrl.required = mode === "custom";
+    this.form.elements.baseUrl.required = claude || mode === "custom";
+    this.form.elements.claudeModel.required = claude;
+    this.form.elements.region.required = claude && mode === "bedrock";
+    this.dialog.querySelector("[data-account-claude-model]").hidden = !claude;
+    this.dialog.querySelector("[data-account-region]").hidden = !claude || mode !== "bedrock";
+    this.dialog.querySelector("[data-account-environment]").hidden = claude;
+    this.dialog.querySelector("[data-account-start]").textContent = claude ? "启用" : "启动";
+    this.dialog.querySelector("[data-account-stop]").textContent = claude ? "停用" : "停止";
     const provider = this.current?.account.reportedAppServer?.provider?.id;
-    const custom = mode === "custom" || (provider && provider !== "openai");
+    const custom = claude || mode === "custom" || (provider && provider !== "openai");
     for (const action of ["login", "logout", "cancel-login"]) this.dialog.querySelector(`[data-account-${action}]`).hidden = custom;
-    this.dialog.querySelector("[data-account-clear-key]").hidden = mode !== "custom";
-    this.dialog.querySelector("[data-account-key-hint]").textContent = mode === "custom" ? "密钥只写入所选节点。留空保留已有密钥。" : mode === "adopt" ? "现有 config.toml 与凭据继续由原文件管理；环境设置可在下方补充。" : "使用 ChatGPT 登录，或填写 OpenAI API Key 后点击「登录」。";
+    this.dialog.querySelector("[data-account-clear-key]").hidden = !claude && mode !== "custom";
+    this.dialog.querySelector("[data-account-key-hint]").textContent = claude || mode === "custom" ? "密钥只写入所选节点。留空保留已有密钥。" : mode === "adopt" ? "现有 config.toml 与凭据继续由原文件管理；环境设置可在下方补充。" : "使用 ChatGPT 登录，或填写 OpenAI API Key 后点击「登录」。";
   }
 
   clearSecrets() { this.form.elements.apiKey.value = ""; this.form.elements.environment.value = ""; }
@@ -150,6 +173,7 @@ export class CodexAccounts {
   }
 
   async save() {
+    if (this.form.elements.engine.value === "claude") return this.saveClaude();
     const fields = this.form.elements, mode = fields.mode.value;
     const body = { environmentFiles: lines(fields.environmentFiles.value), inheritEnv: lines(fields.inheritEnv.value) };
     if (fields.environment.value.trim()) {
@@ -182,9 +206,40 @@ export class CodexAccounts {
     this.form.elements.node.disabled = this.form.elements.mode.disabled = this.form.elements.home.disabled = true;
   }
 
+  async saveClaude() {
+    const fields = this.form.elements;
+    const provider = { id: fields.mode.value, baseUrl: fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
+    if (!this.current) {
+      const created = await this.api("/v1/claude/accounts", { method: "POST", body: JSON.stringify({ nodeId: fields.node.value, name: fields.name.value.trim() }) });
+      this.current = { node: { nodeId: fields.node.value }, account: created };
+      fields.node.disabled = fields.engine.disabled = true;
+    } else await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}`, { method: "PATCH", body: JSON.stringify({ name: fields.name.value.trim() }) });
+    const body = { provider };
+    if (fields.apiKey.value) body.apiKey = fields.apiKey.value;
+    else if (fields.clearKey.checked) body.apiKey = "";
+    const previous = this.current.account.reportedAppServer?.provider || {};
+    const changed = "apiKey" in body || ["id", "baseUrl", "model", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
+    try { if (changed) await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}/configure`, { method: "POST", body: JSON.stringify(body) }); }
+    finally { this.clearSecrets(); }
+    await this.refresh();
+    const node = this.nodes.find(value => value.nodeId === this.current.node.nodeId);
+    const account = node?.claudeAccounts?.find(value => value.nodeAccountId === this.current.account.nodeAccountId);
+    if (account) this.current = { node, account };
+    this.dialog.querySelector("[data-account-actions]").hidden = false;
+    this.dialog.querySelector("[data-account-profile]").textContent = "Claude 账号已保存，可在 Claude 对话中选择使用。";
+  }
+
   async action(action) {
     if (action === "cancel-login") { await this.cancelLogin(); return; }
     if (!this.current) return;
+    if (this.current.account.engine === "claude") {
+      if (action !== "start" && action !== "stop") return;
+      await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}`, { method: "PATCH", body: JSON.stringify({ enabled: action === "start" }) });
+      if (action === "start") await this.api(`/v1/claude/runtimes/${this.current.node.nodeId}/prepare`, { method: "POST", body: "{}" });
+      await this.refresh();
+      this.dialog.querySelector("[data-account-profile]").textContent = action === "start" ? "账号已启用" : "账号已停用，历史会话保留";
+      return;
+    }
     if (action === "start" || action === "stop") {
       await this.api(`/v1/codex/runtimes/${this.current.node.nodeId}/${action}`, { method: "POST", body: JSON.stringify({ storeId: "personal", nodeAccountId: this.current.account.nodeAccountId }) });
       this.dialog.querySelector("[data-account-profile]").textContent = action === "start" ? "已请求启动；首次下载运行包可能需要几分钟。" : "已请求停止，执行中的任务结束后生效。";

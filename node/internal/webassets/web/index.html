@@ -24,6 +24,7 @@
       <nav id="globalNav" class="global-nav hidden" aria-label="主要导航">
         <button id="globalNodes" class="global-nav-item" type="button">设备</button>
         <button id="globalAgent" class="global-nav-item" type="button">对话</button>
+        <button id="globalClaude" class="global-nav-item" type="button">Claude</button>
         <button id="globalRuntime" class="global-nav-item" type="button">运行</button>
 		<button id="globalAccounts" class="global-nav-item" type="button">账号</button>
       </nav>
@@ -97,8 +98,8 @@
           <div id="nodeGrid" class="node-grid"></div>
         </section>
 
-        <section id="codexAccountsPanel" class="panel codex-accounts-panel" aria-label="Codex 账号管理">
-          <div class="panel-head"><div><p class="eyebrow">CODEX ACCOUNTS</p><h2>账号与额度</h2></div><div class="actions"><label>节点<select data-accounts-node aria-label="筛选账号所在节点"></select></label><button data-accounts-refresh class="secondary" type="button">刷新</button><button data-accounts-new class="approve" type="button">添加账号</button></div></div>
+        <section id="codexAccountsPanel" class="panel codex-accounts-panel" aria-label="Agent 账号管理">
+          <div class="panel-head"><div><p class="eyebrow">AGENT ACCOUNTS</p><h2>账号与额度</h2></div><div class="actions"><label>节点<select data-accounts-node aria-label="筛选账号所在节点"></select></label><button data-accounts-refresh class="secondary" type="button">刷新</button><button data-accounts-new class="approve" type="button">添加账号</button></div></div>
           <div data-accounts-list class="codex-accounts-list"></div>
         </section>
 
@@ -106,6 +107,36 @@
           <div class="panel-head"><div><p class="eyebrow">AUDIT</p><h2>最近活动</h2></div><span class="hint">敏感内容不会进入审计 metadata</span></div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>动作</th><th>身份</th><th>目标</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>
         </section>
+      </section>
+
+
+      <section id="claudeView" class="agent-console claude-console hidden" aria-label="Claude Code 对话">
+        <div class="claude-shell">
+          <button data-sidebar-backdrop class="claude-sidebar-backdrop" type="button" aria-label="关闭 Claude 会话列表"></button>
+          <aside class="claude-sidebar">
+            <div class="chat-drawer-nav"><button data-codex class="ghost" type="button">← Codex</button><button data-new class="ghost" type="button">＋ 新对话</button></div>
+            <label class="muted"><input data-archived type="checkbox"> 归档对话</label>
+            <div data-list class="claude-list"></div><button data-more class="secondary" type="button" hidden>加载更多</button>
+          </aside>
+          <section class="conversation-card">
+            <header class="conversation-head"><button data-sidebar-toggle class="ghost claude-sidebar-toggle" type="button" aria-label="打开 Claude 会话列表" aria-expanded="false">☰</button><div><h2 data-title>新 Claude 对话</h2><p data-state class="muted" role="status"></p></div><button data-rename class="ghost" type="button">重命名</button><button data-archive class="ghost" type="button">归档 / 恢复</button></header>
+            <div class="claude-settings"><label>执行 Node<select data-node></select></label><label>账号<select data-account aria-label="Claude 账号"></select></label><label>工作目录<input data-cwd placeholder="执行 Node 上的绝对路径"></label><button data-connect class="secondary" type="button">连接 · 读取模型</button><select data-child aria-label="查看主会话或子 Agent" hidden></select></div>
+            <p data-notice class="workspace-notice" role="status"></p>
+            <label data-incomplete class="workspace-notice warning" hidden><input data-continue type="checkbox"> 历史未完整保存。我已检查记录，继续使用 Mira 已确认保存的历史。</label>
+            <div data-scroll class="conversation-scroll"><button data-history-more class="secondary" type="button" hidden>加载更早的历史</button><div data-trace class="conversation-trace" aria-live="polite"></div></div>
+            <div class="conversation-compose-area"><form data-form class="conversation-composer">
+              <div class="conversation-drop-zone"><textarea data-input rows="2" aria-label="给 Claude 发消息" placeholder="给 Claude 发消息…"></textarea>
+              <p data-file-names class="muted"></p><div class="composer-toolbar">
+                <label class="composer-choice">附件<input data-files type="file" multiple aria-label="添加图片或文件"></label>
+                <label class="composer-choice">模型<input data-model list="claudeModels" placeholder="Node 默认模型" aria-label="Claude 模型"><datalist id="claudeModels" data-models></datalist></label>
+                <select data-effort aria-label="思考强度"><option value="" selected>思考强度：默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="max">最高</option></select>
+                <button data-stop class="secondary" type="button" hidden>停止</button><button data-send class="primary" type="submit">发送 ↑</button>
+                <button data-cancel-upload class="secondary" type="button" hidden>取消上传</button>
+              </div></div>
+              <p data-usage class="muted"></p><button data-reconcile class="ghost" type="button" hidden>检查运行状态</button>
+            </form></div>
+          </section>
+        </div>
       </section>
 
       <section id="agentView" class="agent-console hidden" aria-label="Codex 对话">
@@ -118,6 +149,7 @@
               <button id="agentNewThread" class="ghost sidebar-new-thread" type="button">＋ 新对话</button>
               <div id="agentNavMenu" class="sidebar-popover sidebar-nav-menu" popover="auto" role="menu" aria-label="Mira 菜单">
                 <button id="agentHome" type="button" role="menuitem">Mira 主页</button>
+                <button id="agentClaude" type="button" role="menuitem">Claude Code 对话</button>
                 <button id="agentNewProject" type="button" role="menuitem">新建项目</button>
 				<button id="agentManageAccounts" type="button" role="menuitem">管理 Codex 账号</button>
                 <button id="agentArchiveToggle" type="button" role="menuitemcheckbox" aria-checked="false" aria-pressed="false"><span id="agentArchiveLabel">归档对话</span></button>
@@ -509,15 +541,18 @@
     <dialog id="codexAccountDialog" class="codex-account-dialog" aria-labelledby="codexAccountTitle">
       <form id="codexAccountForm" autocomplete="off">
         <div class="panel-head"><h2 id="codexAccountTitle" data-account-title>添加 Codex 账号</h2><button data-account-close class="ghost" type="button" aria-label="关闭账号管理">×</button></div>
+        <label>Agent 引擎<select name="engine"><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
         <label>运行节点<select name="node" required></select></label>
         <label>账号名称<input name="name" maxlength="128" required></label>
         <label>配置方式<select name="mode"><option value="chatgpt">ChatGPT / OpenAI API Key</option><option value="custom">自定义 Responses 服务商</option><option value="adopt">接管已有 Codex 配置</option></select></label>
         <label data-account-home hidden>节点上的 Codex home<input name="home" placeholder="配置目录的绝对路径"></label>
         <label data-account-provider hidden>服务商 API 地址<input name="baseUrl" type="url" placeholder="https://provider.example/v1"></label>
+        <label data-account-claude-model hidden>默认模型<input name="claudeModel" maxlength="200" placeholder="claude-opus-5-5"></label>
+        <label data-account-region hidden>AWS 区域<input name="region" value="us-east-1" maxlength="64"></label>
         <label>API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="32768"></label>
         <p data-account-key-hint class="muted"></p>
         <label data-account-clear-key class="toggle" hidden><input name="clearKey" type="checkbox">清除此账号保存的服务商密钥</label>
-        <details><summary>环境变量与配置来源</summary>
+        <details data-account-environment><summary>环境变量与配置来源</summary>
           <p class="muted">接管现有配置时，请同时声明所需环境变量来源。环境文件按 KEY=VALUE 读取，不执行 shell 命令。变量值只写入节点。</p>
           <label>节点上的环境文件（每行一个绝对路径）<textarea name="environmentFiles" rows="2"></textarea></label>
           <label>额外继承的 Node 环境变量名称<input name="inheritEnv" placeholder="PROVIDER_API_KEY, CUSTOM_SETTING"></label>

@@ -81,7 +81,7 @@ try {
   await page.locator(".trace-card.assistant").waitFor();
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.app.route")), `/?thread=${thread}`);
   await page.setViewportSize({ width: 320, height: 640 });
-  const header = await page.locator(".conversation-head").boundingBox();
+  const header = await page.locator("#agentView .conversation-head").boundingBox();
   const toggle = await page.locator("#agentThreadDrawerToggle").boundingBox();
   assert.equal(header.width, toggle.width, "navigation must only occupy the sidebar button width");
   assert.ok(toggle.width >= 44 && toggle.height >= 44, "mobile navigation retains a touch target");

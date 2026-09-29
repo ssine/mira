@@ -21,7 +21,12 @@ const selectNodeColumns = `
   nodes.approved_at, nodes.revoked_at, nodes.registered_at, nodes.last_seen_at,
   CASE WHEN (nodes.channel_status->>'connected')::boolean IS TRUE
              AND nodes.last_seen_at > NOW() - INTERVAL '15 seconds'
-       THEN 'online' ELSE 'offline' END AS status, ` + accountRowsJSON
+       THEN 'online' ELSE 'offline' END AS status, ` + accountRowsJSON + `, COALESCE((SELECT jsonb_agg(jsonb_build_object(
+ 'engine','claude','nodeAccountId',a.node_account_id,'accountId',a.node_account_id,'nodeId',a.node_id,
+ 'name',a.name,'enabled',a.enabled,'configured',a.configured,'provider',a.provider->>'id',
+ 'credentialRevision',a.credential_revision,'authType','providerConfig','desiredAppServer','{}'::jsonb,
+ 'reportedAppServer',jsonb_build_object('provider',a.provider,'status',CASE WHEN NOT a.configured THEN 'unconfigured' WHEN a.enabled THEN 'ready' ELSE 'stopped' END)
+ ) ORDER BY a.name,a.node_account_id) FROM mira_claude_accounts a WHERE a.node_id=nodes.node_id),'[]'::jsonb)`
 
 const enrollmentColumns = `
   enrollment_id::text, node_id::text, credential_id::text, credential_secret_hash,
@@ -43,14 +48,14 @@ func scanNode(row scanner, withRank bool) (nodeRow, error) {
 	var value nodeRow
 	var nodeBuild, capabilities, installations, desired, reported, machine, channel, labels, aliases []byte
 	var revision string
-	var accounts []byte
+	var accounts, claudeAccounts []byte
 	var approvedAt, revokedAt *time.Time
 	var registeredAt, lastSeenAt time.Time
 	destinations := []any{
 		&value.NodeID, &value.NodeKey, &value.Hostname, &value.Platform, &value.Architecture, &value.NodeMode,
 		&value.NodeVersion, &nodeBuild, &capabilities, &installations, &desired, &reported, &machine, &channel,
 		&value.ApprovalStatus, &value.DisplayName, &labels, &revision, &aliases,
-		&approvedAt, &revokedAt, &registeredAt, &lastSeenAt, &value.Status, &accounts,
+		&approvedAt, &revokedAt, &registeredAt, &lastSeenAt, &value.Status, &accounts, &claudeAccounts,
 	}
 	if withRank {
 		destinations = append(destinations, &value.rank)
@@ -59,6 +64,9 @@ func scanNode(row scanner, withRank bool) (nodeRow, error) {
 		return nodeRow{}, err
 	}
 	var err error
+	if err = decodeJSON(claudeAccounts, &value.ClaudeAccounts); err != nil {
+		return nodeRow{}, fmt.Errorf("decode Node Claude accounts: %w", err)
+	}
 	if err = decodeJSON(accounts, &value.CodexAccounts); err != nil {
 		return nodeRow{}, fmt.Errorf("decode Node Codex accounts: %w", err)
 	}

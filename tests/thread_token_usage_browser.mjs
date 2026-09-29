@@ -187,7 +187,7 @@ try {
   bounds = await panel.boundingBox();
   const left = await page.locator("#agentThreadDrawer").boundingBox();
   assert.equal(bounds.width, left.width, "desktop navigation and details share the same width");
-  const chat = await page.locator(".conversation-card").boundingBox();
+  const chat = await page.locator("#agentView .conversation-card").boundingBox();
   assert.ok(chat.x + chat.width <= bounds.x + 1, "desktop details reserve a separate column");
   assert.equal(await panel.evaluate(element => getComputedStyle(element).backgroundColor), await page.locator("#agentThreadDrawer").evaluate(element => getComputedStyle(element).backgroundColor));
   assert.equal(await page.locator(".thread-project-summary").first().evaluate(element => getComputedStyle(element).backgroundColor), "rgba(0, 0, 0, 0)", "project headers share the sidebar material");

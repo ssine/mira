@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -131,5 +132,20 @@ func TestUnhandledRequestsDelegate(t *testing.T) {
 	NewHandler().ServeHTTP(notFound, httptest.NewRequest(http.MethodGet, "/missing", nil))
 	if notFound.Code != http.StatusNotFound {
 		t.Fatalf("standalone handler status = %d, want %d", notFound.Code, http.StatusNotFound)
+	}
+}
+
+// A missing public module breaks every page before authentication can render.
+func TestApplicationImportsArePublished(t *testing.T) {
+	imports := regexp.MustCompile(`(?m)^import .* from ["'](/[^"']+)["']`)
+	for route, entry := range assets {
+		if !strings.HasSuffix(route, ".js") || strings.HasPrefix(route, "/vendor/") {
+			continue
+		}
+		for _, match := range imports.FindAllSubmatch(entry.payload, -1) {
+			if _, ok := assets[string(match[1])]; !ok {
+				t.Errorf("%s imports unpublished %s", route, match[1])
+			}
+		}
 	}
 }
