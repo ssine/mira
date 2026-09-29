@@ -2438,7 +2438,7 @@ async function recoverAgentSession({ probe = false, refresh = true } = {}) {
         // A previous edit/send is not permanent permission to reload an idle
         // conversation after every disconnect. Confirm current durable activity
         // before reattaching; explicit preparation and sending still take priority.
-        if (threadId && (!agent.socketInitialized || !agent.loadedThreadIds.has(threadId)) &&
+        if (threadId && agent.resumeRequestedThreadId === threadId && (!agent.socketInitialized || !agent.loadedThreadIds.has(threadId)) &&
           !agent.sendPromise && !agent.resumePromises.has(threadId) && !agent.runtimePromise) {
           const current = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}?storeId=personal`, { signal: AbortSignal.timeout(12_000) });
           if (epoch !== agent.selectionEpoch || threadId !== agent.threadId) return;
