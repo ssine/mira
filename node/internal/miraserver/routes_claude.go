@@ -448,7 +448,9 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		}
 		return true, writeJSON(w, 200, result)
 	}
-
+	if op == "steer" && r.Method == "POST" {
+		return true, server.claudeSteer(ctx, w, r, s)
+	}
 	if op == "interrupt" && r.Method == "POST" {
 		if s.ActiveTurn == nil {
 			return true, writeJSON(w, 200, map[string]any{"stopped": true})
@@ -496,6 +498,73 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		return true, writeJSON(w, 200, state)
 	}
 	return true, claudeError(404, "Unknown Claude operation")
+}
+
+// claudeSteer adds a message to the running turn. The request ID is the steer
+// ID: the worker stores its mira_steer event under that ID before queueing, and
+// a later mira_steer_rejected withdraws it. A lost reply is answered from those
+// records once the turn has ended, never by dispatching the message again.
+func (server *Server) claudeSteer(ctx context.Context, w http.ResponseWriter, r *http.Request, s claudeSession) error {
+	b, err := server.readBody(r)
+	if err != nil {
+		return err
+	}
+	steerID := claudeString(b, "requestId")
+	expected := claudeString(b, "expectedTurnId")
+	text := claudeString(b, "text")
+	if !claudeUUID(steerID) || !claudeUUID(expected) || strings.TrimSpace(text) == "" {
+		return claudeError(400, "requestId, expectedTurnId and text are required")
+	}
+	if len(text) > 4*1024*1024 {
+		return claudeError(400, "Message exceeds 4 MiB")
+	}
+	notSteerable := &HTTPError{Status: 409, Code: "turn_not_steerable", Message: "Claude 本轮已结束，请作为新一轮发送"}
+	var turn string
+	var seq int64
+	err = server.pool.QueryRow(ctx, `SELECT turn_id::text,seq FROM mira_claude_events WHERE event_id=$1 AND session_id=$2 AND event_type='mira_steer'`, steerID, s.ID).Scan(&turn, &seq)
+	if err == nil {
+		var rejected bool
+		if err = server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_events WHERE session_id=$1 AND turn_id=$2 AND seq>$3 AND event_type='mira_steer_rejected' AND payload->>'steerId'=$4)`, s.ID, turn, seq, steerID).Scan(&rejected); err != nil {
+			return err
+		}
+		if rejected {
+			return notSteerable
+		}
+		if s.ActiveTurn == nil || *s.ActiveTurn != turn {
+			return writeJSON(w, 200, map[string]any{"accepted": true, "turnId": turn, "replayed": true})
+		}
+		// The worker still owns the turn and reports the verdict it already reached.
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if s.ActiveTurn == nil || *s.ActiveTurn != expected {
+		return notSteerable
+	}
+	node, err := server.nodes.Get(ctx, s.NodeID, false)
+	if err != nil {
+		return err
+	}
+	if node == nil || node.Capabilities["claudeSteerV1"] != true {
+		return &HTTPError{Status: 409, Code: "steer_unsupported", Message: "请先升级此执行节点，才能在 Claude 运行时追加消息"}
+	}
+	result, err := server.channel.Invoke(ctx, s.NodeID, "claude", map[string]any{"action": "steer", "turnId": expected, "steerId": steerID, "text": text, "attachments": b["attachments"]}, 30*time.Second)
+	if err != nil {
+		return err
+	}
+	verdict, _ := result.(map[string]any)
+	if verdict["accepted"] == true {
+		return writeJSON(w, 200, map[string]any{"accepted": true, "turnId": expected})
+	}
+	switch verdict["reason"] {
+	case "turn_finishing":
+		return notSteerable
+	case "invalid_input":
+		message, _ := verdict["message"].(string)
+		return claudeError(400, "Claude 无法读取这条消息："+message)
+	}
+	// The worker keeps this verdict for the request; once the turn ends, a retry
+	// finds the recorded rejection and the Web sends the message as a new turn.
+	return claudeError(503, "Claude 未能记录这条消息，它不会加入本轮；本轮结束后重试会作为新一轮发送")
 }
 
 func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter, r *http.Request, s claudeSession) error {

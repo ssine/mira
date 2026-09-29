@@ -25,8 +25,8 @@ function pruneCompletedStreams(rows) {
   }
 }
 
-export function claudeTrace(rows, { child = false } = {}) {
-  const items = new Map(), questions = new Map(), streams = new Map();
+export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
+  const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map();
   let interrupted = false;
   const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, ...extra });
   function blocks(message, key, role, turnId, timestamp) {
@@ -47,14 +47,29 @@ export function claudeTrace(rows, { child = false } = {}) {
       }
     }
   }
+  function userInput(key, e, turnId, extra = {}) {
+    put(key, "user", "你", [e.text, ...(e.attachments || []).map(f => `附件：${f.name || f.path}`)].filter(Boolean).join("\n"), turnId, extra);
+    blocks({ content: (e.message?.content || []).filter(b => b.type === "image") }, `${key}:image`, "user", turnId, e.timestamp);
+  }
+  // A message added while Claude runs appears where the model read it. Until
+  // then it waits below the running turn; a stop or a failed turn drops it unread.
+  function placeSteer(id, steerState) {
+    const steer = steers.get(id);
+    if (!steer || steer.steerState) return;
+    steer.steerState = steerState;
+    userInput(`steer:${id}`, steer, steer.turnId, { steerState });
+  }
   for (const row of rows) {
     const e = row.payload, turnId = row.turnId, key = `claude:${e.uuid || row.seq}`, scope = streamScope(row);
     if (!child && e.parent_tool_use_id && ["assistant", "user", "stream_event"].includes(e.type)) continue;
     if (e.type === "mira_user") {
       interrupted = false;
-      put(key, "user", "你", [e.text, ...(e.attachments || []).map(f => `附件：${f.name || f.path}`)].filter(Boolean).join("\n"), turnId);
-      blocks({ content: (e.message?.content || []).filter(b => b.type === "image") }, `${key}:image`, "user", turnId, e.timestamp);
-    } else if (e.type === "assistant") {
+      userInput(key, e, turnId);
+    } else if (e.type === "mira_steer") steers.set(e.steerId, { ...e, turnId });
+    // Mira sends a rejected steer again as the next turn.
+    else if (e.type === "mira_steer_rejected") steers.delete(e.steerId);
+    else if (e.type === "command_lifecycle" && e.state !== "queued") placeSteer(e.command_uuid, e.state === "cancelled" ? "cancelled" : "inserted");
+    else if (e.type === "assistant") {
       // A transcript reload omits stream events. A saved block still identifies
       // the message for later deltas from that message's remaining blocks.
       if (e.message?.id) streams.set(scope, e.message.id);
@@ -80,6 +95,7 @@ export function claudeTrace(rows, { child = false } = {}) {
     else if (e.type === "mira_error") put(key, "error", "运行错误", e.message, turnId);
     else if (e.type === "system" && e.subtype === "mirror_error") put(key, "error", "历史未完整保存", "部分原生记录未能保存到 Mira。", turnId);
     else if (e.type === "result") {
+      for (const id of e.parent_tool_use_id ? [] : e.user_message_uuids || []) placeSteer(id, "inserted");
       if (e.is_error && !interrupted) put(key, "error", "Claude 返回错误", (e.errors || [e.subtype]).join("\n"), turnId);
       const last = [...items.values()].findLast(item => item.turnId === turnId && item.kind === "assistant" && item.body);
       if (last) Object.assign(last, { turnElapsedMs: e.duration_ms, turnCostEstimate: row.costEstimate, turnCompletedAt: row.completedAt ?? e.timestamp });
@@ -87,11 +103,12 @@ export function claudeTrace(rows, { child = false } = {}) {
       put(`task:${e.task_id || row.seq}`, "tool", "子任务", e.description || e.summary || e.status || "", turnId);
     }
   }
+  for (const [id, steer] of steers) placeSteer(id, steer.turnId === activeTurn ? "queued" : "cancelled");
   return { trace: [...items.values()], questions };
 }
 
 export class ClaudeRuntime {
-  constructor(api) { this.api = api; this.turnRequests = new Map(); this.reset(); }
+  constructor(api) { this.api = api; this.turnRequests = new Map(); this.steerRequests = new Map(); this.reset(); }
   reset(id = null) { this.epoch = (this.epoch || 0) + 1; this.id = id; this.rows = new Map(); this.cursor = 0; this.earliest = null; }
   call(path, body) { return this.api(`/v1/claude/${path}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }); }
   async prepare(nodeId, progress = () => {}) {
@@ -130,20 +147,24 @@ export class ClaudeRuntime {
     if (!older) this.cursor = Math.max(this.cursor, result.cursor || 0);
     if (!poll) this.earliest = result.data.length ? result.earliest : null;
     pruneCompletedStreams(this.rows);
-    return { ...claudeTrace([...this.rows.values()].sort((a,b) => a.seq-b.seq), { child: !!thread.subpath }), session: result.session,
+    return { ...claudeTrace([...this.rows.values()].sort((a,b) => a.seq-b.seq), { child: !!thread.subpath, activeTurn: result.session?.activeTurn }), session: result.session,
       nextCursor: this.earliest, changed: result.data.length > 0, more: poll && result.data.length > 0 };
   }
-  async send(thread, body) {
+  send(thread, body) { return this.#retained(this.turnRequests, "turns", thread, body); }
+  steer(thread, body) { return this.#retained(this.steerRequests, "steer", thread, body); }
+  // A retry reuses the request ID, so the Server replays its verdict instead of
+  // repeating the input. Validation and conflicts may be corrected; network
+  // failures retain the exact input.
+  async #retained(requests, operation, thread, body) {
     const id = thread.sessionId;
-    let request = this.turnRequests.get(id);
-    if (!request) { request = { ...body, requestId: crypto.randomUUID() }; this.turnRequests.set(id, request); }
+    let request = requests.get(id);
+    if (!request) { request = { ...body, requestId: crypto.randomUUID() }; requests.set(id, request); }
     try {
-      const result = await this.call(`sessions/${id}/turns`, request);
-      this.turnRequests.delete(id);
+      const result = await this.call(`sessions/${id}/${operation}`, request);
+      requests.delete(id);
       return result;
     } catch (error) {
-      // Validation before reservation may be corrected. Network failures retain exact input.
-      if ([400, 409].includes(error.status)) this.turnRequests.delete(id);
+      if ([400, 409].includes(error.status)) requests.delete(id);
       throw error;
     }
   }

@@ -356,6 +356,11 @@ async function loadClaudeTranscript(threadId, options = {}) {
         if (item.nativeImage && !body.querySelector("img")) {
           const img = element("img", "trace-image"); img.src = item.nativeImage; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
         }
+        const steerNote = { queued: "等待加入本轮", cancelled: "未加入本轮" }[item.steerState] || "";
+        if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
+        let note = card.querySelector(".trace-steer-state");
+        if (steerNote && !note) card.append(note = element("div", "trace-steer-state"));
+        if (note) { note.textContent = steerNote; note.hidden = !steerNote; }
         const q = result.questions.get(item.questionId);
         if (q) {
           const form = forms.get(q.questionId) || claudeQuestionForm(q, thread.sessionId);
@@ -406,9 +411,45 @@ function claudeQuestionForm(question, sessionId) {
   return form;
 }
 
+// Input sent while Claude runs joins that turn at its next tool boundary. When
+// the turn is already finishing, its uploaded input starts the next turn instead.
+async function steerClaudeTurn(thread, text, attachments, progress) {
+  let body = claudeRuntime.steerRequests.get(thread.sessionId);
+  if (!body) {
+    const node = dashboardNodes.get(thread.runtimeNodeId);
+    if (node && !node.capabilities?.claudeSteerV1) throw new Error("此执行节点升级后才能在 Claude 运行时追加消息，请等待本轮结束后再发送");
+    const expectedTurnId = agent.activeTurns.get(thread.threadId);
+    const uploaded = await prepareTurnInput(text, attachments, progress);
+    body = { expectedTurnId, text: text || "请查看附件。", attachments: uploaded.nativeAttachments };
+  }
+  updateReplyProgress(progress, { threadId: thread.threadId, phase: "正在加入本轮…" });
+  try {
+    await claudeRuntime.steer(thread, body);
+  } catch (error) {
+    if (error.code !== "turn_not_steerable") throw error;
+    updateReplyProgress(progress, { phase: "本轮已结束，正在作为新一轮发送…" });
+    const deadline = Date.now() + 120_000;
+    while ((await claudeRuntime.call(`sessions/${thread.sessionId}`)).activeTurn === body.expectedTurnId) {
+      if (Date.now() > deadline) throw new Error("Claude 仍在结束上一轮，请稍后重试");
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+    return { text: body.text, attachments: body.attachments };
+  }
+  replyProgress.finish(progress);
+  renderReplyProgress();
+  await loadClaudeTranscript(thread.threadId, { poll: claudeRuntime.cursor > 0 });
+  return null;
+}
+
 async function sendClaudeMessage(text, attachments, progress) {
-  if (agent.activeTurns.has(agent.threadId)) throw new Error("请等待本轮结束后再发送");
   if (currentAgentThread()?.subpath) throw new Error("请在主会话中继续子 Agent 的工作");
+  let input = null;
+  const current = currentAgentThread();
+  if (current && !claudeRuntime.turnRequests.has(current.sessionId) &&
+      (agent.activeTurns.has(current.threadId) || claudeRuntime.steerRequests.has(current.sessionId))) {
+    input = await steerClaudeTurn(current, text, attachments, progress);
+    if (!input) return;
+  }
   const node = selectedAccountNode();
   const nodeId = node?.nodeId, nodeAccountId = node?.nodeAccountId || "";
   if (!node || node.status !== "online") throw new Error("请选择在线的 Claude 运行节点");
@@ -435,8 +476,8 @@ async function sendClaudeMessage(text, attachments, progress) {
   const thread = currentAgentThread();
   let body = claudeRuntime.turnRequests.get(thread.sessionId);
   if (!body) {
-    const uploaded = await prepareTurnInput(text, attachments, progress);
-    body = { text: text || "请查看附件。", attachments: uploaded.nativeAttachments, nodeId, nodeAccountId, cwd,
+    input ??= { text: text || "请查看附件。", attachments: (await prepareTurnInput(text, attachments, progress)).nativeAttachments };
+    body = { ...input, nodeId, nodeAccountId, cwd,
       model: selectedConversationModel() || "", effort: selectedConversationEffort() || "", continueAcknowledgedHistory: $("#claudeContinue").checked };
   }
   const result = await claudeRuntime.send(thread, body);

@@ -530,6 +530,8 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-elapsed:not([hidden]) + .trace-cost:not([hidden])::before { margin-right: 8px; content: "·"; }
 .trace-body { margin: 0; overflow: visible; overflow-wrap: anywhere; color: var(--text); font: 12px/1.6 var(--font-code); white-space: pre-wrap; }
 .trace-card.user .trace-body { padding: 8px 12px; border-radius: 7px; background: var(--accent-soft); font: 14px/1.6 var(--font-ui); line-height: calc(1.6em + 1px); }
+.trace-card.user[data-steer-state] .trace-body { opacity: .65; }
+.trace-steer-state { margin-top: 3px; color: var(--muted); font: 12px/1.4 var(--font-ui); text-align: right; }
 .trace-card.assistant .trace-body { font: 15px/1.6 var(--font-ui); line-height: calc(1.6em + 1px); }
 .trace-card.system .trace-head, .trace-card.error .trace-head { margin-bottom: 2px; }
 .trace-card-empty .trace-head { margin-bottom: 0; }

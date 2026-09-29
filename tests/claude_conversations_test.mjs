@@ -94,6 +94,36 @@ test("lost native turn response reuses exactly the same request and account",asy
  await runtime.send({sessionId:"s"},{text:"two",nodeAccountId:"B"});assert.deepEqual(requests[0],requests[1]);
 });
 
+test("added messages render where Claude read them and report unread ones", () => {
+ const steer=(id,text)=>({type:"mira_steer",steerId:id,text,message:{role:"user",content:[{type:"text",text}]}});
+ const lifecycle=(id,state)=>({type:"command_lifecycle",command_uuid:id,state});
+ const reply=(id,text)=>({type:"assistant",uuid:id,message:{id,content:[{type:"text",text}]}});
+ const rows=[
+  {type:"mira_user",text:"start"},steer("read","read me"),lifecycle("read","queued"),steer("rejected","resent"),{type:"mira_steer_rejected",steerId:"rejected"},
+  steer("waiting","later"),lifecycle("waiting","queued"),reply("a","first"),lifecycle("read","started"),reply("b","second"),
+ ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
+ const users=view=>view.trace.filter(x=>x.kind==="user"||x.kind==="assistant").map(x=>[x.body,x.steerState]);
+ assert.deepEqual(users(claudeTrace(rows,{activeTurn:"turn"})),[["start",undefined],["first",undefined],["read me","inserted"],["second",undefined],["later","queued"]]);
+ // A stop cancels a waiting message; one never started by a turn that ended is also unread.
+ assert.equal(claudeTrace(rows).trace.find(x=>x.key==="steer:waiting").steerState,"cancelled");
+ const stopped=[...rows,{seq:20,turnId:"turn",payload:lifecycle("waiting","cancelled")},{seq:21,turnId:"turn",payload:reply("c","stopped")}];
+ assert.deepEqual(users(claudeTrace(stopped,{activeTurn:"turn"})).slice(-2),[["later","cancelled"],["stopped",undefined]]);
+ // A result that names the message places it when no start was recorded.
+ const listed=[...rows,{seq:20,turnId:"turn",payload:{type:"result",user_message_uuids:["waiting"]}}];
+ assert.equal(claudeTrace(listed).trace.find(x=>x.key==="steer:waiting").steerState,"inserted");
+});
+
+test("lost steer response retries the same request, and a finished turn clears it",async()=>{
+ const requests=[];let fail=true;
+ const runtime=new ClaudeRuntime(async (url,options)=>{requests.push([url,JSON.parse(options.body)]);if(fail){fail=false;throw new Error("lost");}return{accepted:true};});
+ await assert.rejects(runtime.steer({sessionId:"s"},{expectedTurnId:"t",text:"one"}));
+ await runtime.steer({sessionId:"s"},{expectedTurnId:"t",text:"two"});
+ assert.deepEqual(requests[0],requests[1]);assert.equal(requests[0][0],"/v1/claude/sessions/s/steer");
+ assert.equal(runtime.steerRequests.size,0);
+ const finished=new ClaudeRuntime(async()=>{throw Object.assign(new Error("finished"),{status:409,code:"turn_not_steerable"});});
+ await assert.rejects(finished.steer({sessionId:"s"},{expectedTurnId:"t",text:"one"}));assert.equal(finished.steerRequests.size,0);
+});
+
 test("empty native pages preserve the legacy Codex full-tree contract", async () => {
  const rows=[{threadId:"root"},{threadId:"child",parentThreadId:"root",activity:{state:"running"}}];
  const reader=conversationPageReader(async url=>url.startsWith("/v1/codex/")?{data:rows}:{paged:true,data:[],projects:[]},()=>"codex");

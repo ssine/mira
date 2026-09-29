@@ -8,12 +8,13 @@ const account = (id, name, provider) => ({ engine: "claude", nodeAccountId: id, 
     id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example",
     ...(provider === "anthropic" ? { effort: "xhigh" } : {}) } } });
 const node = { nodeId, hostname: "WSL fixture", platform: "linux", status: "online", approvalStatus: "approved",
-  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true },
+  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true, claudeSteerV1: true },
   desiredAppServer: { defaultCwd: "/work" }, reportedAppServer: { status: "stopped" }, codexAccounts: [],
   claudeAccounts: [account(ids[0], "Messages account", "anthropic"), account(ids[1], "AWS account", "bedrock")] };
 const codexId = randomUUID();
 node.codexAccounts = [{ nodeAccountId: codexId, name: "Messages account", enabled: true, isDefault: true, reportedAppServer: {status:"stopped"} }];
 const calls = [], sessions = [];
+const record = (session, payload) => { const events = session.events ||= []; events.push({ seq: events.length + 1, turnId: session.activeTurn, payload }); };
 let cacheBytes = 4 * 1024 ** 3;
 const summary = s => ({ ...s, threadId:s.sessionId, engine:"claude", runtimeNodeId:s.nodeId, generation:1, itemCount:1, listRoot:true, childCount:0,
  updatedAt: new Date().toISOString(), activity:{state:s.activeTurn?"running":"idle",turnId:s.activeTurn || s.lastTurn,generation:1,itemCount:1,
@@ -48,6 +49,13 @@ try {
     }
     const session = sessions.find(s => s.sessionId === path.split("/")[4]);
     if (path.endsWith("/turns")) { session.nodeAccountId = body.nodeAccountId; session.model = body.model; session.activeTurn = session.lastTurn = randomUUID(); return route.fulfill({ json: { turnId: session.activeTurn } }); }
+    if (path.endsWith("/steer")) {
+      // A turn that finished before the steer arrived rejects it; the Web sends it as the next turn.
+      if (body.text === "Too late") { session.activeTurn = null; return route.fulfill({ status: 409, json: { error: "finished", code: "turn_not_steerable" } }); }
+      record(session, { type: "mira_steer", steerId: body.requestId, text: body.text, attachments: [] });
+      record(session, { type: "command_lifecycle", command_uuid: body.requestId, state: "queued" });
+      return route.fulfill({ json: { accepted: true, turnId: body.expectedTurnId } });
+    }
     if (path.endsWith("/costs")) return route.fulfill({json:{generation:1,turnCostEstimates:{[session.lastTurn]:{amount:.4,status:"complete",basis:"claude_sdk"}}}});
     if (path.endsWith("/children")) return route.fulfill({ json: { data: [] } });
     if (path.endsWith("/events")) {
@@ -109,10 +117,7 @@ try {
   assert.equal(await view.locator(`[data-thread-activity="${sessions[0].sessionId}"]`).getAttribute("title"), "Claude 正在运行");
   await view.locator("#conversationDetailsToggle").click();
   await view.locator("#conversationDetails #claudeReconcile").waitFor({ state: "visible" });
-  const emit = payload => {
-    const events = sessions[0].events ||= [];
-    events.push({ seq: events.length + 1, turnId: sessions[0].activeTurn, payload });
-  };
+  const emit = payload => record(sessions[0], payload);
   emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-reply" } } });
   emit({ type: "assistant", uuid: "thinking", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Consider the question" }] } });
   await view.locator("#conversationTrace .trace-card.reasoning").waitFor();
@@ -139,6 +144,26 @@ try {
   await view.locator("#conversationSend").click();
   await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
   assert.equal(calls.filter(c => c.path.endsWith("/turns")).at(-1).body.nodeAccountId, ids[0]);
+  // Enter adds a message to the running turn, as with Codex.
+  const steered = sessions[0].activeTurn;
+  await page.waitForFunction(() => document.querySelector("#conversationSend").classList.contains("hidden"));
+  await view.locator("#conversationInput").fill("Add this note");
+  await view.locator("#conversationInput").press("Enter");
+  await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
+  const steer = calls.find(c => c.path.endsWith("/steer")).body;
+  assert.deepEqual([steer.expectedTurnId, steer.text], [steered, "Add this note"]);
+  assert.equal(calls.filter(c => c.path.endsWith("/turns")).length, 2, "a steer does not start another turn");
+  const note = view.locator("#conversationTrace .trace-card.user").filter({ hasText: "Add this note" });
+  await note.locator(".trace-steer-state").filter({ hasText: "等待加入本轮" }).waitFor();
+  emit({ type: "command_lifecycle", command_uuid: steer.requestId, state: "started" });
+  await note.locator(".trace-steer-state").waitFor({ state: "hidden" });
+  assert.equal(await note.getAttribute("data-steer-state"), null);
+  await view.locator("#conversationInput").fill("Too late");
+  await view.locator("#conversationInput").press("Enter");
+  await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
+  const late = calls.filter(c => c.path.endsWith("/turns")).at(-1).body;
+  assert.deepEqual([late.text, late.attachments], ["Too late", []], "a finished turn takes the message as the next turn");
+  assert.notEqual(sessions[0].activeTurn, steered);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="codex"]').count(),1);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="claude"]').count(),2);
   const awsRow = view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"});

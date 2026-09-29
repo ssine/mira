@@ -14,7 +14,14 @@ let run,
 const input = [];
 const questions = new Map();
 let client,
+  lifecycle,
   interrupted = false;
+// Retried steer commands share one outcome; Mira stores the request by its ID.
+const steers = new Map();
+let markReady;
+const ready = new Promise((resolve) => {
+  markReady = resolve;
+});
 async function* prompts() {
   while (!stopping) {
     if (!input.length)
@@ -100,6 +107,9 @@ lines.on("line", async (line) => {
         questions.delete(command.questionId);
         resolve(command.answers ?? {});
       }
+    } else if (command.action === "steer") {
+      // A failed steer never stops the running turn; Mira times out its request.
+      await steer(command).catch(() => {});
     } else if (command.action === "start" && !started) {
       started = true;
       spec = command;
@@ -111,7 +121,8 @@ lines.on("line", async (line) => {
       } finally {
         stopping = true;
         wake?.();
-        await run?.interrupt();
+        // Stop discards steers that have not reached the model yet.
+        await run?.interrupt({ cancelQueued: true });
       }
     }
   } catch {
@@ -129,11 +140,49 @@ lines.on("close", () => {
     run?.close();
   }
 });
+// A steer joins the running turn at the SDK's next safe point. Mira records it
+// before queueing; a turn that finished meanwhile rejects it so the Web can
+// start the next turn with the same message instead.
+async function steer({ steerId, text, attachments }) {
+  let outcome = steers.get(steerId);
+  if (!outcome) {
+    outcome = (async () => {
+      // Queue behind the first prompt, which the SDK receives once the query exists.
+      if (started) await ready;
+      if (!run || stopping || interrupted || lifecycle.finished)
+        return { accepted: false, reason: "turn_finishing" };
+      let next;
+      try {
+        next = await message(spec, text, attachments);
+      } catch (error) {
+        return { accepted: false, reason: "invalid_input", message: String(error?.message || "").slice(0, 500) };
+      }
+      next.uuid = steerId;
+      await client.event(
+        { type: "mira_steer", steerId, message: next.message, text, attachments: attachments ?? [] },
+        steerId,
+      );
+      if (stopping || interrupted || !lifecycle.steer(steerId)) {
+        await client.event({ type: "mira_steer_rejected", steerId }).catch(() => {});
+        return { accepted: false, reason: "turn_finishing" };
+      }
+      input.push(next);
+      wake?.();
+      return { accepted: true };
+    })().catch(async () => {
+      // The request may have been stored before the failure; never leave it looking queued.
+      await client?.event({ type: "mira_steer_rejected", steerId }).catch(() => {});
+      return { accepted: false, reason: "unavailable" };
+    });
+    steers.set(steerId, outcome);
+  }
+  process.stdout.write(JSON.stringify({ steerId, ...(await outcome) }) + "\n");
+}
 async function main(spec) {
   client = serverClient(spec);
   let degraded = false,
     failed = false;
-  const lifecycle = new TurnLifecycle();
+  lifecycle = new TurnLifecycle();
   try {
     input.push(await message(spec, spec.text, spec.attachments));
     await client.event({
@@ -198,6 +247,7 @@ async function main(spec) {
       stderr: () => {},
     };
     run = query({ prompt: prompts(), options });
+    markReady();
     for await (const event of run) {
       if (event.type === "system" && event.subtype === "mirror_error")
         degraded = true;
@@ -230,6 +280,7 @@ async function main(spec) {
     }
   } finally {
     stopping = true;
+    markReady();
     wake?.();
     run?.close();
     try {

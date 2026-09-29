@@ -30,6 +30,7 @@ type process struct {
 	input     io.WriteCloser
 	done      chan struct{}
 	write     sync.Mutex
+	acks      ackReader
 }
 type Manager struct {
 	mu                          sync.Mutex
@@ -151,6 +152,9 @@ func (m *Manager) install(ctx context.Context) (string, error) {
 	return dir, nil
 }
 func (m *Manager) Call(params map[string]any) (any, error) {
+	if params["action"] == "steer" {
+		return m.steer(params)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -232,14 +236,15 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		// Transcripts flow directly to Server; stdout/stderr are not unbounded logs.
-		cmd.Stdout = io.Discard
+		// Transcripts flow directly to Server; stdout carries only steer
+		// acknowledgements and stderr is not an unbounded log.
+		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{})}
+		cmd.Stdout = &p.acks
 		cmd.Stderr = io.Discard
 		if err = cmd.Start(); err != nil {
 			input.Close()
 			return nil, err
 		}
-		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{})}
 		m.processes[id] = p
 		m.accepted[id] = true
 		if len(m.accepted) > 4096 {
@@ -277,6 +282,54 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		return nil, errors.New("unknown Claude runtime action")
 	}
 }
+
+// steer queues a message into a running turn. It waits for the worker's
+// verdict without holding the manager lock: a worker records the message
+// before accepting it, which is a Server round trip.
+func (m *Manager) steer(params map[string]any) (any, error) {
+	id, _ := params["turnId"].(string)
+	steerID, _ := params["steerId"].(string)
+	if steerID == "" {
+		return nil, errors.New("steerId is required")
+	}
+	m.mu.Lock()
+	p := m.processes[id]
+	closed := m.closed
+	m.mu.Unlock()
+	if closed {
+		return nil, errors.New("Claude manager is shutting down")
+	}
+	if p == nil {
+		return map[string]any{"accepted": false, "reason": "turn_finishing"}, nil
+	}
+	ack := p.acks.wait(steerID)
+	body, _ := json.Marshal(params)
+	p.write.Lock()
+	_, err := p.input.Write(append(body, '\n'))
+	p.write.Unlock()
+	if err != nil {
+		p.acks.cancel(steerID, ack)
+		return map[string]any{"accepted": false, "reason": "turn_finishing"}, nil
+	}
+	timeout := time.NewTimer(25 * time.Second)
+	defer timeout.Stop()
+	select {
+	case result := <-ack:
+		return result, nil
+	case <-p.done:
+		// Wait delivers all worker output before done closes.
+		select {
+		case result := <-ack:
+			return result, nil
+		default:
+			return map[string]any{"accepted": false, "reason": "turn_finishing"}, nil
+		}
+	case <-timeout.C:
+		p.acks.cancel(steerID, ack)
+		return nil, errors.New("Claude 未及时确认这条消息，它仍可能加入本轮；重试不会重复发送")
+	}
+}
+
 func (m *Manager) Close() {
 	m.mu.Lock()
 	m.closed = true
@@ -321,3 +374,67 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 }
 
 func (b *boundedOutput) Bytes() []byte { return b.buffer.Bytes() }
+
+// ackReader receives a turn worker's stdout: one JSON acknowledgement per steer
+// command, delivered to the oldest request waiting for that steer ID.
+type ackReader struct {
+	mu      sync.Mutex
+	line    []byte
+	waiters map[string][]chan map[string]any
+}
+
+func (a *ackReader) wait(id string) chan map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.waiters == nil {
+		a.waiters = map[string][]chan map[string]any{}
+	}
+	ch := make(chan map[string]any, 1)
+	a.waiters[id] = append(a.waiters[id], ch)
+	return ch
+}
+
+func (a *ackReader) cancel(id string, ch chan map[string]any) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	waiting := a.waiters[id]
+	for i, candidate := range waiting {
+		if candidate == ch {
+			waiting = append(waiting[:i], waiting[i+1:]...)
+			break
+		}
+	}
+	if len(waiting) == 0 {
+		delete(a.waiters, id)
+	} else {
+		a.waiters[id] = waiting
+	}
+}
+
+// Write never fails, so a malformed or oversized line cannot block the worker.
+func (a *ackReader) Write(p []byte) (int, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, b := range p {
+		if b != '\n' {
+			if len(a.line) <= 64*1024 {
+				a.line = append(a.line, b)
+			}
+			continue
+		}
+		var ack map[string]any
+		if len(a.line) <= 64*1024 && json.Unmarshal(a.line, &ack) == nil {
+			id, _ := ack["steerId"].(string)
+			if waiting := a.waiters[id]; len(waiting) > 0 {
+				waiting[0] <- ack
+				if len(waiting) == 1 {
+					delete(a.waiters, id)
+				} else {
+					a.waiters[id] = waiting[1:]
+				}
+			}
+		}
+		a.line = a.line[:0]
+	}
+	return len(p), nil
+}
