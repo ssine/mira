@@ -34,6 +34,8 @@ try {
   assert.equal(await rows.count(), 3);
   // Only the accounts behind the two most recent conversations stay unfolded.
   const more = page.locator("[data-account-more]");
+  // A direct thread link lists only that thread until the conversation list arrives.
+  await page.waitForFunction(() => [...document.querySelectorAll(".sidebar-account-row")].filter(row => !row.hidden).length === 2);
   assert.deepEqual(await rows.evaluateAll(list => list.filter(row => !row.hidden).map(row => row.firstChild.textContent)), ["Codex · API", "Codex · Shared"]);
   assert.equal(await more.textContent(), "展开其余 1 个账号");
   await page.waitForFunction(() => [...document.querySelectorAll(".sidebar-account-row")].find(e => e.textContent.startsWith("Codex · API")).textContent.includes("$13.00"));
