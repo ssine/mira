@@ -1,4 +1,5 @@
 import { weeklyQuota } from "./account-quota.js";
+import { compareThreadsByRecency } from "./thread-list.js";
 
 export function accountNode(node, bindingId = "") {
   if (!node) return null;
@@ -40,6 +41,19 @@ export function accountGroups(nodes) {
     });
   }
   return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+}
+
+// Keys of the distinct account groups behind the most recently active top-level conversations.
+export function recentAccountKeys(groups, threads, limit = 2) {
+  const keys = [];
+  for (const thread of [...threads].sort(compareThreadsByRecency)) {
+    if (keys.length >= limit) break;
+    if (!thread.nodeAccountId || thread.parentThreadId || thread.subpath || thread.archived) continue;
+    const engine = thread.engine || "codex";
+    const group = groups.find(value => value.engine === engine && value.members.some(member => member.account.nodeAccountId === thread.nodeAccountId));
+    if (group && !keys.includes(group.key)) keys.push(group.key);
+  }
+  return keys;
 }
 
 export function accountQuery(bindingId) { return bindingId ? `&nodeAccountId=${encodeURIComponent(bindingId)}` : ""; }
@@ -116,6 +130,7 @@ export class CodexAccounts {
     this.form.elements.inheritEnv.value = (account?.desiredAppServer?.inheritEnv ?? []).join(", ");
     this.form.elements.baseUrl.value = account?.reportedAppServer?.provider?.baseUrl || "";
     this.form.elements.claudeModel.value = account?.reportedAppServer?.provider?.model || "";
+    this.form.elements.claudeEffort.value = account?.reportedAppServer?.provider?.effort || "";
     this.form.elements.region.value = account?.reportedAppServer?.provider?.region || "us-east-1";
     this.dialog.querySelector("[data-account-actions]").hidden = !account;
     this.dialog.querySelector("[data-account-title]").textContent = `${account ? "管理" : "添加"} ${account?.engine === "claude" ? "Claude" : "Codex"} 账号`;
@@ -143,6 +158,7 @@ export class CodexAccounts {
     this.form.elements.claudeModel.required = claude;
     this.form.elements.region.required = claude && mode === "bedrock";
     this.dialog.querySelector("[data-account-claude-model]").hidden = !claude;
+    this.dialog.querySelector("[data-account-claude-effort]").hidden = !claude;
     this.dialog.querySelector("[data-account-region]").hidden = !claude || mode !== "bedrock";
     this.dialog.querySelector("[data-account-environment]").hidden = claude;
     this.dialog.querySelector("[data-account-start]").textContent = claude ? "启用" : "启动";
@@ -213,7 +229,7 @@ export class CodexAccounts {
 
   async saveClaude() {
     const fields = this.form.elements;
-    const provider = { id: fields.mode.value, baseUrl: fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
+    const provider = { id: fields.mode.value, baseUrl: fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.claudeEffort.value ? { effort: fields.claudeEffort.value } : {}), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
     if (!this.current) {
       const created = await this.api("/v1/claude/accounts", { method: "POST", body: JSON.stringify({ nodeId: fields.node.value, name: fields.name.value.trim() }) });
       this.current = { node: { nodeId: fields.node.value }, account: created };
@@ -223,7 +239,7 @@ export class CodexAccounts {
     if (fields.apiKey.value) body.apiKey = fields.apiKey.value;
     else if (fields.clearKey.checked) body.apiKey = "";
     const previous = this.current.account.reportedAppServer?.provider || {};
-    const changed = "apiKey" in body || ["id", "baseUrl", "model", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
+    const changed = "apiKey" in body || ["id", "baseUrl", "model", "effort", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
     try { if (changed) await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}/configure`, { method: "POST", body: JSON.stringify(body) }); }
     finally { this.clearSecrets(); }
     await this.refresh();

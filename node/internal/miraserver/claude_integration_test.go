@@ -301,6 +301,62 @@ func TestClaudeNativeStorage(t *testing.T) {
 	}
 }
 
+// A steer is recorded by the worker before it is queued, so a retried request
+// replays the stored verdict after the turn ends instead of starting a new turn.
+func TestClaudeSteerRoute(t *testing.T) {
+	f := newClaudeFixture(t)
+	id, turn, headers := f.reserved()
+	route := "/v1/claude/sessions/" + id
+	steer := func(body map[string]any) (int, string) {
+		t.Helper()
+		status, raw := f.request("POST", route+"/steer", body, nil)
+		var value map[string]any
+		_ = json.Unmarshal(raw, &value)
+		code, _ := value["code"].(string)
+		if status == 200 && value["accepted"] != true {
+			t.Fatalf("unaccepted success: %s", raw)
+		}
+		return status, code
+	}
+	record := func(eventID string, payload map[string]any) {
+		t.Helper()
+		status, raw := f.request("POST", route+"/events", map[string]any{"eventId": eventID, "payload": payload}, headers)
+		if status != 200 {
+			t.Fatalf("event %v: %d %s", payload["type"], status, raw)
+		}
+	}
+	if status, _ := steer(map[string]any{"requestId": uuidClaude(), "expectedTurnId": turn, "text": " "}); status != 400 {
+		t.Fatalf("blank steer: %d", status)
+	}
+	if status, code := steer(map[string]any{"requestId": uuidClaude(), "expectedTurnId": uuidClaude(), "text": "late"}); status != 409 || code != "turn_not_steerable" {
+		t.Fatalf("steer into another turn: %d %s", status, code)
+	}
+	if status, code := steer(map[string]any{"requestId": uuidClaude(), "expectedTurnId": turn, "text": "old node"}); status != 409 || code != "steer_unsupported" {
+		t.Fatalf("steer without node support: %d %s", status, code)
+	}
+	accepted, rejected := uuidClaude(), uuidClaude()
+	record(accepted, map[string]any{"type": "mira_steer", "steerId": accepted, "text": "accepted"})
+	record(rejected, map[string]any{"type": "mira_steer", "steerId": rejected, "text": "rejected"})
+	record(uuidClaude(), map[string]any{"type": "mira_steer_rejected", "steerId": rejected})
+	if status, code := steer(map[string]any{"requestId": rejected, "expectedTurnId": turn, "text": "rejected"}); status != 409 || code != "turn_not_steerable" {
+		t.Fatalf("rejected steer replay while running: %d %s", status, code)
+	}
+	record(uuidClaude(), map[string]any{"type": "mira_completed"})
+	if status, _ := steer(map[string]any{"requestId": accepted, "expectedTurnId": turn, "text": "accepted"}); status != 200 {
+		t.Fatalf("accepted steer replay after completion: %d", status)
+	}
+	if status, code := steer(map[string]any{"requestId": rejected, "expectedTurnId": turn, "text": "rejected"}); status != 409 || code != "turn_not_steerable" {
+		t.Fatalf("rejected steer replay after completion: %d %s", status, code)
+	}
+	if status, code := steer(map[string]any{"requestId": uuidClaude(), "expectedTurnId": turn, "text": "after"}); status != 409 || code != "turn_not_steerable" {
+		t.Fatalf("new steer after completion: %d %s", status, code)
+	}
+	other, _, _ := f.reserved()
+	if status, _ := f.request("POST", "/v1/claude/sessions/"+other+"/steer", map[string]any{"requestId": accepted, "expectedTurnId": turn, "text": "accepted"}, nil); status == 200 {
+		t.Fatal("steer replay crossed sessions")
+	}
+}
+
 func TestClaudeManagedSDK(t *testing.T) {
 	if os.Getenv("MIRA_CLAUDE_SDK_TEST") != "1" {
 		t.Skip("set MIRA_CLAUDE_SDK_TEST=1 for real SDK/native subprocess validation")
@@ -317,9 +373,12 @@ func TestClaudeManagedSDK(t *testing.T) {
 	t.Setenv("ENABLE_TOOL_SEARCH", "false")
 	var requests atomic.Int32
 	var modelAuth atomic.Value
+	var systemPrompt atomic.Value
 	var imageSeen atomic.Bool
 	var resumed atomic.Bool
 	var hold atomic.Bool
+	var steerHold, steerTool, steerSeen atomic.Bool
+	steerHeld, steerRelease := make(chan struct{}, 1), make(chan struct{}, 1)
 	var ask atomic.Bool
 	var child atomic.Bool
 	var background, backgroundPhase, backgroundDone atomic.Bool
@@ -337,6 +396,9 @@ func TestClaudeManagedSDK(t *testing.T) {
 		}
 		requests.Add(1)
 		modelAuth.Store(r.Header.Get("x-api-key"))
+		if system, _ := json.Marshal(b["system"]); strings.Contains(string(system), "Use home_nodes MCP tools") {
+			systemPrompt.Store(string(system))
+		}
 		bytes, _ := json.Marshal(b["messages"])
 		if strings.Contains(string(bytes), `"type":"image"`) {
 			imageSeen.Store(true)
@@ -344,9 +406,20 @@ func TestClaudeManagedSDK(t *testing.T) {
 		if strings.Contains(string(bytes), "CLAUDE_MIRA_SAVED_MARKER") {
 			resumed.Store(true)
 		}
+		if strings.Contains(string(bytes), "STEER_ADDED_MARKER") {
+			steerSeen.Store(true)
+		}
 		if hold.Load() {
 			<-r.Context().Done()
 			return
+		}
+		if steerHold.CompareAndSwap(true, false) {
+			steerHeld <- struct{}{}
+			select {
+			case <-steerRelease:
+			case <-r.Context().Done():
+				return
+			}
 		}
 		block := map[string]any{"type": "text", "text": "CLAUDE_MIRA_SAVED_MARKER"}
 		stop := "end_turn"
@@ -365,6 +438,10 @@ func TestClaudeManagedSDK(t *testing.T) {
 		if strings.Contains(string(bytes), "CHILD_NATIVE_TEST") && !strings.Contains(string(bytes), "CLAUDE_MIRA_SAVED_MARKER") {
 			block = map[string]any{"type": "text", "text": "CHILD_NATIVE_TEST"}
 			stop = "end_turn"
+		}
+		if steerTool.CompareAndSwap(true, false) {
+			block = map[string]any{"type": "tool_use", "id": "tool_" + uuidClaude(), "name": "mcp__home_nodes__status", "input": map[string]any{"action": "list"}}
+			stop = "tool_use"
 		}
 		if backgroundPhase.Load() {
 			isChild := false
@@ -458,9 +535,19 @@ func TestClaudeManagedSDK(t *testing.T) {
 			}
 			go func(b map[string]any) {
 				params, _ := b["params"].(map[string]any)
-				params["endpoint"] = f.endpoint
-				params["credential"] = f.token
-				value, err := manager.Call(params)
+				var value any
+				var err error
+				if b["capability"] == "file" {
+					// The Server reads Node instruction files through the bounded file capability.
+					var data []byte
+					if data, err = os.ReadFile(params["path"].(string)); err == nil {
+						value = map[string]any{"content": base64.StdEncoding.EncodeToString(data), "encoding": "base64", "bytesRead": len(data), "eof": true}
+					}
+				} else {
+					params["endpoint"] = f.endpoint
+					params["credential"] = f.token
+					value, err = manager.Call(params)
+				}
 				reply := map[string]any{"type": "response", "requestId": b["requestId"], "ok": err == nil, "result": value}
 				if err != nil {
 					reply["error"] = map[string]any{"message": err.Error()}
@@ -510,6 +597,11 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if len(description["models"].([]any)) == 0 {
 		t.Fatal("empty native model catalog")
 	}
+	instructions := filepath.Join(t.TempDir(), "instructions.md")
+	if err = os.WriteFile(instructions, []byte("SHARED_NODE_INSTRUCTION_MARKER"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f.call("PUT", "/v1/nodes/"+f.nodeID+"/desired-app-server", map[string]any{"running": false, "developerInstructionsFile": instructions})
 	created := f.call("POST", "/v1/claude/sessions", map[string]any{"requestId": uuidClaude(), "nodeId": f.nodeID, "cwd": workspace, "title": "SDK test"})
 	id := created["sessionId"].(string)
 	route := "/v1/claude/sessions/" + id
@@ -558,6 +650,11 @@ func TestClaudeManagedSDK(t *testing.T) {
 	}
 	if requests.Load() != 2 {
 		t.Fatalf("duplicate execution or no tool: %d", requests.Load())
+	}
+	if system, _ := systemPrompt.Load().(string); !strings.Contains(system, "SHARED_NODE_INSTRUCTION_MARKER") {
+		t.Fatalf("Claude system prompt omitted the shared Developer instructions file: %s", system)
+	} else if progress := strings.Index(system, strings.TrimSuffix(claudeProgressInstructions, "\n")); progress < 0 || progress > strings.Index(system, "SHARED_NODE_INSTRUCTION_MARKER") {
+		t.Fatalf("Claude system prompt must describe progress updates before the Developer instructions: %s", system)
 	}
 	if err = os.RemoveAll(configDir); err != nil {
 		t.Fatal(err)
@@ -625,6 +722,38 @@ func TestClaudeManagedSDK(t *testing.T) {
 		t.Fatalf("background result did not reach the parent: %q %v", final, err)
 	}
 	backgroundPhase.Store(false)
+
+	// A message added while Claude runs joins the running turn: at the next tool
+	// boundary, or as another response when it arrives during the final answer.
+	// The turn completes only after the model has read it.
+	if _, err = f.server.pool.Exec(ctx, `UPDATE codex_nodes SET capabilities=capabilities||'{"claudeSteerV1":true}' WHERE node_id=$1`, f.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []bool{true, false} {
+		steerSeen.Store(false)
+		steerTool.Store(tool)
+		steerHold.Store(true)
+		steerTurn := runTurn("Answer while I add a note.")
+		select {
+		case <-steerHeld:
+		case <-time.After(30 * time.Second):
+			t.Fatal("timeout: held answer")
+		}
+		steerBody := map[string]any{"requestId": uuidClaude(), "expectedTurnId": steerTurn, "text": "STEER_ADDED_MARKER"}
+		f.call("POST", route+"/steer", steerBody)
+		steerRelease <- struct{}{}
+		wait("steered turn", 60*time.Second, completed)
+		if !steerSeen.Load() {
+			t.Fatalf("the added message did not reach the model (tool boundary: %v)", tool)
+		}
+		var steerStarted int
+		if err = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='command_lifecycle' AND payload->>'command_uuid'=$2 AND payload->>'state'='started'`, steerTurn, steerBody["requestId"]).Scan(&steerStarted); err != nil || steerStarted != 1 {
+			t.Fatalf("steer lifecycle was not recorded: %d %v", steerStarted, err)
+		}
+		if f.call("POST", route+"/steer", steerBody)["replayed"] != true {
+			t.Fatal("a retried steer did not replay its recorded verdict")
+		}
+	}
 
 	// A second approved Node uses a fresh SDK cache/config directory. Server ownership
 	// moves only after completion, and the old writer remains fenced out.

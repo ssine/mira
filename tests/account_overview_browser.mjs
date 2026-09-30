@@ -32,10 +32,22 @@ try {
   await page.goto(`${origin}/?thread=${threads[0].threadId}`);
   const rows = page.locator(".sidebar-account-row"); await rows.first().waitFor({ state: "attached" });
   assert.equal(await rows.count(), 3);
+  // Only the accounts behind the two most recent conversations stay unfolded.
+  const more = page.locator("[data-account-more]");
+  // A direct thread link lists only that thread until the conversation list arrives.
+  await page.waitForFunction(() => [...document.querySelectorAll(".sidebar-account-row")].filter(row => !row.hidden).length === 2);
+  assert.deepEqual(await rows.evaluateAll(list => list.filter(row => !row.hidden).map(row => row.firstChild.textContent)), ["Codex · API", "Codex · Shared"]);
+  assert.equal(await more.textContent(), "展开其余 1 个账号");
   await page.waitForFunction(() => [...document.querySelectorAll(".sidebar-account-row")].find(e => e.textContent.startsWith("Codex · API")).textContent.includes("$13.00"));
   assert.equal(await page.locator("#agentThreadDrawer").getAttribute("aria-hidden"), "true", "mobile loads API summaries before opening the drawer");
   await page.locator("#agentThreadDrawerToggle").click();
   assert.match(await rows.filter({ hasText: /^Codex · API/ }).textContent(), /7 天 ≥ \$13\.00/);
+  assert.equal(await rows.filter({ hasText: "Offline API" }).isVisible(), false);
+  await more.click();
+  assert.equal(await rows.filter({ hasText: "Offline API" }).isVisible(), true);
+  assert.equal(await more.getAttribute("aria-expanded"), "true");
+  await more.click();
+  assert.equal(await rows.filter({ hasText: "Offline API" }).isVisible(), false);
   await page.setViewportSize({ width: 1440, height: 1000 });
   assert.match(await rows.filter({ hasText: /^Codex · API/ }).textContent(), /7 天 ≥ \$13\.00/);
   assert.equal(await rows.filter({ hasText: "Shared" }).textContent(), "Codex · Shared剩余 0%");

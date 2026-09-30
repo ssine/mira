@@ -187,3 +187,64 @@ func TestClaudeProjectionCannotRejectNativeNUL(t *testing.T) {
 		t.Fatalf("native data lost: %q", stored)
 	}
 }
+
+func TestClaudeRunningTurnCost(t *testing.T) {
+	f := newClaudeFixture(t)
+	ctx := context.Background()
+	id, turn, _ := f.reserved()
+	event := func(kind, raw string) {
+		t.Helper()
+		if _, err := f.server.pool.Exec(ctx, `INSERT INTO mira_claude_events(event_id,session_id,turn_id,event_type,payload) VALUES($1,$2,$3,$4,$5::json)`, uuidClaude(), id, turn, kind, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Each content block repeats its response usage; only the latest snapshot counts.
+	event("assistant", `{"type":"assistant","message":{"id":"msg_a","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200}}}`)
+	event("assistant", `{"type":"assistant","message":{"id":"msg_a","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":100,"cache_read_input_tokens":1000,"cache_creation_input_tokens":200,"cache_creation":{"ephemeral_5m_input_tokens":200,"ephemeral_1h_input_tokens":0}}}}`)
+	event("assistant", `{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"id":"msg_b","model":"us.anthropic.claude-haiku-4-5-20251001-v1:0","usage":{"input_tokens":100,"output_tokens":50}}}`)
+	event("assistant", `{"type":"assistant","message":{"id":"msg_c","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}`)
+	near := func(value any, want float64) bool {
+		got, ok := value.(float64)
+		return ok && got > want-1e-9 && got < want+1e-9
+	}
+	// Opus 5.5: 10*$4 + 100*$20 + 1000*$0.20 + 200*$5 per MTok; Haiku 4.5: 100*$1 + 50*$5.
+	const live = 0.00324 + 0.00035
+	summary := f.call("GET", "/v1/claude/conversations/"+id, nil)
+	cost := summary["costEstimate"].(map[string]any)
+	activity := summary["activity"].(map[string]any)
+	turnCost, _ := activity["costEstimate"].(map[string]any)
+	if !near(cost["amount"], live) || cost["status"] != "complete" || cost["running"] != true || turnCost == nil || !near(turnCost["amount"], live) {
+		t.Fatalf("running summary: %#v %#v", cost, activity)
+	}
+	if usage := summary["tokenUsage"].(map[string]any); usage["inputTokens"] != float64(1310) || usage["outputTokens"] != float64(150) {
+		t.Fatalf("running usage: %#v", usage)
+	}
+	costs := f.call("GET", "/v1/claude/sessions/"+id+"/costs?turnId="+turn, nil)["turnCostEstimates"].(map[string]any)[turn].(map[string]any)
+	if !near(costs["amount"], live) || costs["running"] != true {
+		t.Fatalf("running turn cost: %#v", costs)
+	}
+	event("assistant", `{"type":"assistant","message":{"id":"msg_d","model":"gateway-model","usage":{"input_tokens":1,"output_tokens":1}}}`)
+	costs = f.call("GET", "/v1/claude/sessions/"+id+"/costs?turnId="+turn, nil)["turnCostEstimates"].(map[string]any)[turn].(map[string]any)
+	if !near(costs["amount"], live) || costs["status"] != "partial" {
+		t.Fatalf("unpriced response must be partial: %#v", costs)
+	}
+	// The SDK result replaces the estimate even before the session releases the turn.
+	event("result", `{"type":"result","total_cost_usd":0.5,"usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"claude":{"inputTokens":1,"outputTokens":1,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}`)
+	costs = f.call("GET", "/v1/claude/sessions/"+id+"/costs?turnId="+turn, nil)["turnCostEstimates"].(map[string]any)[turn].(map[string]any)
+	summary = f.call("GET", "/v1/claude/conversations/"+id, nil)
+	if !near(costs["amount"], .5) || costs["running"] != nil || !near(summary["costEstimate"].(map[string]any)["amount"], .5) || summary["activity"].(map[string]any)["costEstimate"] != nil {
+		t.Fatalf("settled cost: %#v %#v", costs, summary)
+	}
+}
+
+func TestClaudeModelPrice(t *testing.T) {
+	for model, want := range map[string]int64{"claude-opus-5-5": 4_000, "claude-opus-5": 5_000, "claude-opus-4-1-20250805": 15_000,
+		"anthropic.claude-sonnet-4-6": 3_000, "claude-fable-5-1": 10_000} {
+		if price, ok := claudeModelPrice(model); !ok || price.input != want {
+			t.Fatalf("%s: %#v %v", model, price, ok)
+		}
+	}
+	if _, ok := claudeModelPrice("opus"); ok {
+		t.Fatal("aliases need a resolved model")
+	}
+}

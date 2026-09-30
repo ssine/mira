@@ -26,18 +26,35 @@ Implemented:
 - Native `AskUserQuestion` prompts appear in the conversation and answers return
   to the waiting SDK invocation. Ordinary tools use the same unrestricted OS-user
   execution policy as Mira's default Codex configuration.
-- Mira device tools use the shared MCP adapter. The existing bounded Developer
-  instructions file reader and absolute Mira SSH/SCP/SFTP instructions are shared
-  with Codex. Native user/project/local Claude settings and `CLAUDE.md` still apply.
+- Mira device tools use the shared MCP adapter. The Node's Developer instructions
+  file is shared with Codex: the same bounded reader loads it on every Claude turn and
+  appends it to the system prompt together with the absolute Mira SSH/SCP/SFTP
+  instructions. Native user/project/local Claude settings and `CLAUDE.md` still apply.
+- Claude accounts may set a default reasoning effort for their default model. The
+  model picker maps the account's full model ID to the SDK alias that resolves to it,
+  so its effort levels remain selectable.
+- The transcript follows Codex's rhythm: tool calls and thinking collapse into one
+  line per batch, and the text Claude writes between them stays visible as progress.
+  Built-in tools are summarized as actions with durations, like Codex shell actions:
+  commands, reads, edits with line counts, searches and subagents. Images a tool
+  returns stay in its card. Mira's system prompt asks Claude for a short update
+  every several tool calls; the Developer instructions file comes later and can
+  override it. While a turn runs, polls patch changed or new cards in place.
 - Native subagent transcripts are mirrored independently and selectable from the
-  conversation. Root membership is durable; unknown nested parent relationships
+  conversation. The parent timeline shows only the subagent's tool row. Root membership is durable; unknown nested parent relationships
   remain unknown rather than being inferred from a filename. Original native
   metadata is retained in raw records.
+- Messages sent while Claude runs join the running turn, as with Codex. Claude reads
+  one at the next tool boundary, or answers it after the final answer. The message
+  appears where Claude read it; until then it shows as waiting, and one Claude never
+  read (a stop, a failed turn) shows as not added. If the turn ends before the
+  message is accepted, the composer sends it as the next turn instead. Adding input
+  needs a Node advertising `claudeSteerV1`; older Nodes ask the user to wait.
 - Completed conversations can resume on another approved Claude-capable Node.
   The user chooses a compatible workspace there. An active turn prevents ownership
   transfer; old Node/revision writers are rejected after a new turn is reserved.
 
-The Claude adapter does not yet implement active-turn steering, conversation forking,
+The Claude adapter does not yet implement conversation forking,
 permanent deletion, automatic title generation or a `mira claude` CLI wrapper.
 Unsupported actions are omitted from its menu. Native child records are grouped beneath
 the owning session for browsing, without asserting unknown nested parentage. Continue
@@ -68,6 +85,14 @@ timestamps, grouping adjacent turns only on dense days (at most 128 points/day),
 without discarding costs or incomplete status.
 No unsupported per-child cost split is inferred. See the
 [official cost semantics](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+
+A running turn has no result yet. Until its result lands, conversation summaries price it
+from the latest `usage` of each `assistant` response (deduplicated by message ID,
+subagents included) with the public Claude list prices in `claude_views.go`. Cache
+writes use their 5-minute/1-hour multipliers. The estimate is marked `running`; unknown
+models or invalid usage make it partial. The Web shows it beside the running indicator
+and in the conversation total, then fetches the turn footer from the SDK result once the
+turn settles. Schema 38 only adds the per-turn `assistant` event index for this lookup.
 
 Rebuild the projection by reloading attribution from `mira_claude_turns`, then applying
 `mira_claude_project_result(turn_id, seq, payload)` to the latest root `result` event per
@@ -207,7 +232,9 @@ channels, and a simulated Anthropic Messages endpoint. It verifies device MCP
 execution, exact-operation retry after a committed response is lost, restored
 context after deleting local history, native questions/answers, native subagent
 transcripts, cross-Node ownership/resume, interruption, and permanent mirror
-failure reporting. Model discovery also uses the native SDK. An unknown turn from a previous runtime
+failure reporting. It adds input to running turns both at a tool boundary and during
+the final answer, and verifies the model reads it once and a retry replays the
+verdict. Model discovery also uses the native SDK. An unknown turn from a previous runtime
 instance remains reserved instead of being mistaken for a stopped process.
 The delayed-background regression holds a native child until the parent has
 emitted an interim result, then verifies that its completion wakes the parent

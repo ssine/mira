@@ -5,17 +5,20 @@ const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8787";
 const nodeId = randomUUID(), ids = [randomUUID(), randomUUID()];
 const account = (id, name, provider) => ({ engine: "claude", nodeAccountId: id, accountId: id, nodeId, name,
   enabled: true, configured: true, provider, reportedAppServer: { status: "ready", provider: {
-    id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example" } } });
+    id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example",
+    ...(provider === "anthropic" ? { effort: "xhigh" } : {}) } } });
 const node = { nodeId, hostname: "WSL fixture", platform: "linux", status: "online", approvalStatus: "approved",
-  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true },
+  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true, claudeSteerV1: true },
   desiredAppServer: { defaultCwd: "/work" }, reportedAppServer: { status: "stopped" }, codexAccounts: [],
   claudeAccounts: [account(ids[0], "Messages account", "anthropic"), account(ids[1], "AWS account", "bedrock")] };
 const codexId = randomUUID();
 node.codexAccounts = [{ nodeAccountId: codexId, name: "Messages account", enabled: true, isDefault: true, reportedAppServer: {status:"stopped"} }];
 const calls = [], sessions = [];
+const record = (session, payload) => { const events = session.events ||= []; events.push({ seq: events.length + 1, turnId: session.activeTurn, payload }); };
 let cacheBytes = 4 * 1024 ** 3;
 const summary = s => ({ ...s, threadId:s.sessionId, engine:"claude", runtimeNodeId:s.nodeId, generation:1, itemCount:1, listRoot:true, childCount:0,
- updatedAt: new Date().toISOString(), activity:{state:s.activeTurn?"running":"idle",turnId:s.activeTurn || s.lastTurn,generation:1,itemCount:1}, costEstimate:{amount:.4,status:"complete",basis:"claude_sdk"} });
+ updatedAt: new Date().toISOString(), activity:{state:s.activeTurn?"running":"idle",turnId:s.activeTurn || s.lastTurn,generation:1,itemCount:1,
+ ...(s.activeTurn ? {costEstimate:{amount:.12,status:"complete",basis:"claude_sdk",running:true,note:"运行中估算"}} : {})}, costEstimate:{amount:.4,status:"complete",basis:"claude_sdk"} });
 const browser = await chromium.launch({ headless: true });
 try {
   const context = await browser.newContext({ viewport: { width: 1200, height: 900 } });
@@ -25,7 +28,7 @@ try {
   await context.route("**/v1/codex/threads/*?*", route => route.fulfill({status:404,json:{error:"missing"}}));
   await context.route("**/v1/claude/**", route => {
     const req = route.request(), path = new URL(req.url()).pathname, body = req.postData() ? req.postDataJSON() : null;
-    calls.push({ path, body });
+    calls.push({ path, body, query: new URL(req.url()).search });
     if (path.endsWith("cost-history")) {
       const at = Date.parse("2026-09-30T00:00:00Z"), date = "2026-09-30";
       return route.fulfill({json:{basis:"claude_sdk",estimate:{amount:.4,status:"complete"},from:at,to:at+3600000,
@@ -39,13 +42,20 @@ try {
       if (path.endsWith("/cache-configure")) cacheBytes = body.maxBytes;
       return route.fulfill({ json: { maxBytes: cacheBytes, usedBytes: 0, entries: 0, cleanupPending: false } });
     }
-    if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "claude-example", displayName: "Claude" }] } : { status: "ready" } });
+    if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "opus", resolvedModel: "claude-example", displayName: "Claude", supportedEffortLevels: ["low", "high", "xhigh"] }] } : { status: "ready" } });
     if (path === "/v1/claude/sessions") {
       if (req.method() === "POST") { const session = { ...body, sessionId: randomUUID(), persistence: "saved", activeTurn: null }; sessions.push(session); return route.fulfill({ json: session }); }
       return route.fulfill({ json: { data: sessions, nextOffset: null } });
     }
     const session = sessions.find(s => s.sessionId === path.split("/")[4]);
     if (path.endsWith("/turns")) { session.nodeAccountId = body.nodeAccountId; session.model = body.model; session.activeTurn = session.lastTurn = randomUUID(); return route.fulfill({ json: { turnId: session.activeTurn } }); }
+    if (path.endsWith("/steer")) {
+      // A turn that finished before the steer arrived rejects it; the Web sends it as the next turn.
+      if (body.text === "Too late") { session.activeTurn = null; return route.fulfill({ status: 409, json: { error: "finished", code: "turn_not_steerable" } }); }
+      record(session, { type: "mira_steer", steerId: body.requestId, text: body.text, attachments: [] });
+      record(session, { type: "command_lifecycle", command_uuid: body.requestId, state: "queued" });
+      return route.fulfill({ json: { accepted: true, turnId: body.expectedTurnId } });
+    }
     if (path.endsWith("/costs")) return route.fulfill({json:{generation:1,turnCostEstimates:{[session.lastTurn]:{amount:.4,status:"complete",basis:"claude_sdk"}}}});
     if (path.endsWith("/children")) return route.fulfill({ json: { data: [] } });
     if (path.endsWith("/events")) {
@@ -76,10 +86,13 @@ try {
   const dialog = page.locator("#codexAccountDialog");
   assert.equal(await dialog.locator("[name=engine]").inputValue(), "claude");
   assert.equal(await dialog.locator("[data-account-login]").isVisible(), false);
+  assert.equal(await dialog.locator("[name=claudeEffort]").inputValue(), "");
+  await dialog.locator("[name=claudeEffort]").selectOption("high");
   await dialog.locator("[name=apiKey]").fill("synthetic-claude-browser-secret");
   await dialog.locator("button[type=submit]").click();
   await dialog.getByText("Claude 账号已保存，可在对话的账号列表中选择使用。", { exact: true }).waitFor();
   assert.equal(calls.find(c => c.path.endsWith("/configure")).body.apiKey, "synthetic-claude-browser-secret");
+  assert.equal(calls.find(c => c.path.endsWith("/configure")).body.provider.effort, "high");
   assert.equal(await dialog.locator("[name=apiKey]").inputValue(), "");
   assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("synthetic-claude-browser-secret")), false);
   await dialog.locator("[data-account-close]").click();
@@ -99,30 +112,46 @@ try {
   assert.equal(await view.locator("#conversationAccount").inputValue(), ids[1]);
   await view.locator("#conversationActivity:not(.hidden)").waitFor();
   assert.match(await view.locator("#conversationActivityText").textContent(), /^Claude /);
+  await page.waitForFunction(() => document.querySelector("#conversationActivityCost").textContent === "本轮约 $0.12");
   assert.equal(await view.locator("#conversationComposer #claudeReconcile").count(), 0);
   assert.equal(await view.locator(`[data-thread-activity="${sessions[0].sessionId}"]`).getAttribute("title"), "Claude 正在运行");
   await view.locator("#conversationDetailsToggle").click();
   await view.locator("#conversationDetails #claudeReconcile").waitFor({ state: "visible" });
-  const emit = payload => {
-    const events = sessions[0].events ||= [];
-    events.push({ seq: events.length + 1, turnId: sessions[0].activeTurn, payload });
-  };
+  const emit = payload => record(sessions[0], payload);
+  const group = view.locator("#conversationTrace > .tool-group");
+  emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-tool" } } });
+  emit({ type: "assistant", uuid: "thinking", message: { id: "live-tool", content: [{ type: "thinking", thinking: "Consider the question" }] } });
+  await group.locator(".tool-group-total").filter({ hasText: /^思考$/ }).waitFor();
+  assert.equal(await group.locator(".tool-group-latest").textContent(), "Consider the question");
+  await page.evaluate(() => { window.miraFirstThought = document.querySelector("#conversationTrace .trace-card.reasoning"); });
+  emit({ type: "assistant", uuid: "run", message: { id: "live-tool", content: [{ type: "tool_use", id: "run-tests", name: "Bash", input: { command: "go test ./..." } }] } });
+  emit({ type: "stream_event", event: { type: "message_stop" } });
+  await group.locator(".tool-group-latest").filter({ hasText: "正在执行 go test ./..." }).waitFor();
+  emit({ type: "user", uuid: "ran", message: { content: [{ type: "tool_result", tool_use_id: "run-tests", content: "ok" }] } });
+  await group.locator(".tool-group-latest").filter({ hasText: "已执行 go test ./..." }).waitFor();
   emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-reply" } } });
-  emit({ type: "assistant", uuid: "thinking", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Consider the question" }] } });
-  await view.locator("#conversationTrace .trace-card.reasoning").waitFor();
+  emit({ type: "assistant", uuid: "thinking-2", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Check the output" }] } });
+  await page.waitForFunction(() => document.querySelectorAll("#conversationTrace .tool-group .trace-card.reasoning").length === 2);
+  assert.deepEqual([await group.count(), await group.locator(".tool-group-total").textContent(), await group.getAttribute("open")],
+    [1, "工具调用 · 1 次", null], "thinking and tool calls between replies fold into one row");
   emit({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "One live answer" } } });
   await view.locator("#conversationTrace .trace-card.assistant").filter({ hasText: "One live answer" }).waitFor();
   emit({ type: "assistant", uuid: "answer", timestamp: "2026-09-30T01:02:03.456Z", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
   emit({ type: "stream_event", event: { type: "message_stop" } });
+  const running = sessions[0].activeTurn;
+  assert.equal(calls.some(c => c.path.endsWith("/costs") && c.query.includes(running)), false, "the summary prices a running turn");
   emit({ type: "result", duration_ms: 100 });
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#conversationAccount").disabled);
   assert.equal(await view.locator("#conversationTrace .trace-card.assistant").count(), 1, "the final reply replaces streamed prose without requiring a reload");
+  assert.equal(await page.evaluate(() => window.miraFirstThought === document.querySelector("#conversationTrace .trace-card.reasoning")), true,
+    "polls update changed cards instead of rebuilding the transcript");
   const clock = view.locator("#conversationTrace .trace-card.assistant .trace-completed");
   assert.equal(await clock.isVisible(), true, "Claude messages retain their native record time");
   assert.match(await clock.textContent(), /\d{2}:\d{2}:\d{2}/);
   assert.equal(await clock.getAttribute("title"), "消息记录时间");
-  assert.match(await view.locator("#conversationTrace .trace-card.assistant .trace-cost").textContent(), /0\.40/);
+  await page.waitForFunction(() => /0\.40/.test(document.querySelector("#conversationTrace .trace-card.assistant .trace-cost").textContent));
+  assert.equal(await view.locator("#conversationActivityCost").isVisible(), false);
   await view.locator("#claudeReconcile").waitFor({ state: "hidden" });
   await view.locator("#conversationDetailsClose").click();
   await view.locator("#conversationAccount").selectOption(ids[0]);
@@ -130,15 +159,46 @@ try {
   await view.locator("#conversationSend").click();
   await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
   assert.equal(calls.filter(c => c.path.endsWith("/turns")).at(-1).body.nodeAccountId, ids[0]);
+  // Enter adds a message to the running turn, as with Codex.
+  const steered = sessions[0].activeTurn;
+  await page.waitForFunction(() => document.querySelector("#conversationSend").classList.contains("hidden"));
+  await view.locator("#conversationInput").fill("Add this note");
+  await view.locator("#conversationInput").press("Enter");
+  await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
+  const steer = calls.find(c => c.path.endsWith("/steer")).body;
+  assert.deepEqual([steer.expectedTurnId, steer.text], [steered, "Add this note"]);
+  assert.equal(calls.filter(c => c.path.endsWith("/turns")).length, 2, "a steer does not start another turn");
+  const note = view.locator("#conversationTrace .trace-card.user").filter({ hasText: "Add this note" });
+  await note.locator(".trace-steer-state").filter({ hasText: "等待加入本轮" }).waitFor();
+  emit({ type: "command_lifecycle", command_uuid: steer.requestId, state: "started" });
+  await note.locator(".trace-steer-state").waitFor({ state: "hidden" });
+  assert.equal(await note.getAttribute("data-steer-state"), null);
+  await view.locator("#conversationInput").fill("Too late");
+  await view.locator("#conversationInput").press("Enter");
+  await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
+  const late = calls.filter(c => c.path.endsWith("/turns")).at(-1).body;
+  assert.deepEqual([late.text, late.attachments], ["Too late", []], "a finished turn takes the message as the next turn");
+  assert.notEqual(sessions[0].activeTurn, steered);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="codex"]').count(),1);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="claude"]').count(),2);
-  await view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"}).click();
+  const awsRow = view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"});
+  assert.equal(await awsRow.isVisible(), false, "accounts outside the recent conversations stay folded");
+  await view.locator("[data-account-more]").click();
+  await awsRow.click();
   const curve = view.locator("#agentAccountDetails .spend-line");
   await curve.waitFor();
   assert.equal((await curve.getAttribute("d")).match(/L/g).length, 3, "each same-hour turn contributes a separate curve point");
   await page.evaluate(() => document.querySelector("#agentAccountDetails").hidePopover());
   await view.locator("#agentNewThread").click();
   assert.equal(await view.locator(`#conversationAccount option[value="${codexId}"]`).count(),1,"new sessions can select Codex again");
+  await view.locator("#conversationAccount").selectOption(ids[0]);
+  await page.waitForFunction(() => document.querySelector("#conversationEffortLabel").textContent === "思考 · 很高");
+  assert.equal(await view.locator("#conversationModelLabel").textContent(), "Claude", "the account model ID uses its SDK alias capabilities");
+  await view.locator("#conversationInput").fill("Use the account default effort");
+  await view.locator("#conversationSend").click();
+  await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");
+  const defaultTurn = calls.filter(c => c.path.endsWith("/turns")).at(-1).body;
+  assert.deepEqual([defaultTurn.nodeAccountId, defaultTurn.model, defaultTurn.effort], [ids[0], "claude-example", "xhigh"]);
   assert.deepEqual(errors, []);
   console.log("PASS: shared Claude account management, secret clearing, provider models, binding reload and idle account switch");
 } finally { await browser.close(); }

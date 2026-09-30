@@ -87,3 +87,7 @@ CREATE VIEW mira_claude_usage_deltas AS
  input IS NULL OR output IS NULL OR (ordinal>1 AND (prev_input IS NULL OR prev_output IS NULL OR input<prev_input OR output<prev_output)) AS usage_partial
  FROM previous;
 `
+
+// Running turns are priced from their API responses until the SDK result lands.
+const claudeLiveCostSQL = `CREATE INDEX mira_claude_assistant_events ON mira_claude_events(turn_id,seq) WHERE event_type='assistant';
+`

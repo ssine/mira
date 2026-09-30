@@ -1,4 +1,4 @@
-import { accountQuery, accountNode, accountGroups } from "./codex-accounts.js";
+import { accountQuery, accountNode, accountGroups, recentAccountKeys } from "./codex-accounts.js";
 import { weeklyQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
 import { AccountSpend, spendCacheLifetime, spendProjectionStatus } from "./account-spend.js";
@@ -18,6 +18,7 @@ export class AccountSidebar {
     this.timeoutMs = timeoutMs;
     this.cache = new Map();
     this.summaries = new Map(); this.summaryJobs = new Map();
+    this.threads = []; this.expanded = false;
     this.history = new AccountHistory(root.querySelector("[data-account-history]"));
     this.spend = new AccountSpend(root.querySelector("[data-account-spend]"));
     root.querySelector("[data-account-refresh]").addEventListener("click", () => {
@@ -27,7 +28,22 @@ export class AccountSidebar {
         if (this.spend.range !== "7d") this.spend.select({ nodeId: this.selectedName }, null, true, true);
       }
     });
+    root.querySelector("[data-account-more]").addEventListener("click", () => { this.expanded = !this.expanded; this.renderOverview(); });
     this.render();
+  }
+
+  // Only the accounts of the two most recently active conversations stay unfolded.
+  setThreads(threads) {
+    this.threads = threads;
+    if (this.groups?.length) this.renderOverview();
+  }
+
+  visibleGroups() {
+    const groups = this.groups ?? [], recent = recentAccountKeys(groups, this.threads);
+    const pinned = recent.length ? recent : groups.slice(0, 2).map(group => group.key);
+    // Pinned rows keep the name order so switching conversations does not reshuffle them.
+    const ordered = [...groups.filter(group => pinned.includes(group.key)), ...groups.filter(group => !pinned.includes(group.key))];
+    return { ordered, folded: ordered.length - pinned.length, visible: this.expanded ? ordered : ordered.slice(0, pinned.length) };
   }
 
   setNodes(nodes, active, legacyNode, { summariesActive = active } = {}) {
@@ -46,7 +62,7 @@ export class AccountSidebar {
     this.root.querySelector("#agentAccountToggle").classList.toggle("hidden", overview);
     this.root.querySelector("[data-account-list]").classList.toggle("hidden", !overview);
     if (!overview) {
-      this.selectedName = null;
+      this.selectedName = null; this.root.querySelector("[data-account-more]").hidden = true;
       this.select(emptyCatalog ? null : legacyNode, active && !emptyCatalog);
       if (emptyCatalog && this.root.querySelector("#agentAccountDetails").matches(":popover-open")) this.root.querySelector("#agentAccountDetails").hidePopover();
       return;
@@ -75,14 +91,16 @@ export class AccountSidebar {
     const list = this.root.querySelector("[data-account-list]");
     if (!list || !this.groups?.length) return;
     const existing = new Map([...list.children].map(row => [row.dataset.accountName, row]));
-    for (const group of this.groups) {
+    const { ordered, visible, folded } = this.visibleGroups();
+    for (const [index, group] of ordered.entries()) {
       let row = existing.get(group.key);
       if (!row) {
         row = document.createElement("button"); row.type = "button"; row.className = "sidebar-account-row";
         row.dataset.accountName = group.key; row.setAttribute("aria-haspopup", "dialog"); row.setAttribute("aria-controls", "agentAccountDetails");
         row.append(document.createElement("strong"), document.createElement("span"));
-        list.append(row);
       }
+      if (list.children[index] !== row) list.insertBefore(row, list.children[index] ?? null);
+      row.hidden = !visible.includes(group);
       existing.delete(group.key);
       const { node } = group.members[0];
       const quota = this.groupQuota(group);
@@ -100,6 +118,10 @@ export class AccountSidebar {
       row.setAttribute("aria-label", `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name}，${row.lastChild.textContent}`);
     }
     for (const row of existing.values()) row.remove();
+    const more = this.root.querySelector("[data-account-more]");
+    more.hidden = folded === 0;
+    more.textContent = this.expanded ? "收起账号" : `展开其余 ${folded} 个账号`;
+    more.setAttribute("aria-expanded", String(this.expanded));
     this.loadSummaries();
   }
 
@@ -112,14 +134,15 @@ export class AccountSidebar {
   loadSummaries() {
     clearTimeout(this.summaryTimer);
     if (!this.summariesActive || navigator.onLine === false) return;
-    for (const group of this.groups ?? []) {
+    const groups = this.groups?.length ? this.visibleGroups().visible : [];
+    for (const group of groups) {
       if (this.summaryJobs.size >= 2) break;
       if (this.groupQuota(group).remaining !== null || this.summaryJobs.has(group.key) ||
         (this.summaries.get(group.key)?.expiresAt ?? 0) > Date.now()) continue;
       const controller = new AbortController(); this.summaryJobs.set(group.key, controller);
       void this.loadSummary(group.key, controller);
     }
-    const next = (this.groups ?? []).filter(group => this.groupQuota(group).remaining === null && !this.summaryJobs.has(group.key))
+    const next = groups.filter(group => this.groupQuota(group).remaining === null && !this.summaryJobs.has(group.key))
       .map(group => this.summaries.get(group.key)?.expiresAt).filter(expiresAt => expiresAt > Date.now());
     if (next.length) this.summaryTimer = setTimeout(() => this.loadSummaries(), Math.max(1, Math.min(...next) - Date.now()));
   }
@@ -174,6 +197,7 @@ export class AccountSidebar {
     this.spend.clear();
     this.groups = []; this.selectedName = null;
     this.root.querySelector("[data-account-list]").replaceChildren();
+    this.root.querySelector("[data-account-more]").hidden = true;
     this.key = this.cacheKey = this.node = this.account = this.limits = null;
     this.available = false;
     this.message = "";

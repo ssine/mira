@@ -110,6 +110,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 		"claudeRuntimeV1":      true,
 		"claudeSessionCacheV1": true,
 		"claudeAccountsV1":     true,
+		"claudeSteerV1":        true,
 		"codexAccountsV1":      true,
 		"codexThreadHandoffV1": true,
 		"executionContexts":    runtime.GOOS == "windows",

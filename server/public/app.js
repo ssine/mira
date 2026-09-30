@@ -337,26 +337,40 @@ async function loadClaudeTranscript(threadId, options = {}) {
     if (!options.poll || activeBefore !== result.session.activeTurn || Date.now() - (thread._claudeReadAt || 0) > 10_000) {
       const summary = await readConversation(threadId);
       if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
-      summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary);
+      summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary); renderReplyProgress();
     }
     if (!options.poll || result.changed) {
       const follow = !options.prepend && traceNearBottom();
       const viewport = options.prepend ? { mode: "prepend", top: traceScroller().scrollTop, height: traceScroller().scrollHeight } : follow ? null : captureTraceViewport();
       const forms = new Map([...$("#conversationTrace").querySelectorAll("form[data-claude-question]")].map(form => [form.dataset.claudeQuestion, form]));
+      const previous = agent.transcriptThreadId === threadId ? agent.transcriptItems : null;
       agent.transcriptThreadId = threadId; agent.transcriptGeneration = 1;
       const previousCosts = new Map(agent.transcriptItems.filter(i => i.turnCostEstimate).map(i => [i.key, i.turnCostEstimate]));
       for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
       agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
       agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
-      renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
-      if (!thread.subpath) scheduleTranscriptCosts(threadId, { trace: result.trace, generation: 1, itemCount: currentAgentThread()?.itemCount });
-      for (const item of result.trace) {
-        const card = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(item.key)}"]`);
-        if (!card) continue;
+      let cards = options.poll && previous ? patchClaudeTranscript(previous, result.trace) : null;
+      if (cards) {
+        // Question forms depend on the running turn even when unchanged.
+        for (const item of result.trace) if (item.questionId && !cards.has(item.key)) cards.set(item.key, traceCard(item.key));
+      } else {
+        renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
+        cards = new Map([...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
+      }
+      const byKey = new Map(result.trace.map(item => [item.key, item]));
+      for (const [key, card] of cards) {
+        const item = byKey.get(key);
+        if (!card || !item) continue;
         const body = card.querySelector(".trace-body");
-        if (item.nativeImage && !body.querySelector("img")) {
-          const img = element("img", "trace-image"); img.src = item.nativeImage; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
+        const images = item.nativeImages ?? (item.nativeImage ? [item.nativeImage] : []);
+        for (const src of images.slice(body.querySelectorAll(":scope > img.trace-image").length)) {
+          const img = element("img", "trace-image"); img.src = src; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
         }
+        const steerNote = { queued: "等待加入本轮", cancelled: "未加入本轮" }[item.steerState] || "";
+        if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
+        let note = card.querySelector(".trace-steer-state");
+        if (steerNote && !note) card.append(note = element("div", "trace-steer-state"));
+        if (note) { note.textContent = steerNote; note.hidden = !steerNote; }
         const q = result.questions.get(item.questionId);
         if (q) {
           const form = forms.get(q.questionId) || claudeQuestionForm(q, thread.sessionId);
@@ -368,6 +382,10 @@ async function loadClaudeTranscript(threadId, options = {}) {
       if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId && item.kind === "assistant" && item.body?.trim()))) replyProgress.finish(progress);
       renderReplyProgress();
       if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
+    }
+    // A turn can settle without new events; its footer still needs the final cost.
+    if (!thread.subpath && (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null))) {
+      scheduleTranscriptCosts(threadId, { trace: agent.transcriptItems, generation: 1, itemCount: currentAgentThread()?.itemCount });
     }
     syncActiveTurnUi();
     return result;
@@ -382,6 +400,51 @@ async function loadClaudeTranscript(threadId, options = {}) {
       }, agent.activeTurns.has(threadId) ? 750 : 3000);
     }
   }
+}
+
+function traceCard(key) {
+  return $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
+}
+
+// The fields a Claude transcript card shows. Output images are only appended.
+function sameClaudeItem(left, right) {
+  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "nativeImage", "steerState", "questionId", "completedAt", "turnElapsedMs", "turnCompletedAt"]
+    .every(field => left[field] === right[field]) && (left.nativeImages?.length ?? 0) === (right.nativeImages?.length ?? 0) &&
+    JSON.stringify([left.activity, left.turnCostEstimate]) === JSON.stringify([right.activity, right.turnCostEstimate]);
+}
+
+// A poll usually appends to the tail or finishes a running item. Update only
+// those cards and return them by key; any other change rebuilds the transcript.
+function patchClaudeTranscript(previous, next) {
+  const trace = $("#conversationTrace");
+  const nextKeys = new Set(next.map(item => item.key));
+  const kept = previous.filter(item => nextKeys.has(item.key));
+  const known = new Map(kept.map(item => [item.key, item]));
+  let index = 0, appended = false;
+  for (const item of next) {
+    if (!known.has(item.key)) appended = true;
+    else if (appended || kept[index++].key !== item.key) return null;
+  }
+  const cards = new Map([...trace.querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
+  if (!kept.length || kept.some(item => !cards.has(item.key))) return null;
+  // Replaced stream text, for example, leaves the transcript.
+  for (const item of previous) {
+    const card = nextKeys.has(item.key) ? null : cards.get(item.key);
+    if (!card) continue;
+    const group = card.closest(".tool-group");
+    card.remove();
+    if (group && !group.querySelector(".trace-card")) group.remove(); else updateToolGroup(group);
+  }
+  const tail = cards.get(kept.at(-1).key);
+  if (![tail, tail.closest(".tool-group")].includes(trace.lastElementChild)) return null;
+  const changed = new Map(), turns = new Set();
+  for (const item of next) {
+    if (sameClaudeItem(known.get(item.key), item)) continue;
+    changed.set(item.key, upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", transcriptTraceOptions(item)));
+    if (item.kind === "assistant") turns.add(item.turnId);
+  }
+  for (const turnId of turns) refreshTurnFooters(turnId);
+  return changed;
 }
 
 function claudeQuestionForm(question, sessionId) {
@@ -403,9 +466,45 @@ function claudeQuestionForm(question, sessionId) {
   return form;
 }
 
+// Input sent while Claude runs joins that turn at its next tool boundary. When
+// the turn is already finishing, its uploaded input starts the next turn instead.
+async function steerClaudeTurn(thread, text, attachments, progress) {
+  let body = claudeRuntime.steerRequests.get(thread.sessionId);
+  if (!body) {
+    const node = dashboardNodes.get(thread.runtimeNodeId);
+    if (node && !node.capabilities?.claudeSteerV1) throw new Error("此执行节点升级后才能在 Claude 运行时追加消息，请等待本轮结束后再发送");
+    const expectedTurnId = agent.activeTurns.get(thread.threadId);
+    const uploaded = await prepareTurnInput(text, attachments, progress);
+    body = { expectedTurnId, text: text || "请查看附件。", attachments: uploaded.nativeAttachments };
+  }
+  updateReplyProgress(progress, { threadId: thread.threadId, phase: "正在加入本轮…" });
+  try {
+    await claudeRuntime.steer(thread, body);
+  } catch (error) {
+    if (error.code !== "turn_not_steerable") throw error;
+    updateReplyProgress(progress, { phase: "本轮已结束，正在作为新一轮发送…" });
+    const deadline = Date.now() + 120_000;
+    while ((await claudeRuntime.call(`sessions/${thread.sessionId}`)).activeTurn === body.expectedTurnId) {
+      if (Date.now() > deadline) throw new Error("Claude 仍在结束上一轮，请稍后重试");
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+    return { text: body.text, attachments: body.attachments };
+  }
+  replyProgress.finish(progress);
+  renderReplyProgress();
+  await loadClaudeTranscript(thread.threadId, { poll: claudeRuntime.cursor > 0 });
+  return null;
+}
+
 async function sendClaudeMessage(text, attachments, progress) {
-  if (agent.activeTurns.has(agent.threadId)) throw new Error("请等待本轮结束后再发送");
   if (currentAgentThread()?.subpath) throw new Error("请在主会话中继续子 Agent 的工作");
+  let input = null;
+  const current = currentAgentThread();
+  if (current && !claudeRuntime.turnRequests.has(current.sessionId) &&
+      (agent.activeTurns.has(current.threadId) || claudeRuntime.steerRequests.has(current.sessionId))) {
+    input = await steerClaudeTurn(current, text, attachments, progress);
+    if (!input) return;
+  }
   const node = selectedAccountNode();
   const nodeId = node?.nodeId, nodeAccountId = node?.nodeAccountId || "";
   if (!node || node.status !== "online") throw new Error("请选择在线的 Claude 运行节点");
@@ -432,8 +531,8 @@ async function sendClaudeMessage(text, attachments, progress) {
   const thread = currentAgentThread();
   let body = claudeRuntime.turnRequests.get(thread.sessionId);
   if (!body) {
-    const uploaded = await prepareTurnInput(text, attachments, progress);
-    body = { text: text || "请查看附件。", attachments: uploaded.nativeAttachments, nodeId, nodeAccountId, cwd,
+    input ??= { text: text || "请查看附件。", attachments: (await prepareTurnInput(text, attachments, progress)).nativeAttachments };
+    body = { ...input, nodeId, nodeAccountId, cwd,
       model: selectedConversationModel() || "", effort: selectedConversationEffort() || "", continueAcknowledgedHistory: $("#claudeContinue").checked };
   }
   const result = await claudeRuntime.send(thread, body);
@@ -481,7 +580,6 @@ function selectConversationAccount(bindingId) {
   agent.accountSelections.set(nodeId, bindingId); refreshAccountChoices(bindingId);
   stopAgentRecovery(); closeAgentSocket(); agent.modelChoice = null; agent.effortChoice = null;
   agent.modelCatalog = null; agent.modelCatalogKey = null;
-  if (selectedAccountNode()?.engine === "claude") agent.modelChoice = selectedAccountNode()?.reportedAppServer?.provider?.model || null;
   syncAccountSidebar(); syncConversationSendUi(); void loadConversationModels();
   if (!agent.threadId && agent.draftProject) void selectComposerDraft(`personal:new:${agent.draftProject.key}:${bindingId}`);
   if (agent.threadId) {
@@ -579,6 +677,12 @@ function renderTurnActivity(submitting) {
   const text = activity.state === "unknown" ? activityLabel(activity, agent.threadId) : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
   const label = $("#conversationActivityText");
   if (visible && label.textContent !== text) label.textContent = text;
+  const stored = agent.persistedActivity.get(agent.threadId);
+  const estimate = visible && turnId && stored?.turnId === turnId ? stored.costEstimate : null;
+  const cost = $("#conversationActivityCost");
+  cost.hidden = !estimate;
+  cost.textContent = estimate ? `本轮约 ${compactCost(estimate)}` : "";
+  cost.title = estimate?.note ?? "";
 }
 
 function activityLabel(activity, threadId) {
@@ -2767,9 +2871,24 @@ function conversationModelKey() {
   return JSON.stringify([$("#agentRuntimeNode").value, $("#conversationCwd").value.trim(), node?.nodeAccountId ?? "", node?.accountRevision ?? 0, node?.reportedAppServer?.runtimeId ?? "", node?.engine ?? "codex"]);
 }
 
+// A new conversation starts from the settings of the selected account's most recently active one.
+function lastUsedConversationSettings() {
+  const node = selectedAccountNode(), catalog = modelCatalogForConversation();
+  if (agent.threadId || !node || !catalog) return null;
+  const engine = node.engine || "codex", binding = node.nodeAccountId || "";
+  let latest = null;
+  for (const thread of agent.threads) {
+    if ((thread.engine || "codex") !== engine || thread.parentThreadId || thread.subpath || !thread.model) continue;
+    if ((thread.nodeAccountId || "") !== binding || (thread.runtimeNodeId || thread.sourceNodeId) !== node.nodeId) continue;
+    if (!latest || (Date.parse(thread.updatedAt) || 0) > (Date.parse(latest.updatedAt) || 0)) latest = thread;
+  }
+  if (!latest || !catalog.models.some(item => item.model === latest.model)) return null;
+  return { model: latest.model, effort: latest.reasoningEffort || null };
+}
+
 function selectedConversationModel() {
-  return agent.modelChoice || currentAgentThread()?.model ||
-    (agent.modelCatalogKey === conversationModelKey() ? agent.modelCatalog?.defaultModel : null) || null;
+  const catalog = modelCatalogForConversation();
+  return agent.modelChoice || currentAgentThread()?.model || lastUsedConversationSettings()?.model || catalog?.defaultModel || null;
 }
 
 const reasoningEffortLabels = {
@@ -2801,8 +2920,10 @@ function conversationEffortOptions() {
 function selectedConversationEffort() {
   const catalog = modelCatalogForConversation(), definition = conversationModelDefinition();
   const supported = new Set(conversationEffortOptions().map(option => option.reasoningEffort));
+  const model = selectedConversationModel(), lastUsed = lastUsedConversationSettings();
   for (const value of [agent.effortChoice, agent.threadReasoningEffort,
-    selectedConversationModel() === catalog?.defaultModel ? catalog?.configuredReasoningEffort : null,
+    lastUsed?.model === model ? lastUsed.effort : null,
+    model === catalog?.defaultModel ? catalog?.configuredReasoningEffort : null,
     definition?.defaultReasoningEffort]) {
     if (typeof value === "string" && value && supported.has(value)) return value;
   }
@@ -3223,6 +3344,7 @@ function refreshTurnFooters(turnId = null) {
         ? `API 估算：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
         : "暂无法估算本轮费用：缺少请求用量、模型或对应价格";
     if (costEstimate?.basis === "claude_sdk") cost.title = `Claude SDK 估算：${formatEstimatedCost(costEstimate.amount)}，网关实际扣费可能不同${costEstimate.status === "partial" ? "；部分记录缺失" : ""}`;
+    if (costEstimate?.running) cost.title = costEstimate.note;
     const clock = last.querySelector(".trace-completed");
     if (clock.hidden && traceClock(completedAt)) {
       clock.textContent = traceClock(completedAt);
@@ -3241,6 +3363,7 @@ function updateTraceBodyState(card, value, kind) {
   if (copy) copy.hidden = value.length === 0;
   if (kind === "reasoning" && card._miraExpandable) {
     card.querySelector(".trace-kind").textContent = reasoningHeading(value);
+    updateToolGroup(card.closest(".tool-group"));
   }
 }
 
@@ -3348,6 +3471,15 @@ function scrollTraceToBottom() {
 function updateToolGroup(group) {
   if (!group) return;
   const cards = [...group.querySelectorAll(".trace-card.tool")];
+  if (!cards.length) {
+    // Thinking between two replies, without any tool call.
+    const thoughts = group.querySelectorAll(".trace-card.reasoning");
+    group.querySelector(".tool-group-total").textContent = thoughts.length > 1 ? `思考 · ${thoughts.length} 段` : "思考";
+    group.querySelector(".tool-group-latest").textContent = reasoningHeading(thoughts[thoughts.length - 1]?.querySelector(".trace-body")._miraSource);
+    group.querySelector(".tool-group-counts").textContent = "";
+    group.classList.remove("has-running-tool");
+    return;
+  }
   const activities = cards.map((card) => card._miraActivity ?? {
     status: activityStatus(card.dataset.traceStatus),
     actions: [{ kind: "tool", label: card.dataset.traceTitle || "工具" }],
@@ -3359,6 +3491,12 @@ function updateToolGroup(group) {
   const duration = formatActivityDuration(latest?.durationMs);
   group.querySelector(".tool-group-latest").textContent = `${activitySummary(latest)}${duration ? ` · ${duration}` : ""}`;
   group.classList.toggle("has-running-tool", running > 0);
+}
+
+// Tool calls and the thinking between them collapse into one row; a proposed
+// plan and all replies stay in the conversation itself.
+function groupedTrace(kind, title, options = {}) {
+  return options.collapseTools !== false && (kind === "tool" || (kind === "reasoning" && title !== "计划"));
 }
 
 function ensureToolGroup(trace, turnId = "", before = null) {
@@ -3437,7 +3575,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     }
     if (!["image", "compaction", "recovery"].includes(kind)) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
-    if (kind === "tool" && options.collapseTools !== false) {
+    if (groupedTrace(kind, title, options)) {
       ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     } else {
       trace.append(card);
@@ -3451,7 +3589,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     setTraceMetadata(card, options);
   }
   if (!trace.contains(card)) {
-    if (kind === "tool" && options.collapseTools !== false) ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
+    if (groupedTrace(kind, title, options)) ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     else trace.append(card);
   }
   card.dataset.traceTitle = title;
@@ -3899,8 +4037,11 @@ async function loadToolDetails(card) {
 }
 
 function scheduleTranscriptCosts(threadId, transcript) {
+  // A running Claude turn is priced by its summary; fetch its footer once it settles.
+  const running = engineOf(threadId) === "claude" ? agent.activeTurns.get(threadId) : null;
   const turnIds = [...new Set((transcript.trace ?? [])
-    .filter((item) => item.kind === "assistant" && item.turnId && item.turnCostEstimate == null)
+    .filter((item) => item.kind === "assistant" && item.turnId && item.turnId !== running &&
+      (item.turnCostEstimate == null || item.turnCostEstimate.running))
     .map((item) => item.turnId))];
   if (!turnIds.length) return;
   const key = JSON.stringify([threadId, transcript.generation, transcript.itemCount, turnIds]);
@@ -4003,6 +4144,19 @@ function compactionSummaryKeys(items) {
   return hidden;
 }
 
+function transcriptTraceOptions(item) {
+  return {
+    autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, turnId: item.turnId,
+    transcriptKey: item.key, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
+    completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
+    elapsedApproximate: item.elapsedApproximate,
+    ...(Number.isFinite(item.turnElapsedMs) ? {
+      turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs,
+      turnElapsedApproximate: item.turnElapsedApproximate, turnCostEstimate: item.turnCostEstimate,
+    } : {}),
+  };
+}
+
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
   const summaryKeys = compactionSummaryKeys(agent.transcriptItems);
@@ -4040,13 +4194,8 @@ function renderTranscript(fallbackThread, options = {}) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, reuseCard: reusableCards.get(key), turnId: item.turnId,
-      transcriptKey: item.key, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
-      completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
-      elapsedApproximate: item.elapsedApproximate,
+      ...transcriptTraceOptions(item), reuseCard: reusableCards.get(key),
       ...(Number.isFinite(item.turnElapsedMs) ? {
-        turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs,
-        turnElapsedApproximate: item.turnElapsedApproximate,
         turnCostEstimate: item.turnCostEstimate ?? knownTurnTimings.get(item.turnId)?.turnCostEstimate,
       } : knownTurnTimings.get(item.turnId)),
       ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
@@ -4075,7 +4224,7 @@ function renderTranscript(fallbackThread, options = {}) {
       // instead of appending them after the completed turn during reconciliation.
       const anchorGroup = nextLiveAnchor?.closest(".tool-group");
       const before = anchorGroup ?? nextLiveAnchor;
-      if (card.dataset.traceKind === "tool") {
+      if (groupedTrace(card.dataset.traceKind, card.dataset.traceTitle)) {
         const sameGroup = anchorGroup?.dataset.turnId === (card.dataset.turnId ?? "");
         const group = sameGroup ? anchorGroup : ensureToolGroup(trace, card.dataset.turnId ?? "", before);
         group.querySelector(".tool-group-items").insertBefore(card, sameGroup ? nextLiveAnchor : null);
@@ -4644,6 +4793,7 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
 }
 
 function renderAgentThreads(revealSelection = false) {
+  accountSidebar.setThreads(agent.threads);
   const list = $("#agentThreadList"), scrollTop = list.scrollTop;
   const active = list.contains(document.activeElement) ? document.activeElement : null;
   const focusKey = active?.dataset.threadId ? ["threadId", active.dataset.threadId]

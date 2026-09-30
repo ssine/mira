@@ -77,3 +77,19 @@ func TestAccountProviderRejectsCredentialsInPublicMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountProviderEffort(t *testing.T) {
+	provider := AccountProvider{ID: "anthropic", BaseURL: "https://messages.example", Model: "claude-example"}
+	for _, effort := range []string{"", "low", "medium", "high", "xhigh", "max"} {
+		provider.Effort = effort
+		if err := provider.Validate(); err != nil {
+			t.Fatalf("effort %q rejected: %v", effort, err)
+		}
+	}
+	for _, effort := range []string{"minimal", "XHIGH", "ultra"} {
+		provider.Effort = effort
+		if provider.Validate() == nil {
+			t.Fatalf("effort %q accepted", effort)
+		}
+	}
+}

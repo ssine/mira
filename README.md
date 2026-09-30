@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.62 修复 Claude 主回复先结束时后台子任务被提前收尾的问题，补齐回复时间，并按每轮对话细分账号费用曲线。
+1.0.63 让 Claude 对话按 Codex 的节奏展示：工具调用与思考按段折叠，保留简短进展；支持运行中追加消息、实时显示费用，并与 Codex 共用 Developer instructions 文件。
 
 1.0.59 将 Codex 与 Claude 放进同一个对话页：共用项目列表、消息区、输入框和账号选择；Claude 增加按轮次、会话与账号统计的 SDK 费用估算。
 
@@ -164,13 +164,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.62
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.63
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.62'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.63'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
@@ -512,8 +512,8 @@ Home Server 自身的 Node 应优先作为原生 systemd 服务运行，文件�
 每个运行节点可在 Web 的“运行节点”页配置一个本机 UTF-8 Developer Message 文件。Mira Server
 会在托管 App Server 的 `thread/start`、`thread/resume` 和 `thread/fork` 请求中，通过该 Node
 的文件能力读取最多 256 KiB 并注入 `developerInstructions`；读取失败会阻止请求，避免策略被
-静默忽略。内容会进入 Codex 会话的长期上下文，因此不应包含密钥。该设置不影响 `mira codex`
-CLI。
+静默忽略。托管 Claude Code 共用同一文件：每轮对话开始时以相同限制读取，并追加到系统提示词。
+内容会进入会话的长期上下文，因此不应包含密钥。该设置不影响 `mira codex` CLI。
 
 ## 验证
 

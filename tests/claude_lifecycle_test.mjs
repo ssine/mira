@@ -39,3 +39,37 @@ test("ordinary completion, errors and ambient tasks retain bounded turn ownershi
   const child = new TurnLifecycle();
   assert.equal(child.observe({ ...result, parent_tool_use_id: "tool" }), false);
 });
+
+const lifecycle = (uuid, state) => ({ type: "command_lifecycle", command_uuid: uuid, state });
+
+test("a steer folded at a tool boundary completes with the same result", () => {
+  // Observed SDK order: queued, started at the next tool result, completed, then one result listing both prompts.
+  const state = new TurnLifecycle();
+  assert.equal(state.steer("steer"), true);
+  state.observe(lifecycle("steer", "queued"));
+  state.observe(lifecycle("steer", "started"));
+  state.observe(lifecycle("steer", "completed"));
+  assert.equal(state.observe({ ...result, user_message_uuids: ["first", "steer"] }), true);
+});
+
+test("a steer queued during the final answer keeps input open for its own response", () => {
+  // Observed SDK order: the first result omits the queued steer; the second lists it before its completed lifecycle.
+  const state = new TurnLifecycle();
+  state.steer("steer");
+  state.observe(lifecycle("steer", "queued"));
+  assert.equal(state.observe({ ...result, user_message_uuids: ["first"] }), false);
+  state.observe(lifecycle("first", "completed"));
+  state.observe(lifecycle("steer", "started"));
+  assert.equal(state.observe({ ...result, user_message_uuids: ["steer"] }), true);
+  assert.equal(state.steer("late"), false, "a finished turn cannot accept more input");
+});
+
+test("cancelled steers and failed results release the turn", () => {
+  const cancelled = new TurnLifecycle();
+  cancelled.steer("steer");
+  cancelled.observe(lifecycle("steer", "cancelled"));
+  assert.equal(cancelled.observe(result), true);
+  const failed = new TurnLifecycle();
+  failed.steer("steer");
+  assert.equal(failed.observe({ ...result, is_error: true }), true);
+});

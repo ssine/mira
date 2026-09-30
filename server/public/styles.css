@@ -391,6 +391,9 @@ tbody tr:hover { background: var(--hover); }
 .sidebar-account-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-height: 38px; padding: 7px 8px; border: 0; background: transparent; text-align: left; }
 .sidebar-account-row:hover, .sidebar-account-row[aria-expanded="true"] { background: var(--hover); }
 .sidebar-account-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
+.sidebar-account-row[hidden], .sidebar-account-more[hidden] { display: none; }
+.sidebar-account-more { display: block; width: 100%; min-height: 28px; padding: 4px 8px; border: 0; background: transparent; color: var(--muted); font-size: 11px; text-align: left; }
+.sidebar-account-more:hover { color: var(--text); background: var(--hover); }
 .sidebar-account-row > span { flex: none; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
 .spend-bar { fill: var(--accent); fill-opacity: .18; }
 @media (pointer: coarse) { .sidebar-account-row { min-height: 44px; } }
@@ -527,6 +530,8 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-elapsed:not([hidden]) + .trace-cost:not([hidden])::before { margin-right: 8px; content: "·"; }
 .trace-body { margin: 0; overflow: visible; overflow-wrap: anywhere; color: var(--text); font: 12px/1.6 var(--font-code); white-space: pre-wrap; }
 .trace-card.user .trace-body { padding: 8px 12px; border-radius: 7px; background: var(--accent-soft); font: 14px/1.6 var(--font-ui); line-height: calc(1.6em + 1px); }
+.trace-card.user[data-steer-state] .trace-body { opacity: .65; }
+.trace-steer-state { margin-top: 3px; color: var(--muted); font: 12px/1.4 var(--font-ui); text-align: right; }
 .trace-card.assistant .trace-body { font: 15px/1.6 var(--font-ui); line-height: calc(1.6em + 1px); }
 .trace-card.system .trace-head, .trace-card.error .trace-head { margin-bottom: 2px; }
 .trace-card-empty .trace-head { margin-bottom: 0; }
@@ -578,15 +583,16 @@ progress { width: 100%; accent-color: var(--accent); }
 .tool-group[open] .tool-group-total::before { transform: rotate(90deg); }
 .tool-group-counts { flex: 0 1 auto; min-width: 0; max-width: 28%; overflow: hidden; text-overflow: ellipsis; font: 11px/1.4 var(--font-code); }
 .tool-group-latest { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 13px; line-height: 16.5px; text-overflow: ellipsis; }
-.tool-group-items{display:grid;gap:1px;padding:0;border-top:1px solid var(--line);background:var(--line)}
-.tool-group .trace-card.tool { width: 100%; max-width: 100%; border-left: 0; background: var(--canvas); }
+.tool-group-items{display:grid;grid-template-columns:minmax(0,1fr);gap:1px;padding:0;border-top:1px solid var(--line);background:var(--line)}
+.tool-group .trace-card.tool, .tool-group .trace-card.reasoning { width: 100%; max-width: 100%; border-left: 0; background: var(--canvas); }
+.tool-group .trace-card.reasoning .trace-kind { color: var(--muted); }
 .has-running-tool { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
 .has-running-tool .tool-group-latest { color: var(--accent-hover); }
 .conversation-compose-area { grid-area: conversation-composer; min-width: 0; padding: 0 calc(var(--conversation-inline-end) + var(--conversation-scrollbar-width)) 0 var(--conversation-inline-start); }
 .conversation-composer { position: relative; z-index: 4; width: min(100%, 808px); margin: 0 auto; padding: 4px 0 max(8px, env(safe-area-inset-bottom)); border: 0; background: var(--canvas); }
 .conversation-progress { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 2px 6px; color: var(--muted); font-size: 10px; }
 #conversationProgressText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#conversationProgressTime { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#conversationProgressTime, #conversationActivityCost { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .reply-spinner { width: 11px; height: 11px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: reply-spin 1s linear infinite; }
 .activity-unknown .reply-spinner { animation: none; border-color: var(--muted); border-style: dotted; }
 .conversation-drop-zone { border: 1px solid color-mix(in srgb, var(--input-border) 55%, var(--canvas)); border-radius: 8px; background: var(--canvas); box-shadow: 0 2px 8px rgb(22 34 52 / 4%); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }

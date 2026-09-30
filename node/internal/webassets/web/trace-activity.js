@@ -200,7 +200,7 @@ export function responseToolView(payload, status = "completed") {
   return null;
 }
 
-const verbs = { read: "读取", search: "搜索", list: "列出", run: "执行", create: "创建", edit: "修改", delete: "删除", tool: "调用" };
+const verbs = { read: "读取", search: "搜索", list: "列出", run: "执行", create: "创建", edit: "修改", delete: "删除", agent: "运行子 Agent", tool: "调用" };
 
 export function activitySummary(activity) {
   if (!activity?.actions?.length) return "";

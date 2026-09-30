@@ -9,7 +9,7 @@ export function accountOverviewFixture() {
   nodes[0].codexAccounts = [account(ids[2], ids[0], "Shared", 30, "2026-09-12T01:00:00Z"), account(ids[3], ids[0], "API", null)];
   nodes[1].codexAccounts = [account(ids[4], ids[1], "Shared", 0, "2026-09-12T02:00:00Z"), account(ids[5], ids[1], "Offline API", null)];
   const threads = [6, 7].map((i, index) => ({ threadId: ids[i], title: index ? "Running conversation" : "Account overview", cwd: "/work", model: "gpt-6-astra",
-    runtimeNodeId: ids[0], nodeAccountId: ids[2], generation: 1, itemCount: 1, updatedAt: new Date().toISOString(),
+    runtimeNodeId: ids[0], nodeAccountId: ids[index ? 3 : 2], generation: 1, itemCount: 1, updatedAt: new Date().toISOString(),
     activity: { state: index ? "running" : "idle", turnId: `turn-${i}`, generation: 1, itemCount: 1 } }));
   const history = (range = "7d") => {
     const to = Date.now(), today = new Date(); today.setHours(0, 0, 0, 0);

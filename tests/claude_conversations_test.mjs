@@ -34,6 +34,46 @@ test("native projections replace stream prose, merge tool results, and retain na
  assert.equal(claudeTrace([...rows,{seq:99,payload:{type:"mira_answer",questionId:"q",answers:{a:"yes"}}}]).questions.size,0);
 });
 
+test("tool calls carry readable activities, keep their images, and omit sub-agent task events", () => {
+ const png = {type:"image",source:{type:"base64",media_type:"image/png",data:"AAAA"}};
+ const use = (id,name,input,timestamp) => ({type:"assistant",uuid:`a-${id}`,timestamp,message:{id:`m-${id}`,content:[{type:"tool_use",id,name,input}]}});
+ const done = (id,content,timestamp,extra={}) => ({type:"user",uuid:`u-${id}`,timestamp,...extra,message:{content:[{type:"tool_result",tool_use_id:id,content}]}});
+ const rows = [
+ {type:"system",subtype:"init",cwd:"/work/repo/"},
+ {type:"mira_user",text:"go"},
+ use("bash","Bash",{command:"go test ./...",description:"Run tests"},"2026-09-30T01:00:00Z"),
+ done("bash","ok","2026-09-30T01:00:38Z"),
+ use("edit","Edit",{file_path:"/work/repo/app.js",old_string:"a",new_string:"b"}),
+ done("edit","updated",undefined,{tool_use_result:{filePath:"/work/repo/app.js",structuredPatch:[{lines:[" x","-a","+b","+c"]}]}}),
+ use("write","Write",{file_path:"/elsewhere/new.md",content:"one\ntwo\n"}),
+ done("write","created",undefined,{toolUseResult:{type:"create",content:"one\ntwo\n",structuredPatch:[]}}),
+ use("shot","Read",{file_path:"/work/repo/shot.png"}),
+ done("shot",[png,{type:"text",text:"image"}]),
+ use("agent","Agent",{description:"调查超时",prompt:"…",subagent_type:"general-purpose"}),
+ {type:"system",subtype:"task_started",task_id:"x",description:"调查超时"},
+ {type:"system",subtype:"task_notification",task_id:"x",status:"completed",summary:"done"},
+ done("agent","report"),
+ use("mcp","mcp__home_nodes__process",{action:"list"}),
+ {type:"assistant",uuid:"think",message:{id:"m-think",content:[{type:"thinking",thinking:"**Checking** the result"}]}},
+ use("grep","Grep",{pattern:"TODO",path:"/work/repo/src"}),
+ ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
+ const view = claudeTrace(rows,{activeTurn:"turn"});
+ const tools = Object.fromEntries(view.trace.filter(x=>x.kind==="tool").map(x=>[x.key.slice(5),x.activity]));
+ assert.deepEqual(tools.bash,{status:"completed",durationMs:38000,actions:[{kind:"run",label:"go test ./..."}]});
+ assert.deepEqual(tools.edit.actions,[{kind:"edit",label:"app.js",added:2,removed:1}]);
+ assert.deepEqual(tools.write.actions,[{kind:"create",label:"/elsewhere/new.md",added:2,removed:0}]);
+ assert.deepEqual(tools.shot.actions,[{kind:"read",label:"shot.png"}]);
+ assert.deepEqual(tools.agent.actions,[{kind:"agent",label:"调查超时"}]);
+ assert.deepEqual(tools.mcp,{status:"running",durationMs:null,actions:[{kind:"tool",label:"home_nodes · process"}]});
+ assert.deepEqual(tools.grep.actions,[{kind:"search",label:"“TODO”（src）"}]);
+ assert.deepEqual(view.trace.find(x=>x.key==="tool:shot").nativeImages,["data:image/png;base64,AAAA"]);
+ assert.equal(view.trace.some(x=>x.title==="图片"||x.title==="子任务"),false);
+ assert.equal(view.trace.find(x=>x.kind==="reasoning").body,"**Checking** the result");
+ // The turn ended without these results.
+ const ended = claudeTrace(rows).trace.filter(x=>x.activity?.status==="interrupted").map(x=>x.key);
+ assert.deepEqual(ended,["tool:mcp","tool:grep"]);
+});
+
 test("Claude block completion keeps streaming identity until the whole message stops", async () => {
  for (const reloaded of [false,true]) {
   let seq=0, data=[];
@@ -94,6 +134,36 @@ test("lost native turn response reuses exactly the same request and account",asy
  await runtime.send({sessionId:"s"},{text:"two",nodeAccountId:"B"});assert.deepEqual(requests[0],requests[1]);
 });
 
+test("added messages render where Claude read them and report unread ones", () => {
+ const steer=(id,text)=>({type:"mira_steer",steerId:id,text,message:{role:"user",content:[{type:"text",text}]}});
+ const lifecycle=(id,state)=>({type:"command_lifecycle",command_uuid:id,state});
+ const reply=(id,text)=>({type:"assistant",uuid:id,message:{id,content:[{type:"text",text}]}});
+ const rows=[
+  {type:"mira_user",text:"start"},steer("read","read me"),lifecycle("read","queued"),steer("rejected","resent"),{type:"mira_steer_rejected",steerId:"rejected"},
+  steer("waiting","later"),lifecycle("waiting","queued"),reply("a","first"),lifecycle("read","started"),reply("b","second"),
+ ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
+ const users=view=>view.trace.filter(x=>x.kind==="user"||x.kind==="assistant").map(x=>[x.body,x.steerState]);
+ assert.deepEqual(users(claudeTrace(rows,{activeTurn:"turn"})),[["start",undefined],["first",undefined],["read me","inserted"],["second",undefined],["later","queued"]]);
+ // A stop cancels a waiting message; one never started by a turn that ended is also unread.
+ assert.equal(claudeTrace(rows).trace.find(x=>x.key==="steer:waiting").steerState,"cancelled");
+ const stopped=[...rows,{seq:20,turnId:"turn",payload:lifecycle("waiting","cancelled")},{seq:21,turnId:"turn",payload:reply("c","stopped")}];
+ assert.deepEqual(users(claudeTrace(stopped,{activeTurn:"turn"})).slice(-2),[["later","cancelled"],["stopped",undefined]]);
+ // A result that names the message places it when no start was recorded.
+ const listed=[...rows,{seq:20,turnId:"turn",payload:{type:"result",user_message_uuids:["waiting"]}}];
+ assert.equal(claudeTrace(listed).trace.find(x=>x.key==="steer:waiting").steerState,"inserted");
+});
+
+test("lost steer response retries the same request, and a finished turn clears it",async()=>{
+ const requests=[];let fail=true;
+ const runtime=new ClaudeRuntime(async (url,options)=>{requests.push([url,JSON.parse(options.body)]);if(fail){fail=false;throw new Error("lost");}return{accepted:true};});
+ await assert.rejects(runtime.steer({sessionId:"s"},{expectedTurnId:"t",text:"one"}));
+ await runtime.steer({sessionId:"s"},{expectedTurnId:"t",text:"two"});
+ assert.deepEqual(requests[0],requests[1]);assert.equal(requests[0][0],"/v1/claude/sessions/s/steer");
+ assert.equal(runtime.steerRequests.size,0);
+ const finished=new ClaudeRuntime(async()=>{throw Object.assign(new Error("finished"),{status:409,code:"turn_not_steerable"});});
+ await assert.rejects(finished.steer({sessionId:"s"},{expectedTurnId:"t",text:"one"}));assert.equal(finished.steerRequests.size,0);
+});
+
 test("empty native pages preserve the legacy Codex full-tree contract", async () => {
  const rows=[{threadId:"root"},{threadId:"child",parentThreadId:"root",activity:{state:"running"}}];
  const reader=conversationPageReader(async url=>url.startsWith("/v1/codex/")?{data:rows}:{paged:true,data:[],projects:[]},()=>"codex");
@@ -114,4 +184,23 @@ test("sending or reselecting during a native history read starts a fresh poll", 
  assert.equal(reads.length,2,"new selection must not join an obsolete read");
  reads[0](null);await old;assert.equal(timers.length,0);
  reads[1](null);await current;assert.equal(timers.length,1,"current selection keeps polling");
+});
+
+test("account model IDs borrow effort levels from the SDK alias and expose the account default effort", async () => {
+ const efforts=["low","medium","high","xhigh","max"];
+ const catalog=[{value:"default",resolvedModel:"claude-opus-5-5[1m]",displayName:"Default",supportedEffortLevels:efforts},
+  {value:"opus",resolvedModel:"claude-opus-5-5",displayName:"Opus 5.5",supportedEffortLevels:efforts},
+  {value:"legacy",resolvedModel:"claude-legacy",displayName:"Legacy",supportsEffort:false}];
+ const runtime=new ClaudeRuntime(async url=>url.endsWith("/describe")?{models:catalog}:{status:"ready"});
+ const node=provider=>({nodeId:"wsl",nodeAccountId:"a",reportedAppServer:{provider}});
+ const configured=await runtime.models(node({model:"claude-opus-5-5",effort:"xhigh"}));
+ assert.equal(configured.defaultModel,"claude-opus-5-5");assert.equal(configured.configuredReasoningEffort,"xhigh");
+ assert.deepEqual(configured.models[0],{model:"claude-opus-5-5",displayName:"Opus 5.5",description:"账号默认模型",supportedReasoningEfforts:efforts.map(reasoningEffort=>({reasoningEffort}))});
+ const longContext=await runtime.models(node({model:"claude-opus-5-5[1m]"}));
+ assert.equal(longContext.models[0].displayName,"Default");assert.equal(longContext.models[0].supportedReasoningEfforts.length,5);
+ assert.equal(longContext.configuredReasoningEffort,null);
+ assert.equal((await runtime.models(node({model:"opus"}))).models.length,3,"catalog values are not duplicated");
+ const unknown=await runtime.models(node({model:"claude-unknown"}));
+ assert.deepEqual(unknown.models[0].supportedReasoningEfforts,[]);
+ assert.equal((await runtime.models(node({model:"legacy"}))).models.length,3);
 });

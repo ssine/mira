@@ -51,6 +51,11 @@ This also covers CLI execution and conversations on different Nodes that have no
 live subscription in that browser. App Server subscribers keep immediate live
 updates; other windows display newly persisted output on their next check.
 
+In the transcript, consecutive tool calls and thinking share one collapsed group
+whose header shows the tool count and latest action; a group without tools is
+headed "思考". A proposed plan and assistant text stay outside groups, so long
+turns read as progress updates separated by single tool lines.
+
 Run `go test ./internal/miraserver/views` from `node/` for projection and PostgreSQL
 coverage, and `tests/thread_activity_browser.mjs` against a disposable Server for
 browser live-event/reconnect/history regressions.

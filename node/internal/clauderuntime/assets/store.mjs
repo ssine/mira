@@ -69,12 +69,11 @@ export function serverClient({
       return (await (await request("/subkeys")).json()).subkeys;
     },
   };
-  async function event(payload) {
-    const body = {
-      eventId:
-        payload.type === "mira_question" ? payload.questionId : randomUUID(),
-      payload,
-    };
+  async function event(
+    payload,
+    eventId = payload.type === "mira_question" ? payload.questionId : randomUUID(),
+  ) {
+    const body = { eventId, payload };
     // Retrying this exact storage envelope cannot replay model/tool execution.
     for (let attempt = 0; ; attempt++) {
       try {

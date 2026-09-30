@@ -144,6 +144,7 @@
             <footer class="chat-drawer-footer">
               <section id="agentAccount" class="sidebar-account" aria-label="所有节点的 Agent 账号与额度">
                 <div data-account-list class="sidebar-account-list"></div>
+                <button data-account-more class="sidebar-account-more" type="button" aria-expanded="false" hidden></button>
                 <button id="agentAccountToggle" class="sidebar-account-toggle" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="agentAccountDetails">
                   <span data-account-summary-email>Codex 账户</span><span data-account-summary-plan></span>
                   <span data-account-summary-remaining>查看账户与额度</span><span data-account-summary-credits></span>
@@ -211,7 +212,7 @@
             <label id="claudePersistence" class="workspace-notice warning" hidden><input id="claudeContinue" type="checkbox">历史未完整保存。我已检查记录，继续使用已保存的历史。</label>
             <form id="conversationForm" class="conversation-composer">
               <p id="conversationConnection" class="hidden" role="status"></p>
-              <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span></div>
+              <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span><span id="conversationActivityCost" hidden></span></div>
               <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span><button id="conversationUploadCancel" class="composer-cancel hidden" type="button" aria-label="取消上传" title="取消上传">×</button></div>
               <input id="conversationCwd" type="hidden">
               <div id="conversationDropZone" class="conversation-drop-zone">
@@ -306,7 +307,7 @@
             <button id="agentRuntimeSaveCwd" class="secondary runtime-setting" type="button">保存默认目录</button>
             <label>Developer Message 文件<input id="agentRuntimeDeveloperInstructionsFile" type="text" placeholder="节点上的 UTF-8 绝对路径"></label>
             <button id="agentRuntimeSaveDeveloperInstructions" class="secondary runtime-setting" type="button">保存 Developer Message 文件</button>
-            <p class="muted">在新建、恢复或分叉会话时读取（最大 256 KiB）。内容会发送给 Codex 并随会话长期存在，请勿存放密钥。</p>
+            <p class="muted">Codex 与 Claude 共用：Codex 在新建、恢复或分叉会话时读取，Claude 每轮对话开始时读取并追加到系统提示词（最大 256 KiB）。内容会随会话长期存在，请勿存放密钥。</p>
             <div class="agent-side-actions"><button id="agentRuntimeStart" class="approve" type="button">启动并连接</button><button id="agentRuntimeStop" class="danger" type="button">停止</button></div>
             <p id="agentRuntimeState" class="muted">请选择支持 App Server 的在线节点。</p>
           </section>
@@ -530,6 +531,7 @@
         <label data-account-home hidden>节点上的 Codex home<input name="home" placeholder="配置目录的绝对路径"></label>
         <label data-account-provider hidden>服务商 API 地址<input name="baseUrl" type="url" placeholder="https://provider.example/v1"></label>
         <label data-account-claude-model hidden>默认模型<input name="claudeModel" maxlength="200" placeholder="claude-opus-5-5"></label>
+        <label data-account-claude-effort hidden>默认思考强度<select name="claudeEffort"><option value="">Claude Code 默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">很高</option><option value="max">最高</option></select></label>
         <label data-account-region hidden>AWS 区域<input name="region" value="us-east-1" maxlength="64"></label>
         <label>API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="32768"></label>
         <p data-account-key-hint class="muted"></p>

@@ -140,29 +140,27 @@ func (server *Server) routeClaudeAccounts(ctx context.Context, w http.ResponseWr
 
 // Called while holding the account row through reservation. Configuration edits
 // hold the same row, so no turn can race a credential change or disable operation.
-func claudeAccountForTurn(ctx context.Context, tx pgx.Tx, nodeID, accountID string) (string, error) {
+func claudeAccountForTurn(ctx context.Context, tx pgx.Tx, nodeID, accountID string) (clauderuntime.AccountProvider, error) {
+	var provider clauderuntime.AccountProvider
 	if accountID == "" {
-		return "", nil
+		return provider, nil
 	}
 	if !claudeUUID(accountID) {
-		return "", claudeError(400, "Invalid Claude account ID")
+		return provider, claudeError(400, "Invalid Claude account ID")
 	}
 	var owner string
 	var enabled, configured bool
-	var provider clauderuntime.AccountProvider
 	var raw []byte
 	err := tx.QueryRow(ctx, `SELECT node_id::text,enabled,configured,provider FROM mira_claude_accounts WHERE node_account_id=$1 FOR UPDATE`, accountID).Scan(&owner, &enabled, &configured, &raw)
 	if err == pgx.ErrNoRows {
-		return "", claudeError(409, "Claude account is unavailable on this Node")
+		return provider, claudeError(409, "Claude account is unavailable on this Node")
 	}
 	if err != nil {
-		return "", err
+		return provider, err
 	}
 	if owner != nodeID || !enabled || !configured {
-		return "", claudeError(409, "Choose a configured, enabled Claude account on the execution Node")
+		return provider, claudeError(409, "Choose a configured, enabled Claude account on the execution Node")
 	}
-	if err = json.Unmarshal(raw, &provider); err != nil {
-		return "", err
-	}
-	return provider.Model, nil
+	err = json.Unmarshal(raw, &provider)
+	return provider, err
 }

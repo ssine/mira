@@ -20,7 +20,10 @@ Use Mira's existing administrator session; mutations require `X-Mira-CSRF`.
   continueAcknowledgedHistory?}`. Attachment entries have native `path`, `name`,
   and `mime`. Request ID is the durable turn ID. Exact replay returns that ID,
   including after worker exit; it never dispatches again. Active turns conflict.
+- `POST sessions/{id}/steer`: `{requestId,expectedTurnId,text,attachments?}` adds
+  input to the running turn (see [Adding input to a running turn](#adding-input-to-a-running-turn)).
 - `POST sessions/{id}/interrupt`: request native interruption and allow mirror flush.
+  Added input the model has not read yet is discarded.
 - `POST sessions/{id}/answer`: `{questionId,answers}` for a question emitted by
   the currently active turn. The Node forwards it to the waiting native tool.
 - `POST sessions/{id}/reconcile`: inspect the owning Node. An absent worker closes
@@ -55,9 +58,10 @@ or additional security identity is introduced.
 - `GET sessions/{id}/entries?subpath=`: ordered native JSONL stream.
 - `GET sessions/{id}/subkeys`: `{subkeys:[...]}` for native child transcripts.
 - `POST sessions/{id}/events`: `{eventId:UUID,payload:object}`. SDK messages are
-  unchanged. Adapter lifecycle records use `mira_user`, `mira_question`,
-  `mira_answer`, `mira_interrupt_requested`, `mira_error`, and `mira_completed`.
-  Question event IDs equal question IDs. Other IDs are independent UUIDs.
+  unchanged. Adapter lifecycle records use `mira_user`, `mira_steer`,
+  `mira_steer_rejected`, `mira_question`, `mira_answer`, `mira_interrupt_requested`,
+  `mira_error`, and `mira_completed`. Question event IDs equal question IDs and
+  `mira_steer` event IDs equal steer request IDs. Other IDs are independent UUIDs.
 
 Root transcript subpath is empty. Child paths are opaque relative paths up to
 1024 characters; absolute, backslash, traversal and NUL paths are rejected.
@@ -85,7 +89,8 @@ The existing administrator account UI includes Claude bindings, exposed as
 `claudeAccounts` on Node views. `POST /v1/claude/accounts` creates a Node binding
 from `nodeId` and `name`; `PATCH /v1/claude/accounts/:id` changes `name` or `enabled`.
 `POST /v1/claude/accounts/:id/configure` sends a typed `provider` (`id`: `anthropic`
-or `bedrock`, `baseUrl`, `model`, and Bedrock `region`) and an optional `apiKey`
+or `bedrock`, `baseUrl`, `model`, Bedrock `region`, and optional default `effort`:
+`low`, `medium`, `high`, `xhigh` or `max`) and an optional `apiKey`
 through the private Node channel. Omit `apiKey` to retain it; an empty key clears it.
 Keys never enter PostgreSQL, account responses, desired state, or audit metadata.
 
@@ -97,6 +102,15 @@ ambient credentials. Account row locks serialize reservation with credential
 changes; the Node also refuses changes while one of that account's workers runs.
 The account binding is durable metadata, independent of native transcript entries.
 Runtime `describe` accepts the same binding for native model/account discovery.
+When a turn resolves to the account's `model` and neither the request nor the session
+supplies an effort, the account's default `effort` is used; otherwise the SDK default
+applies. The account `model` is usually a full model ID while the native catalog lists
+aliases, so clients match it to catalog entries through `resolvedModel`.
+
+Each turn appends the Node's `desiredAppServer.developerInstructionsFile`, shared with
+Codex, to the Claude Code system prompt. It uses the same bounded file-capability
+reader (UTF-8, at most 256 KiB), is read on every turn, and blocks the turn when it
+cannot be read or validated.
 
 ## Shared conversation read projections (Mira 1.0.59)
 
@@ -134,3 +148,36 @@ with equal Start/End. Clients verify the received record count. Absent cache hea
 mean a complete legacy stream and must never be appended to a cached prefix.
 Ordinary GET is unchanged. Authentication/revision/ownership checks always apply,
 including cache hits, and storage failure never authorizes an offline resume.
+
+## Adding input to a running turn
+
+Desktop Nodes that can add input to a running turn advertise `claudeSteerV1`.
+`POST sessions/{id}/steer` takes `{requestId,expectedTurnId,text,attachments?}`;
+the request ID is a UUID naming this input, and attachments use the turn format.
+The Server forwards it to the worker that owns `expectedTurnId` and returns
+`{accepted:true,turnId}` only after the worker has recorded and queued it:
+
+- The worker records `mira_steer` `{steerId,message,text,attachments}` under the
+  request ID before queueing the native user message with the same UUID. If the
+  turn finishes in between, it records `mira_steer_rejected` `{steerId}` instead.
+- The SDK reports the queued message with `command_lifecycle`
+  `{command_uuid,state}` events: `queued`, then `started` when the model reads it
+  (at the next tool boundary, or as another response when it arrives during the
+  final answer), then `completed`. A stop reports `cancelled`. Results list read
+  messages in `user_message_uuids`. A successful result ends the turn only once
+  no accepted message is outstanding.
+- `409 turn_not_steerable`: the turn is no longer `expectedTurnId`, or is
+  finishing. Nothing was queued; send the input as a new turn once it ends.
+- `409 steer_unsupported`: the owning Node lacks `claudeSteerV1`.
+- `400`: invalid request, or input the worker could not read (such as an image).
+- `503`: the worker could not record the input, so it will not join this turn.
+  The worker keeps this verdict for the request ID; after the turn ends, a retry
+  returns `turn_not_steerable`.
+- A retried request ID replays its verdict. After the turn ends, a recorded
+  `mira_steer` without a later rejection returns `{accepted:true,turnId,replayed:true}`;
+  while the turn runs, the worker answers again from its own record. A worker that
+  does not answer in time returns an error without a verdict: the input may still
+  join the turn, and only a retry with the same request ID is safe.
+
+Transcript projections place an added message at its `started` event. Until
+then it is shown as waiting; one the turn never read is shown as not added.
