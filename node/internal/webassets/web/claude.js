@@ -68,7 +68,7 @@ function pruneCompletedStreams(rows) {
 }
 
 export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
-  const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map();
+  const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map(), endedTurns = new Set();
   let interrupted = false, cwd = "";
   const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, ...extra });
   function blocks(message, key, role, turnId, timestamp, toolResult) {
@@ -138,11 +138,14 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
       if (raw?.type === "message_stop") streams.delete(scope);
     } else if (e.type === "mira_question") {
       questions.set(e.questionId, { ...e, turnId });
-      put(`question:${e.questionId}`, "assistant", "需要你的选择", "", turnId, { questionId: e.questionId });
+      put(`question:${e.questionId}`, "question", "等待你的回答", (e.questions || []).map(q => q.question).join("\n\n"), turnId,
+        { questionId: e.questionId, questionState: "pending" });
     } else if (e.type === "mira_answer") {
       questions.delete(e.questionId);
-      put(`question:${e.questionId}`, "assistant", "已回答", Object.values(e.answers || {}).join(" · "), turnId);
-    } else if (e.type === "mira_interrupt_requested") interrupted = true;
+      put(`question:${e.questionId}`, "question", "已回答", Object.entries(e.answers || {}).map(([question, answer]) => `${question}\n${answer}`).join("\n\n"), turnId,
+        { questionId: e.questionId, questionState: "answered" });
+    } else if (e.type === "mira_interrupt_requested") { interrupted = true; endedTurns.add(turnId); }
+    else if (e.type === "mira_completed") endedTurns.add(turnId);
     else if (e.type === "mira_error") put(key, "error", "运行错误", e.message, turnId);
     else if (e.type === "system" && e.subtype === "mirror_error") put(key, "error", "历史未完整保存", "部分原生记录未能保存到 Mira。", turnId);
     else if (e.type === "result") {
@@ -159,6 +162,12 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
     if (item.activity?.status === "running" && item.turnId !== activeTurn) item.activity = { ...item.activity, status: "interrupted" };
   }
   for (const [id, steer] of steers) placeSteer(id, steer.turnId === activeTurn ? "queued" : "cancelled");
+  for (const [id, question] of questions) {
+    if (question.turnId === activeTurn && !endedTurns.has(question.turnId)) continue;
+    questions.delete(id);
+    const item = items.get(`question:${id}`);
+    Object.assign(item, { title: "问题已结束", questionState: "cancelled", body: `${item.body}\n\n本轮已结束，此问题不再等待回答。` });
+  }
   return { trace: [...items.values()], questions };
 }
 

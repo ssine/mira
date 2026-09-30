@@ -339,7 +339,7 @@ async function loadClaudeTranscript(threadId, options = {}) {
       if (agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
       summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary); renderReplyProgress();
     }
-    if (!options.poll || result.changed) {
+    if (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null)) {
       const follow = !options.prepend && traceNearBottom();
       const viewport = options.prepend ? { mode: "prepend", top: traceScroller().scrollTop, height: traceScroller().scrollHeight } : follow ? null : captureTraceViewport();
       const forms = new Map([...$("#conversationTrace").querySelectorAll("form[data-claude-question]")].map(form => [form.dataset.claudeQuestion, form]));
@@ -366,7 +366,7 @@ async function loadClaudeTranscript(threadId, options = {}) {
         for (const src of images.slice(body.querySelectorAll(":scope > img.trace-image").length)) {
           const img = element("img", "trace-image"); img.src = src; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
         }
-        const steerNote = { queued: "等待加入本轮", cancelled: "未加入本轮" }[item.steerState] || "";
+        const steerNote = { queued: "等待加入本轮", cancelled: "本轮已结束，这条消息未被读取" }[item.steerState] || "";
         if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
         let note = card.querySelector(".trace-steer-state");
         if (steerNote && !note) card.append(note = element("div", "trace-steer-state"));
@@ -374,12 +374,16 @@ async function loadClaudeTranscript(threadId, options = {}) {
         const q = result.questions.get(item.questionId);
         if (q) {
           const form = forms.get(q.questionId) || claudeQuestionForm(q, thread.sessionId);
-          body.replaceChildren(form);
-          for (const control of form.elements) control.disabled = !result.session.activeTurn || q.turnId !== result.session.activeTurn || form.dataset.submitted === "true";
+          // A form is visible content even if the native event has no prose.
+          body.hidden = false;
+          card.classList.remove("trace-card-empty");
+          if (form.parentNode !== body) body.replaceChildren(form);
+          form.setActive(q.turnId === result.session.activeTurn);
         }
       }
       const progress = replyProgress.current(threadId);
-      if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId && item.kind === "assistant" && item.body?.trim()))) replyProgress.finish(progress);
+      if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId &&
+        (item.questionState === "pending" || item.kind === "assistant" && item.body?.trim())))) replyProgress.finish(progress);
       renderReplyProgress();
       if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
     }
@@ -408,7 +412,7 @@ function traceCard(key) {
 
 // The fields a Claude transcript card shows. Output images are only appended.
 function sameClaudeItem(left, right) {
-  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "nativeImage", "steerState", "questionId", "completedAt", "turnElapsedMs", "turnCompletedAt"]
+  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "nativeImage", "steerState", "questionId", "questionState", "completedAt", "turnElapsedMs", "turnCompletedAt"]
     .every(field => left[field] === right[field]) && (left.nativeImages?.length ?? 0) === (right.nativeImages?.length ?? 0) &&
     JSON.stringify([left.activity, left.turnCostEstimate]) === JSON.stringify([right.activity, right.turnCostEstimate]);
 }
@@ -448,20 +452,57 @@ function patchClaudeTranscript(previous, next) {
 }
 
 function claudeQuestionForm(question, sessionId) {
-  const form = element("form", "request-form"); form.dataset.claudeQuestion = question.questionId;
-  for (const q of question.questions || []) {
-    const label = element("label", "", q.question), input = element("input"); input.name = q.question; input.required = true;
-    label.append(input); form.append(label);
+  const form = element("form", "claude-question-form"); form.dataset.claudeQuestion = question.questionId;
+  const fields = [];
+  let active = true, sending = false, submitted = false;
+  for (const [index, q] of (question.questions || []).entries()) {
+    const field = element("fieldset", "claude-question-field");
+    field.append(element("legend", "", q.header || `问题 ${index + 1}`), element("p", "claude-question-text", q.question));
+    field.append(element("p", "claude-question-hint", !q.options?.length ? "请填写你的回答" : q.multiSelect ? "可多选，也可以自行填写" : "请选择一项，或自行填写"));
+    const choices = [];
     for (const o of q.options || []) {
-      const button = element("button", "secondary", o.label); button.type = "button"; button.title = o.description || "";
-      button.addEventListener("click", () => { input.value = q.multiSelect ? [input.value, o.label].filter(Boolean).join(", ") : o.label; }); form.append(button);
+      const label = element("label", "claude-question-option"), choice = element("input");
+      choice.type = q.multiSelect ? "checkbox" : "radio";
+      choice.name = `choice-${question.questionId}-${index}`; choice.value = o.label;
+      const text = element("span"); text.append(element("strong", "", o.label));
+      if (o.description) text.append(element("span", "claude-question-description", o.description));
+      label.append(choice, text); field.append(label); choices.push(choice);
     }
+    const label = element("label", "claude-question-custom", "补充说明 / 其他答案"), input = element("textarea");
+    input.name = `text-${index}`; input.rows = 2; label.append(input); field.append(label); form.append(field);
+    fields.push({ question: q.question, choices, input });
+    field.addEventListener("input", () => input.setCustomValidity(""));
+    field.addEventListener("change", () => input.setCustomValidity(""));
   }
-  const send = element("button", "primary", "回答"); send.type = "submit"; form.append(send);
+  const actions = element("div", "claude-question-actions"), send = element("button", "primary", "提交回答");
+  send.type = "submit";
+  const feedback = element("span", "claude-question-feedback"); feedback.setAttribute("role", "status");
+  actions.append(send, feedback); form.append(actions);
+  form.setActive = value => {
+    active = value;
+    for (const control of form.elements) control.disabled = !active || sending || submitted;
+    form.setAttribute("aria-busy", String(sending));
+    send.textContent = sending ? "正在提交…" : submitted ? "已提交" : "提交回答";
+  };
   form.addEventListener("submit", async e => {
-    e.preventDefault(); send.disabled = true;
-    try { await claudeRuntime.call(`sessions/${sessionId}/answer`, { questionId: question.questionId, answers: Object.fromEntries(new FormData(form)) }); form.dataset.submitted = "true"; }
-    catch (error) { toast(error.message); send.disabled = false; }
+    e.preventDefault();
+    if (!active || sending || submitted) return;
+    if (agent.activeTurns.get(sessionId) !== question.turnId) { form.setActive(false); return; }
+    const answers = [];
+    for (const { question: text, choices, input } of fields) {
+      const selected = choices.filter(choice => choice.checked).map(choice => choice.value).join(", ");
+      const answer = [selected, input.value.trim()].filter(Boolean).join("\n");
+      input.setCustomValidity(answer ? "" : "请选择选项或填写答案。");
+      if (!input.reportValidity()) return;
+      answers.push([text, answer]);
+    }
+    sending = true; feedback.textContent = ""; feedback.classList.remove("error"); form.setActive(active);
+    try {
+      await claudeRuntime.call(`sessions/${sessionId}/answer`, { questionId: question.questionId, answers: Object.fromEntries(answers) });
+      submitted = true; feedback.textContent = "回答已发送，等待 Claude 继续…";
+    } catch (error) {
+      feedback.textContent = `提交失败：${error.message}，可重试。`; feedback.classList.add("error");
+    } finally { sending = false; form.setActive(active && agent.activeTurns.get(sessionId) === question.turnId); }
   });
   return form;
 }
@@ -504,6 +545,10 @@ async function sendClaudeMessage(text, attachments, progress) {
       (agent.activeTurns.has(current.threadId) || claudeRuntime.steerRequests.has(current.sessionId))) {
     input = await steerClaudeTurn(current, text, attachments, progress);
     if (!input) return;
+  }
+  if (current?.persistence === "incomplete" && !claudeRuntime.turnRequests.has(current.sessionId) && !$("#claudeContinue").checked) {
+    $("#claudeContinue").focus();
+    throw new Error("部分历史可能未保存。请先勾选“允许本次从已保存的记录继续”，再发送消息。");
   }
   const node = selectedAccountNode();
   const nodeId = node?.nodeId, nodeAccountId = node?.nodeAccountId || "";
@@ -674,7 +719,9 @@ function renderTurnActivity(submitting) {
     if (follow) scrollTraceToBottom();
   }
   const engine = engineOf(agent.threadId) === "claude" ? "Claude" : "Codex";
-  const text = activity.state === "unknown" ? activityLabel(activity, agent.threadId) : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
+  const waiting = engine === "Claude" && agent.transcriptThreadId === agent.threadId &&
+    agent.transcriptItems.some(item => item.turnId === turnId && item.questionState === "pending");
+  const text = activity.state === "unknown" ? activityLabel(activity, agent.threadId) : waiting ? "Claude 等待你的回答" : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
   const label = $("#conversationActivityText");
   if (visible && label.textContent !== text) label.textContent = text;
   const stored = agent.persistedActivity.get(agent.threadId);
@@ -2859,6 +2906,8 @@ function syncConversationSendUi() {
   $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
   $("#conversationCwd").disabled = busy || child;
   $("#claudePersistence").hidden = !native || currentAgentThread()?.persistence !== "incomplete";
+  $("#claudeContinueLabel").hidden = running || child;
+  $("#claudeContinue").disabled = running || child;
   $(".conversation-recovery-settings").classList.toggle("hidden", native);
   renderConversationModel();
   for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy || composerDraftLoading;

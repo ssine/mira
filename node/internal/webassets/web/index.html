@@ -209,7 +209,11 @@
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             </div>
             <div id="conversationComposer" class="conversation-compose-area">
-            <label id="claudePersistence" class="workspace-notice warning" hidden><input id="claudeContinue" type="checkbox">历史未完整保存。我已检查记录，继续使用已保存的历史。</label>
+            <aside id="claudePersistence" class="claude-persistence" hidden aria-label="历史保存状态">
+              <strong>部分历史可能未保存</strong>
+              <p id="claudePersistenceHelp">中断或保存失败后，Claude 将以已保存的记录继续，缺失内容不会自动恢复。</p>
+              <label id="claudeContinueLabel"><input id="claudeContinue" type="checkbox" aria-describedby="claudePersistenceHelp">允许本次从已保存的记录继续</label>
+            </aside>
             <form id="conversationForm" class="conversation-composer">
               <p id="conversationConnection" class="hidden" role="status"></p>
               <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span><span id="conversationActivityCost" hidden></span></div>
