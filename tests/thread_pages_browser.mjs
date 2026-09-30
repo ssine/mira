@@ -76,7 +76,9 @@ try {
  await oldProject.locator('.thread-project-history-summary').click();
  await page.locator(`[data-thread-row="${old.threadId}"]`).waitFor();
  await page.goto(`${origin}/?thread=${nested.threadId}`);
- await page.locator(`[data-thread-row="${nested.threadId}"]`).waitFor();
+ // The selected row can render provisionally before its ancestry loads. Wait
+ // until it is inside the expanded path instead of sampling that intermediate UI.
+ await page.locator(`[data-subagent-parent="${id(1)}"][open] [data-subagent-parent="${id(1000)}"][open] [data-thread-row="${nested.threadId}"]`).waitFor();
  assert.equal(await page.locator(`[data-subagent-parent="${id(1)}"]`).getAttribute('open'),'');
  assert.equal(await page.locator(`[data-subagent-parent="${id(1000)}"]`).getAttribute('open'),'');
  assert.equal(requests.some(q=>q.limit==='300'),false,'paged clients never poll the legacy 300-row list');
