@@ -219,6 +219,7 @@ func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[s
 	result["updatedAt"] = s.UpdatedAt
 	result["createdAt"] = s.CreatedAt
 	result["persistence"] = s.Persistence
+	result["historyAcknowledgementRequired"] = s.HistoryAcknowledgementRequired
 	result["listRoot"] = true
 	var count, seq int64
 	var lastTurn *string

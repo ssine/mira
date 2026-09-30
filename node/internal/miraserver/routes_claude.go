@@ -43,26 +43,42 @@ func claudeUUID(s string) bool {
 }
 
 type claudeSession struct {
-	ID          string    `json:"sessionId"`
-	NodeID      string    `json:"nodeId"`
-	Cwd         string    `json:"cwd"`
-	Title       string    `json:"title"`
-	Model       string    `json:"model"`
-	Effort      string    `json:"effort"`
-	AccountID   string    `json:"nodeAccountId"`
-	Archived    bool      `json:"archived"`
-	Revision    int64     `json:"revision"`
-	ActiveTurn  *string   `json:"activeTurn"`
-	Persistence string    `json:"persistence"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID                             string    `json:"sessionId"`
+	NodeID                         string    `json:"nodeId"`
+	Cwd                            string    `json:"cwd"`
+	Title                          string    `json:"title"`
+	Model                          string    `json:"model"`
+	Effort                         string    `json:"effort"`
+	AccountID                      string    `json:"nodeAccountId"`
+	Archived                       bool      `json:"archived"`
+	Revision                       int64     `json:"revision"`
+	ActiveTurn                     *string   `json:"activeTurn"`
+	Persistence                    string    `json:"persistence"`
+	HistoryAcknowledgementRequired bool      `json:"historyAcknowledgementRequired"`
+	CreatedAt                      time.Time `json:"createdAt"`
+	UpdatedAt                      time.Time `json:"updatedAt"`
 }
 
-const claudeColumns = `session_id::text,node_id::text,cwd,title,model,effort,archived,revision,active_turn::text,persistence,created_at,updated_at,COALESCE(node_account_id::text,'')`
+// Incomplete is historical evidence, not a request to acknowledge the same gap
+// on every turn. Rebuild the acknowledgement boundary from accepted turn requests;
+// a mirror failure or reconciled worker exit at/after that revision opens a new gap.
+// This also recognizes acknowledgements made by older Servers without rewriting history.
+const claudeHistoryAcknowledgement = `CASE WHEN persistence='incomplete' THEN NOT COALESCE((
+ SELECT NOT EXISTS(SELECT 1 FROM mira_claude_turns later
+   WHERE later.session_id=ack.session_id AND later.revision>=ack.revision AND (
+     later.error='Runtime ended without an acknowledged completion' OR EXISTS(
+       SELECT 1 FROM mira_claude_events e WHERE e.session_id=later.session_id AND e.turn_id=later.turn_id
+       AND ((e.event_type='system' AND e.payload->>'subtype'='mirror_error') OR e.payload->>'degraded'='true'))))
+ FROM mira_claude_turns ack WHERE ack.session_id=mira_claude_sessions.session_id
+   AND ack.request->>'continueAcknowledgedHistory'='true' ORDER BY ack.revision DESC LIMIT 1
+),false) ELSE false END`
+
+const claudeSessionColumns = `session_id::text,node_id::text,cwd,title,model,effort,archived,revision,active_turn::text,persistence,created_at,updated_at,COALESCE(node_account_id::text,'')`
+const claudeColumns = claudeSessionColumns + `,` + claudeHistoryAcknowledgement
 
 func scanClaude(row pgx.Row) (claudeSession, error) {
 	var s claudeSession
-	err := row.Scan(&s.ID, &s.NodeID, &s.Cwd, &s.Title, &s.Model, &s.Effort, &s.Archived, &s.Revision, &s.ActiveTurn, &s.Persistence, &s.CreatedAt, &s.UpdatedAt, &s.AccountID)
+	err := row.Scan(&s.ID, &s.NodeID, &s.Cwd, &s.Title, &s.Model, &s.Effort, &s.Archived, &s.Revision, &s.ActiveTurn, &s.Persistence, &s.CreatedAt, &s.UpdatedAt, &s.AccountID, &s.HistoryAcknowledgementRequired)
 	if errors.Is(err, pgx.ErrNoRows) {
 		err = claudeError(404, "Claude session not found")
 	}
@@ -638,7 +654,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		return err
 	}
 	defer tx.Rollback(ctx)
-	s, err = scanClaude(tx.QueryRow(ctx, `SELECT `+claudeColumns+` FROM mira_claude_sessions WHERE session_id=$1 FOR UPDATE`, s.ID))
+	s, err = scanClaude(tx.QueryRow(ctx, `SELECT `+claudeSessionColumns+`,false FROM mira_claude_sessions WHERE session_id=$1 FOR UPDATE`, s.ID))
 	if err != nil {
 		return err
 	}
@@ -657,6 +673,11 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 	if s.ActiveTurn != nil {
 		return claudeError(409, "A Claude turn is already active; stop it before starting another")
 	}
+	// Take a fresh snapshot after acquiring the session lock: a writer that held
+	// it before us may have recorded a new gap while the locking SELECT waited.
+	if err = tx.QueryRow(ctx, `SELECT `+claudeHistoryAcknowledgement+` FROM mira_claude_sessions WHERE session_id=$1`, s.ID).Scan(&s.HistoryAcknowledgementRequired); err != nil {
+		return err
+	}
 
 	var count int
 	err = tx.QueryRow(ctx, `SELECT count(*) FROM mira_claude_entries WHERE session_id=$1 AND subpath=''`, s.ID).Scan(&count)
@@ -672,7 +693,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 			return claudeError(409, "No acknowledged native Claude history is available. Start a new conversation instead of falling back to local history.")
 		}
 	}
-	if s.Persistence == "incomplete" && b["continueAcknowledgedHistory"] != true {
+	if s.HistoryAcknowledgementRequired && b["continueAcknowledgedHistory"] != true {
 		return claudeError(409, "Claude history is incomplete. Inspect the saved history before explicitly continuing with acknowledged history.")
 	}
 	revision := s.Revision + 1
@@ -743,7 +764,9 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		return err
 	}
 	defer tx.Rollback(ctx)
-	s, err := scanClaude(tx.QueryRow(ctx, `SELECT `+claudeColumns+` FROM mira_claude_sessions WHERE session_id=$1 FOR UPDATE`, id))
+	// Storage writes need ownership only; do not rescan historical gap evidence on
+	// every streamed event or transcript batch. Reads and turn acceptance derive it.
+	s, err := scanClaude(tx.QueryRow(ctx, `SELECT `+claudeSessionColumns+`,false FROM mira_claude_sessions WHERE session_id=$1 FOR UPDATE`, id))
 	if err != nil {
 		return err
 	}

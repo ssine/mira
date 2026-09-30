@@ -11,7 +11,7 @@ try {
   await context.route("**/app.js", async route => {
     const response = await route.fetch();
     await route.fulfill({ response, body: (await response.text()).replace("void bootstrap();",
-      "window.recoveryRegression = { retainTurnError }; void bootstrap();") });
+      "window.recoveryRegression = { retainTurnError, handleAgentNotification, renderTranscript, recoveryNotices }; void bootstrap();") });
   });
   await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data: [thread] } }));
   await context.route(/\/v1\/codex\/threads\/[^?]+\?/, route => {
@@ -23,6 +23,7 @@ try {
         { key: "reply", turnId: "first", kind: "assistant", body: "Already completed work." },
         { key: "mismatch", turnId: "failed", kind: "error", title: "Turn 失败", status: "失败", body: raw },
         { key: "ordinary", turnId: "other", kind: "error", title: "Turn 失败", status: "失败", body: "Permission denied" },
+        { key: "final", turnId: "recovered", kind: "assistant", body: "Recovery finished successfully." },
       ],
     } : thread });
   });
@@ -55,6 +56,50 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   assert.equal(await recovery.locator(".trace-body").isVisible(), false);
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  // Replayed live failures must reconcile at their original chronological
+  // position, and never accumulate below a later successful final response.
+  await recovery.locator("summary").click();
+  await page.evaluate(({ id, raw }) => {
+    window.recoveryRegression.retainTurnError(id, "failed", raw);
+    window.recoveryRegression.retainTurnError(id, "failed", raw);
+    window.recoveryRegression.renderTranscript(null);
+  }, { id: thread.threadId, raw });
+  assert.equal(await recovery.count(), 1, "repeated live/canonical errors were duplicated");
+  assert.notEqual(await recovery.locator(".trace-detail").getAttribute("open"), null, "reconciliation closed the user's expanded recovery details");
+  await recovery.locator("summary").click();
+  assert(await recovery.evaluate(card => !!(card.compareDocumentPosition(document.querySelector('[data-trace-key="final"]')) & Node.DOCUMENT_POSITION_FOLLOWING)), "old recovery error moved after final response");
+  notice = { retryCount: 3, status: "completed", resolved: true };
+  await page.evaluate(() => { window.recoveryRegression.recoveryNotices.reset(); return window.recoveryRegression.recoveryNotices.refresh(); });
+  await recovery.locator(".compaction-label").filter({ hasText: "本次重试已结束" }).waitFor();
+  assert.equal(await recovery.locator(".trace-body").isVisible(), false);
+  await page.reload();
+  await recovery.locator(".compaction-label").filter({ hasText: "本次重试已结束" }).waitFor();
+  assert.equal(await recovery.count(), 1);
+  assert(await recovery.evaluate(card => !!(card.compareDocumentPosition(document.querySelector('[data-trace-key="final"]')) & Node.DOCUMENT_POSITION_FOLLOWING)));
+  assert.equal(await page.locator(".trace-card.error").count(), 1, "ordinary failure was hidden during recovery cleanup");
+  // Ephemeral connection warnings clear on actual resumed output or completion.
+  await page.evaluate(id => {
+    const notify = (method, params) => window.recoveryRegression.handleAgentNotification({ method, params: { threadId: id, ...params } });
+    notify("error", { turnId: "transient", willRetry: true, message: "temporary connection failure" });
+  }, thread.threadId);
+  assert.equal(await page.locator('[data-transient-retry="true"]').count(), 1);
+  await page.evaluate(id => {
+    const notify = (method, params) => window.recoveryRegression.handleAgentNotification({ method, params: { threadId: id, ...params } });
+    notify("item/agentMessage/delta", { turnId: "unrelated", itemId: "unrelated", delta: "Other turn" });
+  }, thread.threadId);
+  assert.equal(await page.locator('[data-transient-retry="true"]').count(), 1, "unrelated turn cleared the warning");
+  await page.evaluate(id => {
+    const notify = (method, params) => window.recoveryRegression.handleAgentNotification({ method, params: { threadId: id, ...params } });
+    notify("item/agentMessage/delta", { turnId: "transient", itemId: "continued", delta: "Continued output" });
+  }, thread.threadId);
+  assert.equal(await page.locator('[data-transient-retry="true"]').count(), 0);
+  await page.evaluate(id => {
+    const notify = (method, params) => window.recoveryRegression.handleAgentNotification({ method, params: { threadId: id, ...params } });
+    notify("error", { turnId: "transient", willRetry: true, message: "temporary connection failure" });
+    notify("turn/completed", { turn: { id: "transient", status: "completed" } });
+    notify("error", { turnId: "transient", willRetry: true, message: "late retry notification" });
+  }, thread.threadId);
+  assert.equal(await page.locator('[data-transient-retry="true"]').count(), 0);
   assert.deepEqual(errors, []);
   console.log("PASS: neutral recovery notices, durable retry counts, collapsed raw errors, exhaustion and ordinary failures");
 } finally {

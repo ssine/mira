@@ -233,3 +233,7 @@ export class ClaudeRuntime {
     }
   }
 }
+// Older Servers do not expose the derived acknowledgement boundary.
+export function claudeHistoryAcknowledgementRequired(session) {
+  return session?.persistence === "incomplete" && session.historyAcknowledgementRequired !== false;
+}

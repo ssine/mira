@@ -173,6 +173,67 @@ func (f *claudeFixture) reserved() (string, string, map[string]string) {
 	}
 	return id, turn, map[string]string{"Authorization": "Bearer " + f.token, "X-Mira-Claude-Turn": turn, "X-Mira-Claude-Revision": "1"}
 }
+func TestClaudeHistoryAcknowledgement(t *testing.T) {
+	f := newClaudeFixture(t)
+	id, _, headers := f.reserved()
+	route := "/v1/claude/sessions/" + id
+	ctx := context.Background()
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := f.server.pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(required bool) {
+		t.Helper()
+		for _, s := range []map[string]any{f.call("GET", route, nil),
+			f.call("GET", route+"/events", nil)["session"].(map[string]any),
+			f.call("GET", "/v1/claude/conversations/"+id, nil)} {
+			if s["persistence"] != "incomplete" || s["historyAcknowledgementRequired"] != required {
+				t.Fatalf("history acknowledgement projection: %#v", s)
+			}
+		}
+	}
+	event := func(payload map[string]any) {
+		t.Helper()
+		status, raw := f.request("POST", route+"/events", map[string]any{"eventId": uuidClaude(), "payload": payload}, headers)
+		if status != 200 {
+			t.Fatalf("event: %d %s", status, raw)
+		}
+	}
+	reserve := func(revision int, ack bool) string {
+		t.Helper()
+		turn := uuidClaude()
+		exec(`INSERT INTO mira_claude_turns(turn_id,session_id,node_id,revision,request) VALUES($1,$2,$3,$4,$5::json)`, turn, id, f.nodeID, revision, fmt.Sprintf(`{"continueAcknowledgedHistory":%t}`, ack))
+		exec(`UPDATE mira_claude_sessions SET active_turn=$2,revision=$3 WHERE session_id=$1`, id, turn, revision)
+		headers["X-Mira-Claude-Turn"], headers["X-Mira-Claude-Revision"] = turn, fmt.Sprint(revision)
+		return turn
+	}
+	// Legacy data: the acknowledgement predates this projection. No backfill or
+	// fabricated "saved" state should be needed when the page is first reloaded.
+	event(map[string]any{"type": "system", "subtype": "mirror_error"})
+	check(true)
+	reserve(2, true)
+	check(false)
+	event(map[string]any{"type": "mira_completed"})
+	check(false)
+	reserve(3, false)
+	event(map[string]any{"type": "mira_completed", "failed": true})
+	check(false) // A model error alone is not a new history gap.
+	reserve(4, false)
+	event(map[string]any{"type": "mira_completed", "degraded": true})
+	check(true)
+	reserve(5, true)
+	check(false)
+	event(map[string]any{"type": "system", "subtype": "mirror_error"})
+	check(true) // Acknowledgement cannot cover failures in its own turn.
+	turn := reserve(6, true)
+	check(false)
+	exec(`UPDATE mira_claude_turns SET error='Runtime ended without an acknowledged completion',status='failed',completed_at=now() WHERE turn_id=$1`, turn)
+	exec(`UPDATE mira_claude_sessions SET active_turn=NULL WHERE session_id=$1`, id)
+	check(true) // Reconciliation has no mirror_error event.
+}
+
 func TestClaudeCompletionWithCodexPushSubscription(t *testing.T) {
 	f := newClaudeFixture(t)
 	f.call("GET", "/v1/push/config", nil)
@@ -854,6 +915,21 @@ func TestClaudeManagedSDK(t *testing.T) {
 	status, _ = f.request("POST", route+"/turns", map[string]any{"requestId": uuidClaude(), "text": "Must not silently resume"}, nil)
 	if status != 409 {
 		t.Fatalf("incomplete resume should require acknowledged-history choice: %d", status)
+	}
+	f.call("POST", route+"/turns", map[string]any{"requestId": uuidClaude(), "text": "Continue with the saved history.", "continueAcknowledgedHistory": true})
+	wait("acknowledged continuation", 60*time.Second, func() bool { return f.call("GET", route, nil)["activeTurn"] == nil })
+	if state := f.call("GET", route, nil); state["persistence"] != "incomplete" || state["historyAcknowledgementRequired"] != false {
+		t.Fatalf("old gap remained actionable or was erased: %#v", state)
+	}
+	runTurn("Continue again without repeating acknowledgement.")
+	wait("later continuation", 60*time.Second, func() bool { return f.call("GET", route, nil)["activeTurn"] == nil })
+	f.failMirror.Store(true)
+	degradedTurn = runTurn("A new mirror failure requires new acknowledgement.")
+	wait("new mirror failure", 45*time.Second, func() bool { return f.call("GET", route, nil)["activeTurn"] == nil })
+	f.failMirror.Store(false)
+	status, _ = f.request("POST", route+"/turns", map[string]any{"requestId": uuidClaude(), "text": "Must acknowledge the new gap"}, nil)
+	if status != 409 || f.call("GET", route, nil)["historyAcknowledgementRequired"] != true {
+		t.Fatalf("new history gap bypassed acknowledgement: %d", status)
 	}
 
 	// A fresh manager has no memory of the old process; do not mistake its empty

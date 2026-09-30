@@ -1,4 +1,4 @@
-import { ClaudeRuntime } from "/claude.js";
+import { ClaudeRuntime, claudeHistoryAcknowledgementRequired } from "/claude.js";
 import { conversationPageReader } from "/conversation-pages.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
@@ -332,7 +332,8 @@ async function loadClaudeTranscript(threadId, options = {}) {
     if (!thread.subpath) {
       if (result.session.activeTurn) agent.activeTurns.set(threadId, result.session.activeTurn);
       else agent.activeTurns.delete(threadId);
-      Object.assign(thread, { persistence: result.session.persistence });
+      Object.assign(thread, { persistence: result.session.persistence,
+        historyAcknowledgementRequired: result.session.historyAcknowledgementRequired });
     }
     if (!options.poll || activeBefore !== result.session.activeTurn || Date.now() - (thread._claudeReadAt || 0) > 10_000) {
       const summary = await readConversation(threadId);
@@ -546,9 +547,9 @@ async function sendClaudeMessage(text, attachments, progress) {
     input = await steerClaudeTurn(current, text, attachments, progress);
     if (!input) return;
   }
-  if (current?.persistence === "incomplete" && !claudeRuntime.turnRequests.has(current.sessionId) && !$("#claudeContinue").checked) {
+  if (claudeHistoryAcknowledgementRequired(current) && !claudeRuntime.turnRequests.has(current.sessionId) && !$("#claudeContinue").checked) {
     $("#claudeContinue").focus();
-    throw new Error("部分历史可能未保存。请先勾选“允许本次从已保存的记录继续”，再发送消息。");
+    throw new Error("部分历史可能未保存。请先勾选“已知晓，使用已保存的记录继续”，再发送消息。");
   }
   const node = selectedAccountNode();
   const nodeId = node?.nodeId, nodeAccountId = node?.nodeAccountId || "";
@@ -2905,7 +2906,7 @@ function syncConversationSendUi() {
   $("#agentNewProject").disabled = busy;
   $("#conversationAttach").disabled = busy || !composerDraftKey || composerDraftLoading;
   $("#conversationCwd").disabled = busy || child;
-  $("#claudePersistence").hidden = !native || currentAgentThread()?.persistence !== "incomplete";
+  $("#claudePersistence").hidden = !native || !claudeHistoryAcknowledgementRequired(currentAgentThread());
   $("#claudeContinueLabel").hidden = running || child;
   $("#claudeContinue").disabled = running || child;
   $(".conversation-recovery-settings").classList.toggle("hidden", native);
@@ -3585,7 +3586,9 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   const follow = options.autoScroll !== false && (options.forceScroll === true || traceNearBottom(trace));
   trace.querySelector(".conversation-empty")?.remove();
   let card = (key ? trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`) : null) ?? options.reuseCard;
+  let replacementPosition;
   if (card && card.dataset.traceKind !== kind && [card.dataset.traceKind, kind].includes("recovery")) {
+    replacementPosition = { parent: card.parentNode, next: card.nextSibling };
     card.remove();
     card = null;
   }
@@ -3640,6 +3643,9 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   if (!trace.contains(card)) {
     if (groupedTrace(kind, title, options)) ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     else trace.append(card);
+  }
+  if (replacementPosition?.parent && trace.contains(replacementPosition.parent)) {
+    replacementPosition.parent.insertBefore(card, replacementPosition.next);
   }
   card.dataset.traceTitle = title;
   card.dataset.traceStatus = status;
@@ -3953,25 +3959,51 @@ function retainTurnError(threadId, turnId, message) {
     diagnostic = { threadId, turnId, messages: new Set(), dismissed: false };
     agent.diagnostics.set(key, diagnostic);
   }
-  if (message === "Codex Turn 执行失败" && [...diagnostic.messages].some(encryptedContextError)) return;
-  if (encryptedContextError(message)) diagnostic.messages.delete("Codex Turn 执行失败");
-  diagnostic.messages.add(message);
+  addDiagnosticMessage(diagnostic, message);
   if (threadId === agent.threadId) renderTurnDiagnostics();
 }
 
+function addDiagnosticMessage(diagnostic, message) {
+  if (message === "Codex Turn 执行失败" && [...diagnostic.messages].some(encryptedContextError)) return;
+  if (encryptedContextError(message)) diagnostic.messages.delete("Codex Turn 执行失败");
+  if (message) diagnostic.messages.add(message);
+}
+
+function renderTurnDiagnostic(key, diagnostic, reuseCard) {
+  if (diagnostic.dismissed) return null;
+  const card = upsertTrace(`diagnostic-${key}`, "error", "执行失败",
+    [...diagnostic.messages].join("\n\n"), "", { autoScroll: false, turnId: diagnostic.turnId, reuseCard,
+      recoveryEligible: [...diagnostic.messages].every(encryptedContextError) });
+  card.dataset.traceKey = `diagnostic-${key}`;
+  card.dataset.diagnosticKey = key;
+  if (card.dataset.traceKind !== "recovery" && !card.querySelector("[data-dismiss-diagnostic]")) {
+    const dismiss = element("button", "trace-dismiss", "关闭此错误");
+    dismiss.type = "button";
+    dismiss.dataset.dismissDiagnostic = key;
+    dismiss.title = "仅关闭提示，不会重新执行或删除数据库历史";
+    card.append(dismiss);
+  }
+  return card;
+}
+
 function renderTurnDiagnostics() {
+  const trace = $("#conversationTrace");
   for (const [key, diagnostic] of agent.diagnostics) {
     if (diagnostic.threadId !== agent.threadId || diagnostic.dismissed) continue;
-    const card = upsertTrace(`diagnostic-${key}`, "error", "执行失败",
-      [...diagnostic.messages].join("\n\n"), "", { autoScroll: false, turnId: diagnostic.turnId,
-        recoveryEligible: [...diagnostic.messages].every(encryptedContextError) });
-    card.dataset.diagnosticKey = key;
-    if (card.dataset.traceKind !== "recovery" && !card.querySelector("[data-dismiss-diagnostic]")) {
-      const dismiss = element("button", "trace-dismiss", "关闭此错误");
-      dismiss.type = "button";
-      dismiss.dataset.dismissDiagnostic = key;
-      dismiss.title = "仅关闭提示，不会重新执行或删除数据库历史";
-      card.append(dismiss);
+    const existing = traceCard(`diagnostic-${key}`);
+    const turnCards = diagnostic.turnId ? [...trace.querySelectorAll(".trace-card[data-turn-id]")]
+      .filter(card => card.dataset.turnId === diagnostic.turnId && card !== existing) : [];
+    const storedErrors = turnCards.filter(card => ["error", "recovery"].includes(card.dataset.traceKind));
+    for (const card of storedErrors) addDiagnosticMessage(diagnostic, card.querySelector(".trace-body")._miraSource);
+    const card = renderTurnDiagnostic(key, diagnostic, storedErrors[0]);
+    // A delayed live notification must replace its canonical error in place.
+    // Otherwise attach it to its own turn, never after a later successful reply.
+    if (storedErrors.length) {
+      storedErrors[0].replaceWith(card);
+      for (const duplicate of storedErrors.slice(1)) duplicate.remove();
+    } else if (!existing && turnCards.length) {
+      const last = turnCards.at(-1);
+      (last.closest(".tool-group") ?? last).after(card);
     }
   }
   void recoveryNotices.refresh();
@@ -4239,7 +4271,13 @@ function renderTranscript(fallbackThread, options = {}) {
   renderHistoryLoader(trace);
   for (const item of agent.transcriptItems) {
     if (summaryKeys.has(item.key)) continue;
-    if (item.kind === "error" && agent.diagnostics.has(JSON.stringify([agent.threadId, item.turnId ?? "unscoped"]))) continue;
+    const diagnosticKey = JSON.stringify([agent.threadId, item.turnId ?? "unscoped"]);
+    const diagnostic = item.kind === "error" && agent.diagnostics.get(diagnosticKey);
+    if (diagnostic) {
+      addDiagnosticMessage(diagnostic, item.body);
+      renderTurnDiagnostic(diagnosticKey, diagnostic, reusableCards.get(`diagnostic-${diagnosticKey}`));
+      continue;
+    }
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
@@ -4468,6 +4506,15 @@ async function refreshCompletedTranscript(threadId) {
 function handleAgentNotification(message) {
   const method = message.method ?? "";
   const params = message.params ?? {};
+  // Transport retries are temporary feedback. Terminal events and resumed output
+  // retire them, scoped to the originating turn and currently open conversation.
+  if (notificationIsForOpenThread(params) && (method === "turn/completed" || method === "error" && params.willRetry !== true ||
+      method === "item/completed" || /Delta$|\/delta$/.test(method) && (params.delta || params.message))) {
+    const turnId = params.turn?.id ?? params.turnId ?? agent.activeTurns.get(agent.threadId);
+    for (const card of $("#conversationTrace").querySelectorAll('[data-transient-retry="true"]')) {
+      if (!card.dataset.turnId || card.dataset.turnId === turnId) card.remove();
+    }
+  }
   if (method === "mira/account/contextIncompatible") {
     if (params.threadId === agent.threadId && params.nodeAccountId === $("#conversationAccount").value &&
         (accountRecovery.context?.threadId !== params.threadId || accountRecovery.context?.bindingId !== params.nodeAccountId)) accountRecovery.select(params.threadId, params.nodeAccountId);
@@ -4567,8 +4614,13 @@ function handleAgentNotification(message) {
   if (method === "error") {
     const threadId = notificationThreadId(params) ?? agent.threadId;
     if (params.willRetry === true) {
-      if (threadId === agent.threadId) upsertTrace(`retry-${params.turnId ?? "current"}`, "system", "正在重试",
-        readableErrorMessage(params.error ?? params.message) || "连接暂时中断，Codex 正在重试。", "");
+      if (threadId === agent.threadId) {
+        const turnId = params.turnId ?? agent.activeTurns.get(threadId);
+        if (agent.turnTimings.get(turnId)?.completedAt) return;
+        const card = upsertTrace(`retry-${turnId ?? "current"}`, "system", "正在重试",
+          readableErrorMessage(params.error ?? params.message) || "连接暂时中断，Codex 正在重试。", "", { turnId });
+        card.dataset.transientRetry = "true";
+      }
       return; // A recoverable transport warning is not a failed turn.
     }
     retainTurnError(threadId, params.turnId ?? agent.activeTurns.get(threadId),
@@ -5029,6 +5081,8 @@ function renderConversationDetails(thread) {
     ["运行机器", nodeDisplayName(draft ? $("#agentRuntimeNode").value : thread?.runtimeNodeId || thread?.sourceNodeId)],
     ["工作目录", draft ? $("#conversationCwd").value : thread?.cwd, true], ["最近使用的模型", draft ? "尚未发送消息" : thread?.model || "历史未记录"],
     ["最近更新", thread?.updatedAt ? new Date(thread.updatedAt).toLocaleString() : null],
+    ...(thread?.engine === "claude" && thread.persistence === "incomplete" ? [["历史保存", claudeHistoryAcknowledgementRequired(thread)
+      ? "部分历史可能未保存，继续前需确认" : "早期历史完整性未确认；已选择使用已保存的记录继续"]] : []),
   ]);
   renderConversationModel();
 }

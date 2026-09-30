@@ -39,7 +39,8 @@ export async function startQuestionFixture() {
       if (body.action === "poll") emit({ type: "system", subtype: "status", status: "waiting" });
       if (body.action === "question") emit({ type: "mira_question", questionId: `${questionId.slice(0, -1)}5`, questions: [questions[0]] });
       // No terminal event: reconciliation can clear the turn independently.
-      if (body.action === "end") { session.activeTurn = null; session.persistence = "incomplete"; }
+      if (body.action === "end") { session.activeTurn = null; session.persistence = "incomplete"; session.historyAcknowledgementRequired = true; }
+      if (body.action === "complete") { session.activeTurn = null; emit({ type: "mira_completed" }); }
       return json({});
     }
     if (path === "/healthz") return json({ version: "test", adminConfigured: true });
@@ -65,6 +66,8 @@ export async function startQuestionFixture() {
       return json({ accepted: true });
     }
     if (path.endsWith("/turns")) {
+      if (session.historyAcknowledgementRequired && !body.continueAcknowledgedHistory) return json({ error: "History acknowledgement required" }, 409);
+      if (body.continueAcknowledgedHistory) session.historyAcknowledgementRequired = false;
       turns.push(body); session.activeTurn = body.requestId;
       return json({ turnId: body.requestId });
     }

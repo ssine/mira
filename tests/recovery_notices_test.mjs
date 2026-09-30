@@ -12,7 +12,9 @@ test("only known encrypted-context failures receive recovery notices", () => {
 
 test("counts describe actual retries and distinguish recovery from exhaustion", () => {
   assert.equal(recoveryNoticeLabel({ retryCount: 3, status: "dispatching" }), "加密内容不匹配 · 已自动重试 3 次，正在继续");
-  assert.equal(recoveryNoticeLabel({ retryCount: 2, status: "completed" }), "加密内容不匹配 · 已自动重试 2 次");
+  assert.equal(recoveryNoticeLabel({ retryCount: 2, status: "completed" }), "上下文恢复记录 · 已自动重试 2 次 · 本次重试已结束");
+  assert.equal(recoveryNoticeLabel({ retryCount: 2, status: "applying" }), "加密内容不匹配 · 正在自动处理");
+  assert.equal(recoveryNoticeLabel({ resolved: true }), "不兼容内容已处理");
   assert.match(recoveryNoticeLabel({ retryCount: 19, status: "stopped", reason: "同一份上下文已连续失败 20 次" }), /自动重试已停止/);
   assert(!recoveryNoticeLabel({ retryCount: 3, status: "stopped", reason: "本次自动重试未完成；兼容错误会继续恢复" }).includes("已停止"));
   assert.equal(recoveryNoticeLabel(undefined, false), "加密内容不匹配 · 自动恢复已关闭");
