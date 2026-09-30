@@ -194,6 +194,15 @@ func (server *Server) claudeUsage(ctx context.Context, s claudeSession, live *cl
 	return map[string]any{"costEstimate": estimate, "tokenUsage": total, "tokenUsageSummary": map[string]any{"total": total, "self": self, "includesSubagents": true, "scope": "claude_session"}}, err
 }
 
+// claudeLatestProse is the newest main-transcript assistant event with prose,
+// matching the Codex rule that only assistant replies make a conversation
+// unread. Text values are compared as raw JSON so escaped NUL stays readable.
+const claudeLatestProse = `coalesce((SELECT seq FROM mira_claude_events e WHERE e.session_id=$1 AND e.event_type='assistant'
+ AND coalesce(json_typeof(e.payload->'parent_tool_use_id'),'null')='null'
+ AND EXISTS(SELECT 1 FROM json_array_elements(CASE WHEN json_typeof(e.payload->'message'->'content')='array' THEN e.payload->'message'->'content' ELSE '[]'::json END) b
+  WHERE b->>'type'='text' AND json_typeof(b->'text')='string' AND (b->'text')::text !~ '^"(\s|\\[nrt])*"$')
+ ORDER BY seq DESC LIMIT 1),0)`
+
 func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[string]any, error) {
 	live, err := server.claudeLiveUsage(ctx, s)
 	if err != nil {
@@ -221,13 +230,14 @@ func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[s
 	result["persistence"] = s.Persistence
 	result["historyAcknowledgementRequired"] = s.HistoryAcknowledgementRequired
 	result["listRoot"] = true
-	var count, seq int64
+	var count, seq, latest, read int64
 	var lastTurn *string
 	var status string
 	err = server.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM mira_claude_transcripts WHERE session_id=$1 AND subpath<>''),
  coalesce((SELECT max(seq) FROM mira_claude_events WHERE session_id=$1),0),
  (SELECT turn_id::text FROM mira_claude_turns WHERE session_id=$1 ORDER BY revision DESC LIMIT 1),
- coalesce((SELECT status FROM mira_claude_turns WHERE session_id=$1 ORDER BY revision DESC LIMIT 1),'idle')`, s.ID).Scan(&count, &seq, &lastTurn, &status)
+ coalesce((SELECT status FROM mira_claude_turns WHERE session_id=$1 ORDER BY revision DESC LIMIT 1),'idle'),
+ `+claudeLatestProse+`,(SELECT read_seq FROM mira_claude_sessions WHERE session_id=$1)`, s.ID).Scan(&count, &seq, &lastTurn, &status, &latest, &read)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +254,7 @@ func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[s
 		activity = status
 	}
 	result["activity"] = map[string]any{"state": activity, "turnId": lastTurn, "generation": 1, "itemCount": seq}
+	result["readState"] = map[string]any{"generation": 1, "latestItemSeq": latest, "readItemCount": read, "unread": latest > read}
 	if live != nil {
 		result["activity"].(map[string]any)["costEstimate"] = claudeLiveEstimate(&live.amount, live.unpriced)
 	}
@@ -283,6 +294,8 @@ func (server *Server) claudeConversation(ctx context.Context, id string) (map[st
 	value["costEstimate"] = claudeEstimate(nil, false)
 	delete(value, "tokenUsage")
 	delete(value, "tokenUsageSummary")
+	// Read state belongs to the session's main transcript.
+	delete(value, "readState")
 	value["activity"] = map[string]any{"state": "idle", "generation": 1, "itemCount": 0}
 	return value, nil
 }

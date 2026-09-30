@@ -467,6 +467,9 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 	if op == "steer" && r.Method == "POST" {
 		return true, server.claudeSteer(ctx, w, r, s)
 	}
+	if op == "read" && r.Method == "POST" {
+		return true, server.claudeRead(ctx, w, r, id)
+	}
 	if op == "interrupt" && r.Method == "POST" {
 		if s.ActiveTurn == nil {
 			return true, writeJSON(w, 200, map[string]any{"stopped": true})
@@ -1006,4 +1009,34 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		return err
 	}
 	return writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// claudeRead acknowledges a rendered snapshot with the Codex read contract.
+// Claude sessions have one generation; positions only advance and never past
+// recorded events, and recency is untouched.
+func (server *Server) claudeRead(ctx context.Context, w http.ResponseWriter, r *http.Request, id string) error {
+	var b struct {
+		Generation int64 `json:"generation"`
+		ItemCount  int64 `json:"itemCount"`
+	}
+	if err := foundation.ReadJSON(r, &b, server.config.Foundation.MaxBodyBytes); err != nil {
+		return err
+	}
+	if b.Generation != 1 || b.ItemCount < 0 {
+		return &HTTPError{Status: 409, Code: "stale_read_position", Message: "Read position does not match this conversation"}
+	}
+	var latest, read int64
+	var future bool
+	err := server.pool.QueryRow(ctx, `WITH updated AS (
+ UPDATE mira_claude_sessions SET read_seq=GREATEST(read_seq,$2) WHERE session_id=$1
+  AND $2<=coalesce((SELECT max(seq) FROM mira_claude_events WHERE session_id=$1),0) RETURNING read_seq)
+ SELECT coalesce((SELECT read_seq FROM updated),(SELECT read_seq FROM mira_claude_sessions WHERE session_id=$1)),
+  NOT EXISTS(SELECT 1 FROM updated),`+claudeLatestProse, id, b.ItemCount).Scan(&read, &future, &latest)
+	if err != nil {
+		return err
+	}
+	if future {
+		return &HTTPError{Status: 409, Code: "stale_read_position", Message: "Read position is ahead of recorded history"}
+	}
+	return writeJSON(w, 200, map[string]any{"generation": 1, "latestItemSeq": latest, "readItemCount": read, "unread": latest > read})
 }
