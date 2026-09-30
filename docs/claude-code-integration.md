@@ -33,8 +33,15 @@ Implemented:
 - Claude accounts may set a default reasoning effort for their default model. The
   model picker maps the account's full model ID to the SDK alias that resolves to it,
   so its effort levels remain selectable.
+- The transcript follows Codex's rhythm: tool calls and thinking collapse into one
+  line per batch, and the text Claude writes between them stays visible as progress.
+  Built-in tools are summarized as actions with durations, like Codex shell actions:
+  commands, reads, edits with line counts, searches and subagents. Images a tool
+  returns stay in its card. Mira's system prompt asks Claude for a short update
+  every several tool calls; the Developer instructions file comes later and can
+  override it. While a turn runs, polls patch changed or new cards in place.
 - Native subagent transcripts are mirrored independently and selectable from the
-  conversation. Root membership is durable; unknown nested parent relationships
+  conversation. The parent timeline shows only the subagent's tool row. Root membership is durable; unknown nested parent relationships
   remain unknown rather than being inferred from a filename. Original native
   metadata is retained in raw records.
 - Messages sent while Claude runs join the running turn, as with Codex. Claude reads

@@ -34,6 +34,46 @@ test("native projections replace stream prose, merge tool results, and retain na
  assert.equal(claudeTrace([...rows,{seq:99,payload:{type:"mira_answer",questionId:"q",answers:{a:"yes"}}}]).questions.size,0);
 });
 
+test("tool calls carry readable activities, keep their images, and omit sub-agent task events", () => {
+ const png = {type:"image",source:{type:"base64",media_type:"image/png",data:"AAAA"}};
+ const use = (id,name,input,timestamp) => ({type:"assistant",uuid:`a-${id}`,timestamp,message:{id:`m-${id}`,content:[{type:"tool_use",id,name,input}]}});
+ const done = (id,content,timestamp,extra={}) => ({type:"user",uuid:`u-${id}`,timestamp,...extra,message:{content:[{type:"tool_result",tool_use_id:id,content}]}});
+ const rows = [
+ {type:"system",subtype:"init",cwd:"/work/repo/"},
+ {type:"mira_user",text:"go"},
+ use("bash","Bash",{command:"go test ./...",description:"Run tests"},"2026-09-30T01:00:00Z"),
+ done("bash","ok","2026-09-30T01:00:38Z"),
+ use("edit","Edit",{file_path:"/work/repo/app.js",old_string:"a",new_string:"b"}),
+ done("edit","updated",undefined,{tool_use_result:{filePath:"/work/repo/app.js",structuredPatch:[{lines:[" x","-a","+b","+c"]}]}}),
+ use("write","Write",{file_path:"/elsewhere/new.md",content:"one\ntwo\n"}),
+ done("write","created",undefined,{toolUseResult:{type:"create",content:"one\ntwo\n",structuredPatch:[]}}),
+ use("shot","Read",{file_path:"/work/repo/shot.png"}),
+ done("shot",[png,{type:"text",text:"image"}]),
+ use("agent","Agent",{description:"调查超时",prompt:"…",subagent_type:"general-purpose"}),
+ {type:"system",subtype:"task_started",task_id:"x",description:"调查超时"},
+ {type:"system",subtype:"task_notification",task_id:"x",status:"completed",summary:"done"},
+ done("agent","report"),
+ use("mcp","mcp__home_nodes__process",{action:"list"}),
+ {type:"assistant",uuid:"think",message:{id:"m-think",content:[{type:"thinking",thinking:"**Checking** the result"}]}},
+ use("grep","Grep",{pattern:"TODO",path:"/work/repo/src"}),
+ ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
+ const view = claudeTrace(rows,{activeTurn:"turn"});
+ const tools = Object.fromEntries(view.trace.filter(x=>x.kind==="tool").map(x=>[x.key.slice(5),x.activity]));
+ assert.deepEqual(tools.bash,{status:"completed",durationMs:38000,actions:[{kind:"run",label:"go test ./..."}]});
+ assert.deepEqual(tools.edit.actions,[{kind:"edit",label:"app.js",added:2,removed:1}]);
+ assert.deepEqual(tools.write.actions,[{kind:"create",label:"/elsewhere/new.md",added:2,removed:0}]);
+ assert.deepEqual(tools.shot.actions,[{kind:"read",label:"shot.png"}]);
+ assert.deepEqual(tools.agent.actions,[{kind:"agent",label:"调查超时"}]);
+ assert.deepEqual(tools.mcp,{status:"running",durationMs:null,actions:[{kind:"tool",label:"home_nodes · process"}]});
+ assert.deepEqual(tools.grep.actions,[{kind:"search",label:"“TODO”（src）"}]);
+ assert.deepEqual(view.trace.find(x=>x.key==="tool:shot").nativeImages,["data:image/png;base64,AAAA"]);
+ assert.equal(view.trace.some(x=>x.title==="图片"||x.title==="子任务"),false);
+ assert.equal(view.trace.find(x=>x.kind==="reasoning").body,"**Checking** the result");
+ // The turn ended without these results.
+ const ended = claudeTrace(rows).trace.filter(x=>x.activity?.status==="interrupted").map(x=>x.key);
+ assert.deepEqual(ended,["tool:mcp","tool:grep"]);
+});
+
 test("Claude block completion keeps streaming identity until the whole message stops", async () => {
  for (const reloaded of [false,true]) {
   let seq=0, data=[];

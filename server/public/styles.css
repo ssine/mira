@@ -583,8 +583,9 @@ progress { width: 100%; accent-color: var(--accent); }
 .tool-group[open] .tool-group-total::before { transform: rotate(90deg); }
 .tool-group-counts { flex: 0 1 auto; min-width: 0; max-width: 28%; overflow: hidden; text-overflow: ellipsis; font: 11px/1.4 var(--font-code); }
 .tool-group-latest { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: 13px; line-height: 16.5px; text-overflow: ellipsis; }
-.tool-group-items{display:grid;gap:1px;padding:0;border-top:1px solid var(--line);background:var(--line)}
-.tool-group .trace-card.tool { width: 100%; max-width: 100%; border-left: 0; background: var(--canvas); }
+.tool-group-items{display:grid;grid-template-columns:minmax(0,1fr);gap:1px;padding:0;border-top:1px solid var(--line);background:var(--line)}
+.tool-group .trace-card.tool, .tool-group .trace-card.reasoning { width: 100%; max-width: 100%; border-left: 0; background: var(--canvas); }
+.tool-group .trace-card.reasoning .trace-kind { color: var(--muted); }
 .has-running-tool { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
 .has-running-tool .tool-group-latest { color: var(--accent-hover); }
 .conversation-compose-area { grid-area: conversation-composer; min-width: 0; padding: 0 calc(var(--conversation-inline-end) + var(--conversation-scrollbar-width)) 0 var(--conversation-inline-start); }

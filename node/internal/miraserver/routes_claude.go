@@ -567,6 +567,15 @@ func (server *Server) claudeSteer(ctx context.Context, w http.ResponseWriter, r 
 	return claudeError(503, "Claude 未能记录这条消息，它不会加入本轮；本轮结束后重试会作为新一轮发送")
 }
 
+// Mira collapses tool calls and thinking, so text between tool calls is what
+// the user follows during a long turn. The Developer Message file comes later
+// and may override this.
+const claudeProgressInstructions = "Mira shows the user the text you write between tool calls as progress updates; tool calls and thinking are collapsed. " +
+	"During long work, write a brief update when there is something worth reporting, such as a finding, a finished step, or a change of plan, " +
+	"typically every several tool calls rather than before each one. Write each update for the user, in the user's language, " +
+	"as one to three self-contained sentences saying what you did or found and what comes next. Do not write notes to yourself there. " +
+	"Your last message in a turn is the answer.\n"
+
 func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter, r *http.Request, s claudeSession) error {
 	b, err := server.readBody(r)
 	if err != nil {
@@ -623,7 +632,7 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 	if err != nil {
 		return err
 	}
-	instructions = "You are running in Mira on a trusted execution Node. Use home_nodes MCP tools for other authorized devices.\n" + instructions
+	instructions = "You are running in Mira on a trusted execution Node. Use home_nodes MCP tools for other authorized devices.\n" + claudeProgressInstructions + instructions
 	tx, err := server.pool.Begin(ctx)
 	if err != nil {
 		return err

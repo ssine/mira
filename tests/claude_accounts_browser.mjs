@@ -118,9 +118,22 @@ try {
   await view.locator("#conversationDetailsToggle").click();
   await view.locator("#conversationDetails #claudeReconcile").waitFor({ state: "visible" });
   const emit = payload => record(sessions[0], payload);
+  const group = view.locator("#conversationTrace > .tool-group");
+  emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-tool" } } });
+  emit({ type: "assistant", uuid: "thinking", message: { id: "live-tool", content: [{ type: "thinking", thinking: "Consider the question" }] } });
+  await group.locator(".tool-group-total").filter({ hasText: /^思考$/ }).waitFor();
+  assert.equal(await group.locator(".tool-group-latest").textContent(), "Consider the question");
+  await page.evaluate(() => { window.miraFirstThought = document.querySelector("#conversationTrace .trace-card.reasoning"); });
+  emit({ type: "assistant", uuid: "run", message: { id: "live-tool", content: [{ type: "tool_use", id: "run-tests", name: "Bash", input: { command: "go test ./..." } }] } });
+  emit({ type: "stream_event", event: { type: "message_stop" } });
+  await group.locator(".tool-group-latest").filter({ hasText: "正在执行 go test ./..." }).waitFor();
+  emit({ type: "user", uuid: "ran", message: { content: [{ type: "tool_result", tool_use_id: "run-tests", content: "ok" }] } });
+  await group.locator(".tool-group-latest").filter({ hasText: "已执行 go test ./..." }).waitFor();
   emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-reply" } } });
-  emit({ type: "assistant", uuid: "thinking", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Consider the question" }] } });
-  await view.locator("#conversationTrace .trace-card.reasoning").waitFor();
+  emit({ type: "assistant", uuid: "thinking-2", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Check the output" }] } });
+  await page.waitForFunction(() => document.querySelectorAll("#conversationTrace .tool-group .trace-card.reasoning").length === 2);
+  assert.deepEqual([await group.count(), await group.locator(".tool-group-total").textContent(), await group.getAttribute("open")],
+    [1, "工具调用 · 1 次", null], "thinking and tool calls between replies fold into one row");
   emit({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "One live answer" } } });
   await view.locator("#conversationTrace .trace-card.assistant").filter({ hasText: "One live answer" }).waitFor();
   emit({ type: "assistant", uuid: "answer", timestamp: "2026-09-30T01:02:03.456Z", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
@@ -131,6 +144,8 @@ try {
   sessions[0].activeTurn = null;
   await page.waitForFunction(() => !document.querySelector("#conversationAccount").disabled);
   assert.equal(await view.locator("#conversationTrace .trace-card.assistant").count(), 1, "the final reply replaces streamed prose without requiring a reload");
+  assert.equal(await page.evaluate(() => window.miraFirstThought === document.querySelector("#conversationTrace .trace-card.reasoning")), true,
+    "polls update changed cards instead of rebuilding the transcript");
   const clock = view.locator("#conversationTrace .trace-card.assistant .trace-completed");
   assert.equal(await clock.isVisible(), true, "Claude messages retain their native record time");
   assert.match(await clock.textContent(), /\d{2}:\d{2}:\d{2}/);

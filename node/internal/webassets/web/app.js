@@ -343,18 +343,28 @@ async function loadClaudeTranscript(threadId, options = {}) {
       const follow = !options.prepend && traceNearBottom();
       const viewport = options.prepend ? { mode: "prepend", top: traceScroller().scrollTop, height: traceScroller().scrollHeight } : follow ? null : captureTraceViewport();
       const forms = new Map([...$("#conversationTrace").querySelectorAll("form[data-claude-question]")].map(form => [form.dataset.claudeQuestion, form]));
+      const previous = agent.transcriptThreadId === threadId ? agent.transcriptItems : null;
       agent.transcriptThreadId = threadId; agent.transcriptGeneration = 1;
       const previousCosts = new Map(agent.transcriptItems.filter(i => i.turnCostEstimate).map(i => [i.key, i.turnCostEstimate]));
       for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
       agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
       agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
-      renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
-      for (const item of result.trace) {
-        const card = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(item.key)}"]`);
-        if (!card) continue;
+      let cards = options.poll && previous ? patchClaudeTranscript(previous, result.trace) : null;
+      if (cards) {
+        // Question forms depend on the running turn even when unchanged.
+        for (const item of result.trace) if (item.questionId && !cards.has(item.key)) cards.set(item.key, traceCard(item.key));
+      } else {
+        renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
+        cards = new Map([...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
+      }
+      const byKey = new Map(result.trace.map(item => [item.key, item]));
+      for (const [key, card] of cards) {
+        const item = byKey.get(key);
+        if (!card || !item) continue;
         const body = card.querySelector(".trace-body");
-        if (item.nativeImage && !body.querySelector("img")) {
-          const img = element("img", "trace-image"); img.src = item.nativeImage; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
+        const images = item.nativeImages ?? (item.nativeImage ? [item.nativeImage] : []);
+        for (const src of images.slice(body.querySelectorAll(":scope > img.trace-image").length)) {
+          const img = element("img", "trace-image"); img.src = src; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
         }
         const steerNote = { queued: "等待加入本轮", cancelled: "未加入本轮" }[item.steerState] || "";
         if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
@@ -390,6 +400,51 @@ async function loadClaudeTranscript(threadId, options = {}) {
       }, agent.activeTurns.has(threadId) ? 750 : 3000);
     }
   }
+}
+
+function traceCard(key) {
+  return $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
+}
+
+// The fields a Claude transcript card shows. Output images are only appended.
+function sameClaudeItem(left, right) {
+  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "nativeImage", "steerState", "questionId", "completedAt", "turnElapsedMs", "turnCompletedAt"]
+    .every(field => left[field] === right[field]) && (left.nativeImages?.length ?? 0) === (right.nativeImages?.length ?? 0) &&
+    JSON.stringify([left.activity, left.turnCostEstimate]) === JSON.stringify([right.activity, right.turnCostEstimate]);
+}
+
+// A poll usually appends to the tail or finishes a running item. Update only
+// those cards and return them by key; any other change rebuilds the transcript.
+function patchClaudeTranscript(previous, next) {
+  const trace = $("#conversationTrace");
+  const nextKeys = new Set(next.map(item => item.key));
+  const kept = previous.filter(item => nextKeys.has(item.key));
+  const known = new Map(kept.map(item => [item.key, item]));
+  let index = 0, appended = false;
+  for (const item of next) {
+    if (!known.has(item.key)) appended = true;
+    else if (appended || kept[index++].key !== item.key) return null;
+  }
+  const cards = new Map([...trace.querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
+  if (!kept.length || kept.some(item => !cards.has(item.key))) return null;
+  // Replaced stream text, for example, leaves the transcript.
+  for (const item of previous) {
+    const card = nextKeys.has(item.key) ? null : cards.get(item.key);
+    if (!card) continue;
+    const group = card.closest(".tool-group");
+    card.remove();
+    if (group && !group.querySelector(".trace-card")) group.remove(); else updateToolGroup(group);
+  }
+  const tail = cards.get(kept.at(-1).key);
+  if (![tail, tail.closest(".tool-group")].includes(trace.lastElementChild)) return null;
+  const changed = new Map(), turns = new Set();
+  for (const item of next) {
+    if (sameClaudeItem(known.get(item.key), item)) continue;
+    changed.set(item.key, upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", transcriptTraceOptions(item)));
+    if (item.kind === "assistant") turns.add(item.turnId);
+  }
+  for (const turnId of turns) refreshTurnFooters(turnId);
+  return changed;
 }
 
 function claudeQuestionForm(question, sessionId) {
@@ -3308,6 +3363,7 @@ function updateTraceBodyState(card, value, kind) {
   if (copy) copy.hidden = value.length === 0;
   if (kind === "reasoning" && card._miraExpandable) {
     card.querySelector(".trace-kind").textContent = reasoningHeading(value);
+    updateToolGroup(card.closest(".tool-group"));
   }
 }
 
@@ -3415,6 +3471,15 @@ function scrollTraceToBottom() {
 function updateToolGroup(group) {
   if (!group) return;
   const cards = [...group.querySelectorAll(".trace-card.tool")];
+  if (!cards.length) {
+    // Thinking between two replies, without any tool call.
+    const thoughts = group.querySelectorAll(".trace-card.reasoning");
+    group.querySelector(".tool-group-total").textContent = thoughts.length > 1 ? `思考 · ${thoughts.length} 段` : "思考";
+    group.querySelector(".tool-group-latest").textContent = reasoningHeading(thoughts[thoughts.length - 1]?.querySelector(".trace-body")._miraSource);
+    group.querySelector(".tool-group-counts").textContent = "";
+    group.classList.remove("has-running-tool");
+    return;
+  }
   const activities = cards.map((card) => card._miraActivity ?? {
     status: activityStatus(card.dataset.traceStatus),
     actions: [{ kind: "tool", label: card.dataset.traceTitle || "工具" }],
@@ -3426,6 +3491,12 @@ function updateToolGroup(group) {
   const duration = formatActivityDuration(latest?.durationMs);
   group.querySelector(".tool-group-latest").textContent = `${activitySummary(latest)}${duration ? ` · ${duration}` : ""}`;
   group.classList.toggle("has-running-tool", running > 0);
+}
+
+// Tool calls and the thinking between them collapse into one row; a proposed
+// plan and all replies stay in the conversation itself.
+function groupedTrace(kind, title, options = {}) {
+  return options.collapseTools !== false && (kind === "tool" || (kind === "reasoning" && title !== "计划"));
 }
 
 function ensureToolGroup(trace, turnId = "", before = null) {
@@ -3504,7 +3575,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     }
     if (!["image", "compaction", "recovery"].includes(kind)) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
-    if (kind === "tool" && options.collapseTools !== false) {
+    if (groupedTrace(kind, title, options)) {
       ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     } else {
       trace.append(card);
@@ -3518,7 +3589,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     setTraceMetadata(card, options);
   }
   if (!trace.contains(card)) {
-    if (kind === "tool" && options.collapseTools !== false) ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
+    if (groupedTrace(kind, title, options)) ensureToolGroup(trace, options.turnId ?? "").querySelector(".tool-group-items").append(card);
     else trace.append(card);
   }
   card.dataset.traceTitle = title;
@@ -4073,6 +4144,19 @@ function compactionSummaryKeys(items) {
   return hidden;
 }
 
+function transcriptTraceOptions(item) {
+  return {
+    autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, turnId: item.turnId,
+    transcriptKey: item.key, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
+    completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
+    elapsedApproximate: item.elapsedApproximate,
+    ...(Number.isFinite(item.turnElapsedMs) ? {
+      turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs,
+      turnElapsedApproximate: item.turnElapsedApproximate, turnCostEstimate: item.turnCostEstimate,
+    } : {}),
+  };
+}
+
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
   const summaryKeys = compactionSummaryKeys(agent.transcriptItems);
@@ -4110,13 +4194,8 @@ function renderTranscript(fallbackThread, options = {}) {
     const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
     const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
     const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, reuseCard: reusableCards.get(key), turnId: item.turnId,
-      transcriptKey: item.key, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
-      completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
-      elapsedApproximate: item.elapsedApproximate,
+      ...transcriptTraceOptions(item), reuseCard: reusableCards.get(key),
       ...(Number.isFinite(item.turnElapsedMs) ? {
-        turnCompletedAt: item.turnCompletedAt, turnElapsedMs: item.turnElapsedMs,
-        turnElapsedApproximate: item.turnElapsedApproximate,
         turnCostEstimate: item.turnCostEstimate ?? knownTurnTimings.get(item.turnId)?.turnCostEstimate,
       } : knownTurnTimings.get(item.turnId)),
       ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
@@ -4145,7 +4224,7 @@ function renderTranscript(fallbackThread, options = {}) {
       // instead of appending them after the completed turn during reconciliation.
       const anchorGroup = nextLiveAnchor?.closest(".tool-group");
       const before = anchorGroup ?? nextLiveAnchor;
-      if (card.dataset.traceKind === "tool") {
+      if (groupedTrace(card.dataset.traceKind, card.dataset.traceTitle)) {
         const sameGroup = anchorGroup?.dataset.turnId === (card.dataset.turnId ?? "");
         const group = sameGroup ? anchorGroup : ensureToolGroup(trace, card.dataset.turnId ?? "", before);
         group.querySelector(".tool-group-items").insertBefore(card, sameGroup ? nextLiveAnchor : null);

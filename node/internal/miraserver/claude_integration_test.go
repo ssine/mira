@@ -653,6 +653,8 @@ func TestClaudeManagedSDK(t *testing.T) {
 	}
 	if system, _ := systemPrompt.Load().(string); !strings.Contains(system, "SHARED_NODE_INSTRUCTION_MARKER") {
 		t.Fatalf("Claude system prompt omitted the shared Developer instructions file: %s", system)
+	} else if progress := strings.Index(system, strings.TrimSuffix(claudeProgressInstructions, "\n")); progress < 0 || progress > strings.Index(system, "SHARED_NODE_INSTRUCTION_MARKER") {
+		t.Fatalf("Claude system prompt must describe progress updates before the Developer instructions: %s", system)
 	}
 	if err = os.RemoveAll(configDir); err != nil {
 		t.Fatal(err)
