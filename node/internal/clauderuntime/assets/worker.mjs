@@ -15,6 +15,8 @@ const input = [];
 const questions = new Map();
 let client,
   lifecycle,
+  interruptRecord,
+  interruptRecordFailed = false,
   interrupted = false;
 // Retried steer commands share one outcome; Mira stores the request by its ID.
 const steers = new Map();
@@ -116,14 +118,13 @@ lines.on("line", async (line) => {
       await main(command);
     } else if (command.action === "interrupt") {
       interrupted = true;
-      try {
-        await client?.event({ type: "mira_interrupt_requested" });
-      } finally {
-        stopping = true;
-        wake?.();
-        // Stop discards steers that have not reached the model yet.
-        await run?.interrupt({ cancelQueued: true });
-      }
+      stopping = true;
+      wake?.();
+      // Stop model/tool work immediately, even while Server writes are retrying.
+      // Still drain the event before recording completion; never abort a write.
+      interruptRecord ??= client?.event({ type: "mira_interrupt_requested" })
+        .catch(() => { interruptRecordFailed = true; });
+      await run?.interrupt({ cancelQueued: true });
     }
   } catch {
     process.exitCode = 1;
@@ -191,6 +192,7 @@ async function main(spec) {
       text: spec.text,
       attachments: spec.attachments ?? [],
     });
+    if (interrupted) return;
     const options = {
       cwd: spec.cwd,
       model: spec.model || undefined,
@@ -283,11 +285,12 @@ async function main(spec) {
     markReady();
     wake?.();
     run?.close();
+    await interruptRecord;
     try {
       await client.event({
         type: "mira_completed",
         failed,
-        degraded,
+        degraded: degraded || interruptRecordFailed,
         interrupted,
       });
     } catch {

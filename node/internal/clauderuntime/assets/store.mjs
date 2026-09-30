@@ -20,7 +20,8 @@ export function serverClient({
     throw new Error("Invalid Mira endpoint");
   const root = `/v1/claude/sessions/${sessionId}`;
   async function request(path, body, { raw = false } = {}) {
-    const response = await fetch(new URL(root + path, base), {
+    // Freeze the envelope once: a lost response must never create another write.
+    const options = {
       method: body === undefined ? "GET" : "POST",
       redirect: "error",
       headers: {
@@ -30,11 +31,28 @@ export function serverClient({
         "x-mira-claude-revision": String(revision),
       },
       body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
-      signal: AbortSignal.timeout(45_000),
-    });
-    if (!response.ok)
-      throw new Error(`Mira Claude storage failed (HTTP ${response.status})`);
-    return response;
+    };
+    // One deadline for all attempts, below the SDK's 60s append timeout. Quick
+    // gateway failures during a Server restart must not exhaust retries in <1s.
+    const deadline = performance.now() + 45_000;
+    for (let attempt = 0; ; attempt++) {
+      let retryable = true;
+      try {
+        const response = await fetch(new URL(root + path, base), {
+          ...options,
+          signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))),
+        });
+        if (response.ok) return response;
+        retryable = [408, 429, 500, 502, 503, 504].includes(response.status);
+        await response.body?.cancel();
+        throw new Error(`Mira Claude storage failed (HTTP ${response.status})`);
+      } catch (error) {
+        const delay = Math.min(250 * 2 ** Math.min(attempt, 3), 2000);
+        if (body === undefined || !retryable || performance.now() + delay >= deadline)
+          throw error;
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
   }
   // SDK retries reuse the same entries array. Retain the exact operation and body,
   // including UUID-less entries, until the batch has been acknowledged.
@@ -52,7 +70,8 @@ export function serverClient({
         };
         batches.set(entries, batch);
       }
-      await request(batch.path, batch.body, { raw: true });
+      const response = await request(batch.path, batch.body, { raw: true });
+      await response.body?.cancel();
     },
     async load(key) {
       if (key.sessionId !== sessionId)
@@ -73,17 +92,9 @@ export function serverClient({
     payload,
     eventId = payload.type === "mira_question" ? payload.questionId : randomUUID(),
   ) {
-    const body = { eventId, payload };
     // Retrying this exact storage envelope cannot replay model/tool execution.
-    for (let attempt = 0; ; attempt++) {
-      try {
-        await request("/events", body);
-        return;
-      } catch (error) {
-        if (attempt >= 2) throw error;
-        await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
-      }
-    }
+    const response = await request("/events", { eventId, payload });
+    await response.body?.cancel();
   }
   return { store, event };
 }

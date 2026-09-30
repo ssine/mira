@@ -32,6 +32,8 @@ type claudeFixture struct {
 	t                                        *testing.T
 	failMirror, dropNextMirror, replayedLost atomic.Bool
 	lostOperation                            atomic.Value
+	storageUnavailableUntil                  atomic.Int64
+	holdEvents                               atomic.Bool
 }
 
 func newClaudeFixture(t *testing.T) *claudeFixture {
@@ -83,9 +85,15 @@ func newClaudeFixture(t *testing.T) *claudeFixture {
 				return
 			}
 		}
+		if r.Method == "POST" && (strings.HasSuffix(r.URL.Path, "/entries") || strings.HasSuffix(r.URL.Path, "/events")) {
+			if time.Now().UnixMilli() < f.storageUnavailableUntil.Load() || (strings.HasSuffix(r.URL.Path, "/events") && f.holdEvents.Load()) {
+				w.WriteHeader(503)
+				return
+			}
+		}
 		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/entries") {
 			if f.failMirror.Load() {
-				w.WriteHeader(503)
+				w.WriteHeader(400) // Permanent rejection must not consume the transient retry budget.
 				return
 			}
 			operation := r.URL.Query().Get("operationId")
@@ -377,6 +385,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var imageSeen atomic.Bool
 	var resumed atomic.Bool
 	var hold atomic.Bool
+	var modelCancelled atomic.Bool
 	var steerHold, steerTool, steerSeen atomic.Bool
 	steerHeld, steerRelease := make(chan struct{}, 1), make(chan struct{}, 1)
 	var ask atomic.Bool
@@ -411,6 +420,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 		}
 		if hold.Load() {
 			<-r.Context().Done()
+			modelCancelled.Store(true)
 			return
 		}
 		if steerHold.CompareAndSwap(true, false) {
@@ -636,6 +646,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 		return true
 	}
 	f.dropNextMirror.Store(true)
+	f.storageUnavailableUntil.Store(time.Now().Add(12 * time.Second).UnixMilli())
 	runTurn("Use the Mira status tool and reply with the marker.")
 	wait("first SDK turn", 60*time.Second, completed)
 	var count int
@@ -817,7 +828,13 @@ func TestClaudeManagedSDK(t *testing.T) {
 	before := requests.Load()
 	turn := runTurn("Wait while I interrupt.")
 	wait("model request", 30*time.Second, func() bool { return requests.Load() > before })
+	f.holdEvents.Store(true)
 	f.call("POST", route+"/interrupt", map[string]any{})
+	wait("interrupt while storage is unavailable", 5*time.Second, modelCancelled.Load)
+	if f.call("GET", route, nil)["activeTurn"] == nil {
+		t.Fatal("turn completed before pending storage writes drained")
+	}
+	f.holdEvents.Store(false)
 	wait("interrupt and flush", 30*time.Second, func() bool { return f.call("GET", route, nil)["activeTurn"] == nil })
 	// The accepted turn must remain idempotent after its process has exited.
 	var turnState string

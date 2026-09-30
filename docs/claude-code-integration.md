@@ -187,6 +187,26 @@ JSON field extraction itself can reject escaped NUL anywhere in a raw object.
   Live events are cursor-based; older history loads on request. Raw native entries
   remain the resume source, independent of the visible event projection.
 
+Native `AskUserQuestion` requests appear as visible question forms outside folded
+tool activity. Single-choice, multiple-choice and free-text answers use the existing
+turn-scoped answer endpoint. No option is preselected; submitting requires an answer
+to every question. Polls preserve drafts, focus and in-flight submission state;
+recorded answers become read-only summaries and ended turns close unanswered forms.
+The activity line distinguishes waiting for an answer from model execution.
+
+For incomplete history, the composer explains that continuing uses the saved records
+and does not recover missing content. Its explicit acknowledgement applies to one
+submission and is cleared after sending or changing conversations. It does not mark
+the history complete; subsequent turns retain the existing persistence contract.
+
+Transient event/transcript write failures retry the identical serialized operation
+with capped backoff within one 45-second deadline, below the SDK's 60-second append
+timeout. Authentication, ownership and other permanent rejections fail immediately
+at the adapter boundary. Interrupts stop native work without waiting for storage;
+already-started writes drain before the completion event, subject to the Node's
+existing shutdown deadline. This improves brief Server-restart recovery; it does
+not add Codex's pre-sampling durability barrier or recover previously missing data.
+
 Wire endpoints and ownership rules are in
 [Claude sessions v1](../protocol/claude-sessions-v1.md).
 

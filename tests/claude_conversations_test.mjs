@@ -25,13 +25,35 @@ test("native projections replace stream prose, merge tool results, and retain na
  {type:"mira_question",questionId:"q",questions:[{question:"Choose"}]},
  {type:"result",duration_ms:100,total_cost_usd:1}
  ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
- const view=claudeTrace(rows);
+ const view=claudeTrace(rows,{activeTurn:"turn"});
  assert.deepEqual(view.trace.filter(x=>x.kind==="assistant"&&x.body).map(x=>x.body),["full"]);
  assert.equal(view.trace.find(x=>x.kind==="assistant"&&x.body).completedAt,"2026-09-30T01:02:03.456Z");
  assert.equal(view.trace.find(x=>x.kind==="assistant"&&x.body).timingScope,"recorded");
  assert.equal(view.trace.filter(x=>x.kind==="tool").length,1);assert.match(view.trace.find(x=>x.kind==="tool").body,/output/);
  assert.equal(view.questions.size,1);
  assert.equal(claudeTrace([...rows,{seq:99,payload:{type:"mira_answer",questionId:"q",answers:{a:"yes"}}}]).questions.size,0);
+});
+
+test("questions remain visible outside tool groups and expire with their owning turn", () => {
+ const question={seq:1,turnId:"turn",payload:{type:"mira_question",questionId:"q",questions:[{question:"Choose a target"}]}};
+ const pending=claudeTrace([question],{activeTurn:"turn"});
+ assert.equal(pending.trace[0].kind,"question");
+ assert.equal(pending.trace[0].body,"Choose a target");
+ assert.equal(pending.trace[0].questionState,"pending");
+ assert.equal(pending.questions.size,1);
+ for(const activeTurn of [null,"next-turn"]) {
+  const ended=claudeTrace([question],{activeTurn});
+  assert.equal(ended.questions.size,0);
+  assert.equal(ended.trace[0].questionState,"cancelled");
+ }
+ for(const type of ["mira_completed","mira_interrupt_requested"]) {
+  const ended=claudeTrace([question,{seq:2,turnId:"turn",payload:{type}}],{activeTurn:"turn"});
+  assert.equal(ended.questions.size,0,"terminal events override a stale session snapshot");
+ }
+ const answered=claudeTrace([question,{seq:2,turnId:"turn",payload:{type:"mira_answer",questionId:"q",answers:{"Choose a target":"WSL"}}}]);
+ assert.equal(answered.questions.size,0);
+ assert.equal(answered.trace[0].questionState,"answered");
+ assert.equal(answered.trace[0].body,"Choose a target\nWSL");
 });
 
 test("tool calls carry readable activities, keep their images, and omit sub-agent task events", () => {
