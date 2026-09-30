@@ -6,7 +6,7 @@ const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
   const errors = []; page.on("pageerror", error => errors.push(error.message));
-  for (const phase of [1, 2, 3]) {
+  for (const phase of [1, 2, 3, 4]) {
     if (phase === 2) await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(`${fixture.origin}/?thread=${questionThread}`);
     await page.evaluate(phase => {

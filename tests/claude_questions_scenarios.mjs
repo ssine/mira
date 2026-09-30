@@ -83,6 +83,19 @@ export async function runQuestionPhase(phase) {
     await until(async () => (await state()).turns.length === 1, "Acknowledged continuation was not sent");
     assert((await state()).turns[0].continueAcknowledgedHistory === true, "Continuation acknowledgement missing from request");
     await until(() => !checkbox.checked && !visible(checkbox), "Confirmation was not cleared for the next turn");
+    assert(!visible(notice), "Acknowledged history still occupies the composer");
+    await control({ action: "complete" });
+    await until(() => !$("#conversationSend").disabled && !$("#conversationSend").classList.contains("hidden"), "Continuation did not finish");
+    assert(!visible(notice), "Completion resurrected the old warning");
+  } else if (phase === 4) {
+    assert(!visible($("#claudePersistence")), "Reload resurrected an acknowledged history warning");
+    await until(() => !$("#conversationInput").disabled, "Composer not ready");
+    fill($("#conversationInput"), "继续下一轮"); $("#conversationForm").requestSubmit();
+    await until(async () => (await state()).turns.length === 2, "Later turn required repeated acknowledgement");
+    assert((await state()).turns[1].continueAcknowledgedHistory === false, "Client fabricated an acknowledgement");
+    await control({ action: "end" });
+    await until(() => visible($("#claudePersistence")) && visible($("#claudeContinue")), "New gap did not reopen the warning");
+    assert(!$("#claudeContinue").checked, "Old acknowledgement covered a new gap");
   }
   assert(document.documentElement.scrollWidth <= innerWidth, "Question causes horizontal overflow");
   return `phase ${phase} passed`;

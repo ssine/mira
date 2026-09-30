@@ -2,10 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fs from "node:fs/promises";
 import vm from "node:vm";
-import { claudeTrace, ClaudeRuntime } from "../server/public/claude.js";
+import { claudeTrace, ClaudeRuntime, claudeHistoryAcknowledgementRequired } from "../server/public/claude.js";
 import { conversationPageReader } from "../server/public/conversation-pages.js";
 import { accountGroups, accountNode } from "../server/public/codex-accounts.js";
 import { AccountSpend } from "../server/public/account-spend.js";
+
+test("history acknowledgement is conservative for older Servers and distinct from historical completeness", () => {
+  assert.equal(claudeHistoryAcknowledgementRequired({ persistence: "incomplete" }), true);
+  assert.equal(claudeHistoryAcknowledgementRequired({ persistence: "incomplete", historyAcknowledgementRequired: false }), false);
+  assert.equal(claudeHistoryAcknowledgementRequired({ persistence: "incomplete", historyAcknowledgementRequired: true }), true);
+  assert.equal(claudeHistoryAcknowledgementRequired({ persistence: "saved" }), false);
+});
 
 test("same account name stays separated by engine, including expense endpoints", () => {
  const node = { nodeId: "wsl", codexAccounts: [{ name: "Mafia", nodeAccountId: "c" }], claudeAccounts: [{ engine:"claude", name:"Mafia", nodeAccountId:"a", configured:true }] };

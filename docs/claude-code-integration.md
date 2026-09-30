@@ -195,9 +195,14 @@ recorded answers become read-only summaries and ended turns close unanswered for
 The activity line distinguishes waiting for an answer from model execution.
 
 For incomplete history, the composer explains that continuing uses the saved records
-and does not recover missing content. Its explicit acknowledgement applies to one
-submission and is cleared after sending or changing conversations. It does not mark
-the history complete; subsequent turns retain the existing persistence contract.
+and does not recover missing content. An accepted continuation acknowledges the
+known gap across reloads and later turns. `historyAcknowledgementRequired` is a read
+projection of accepted turn requests and subsequent mirror failures or reconciled
+worker exits, ordered by session revision. The Server checks it under the session
+lock before accepting a new turn. A new gap requires a new acknowledgement; an
+ordinary model error does not. Historical `persistence=incomplete` stays intact and
+remains visible in conversation details, while an acknowledged gap stops occupying
+the composer. Older Servers without this projection retain the conservative prompt.
 
 Transient event/transcript write failures retry the identical serialized operation
 with capped backoff within one 45-second deadline, below the SDK's 60-second append

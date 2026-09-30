@@ -45,6 +45,9 @@ try {
  await page.goto(`${origin}/?thread=${id(1)}`);
  const family=page.locator(`[data-subagent-parent="${id(1)}"]`);
  await family.waitFor();
+ // Opening a deep link can render its ancestry before the independent project
+ // directory request settles. Wait for the directory, not only the path row.
+ await page.locator('.thread-project-identity strong',{hasText:/^old-project$/}).waitFor();
  assert.equal(await page.locator('.thread-project').count(),2,'old project is in the complete directory');
  assert.equal(await page.locator('.thread-subagent-threads [data-thread-row]').count(),0,'collapsed children have no DOM');
  assert.equal(requests.some(q=>q.view==='children'),false,'no eager child requests');
@@ -73,7 +76,9 @@ try {
  await oldProject.locator('.thread-project-history-summary').click();
  await page.locator(`[data-thread-row="${old.threadId}"]`).waitFor();
  await page.goto(`${origin}/?thread=${nested.threadId}`);
- await page.locator(`[data-thread-row="${nested.threadId}"]`).waitFor();
+ // The selected row can render provisionally before its ancestry loads. Wait
+ // until it is inside the expanded path instead of sampling that intermediate UI.
+ await page.locator(`[data-subagent-parent="${id(1)}"][open] [data-subagent-parent="${id(1000)}"][open] [data-thread-row="${nested.threadId}"]`).waitFor();
  assert.equal(await page.locator(`[data-subagent-parent="${id(1)}"]`).getAttribute('open'),'');
  assert.equal(await page.locator(`[data-subagent-parent="${id(1000)}"]`).getAttribute('open'),'');
  assert.equal(requests.some(q=>q.limit==='300'),false,'paged clients never poll the legacy 300-row list');

@@ -43,7 +43,12 @@ New ownership is reserved under a session row lock, with an increasing revision,
 only when no active turn exists. The worker's native session ID remains unchanged.
 An accepted command whose reply is lost stays reserved until a completion or an
 explicit negative observation from its owning Node. History status `incomplete`
-requires `continueAcknowledgedHistory:true` for subsequent turns and remains visible.
+remains historical evidence. Session and conversation reads additionally expose
+`historyAcknowledgementRequired`: accepted `continueAcknowledgedHistory:true` turn
+requests cover earlier gaps, but a mirror failure or reconciled unacknowledged exit
+at or after that turn's revision requires a new acknowledgement. Turn acceptance
+checks this projection under the session lock. No acknowledgement marks missing
+history as repaired; older clients may still conservatively ask on every turn.
 
 ## Node storage operations
 
