@@ -77,7 +77,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
     for (const [index, b] of content.entries()) {
       const k = `${key}:${index}`;
       if (b.type === "text") put(k, role, role === "user" ? "你" : "Claude", b.text, turnId, timing);
-      else if (b.type === "thinking") put(k, "reasoning", "思考", b.thinking, turnId, timing);
+      else if (b.type === "thinking") { if (b.thinking?.trim()) put(k, "reasoning", "思考", b.thinking, turnId, timing); }
       else if (b.type === "tool_use") {
         const activity = { status: "running", durationMs: null, actions: toolActions(b.name, b.input, cwd) };
         put(`tool:${b.id}`, "tool", b.name, JSON.stringify(b.input, null, 2), turnId, { ...timing, activity, startedAt: timestamp });

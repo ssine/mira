@@ -974,7 +974,6 @@ function visibleReadPosition() {
 }
 
 function scheduleThreadRead() {
-  if (conversationEngine() === "claude") return;
   const position = visibleReadPosition();
   if (!position) { clearTimeout(agent.readTimer); agent.readTimer = null; return; }
   if (agent.readTimer || agent.readRequest) return;
@@ -984,7 +983,9 @@ function scheduleThreadRead() {
     agent.readTimer = null;
     const current = visibleReadPosition();
     if (!current || current.threadId !== position.threadId || current.generation !== position.generation) return;
-    const operation = api(`/v1/codex/threads/${encodeURIComponent(position.threadId)}/read?storeId=personal`, {
+    const claude = agent.threads.find(t => t.threadId === position.threadId && t.engine === "claude");
+    const operation = api(claude ? `/v1/claude/sessions/${encodeURIComponent(claude.sessionId)}/read`
+      : `/v1/codex/threads/${encodeURIComponent(position.threadId)}/read?storeId=personal`, {
       method: "POST", body: JSON.stringify({ generation: position.generation, itemCount: position.itemCount }), signal: AbortSignal.timeout(12_000),
     });
     agent.readRequest = operation;

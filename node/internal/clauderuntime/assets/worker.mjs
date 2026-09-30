@@ -197,6 +197,9 @@ async function main(spec) {
       cwd: spec.cwd,
       model: spec.model || undefined,
       effort: spec.effort || undefined,
+      // Without an explicit display the API omits thinking text and returns
+      // only signatures, which would render as empty reasoning cards.
+      thinking: { type: "adaptive", display: "summarized" },
       ...(spec.resume
         ? { resume: spec.sessionId }
         : { sessionId: spec.sessionId }),

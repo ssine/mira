@@ -22,6 +22,9 @@ Use Mira's existing administrator session; mutations require `X-Mira-CSRF`.
   including after worker exit; it never dispatches again. Active turns conflict.
 - `POST sessions/{id}/steer`: `{requestId,expectedTurnId,text,attachments?}` adds
   input to the running turn (see [Adding input to a running turn](#adding-input-to-a-running-turn)).
+- `POST sessions/{id}/read`: `{generation,itemCount}` advances the shared Web read
+  position (generation 1, event sequence). Conversation summaries include
+  `readState`; see `docs/web-read-state.md`.
 - `POST sessions/{id}/interrupt`: request native interruption and allow mirror flush.
   Added input the model has not read yet is discarded.
 - `POST sessions/{id}/answer`: `{questionId,answers}` for a question emitted by

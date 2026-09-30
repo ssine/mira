@@ -742,6 +742,28 @@ func TestClaudeManagedSDK(t *testing.T) {
 		t.Fatal("native resume lost previous messages")
 	}
 
+	// A reply is unread until acknowledged with the Codex read contract; the
+	// position never passes recorded history and never moves backwards.
+	conversation := f.call("GET", "/v1/claude/conversations/"+id, nil)
+	readState := conversation["readState"].(map[string]any)
+	if readState["unread"] != true || readState["latestItemSeq"].(float64) <= readState["readItemCount"].(float64) {
+		t.Fatalf("assistant reply is not unread: %#v", readState)
+	}
+	itemCount := conversation["itemCount"].(float64)
+	if status, _ := f.request("POST", route+"/read", map[string]any{"generation": 1, "itemCount": itemCount + 1000}, nil); status != 409 {
+		t.Fatalf("future read position accepted: %d", status)
+	}
+	read := f.call("POST", route+"/read", map[string]any{"generation": 1, "itemCount": itemCount})
+	if read["unread"] != false || read["readItemCount"] != itemCount {
+		t.Fatalf("read position not saved: %#v", read)
+	}
+	if read = f.call("POST", route+"/read", map[string]any{"generation": 1, "itemCount": 1}); read["readItemCount"] != itemCount {
+		t.Fatalf("read position moved backwards: %#v", read)
+	}
+	if listed := f.call("GET", "/v1/claude/conversations/"+id, nil)["readState"].(map[string]any); listed["unread"] != false {
+		t.Fatalf("conversation still unread: %#v", listed)
+	}
+
 	ask.Store(true)
 	runTurn("Ask me a question.")
 	questionID := ""

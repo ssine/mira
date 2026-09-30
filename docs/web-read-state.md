@@ -32,6 +32,15 @@ Polling transfers read positions between devices without resuming Codex or
 connecting to the execution Node. An unsuccessful acknowledgment remains unread
 and can be retried; a later reply can never be acknowledged by an older snapshot.
 
+Claude conversations (Mira 1.0.66) share the same browser contract. Migration 39
+adds `mira_claude_sessions.read_seq`, initialized to each session's latest event
+sequence so existing histories start read. The conversation summary's `readState`
+uses generation 1; `latestItemSeq` is the newest main-thread `assistant` event with
+non-empty text (subagent, tool, thinking and lifecycle events do not count).
+`POST /v1/claude/sessions/:id/read` accepts `{ generation, itemCount }`, advances
+`read_seq` monotonically, rejects stale generations and future sequences with 409,
+and does not change recency.
+
 List rows use an outline/left rule for selection, pale blue for running, pale
 green for idle with unread updates, and heavier title text for unread content.
 State text remains present independently of color. No list animation is needed.
