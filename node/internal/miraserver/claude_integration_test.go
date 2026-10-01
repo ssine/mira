@@ -34,6 +34,8 @@ type claudeFixture struct {
 	lostOperation                            atomic.Value
 	storageUnavailableUntil                  atomic.Int64
 	holdEvents                               atomic.Bool
+	holdLoads                                atomic.Bool
+	loadsWaiting                             atomic.Int32
 }
 
 func newClaudeFixture(t *testing.T) *claudeFixture {
@@ -111,6 +113,17 @@ func newClaudeFixture(t *testing.T) *claudeFixture {
 				w.WriteHeader(recorder.Code)
 				_, _ = w.Write(recorder.Body.Bytes())
 				return
+			}
+		}
+		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/entries") && f.holdLoads.Load() {
+			f.loadsWaiting.Add(1)
+			defer f.loadsWaiting.Add(-1)
+			for f.holdLoads.Load() {
+				select {
+				case <-r.Context().Done():
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
 			}
 		}
 		s.ServeHTTP(w, r)
@@ -1011,6 +1024,12 @@ func TestClaudeManagedSDK(t *testing.T) {
 		t.Fatal("timeout: background continuation after the API error")
 	}
 	var errorsSeen int
+	// The next model request can arrive before the previous event's separate
+	// Server write is acknowledged. Wait for that write, not model scheduling.
+	wait("intermediate error persisted", 5*time.Second, func() bool {
+		_ = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' AND payload->>'is_error'='true'`, recoveryTurn).Scan(&errorsSeen)
+		return errorsSeen == 1
+	})
 	if err = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' AND payload->>'is_error'='true'`, recoveryTurn).Scan(&errorsSeen); err != nil || errorsSeen != 1 {
 		t.Fatalf("expected one intermediate API error: %d %v", errorsSeen, err)
 	}
@@ -1084,6 +1103,27 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if status != 409 {
 		t.Fatalf("old Node not fenced: %d", status)
 	}
+	// Cancelling while native resume loads its transcript can cancel the first
+	// input before any result exists. The SDK then reports idle, but its input
+	// writer waits for a first result forever unless the query is closed.
+	f.holdLoads.Store(true)
+	beforeEarlyInterrupt := requests.Load()
+	earlyTurn := runTurn("Cancel this prompt before native resume finishes.")
+	wait("held native transcript load", 5*time.Second, func() bool { return f.loadsWaiting.Load() > 0 })
+	f.call("POST", route+"/interrupt", map[string]any{})
+	wait("early interrupt recorded", 5*time.Second, func() bool {
+		var recorded bool
+		_ = f.server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_events WHERE turn_id=$1 AND event_type='mira_interrupt_requested')`, earlyTurn).Scan(&recorded)
+		return recorded
+	})
+	f.holdLoads.Store(false)
+	wait("interrupt before first result", 15*time.Second, func() bool { return f.call("GET", route, nil)["activeTurn"] == nil })
+	var earlyStatus string
+	var earlyResults int
+	if err = f.server.pool.QueryRow(ctx, `SELECT status,(SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result') FROM mira_claude_turns WHERE turn_id=$1`, earlyTurn).Scan(&earlyStatus, &earlyResults); err != nil || earlyStatus != "interrupted" || earlyResults != 0 || requests.Load() != beforeEarlyInterrupt {
+		t.Fatalf("early interruption: status=%s results=%d modelRequests=%d err=%v", earlyStatus, earlyResults, requests.Load()-beforeEarlyInterrupt, err)
+	}
+
 	hold.Store(true)
 	before := requests.Load()
 	turn := runTurn("Wait while I interrupt.")

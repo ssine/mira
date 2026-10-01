@@ -217,9 +217,12 @@ the composer. Older Servers without this projection retain the conservative prom
 Transient event/transcript write failures retry the identical serialized operation
 with capped backoff within one 45-second deadline, below the SDK's 60-second append
 timeout. Authentication, ownership and other permanent rejections fail immediately
-at the adapter boundary. Interrupts stop native work without waiting for storage;
-already-started writes drain before the completion event, subject to the Node's
-existing shutdown deadline. This improves brief Server-restart recovery; it does
+at the adapter boundary. Interrupts stop native work without waiting for storage.
+Once the SDK acknowledges the interrupt and native execution reports idle, the
+worker closes the query even if cancellation happened during resume before the
+first result. It awaits SDK cleanup, including pending transcript mirrors, and
+already-started writes before the completion event, subject to the Node's existing
+shutdown deadline. This improves brief Server-restart recovery; it does
 not add Codex's pre-sampling durability barrier or recover previously missing data.
 
 Server also reconciles active Claude turns without an open browser. It checks

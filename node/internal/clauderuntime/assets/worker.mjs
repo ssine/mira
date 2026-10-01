@@ -17,7 +17,9 @@ let client,
   lifecycle,
   interruptRecord,
   interruptRecordFailed = false,
-  interrupted = false;
+  interrupted = false,
+  interruptAcknowledged = false,
+  nativeIdle = false;
 // Retried steer commands share one outcome; Mira stores the request by its ID.
 const steers = new Map();
 let markReady;
@@ -125,6 +127,8 @@ lines.on("line", async (line) => {
       interruptRecord ??= client?.event({ type: "mira_interrupt_requested" })
         .catch(() => { interruptRecordFailed = true; });
       await run?.interrupt({ cancelQueued: true });
+      interruptAcknowledged = true;
+      if (nativeIdle) run?.close();
     }
   } catch {
     process.exitCode = 1;
@@ -260,6 +264,15 @@ async function main(spec) {
       if (event.type === "system" && event.subtype === "mirror_error")
         degraded = true;
       await client.event(event);
+      if (event.type === "system" && event.subtype === "session_state_changed") {
+        nativeIdle = event.state === "idle";
+        // Cancelling the initial input during resume can produce idle without
+        // any result. The SDK's bidirectional input writer waits for its first
+        // result before closing stdin, so ending prompts alone would deadlock.
+        // Only close after both native idle and the interrupt acknowledgement;
+        // SDK cleanup drains pending transcript mirrors before ending iteration.
+        if (nativeIdle && interruptAcknowledged) run.close();
+      }
       if (event.type === "result" && !event.parent_tool_use_id) {
         // A background notification can recover from an earlier API error in
         // this same worker. Completion reflects the latest native response.
@@ -293,6 +306,7 @@ async function main(spec) {
     markReady();
     wake?.();
     run?.close();
+    await run?.[Symbol.asyncDispose]();
     await interruptRecord;
     try {
       await client.event({
