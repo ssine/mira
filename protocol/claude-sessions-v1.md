@@ -157,7 +157,7 @@ mean a complete legacy stream and must never be appended to a cached prefix.
 Ordinary GET is unchanged. Authentication/revision/ownership checks always apply,
 including cache hits, and storage failure never authorizes an offline resume.
 
-### Per-conversation cache state
+### Per-conversation cache state (Mira 1.0.67)
 
 Nodes that advertise `claudeSessionCacheStatusV1` answer the private `cache-session`
 action with `{state:"cached"|"absent"|"disabled",maxBytes,cursor?,prefix?,bytes?}`

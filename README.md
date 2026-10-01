@@ -5,6 +5,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.67 让侧栏圆圈也显示 Claude 对话在节点磁盘上的缓存状态；Claude 对话有新动态时，所在项目会像 Codex 一样排到前面。
+
 1.0.66 让 Claude 对话与 Codex 一样提示新内容，完成后未读时显示绿色状态；思考改为摘要显示，空的思考不再显示。
 
 1.0.65 修复会话底部遗留提示：Claude 已确认的旧历史保存问题不再反复提示，新故障仍需确认；Codex 恢复记录保留在发生的位置，重试结束后更新状态，临时连接重试提示及时清除。
@@ -168,13 +170,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.66
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.67
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.66'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.67'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
