@@ -1087,6 +1087,41 @@ func TestClaudeManagedSDK(t *testing.T) {
 		t.Fatal("account accepted on a different Node")
 	}
 	f.call("PATCH", "/v1/claude/accounts/"+accountIDs[1], map[string]any{"enabled": true})
+	// Simulate a Node update while the model is still responding and Server
+	// cannot acknowledge completion. A new manager uses the old manager's
+	// reaped-worker receipt; no browser action or repeated model call is needed.
+	recoverySession := f.call("POST", "/v1/claude/sessions", map[string]any{"requestId": uuidClaude(), "nodeId": f.nodeID, "cwd": workspace})["sessionId"].(string)
+	recoveryRoute := "/v1/claude/sessions/" + recoverySession
+	hold.Store(true)
+	modelCancelled.Store(false)
+	beforeRecovery := requests.Load()
+	shutdownTurn := uuidClaude()
+	f.call("POST", recoveryRoute+"/turns", map[string]any{"requestId": shutdownTurn, "text": "Hold this request during Node shutdown.", "model": "claude-sonnet-4-6"})
+	wait("model before Node shutdown", 30*time.Second, func() bool { return requests.Load() > beforeRecovery })
+	f.holdEvents.Store(true)
+	manager.Close()
+	f.holdEvents.Store(false)
+	wait("native model stopped on shutdown", 5*time.Second, modelCancelled.Load)
+	if state := f.call("GET", recoveryRoute, nil); state["activeTurn"] != shutdownTurn {
+		t.Fatalf("expected lost completion before reconciliation: %v", state)
+	}
+	newManager := clauderuntime.New(runtimeRoot)
+	defer newManager.Close()
+	if _, err = f.server.pool.Exec(ctx, `UPDATE codex_nodes SET capabilities=capabilities||'{"claudeExecutionStatusV1":true}' WHERE node_id=$1`, f.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	invoker := claudeExecutionInvoker{online: true, call: newManager.Call}
+	if _, err = f.server.reconcileClaudeExecutionPage(ctx, invoker, ""); err != nil {
+		t.Fatal(err)
+	}
+	state := f.call("GET", recoveryRoute, nil)
+	if state["activeTurn"] != nil || state["persistence"] != "incomplete" {
+		t.Fatalf("shutdown receipt did not release reservation: %v", state)
+	}
+	if requests.Load() != beforeRecovery+1 {
+		t.Fatal("reconciliation repeated model work")
+	}
+	hold.Store(false)
 	if preview := os.Getenv("MIRA_CLAUDE_PREVIEW_FILE"); preview != "" {
 		hold.Store(false)
 		if err := os.WriteFile(preview, []byte(f.endpoint), 0600); err != nil {

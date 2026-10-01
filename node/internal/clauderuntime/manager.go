@@ -31,6 +31,7 @@ type process struct {
 	done      chan struct{}
 	write     sync.Mutex
 	acks      ackReader
+	stop      func() bool
 }
 type Manager struct {
 	mu                          sync.Mutex
@@ -40,14 +41,17 @@ type Manager struct {
 	runtimeID                   string
 	preparing                   bool
 	closed                      bool
+	unconfirmedExit             bool
 	cancel                      context.CancelFunc
 	processes                   map[string]*process
 	// Completed IDs prevent an ambiguous control reply from rerunning tools.
-	accepted map[string]bool
+	accepted  map[string]bool
+	sealed    map[string]bool
+	closeOnce sync.Once
 }
 
 func New(identityDir string) *Manager {
-	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}}
+	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}, sealed: map[string]bool{}}
 	m.cachePaths(identityDir)
 	return m
 }
@@ -158,6 +162,9 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	if params["action"] == "cache-session" {
 		return m.sessionCache(params)
 	}
+	if params["action"] == "interrupt" || params["action"] == "answer" {
+		return m.writeControl(params)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -167,6 +174,8 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	id, _ := params["turnId"].(string)
 	accountID, _ := params["nodeAccountId"].(string)
 	switch action {
+	case "reconcile":
+		return m.reconcile(params)
 	case "cache-status", "cache-configure":
 		return m.cacheCall(action, params["maxBytes"])
 	case "account/configure":
@@ -211,6 +220,9 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		if params["runtimeId"] != m.runtimeID {
 			return nil, errors.New("Claude runtime changed before start; execution state is unknown")
 		}
+		if m.sealed[id] {
+			return nil, errors.New("Claude turn was fenced after its worker stopped")
+		}
 		if m.accepted[id] {
 			return map[string]any{"accepted": true, "active": m.processes[id] != nil}, nil
 		}
@@ -244,10 +256,21 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{})}
 		cmd.Stdout = &p.acks
 		cmd.Stderr = io.Discard
+		cmd.WaitDelay = 2 * time.Second
 		if err = cmd.Start(); err != nil {
 			input.Close()
 			return nil, err
 		}
+		cleanup, err := guardProcessTree(cmd)
+		if err != nil {
+			killCommand(cmd)
+			_ = input.Close()
+			_ = cmd.Wait()
+			return nil, err
+		}
+		var stopOnce sync.Once
+		var stopped bool
+		p.stop = func() bool { stopOnce.Do(func() { stopped = cleanup() }); return stopped }
 		m.processes[id] = p
 		m.accepted[id] = true
 		if len(m.accepted) > 4096 {
@@ -259,31 +282,60 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 			}
 		}
 		encoded, _ := json.Marshal(params)
-		if _, err = input.Write(append(encoded, '\n')); err != nil {
-			killCommand(cmd)
+		// Startup stdin is bounded too: a wedged worker must not hold m.mu and
+		// prevent shutdown or reconciliation. Failure retains the accepted ID.
+		err = writeProcessControl(p, append(encoded, '\n'))
+		if err != nil {
+			p.stop()
 		}
 		go func() {
 			_ = cmd.Wait()
+			stopped := p.stop()
 			_ = input.Close()
 			m.mu.Lock()
+			m.unconfirmedExit = m.unconfirmedExit || !stopped
 			delete(m.processes, id)
 			m.mu.Unlock()
 			close(p.done)
 		}()
 		return map[string]any{"accepted": true}, err
-	case "interrupt", "answer":
-		p := m.processes[id]
-		if p == nil {
-			return nil, errors.New("Claude turn is no longer running on this Node")
-		}
-		body, _ := json.Marshal(params)
-		p.write.Lock()
-		_, err := p.input.Write(append(body, '\n'))
-		p.write.Unlock()
-		return map[string]any{"accepted": err == nil}, err
 	default:
 		return nil, errors.New("unknown Claude runtime action")
 	}
+}
+
+func writeProcessControl(p *process, body []byte) error {
+	written := make(chan error, 1)
+	go func() {
+		p.write.Lock()
+		defer p.write.Unlock()
+		_, err := p.input.Write(body)
+		written <- err
+	}()
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-written:
+		return err
+	case <-timer.C:
+		// Closing stdin also releases the blocked writer. Never resend the
+		// command: a partial write has an ambiguous outcome.
+		_ = p.input.Close()
+		return errors.New("Claude worker control input timed out")
+	}
+}
+
+func (m *Manager) writeControl(params map[string]any) (any, error) {
+	id, _ := params["turnId"].(string)
+	m.mu.Lock()
+	p, closed := m.processes[id], m.closed
+	m.mu.Unlock()
+	if closed || p == nil {
+		return nil, errors.New("Claude turn is no longer running on this Node")
+	}
+	body, _ := json.Marshal(params)
+	err := writeProcessControl(p, append(body, '\n'))
+	return map[string]any{"accepted": err == nil}, err
 }
 
 // steer queues a message into a running turn. It waits for the worker's
@@ -307,12 +359,10 @@ func (m *Manager) steer(params map[string]any) (any, error) {
 	}
 	ack := p.acks.wait(steerID)
 	body, _ := json.Marshal(params)
-	p.write.Lock()
-	_, err := p.input.Write(append(body, '\n'))
-	p.write.Unlock()
+	err := writeProcessControl(p, append(body, '\n'))
 	if err != nil {
 		p.acks.cancel(steerID, ack)
-		return map[string]any{"accepted": false, "reason": "turn_finishing"}, nil
+		return nil, err // An ambiguous write must not cause a new-turn replay.
 	}
 	timeout := time.NewTimer(25 * time.Second)
 	defer timeout.Stop()
@@ -334,6 +384,10 @@ func (m *Manager) steer(params map[string]any) (any, error) {
 }
 
 func (m *Manager) Close() {
+	m.closeOnce.Do(m.close)
+}
+
+func (m *Manager) close() {
 	m.mu.Lock()
 	m.closed = true
 	if m.cancel != nil {
@@ -345,22 +399,46 @@ func (m *Manager) Close() {
 	}
 	m.mu.Unlock()
 	for _, p := range ps {
-		p.write.Lock()
-		_, _ = p.input.Write([]byte("{\"action\":\"interrupt\"}\n"))
-		p.write.Unlock()
+		// A wedged stdin or a concurrent steer must not consume the Supervisor's
+		// entire stop deadline before we can terminate and reap the worker.
+		go func(p *process) {
+			_ = writeProcessControl(p, []byte("{\"action\":\"interrupt\"}\n"))
+		}(p)
 	}
-	deadline := time.NewTimer(10 * time.Second)
+	deadline := time.NewTimer(5 * time.Second)
 	defer deadline.Stop()
+	forced := false
 	for _, p := range ps {
 		select {
 		case <-p.done:
 		case <-deadline.C:
+			forced = true
 			for _, q := range ps {
-				killCommand(q.command)
+				q.stop()
 			}
+		}
+		if forced {
+			break
+		}
+	}
+	// Receipt creation requires an actual Wait acknowledgement for every worker.
+	// A kill request alone (or a Node restart with an empty map) is not evidence.
+	reap := time.NewTimer(3 * time.Second)
+	defer reap.Stop()
+	for _, p := range ps {
+		select {
+		case <-p.done:
+		case <-reap.C:
 			return
 		}
 	}
+	m.mu.Lock()
+	uncertain := m.unconfirmedExit
+	m.mu.Unlock()
+	if uncertain {
+		return
+	}
+	_ = m.recordClosedRuntime()
 }
 
 // Bounded metadata IPC; worker transcripts never use stdout.

@@ -146,6 +146,10 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
         { questionId: e.questionId, questionState: "answered" });
     } else if (e.type === "mira_interrupt_requested") { interrupted = true; endedTurns.add(turnId); }
     else if (e.type === "mira_completed") endedTurns.add(turnId);
+    else if (e.type === "mira_execution_stopped") {
+      endedTurns.add(turnId);
+      put(key, "error", "执行已停止", e.message, turnId);
+    }
     else if (e.type === "mira_error") put(key, "error", "运行错误", e.message, turnId);
     else if (e.type === "system" && e.subtype === "mirror_error") put(key, "error", "历史未完整保存", "部分原生记录未能保存到 Mira。", turnId);
     else if (e.type === "result") {

@@ -30,8 +30,9 @@ Use Mira's existing administrator session; mutations require `X-Mira-CSRF`.
 - `POST sessions/{id}/answer`: `{questionId,answers}` for a question emitted by
   the currently active turn. The Node forwards it to the waiting native tool.
 - `POST sessions/{id}/reconcile`: inspect the owning Node. An absent worker closes
-  an otherwise active turn as failed with incomplete persistence. Offline or a
-  different runtime instance is not proof of absence.
+  an otherwise active turn as failed with incomplete persistence only with the
+  execution evidence described below. An unconfirmed observation returns 409.
+  This is also performed automatically without an open browser.
 - `GET sessions/{id}/events?after=N`: up to 200 raw event envelopes and a cursor.
 - `GET sessions/{id}/events?view=transcript&before=N`: latest/older events without
   stream deltas, returned chronologically with `cursor` and `earliest`. `before=0`
@@ -53,6 +54,38 @@ at or after that turn's revision requires a new acknowledgement. Turn acceptance
 checks this projection under the session lock. No acknowledgement marks missing
 history as repaired; older clients may still conservatively ask on every turn.
 
+### Execution reconciliation
+
+Server polls active reservations in pages of 64 with eight bounded probes, on a
+five-second timer. New `starting` reservations get 35 seconds to dispatch before
+automatic absence checks. Recent observations are a disposable bounded cache,
+valid for 20 seconds; missing, expired or offline observations show `unknown`.
+`activeTurn` remains the concurrency reservation, not proof of current execution.
+
+Nodes advertising `claudeExecutionStatusV1` support the private `claude/reconcile`
+action with `{runtimeId,turnId}`. Replies include `expectedRuntimeId`, current
+`runtimeId`, `turnId`, and `state` (`running`, `stopped`, `unknown`). In the same
+runtime, absent turns are fenced under the start lock before returning `stopped`
+with `proof:turn_fenced`. Delayed starts are rejected. At the 4096-fence bound,
+new negative observations remain unknown rather than evicting a live fence.
+
+A different runtime may return `stopped` with `proof:runtime_closed` only when
+the previous manager left a closed-runtime receipt after rejecting new starts,
+stopping its workers, cleaning up their process trees and receiving all process
+Wait acknowledgements. Shutdown allows five seconds to drain, then three seconds
+to reap. Receipts under `runtimes/claude/closed-runtimes` retain 128 runtime IDs;
+they contain no conversation data and are never a history store. Missing receipts
+(hard crashes, older Nodes, or retention) mean unknown. Detached external work is
+outside this worker-liveness contract. Legacy Nodes can confirm a live turn but
+their empty process map is insufficient to release a reservation.
+
+Finalization rechecks session, turn, Node, revision and runtime under the session
+lock, marks the turn failed and persistence incomplete, releases the reservation,
+and appends `mira_execution_stopped` with the observed proof. Repeated probes are
+idempotent. Late native events remain raw history but cannot replace a terminal
+status. Reconciliation never resubmits prompts, repeats tools, recovers missing
+history, or treats elapsed time alone as proof of termination.
+
 ## Node storage operations
 
 These require the existing approved Node Bearer credential. Every request carries
@@ -68,7 +101,8 @@ or additional security identity is introduced.
 - `POST sessions/{id}/events`: `{eventId:UUID,payload:object}`. SDK messages are
   unchanged. Adapter lifecycle records use `mira_user`, `mira_steer`,
   `mira_steer_rejected`, `mira_question`, `mira_answer`, `mira_interrupt_requested`,
-  `mira_error`, and `mira_completed`. Question event IDs equal question IDs and
+  `mira_error`, and `mira_completed`. Server reconciliation may additionally append
+  `mira_execution_stopped` with `degraded:true`. Question event IDs equal question IDs and
   `mira_steer` event IDs equal steer request IDs. Other IDs are independent UUIDs.
 
 Root transcript subpath is empty. Child paths are opaque relative paths up to

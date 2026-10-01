@@ -32,6 +32,9 @@ type Config struct {
 }
 
 type Server struct {
+	stopClaudeExecution   func()
+	claudeExecutionMu     sync.Mutex
+	claudeExecution       map[string]claudeExecutionObservation
 	stopRecovery          func()
 	config                Config
 	pool                  *pgxpool.Pool
@@ -119,6 +122,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 		return nil, err
 	}
 	server.stopRecovery = server.startAutomaticRecovery(ctx)
+	server.stopClaudeExecution = server.startClaudeExecutionReconciliation(ctx)
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.stopAccountCosts = viewService.StartAccountCostProjector(ctx, configuration.Logger)
 	server.stopPush = server.startPushWorker(ctx)
@@ -160,6 +164,9 @@ func (server *Server) ListenAndServe() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	var result error
 	server.closeOnce.Do(func() {
+		if server.stopClaudeExecution != nil {
+			server.stopClaudeExecution()
+		}
 		if server.stopRecovery != nil {
 			server.stopRecovery()
 		}

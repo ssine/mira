@@ -61,7 +61,7 @@ test("questions remain visible outside tool groups and expire with their owning 
   assert.equal(ended.questions.size,0);
   assert.equal(ended.trace[0].questionState,"cancelled");
  }
- for(const type of ["mira_completed","mira_interrupt_requested"]) {
+ for(const type of ["mira_completed","mira_interrupt_requested","mira_execution_stopped"]) {
   const ended=claudeTrace([question,{seq:2,turnId:"turn",payload:{type}}],{activeTurn:"turn"});
   assert.equal(ended.questions.size,0,"terminal events override a stale session snapshot");
  }
@@ -69,6 +69,27 @@ test("questions remain visible outside tool groups and expire with their owning 
  assert.equal(answered.questions.size,0);
  assert.equal(answered.trace[0].questionState,"answered");
  assert.equal(answered.trace[0].body,"Choose a target\nWSL");
+});
+
+test("confirmed worker exit explains incomplete history in the transcript", () => {
+ const view=claudeTrace([{seq:1,turnId:"turn",payload:{type:"mira_execution_stopped",degraded:true,message:"执行进程已退出，未收到完整的结束记录。"}}]);
+ assert.equal(view.trace[0].kind,"error");
+ assert.equal(view.trace[0].title,"执行已停止");
+ assert.match(view.trace[0].body,/未收到完整的结束记录/);
+});
+
+test("reloading an unknown Claude turn retains its input reservation", async () => {
+ const app=await fs.readFile(new URL("../server/public/app.js",import.meta.url),"utf8");
+ const start=app.indexOf("function acceptThreadActivity(");
+ const agent={persistedActivity:new Map(),activeTurns:new Map(),turnThreads:new Map(),threads:[]};
+ const context=vm.createContext({agent,acceptThreadTokenUsage(){},rememberThreadCost(){},
+  $:()=>({querySelector:()=>null}),threadActivity:id=>agent.persistedActivity.get(id)});
+ vm.runInContext(app.slice(start,app.indexOf("\nfunction renderThreadStates",start)),context);
+ context.acceptThreadActivity({threadId:"claude",engine:"claude",activity:{state:"unknown",turnId:"turn",generation:1,itemCount:5}});
+ assert.equal(agent.activeTurns.get("claude"),"turn");
+ assert.equal(agent.persistedActivity.get("claude").state,"unknown");
+ context.acceptThreadActivity({threadId:"codex",engine:"codex",activity:{state:"unknown",turnId:"other",generation:1,itemCount:5}});
+ assert.equal(agent.activeTurns.has("codex"),false);
 });
 
 test("tool calls carry readable activities, keep their images, and omit sub-agent task events", () => {

@@ -222,6 +222,22 @@ already-started writes drain before the completion event, subject to the Node's
 existing shutdown deadline. This improves brief Server-restart recovery; it does
 not add Codex's pre-sampling durability barrier or recover previously missing data.
 
+Server also reconciles active Claude turns without an open browser. It checks
+the owning worker, fences absent turns against delayed starts, and uses bounded
+Node-local shutdown receipts to recognize an earlier manager whose workers were
+terminated and reaped during an update. Confirmed exits without completion become
+failed turns with incomplete history and a visible explanation; saved records are
+retained, and the normal acknowledged-history continuation rule applies. Late
+completion events cannot overwrite that terminal state.
+
+An active reservation alone no longer displays as running. Offline Nodes, expired
+observations and restarted runtimes without shutdown evidence display “状态待确认”.
+Hard crashes and old releases without receipts can therefore still require manual
+investigation; the system does not infer termination from a timeout or automatically
+repeat execution. Both Node and Server must support execution reconciliation for
+automatic release after an unacknowledged exit. This does not retroactively produce
+shutdown evidence for turns stranded by an older release.
+
 Wire endpoints and ownership rules are in
 [Claude sessions v1](../protocol/claude-sessions-v1.md).
 
