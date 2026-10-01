@@ -163,7 +163,20 @@ export function createCompletionNotifications(api, toast) {
       })]);
     } finally { clearTimeout(timer); }
   };
-  const save = (subscription) => api("/v1/push/subscription", { method: "POST", body: JSON.stringify(subscription.toJSON()) });
+  // Focus re-registers only a changed endpoint or a twelve-hour-old record; the
+  // Server keeps subscriptions until delivery fails or the user turns them off.
+  const savedKey = "mira.push.saved";
+  const savedRecently = (subscription) => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(savedKey) ?? "null");
+      return saved?.endpoint === subscription.endpoint && Date.now() - saved.at < 12 * 60 * 60_000;
+    } catch { return false; }
+  };
+  const forgetSaved = () => { try { localStorage.removeItem(savedKey); } catch { /* optional storage */ } };
+  const save = async (subscription) => {
+    await api("/v1/push/subscription", { method: "POST", body: JSON.stringify(subscription.toJSON()) });
+    try { localStorage.setItem(savedKey, JSON.stringify({ endpoint: subscription.endpoint, at: Date.now() })); } catch { /* optional storage */ }
+  };
   const refresh = async () => {
     if (!authenticated || busy || !supported()) return;
     const current = epoch;
@@ -173,7 +186,7 @@ export function createCompletionNotifications(api, toast) {
       enabled = false;
       if (current !== epoch || !authenticated) return;
       if (wanted() && sub && Notification.permission === "granted") {
-        await save(sub);
+        if (!savedRecently(sub)) await save(sub);
         if (current === epoch && authenticated) enabled = true;
       }
     } catch { /* Offline/session errors do not disable the saved preference. */ }
@@ -191,7 +204,7 @@ export function createCompletionNotifications(api, toast) {
       if (enabled) {
         const sub = await (await registration()).pushManager.getSubscription();
         if (sub) await api("/v1/push/subscription", { method: "DELETE", body: JSON.stringify({ endpoint: sub.endpoint }) });
-        remember(false); enabled = false;
+        remember(false); forgetSaved(); enabled = false;
         if (sub) await sub.unsubscribe();
         toast("已关闭这台设备的完成通知");
       } else {
@@ -226,10 +239,10 @@ export function createCompletionNotifications(api, toast) {
       if (authenticated === value) return;
       authenticated = value; epoch++;
       if (value) void refresh();
-      else { enabled = false; sync(); }
+      else { enabled = false; forgetSaved(); sync(); }
     },
     async logout() {
-      remember(false); enabled = false; authenticated = false; epoch++; sync();
+      remember(false); forgetSaved(); enabled = false; authenticated = false; epoch++; sync();
       if (!supported()) return;
       const worker = await navigator.serviceWorker.getRegistration();
       const sub = await worker?.pushManager.getSubscription();

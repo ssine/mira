@@ -55,6 +55,7 @@ var specs = map[string]assetSpec{
 	"/trace-activity.js":         {"web/trace-activity.js", "text/javascript; charset=utf-8"},
 	"/trace-images.js":           {"web/trace-images.js", "text/javascript; charset=utf-8"},
 	"/composer-drafts.js":        {"web/composer-drafts.js", "text/javascript; charset=utf-8"},
+	"/client-cache.js":           {"web/client-cache.js", "text/javascript; charset=utf-8"},
 	"/conversation-progress.js":  {"web/conversation-progress.js", "text/javascript; charset=utf-8"},
 	"/theme.js":                  {"web/theme.js", "text/javascript; charset=utf-8"},
 	"/styles.css":                {"web/styles.css", "text/css; charset=utf-8"},

@@ -166,6 +166,10 @@ Expanded tool detail updates must preserve existing bodies and the user's readin
 The Web sidebar paginates root conversations per project and loads direct subagent children on
 expansion. Preserve the complete project directory, merge loaded pages during refresh, and keep
 Token/cost totals independent of which rows are loaded. See `docs/thread-list-pagination.md`.
+The browser keeps disposable, version-bound IndexedDB copies of the sidebar, Node list, model
+catalogs, residency and recently opened transcripts (`client-cache.js`), rendered first and then
+revalidated. PostgreSQL stays authoritative; never derive running state or account bindings from a
+cached copy. See `docs/web-client-cache.md`.
 Conversation token totals and cost estimates include each thread's own usage and all descendant subagent threads from
 PostgreSQL, including archived children, without counting copied pre-fork history again. Show self
 and descendant amounts separately, preserve partial/unavailable statistics, and refresh child usage and costs

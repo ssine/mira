@@ -173,7 +173,18 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
 
 export class ClaudeRuntime {
   constructor(api) { this.api = api; this.turnRequests = new Map(); this.steerRequests = new Map(); this.reset(); }
-  reset(id = null) { this.epoch = (this.epoch || 0) + 1; this.id = id; this.rows = new Map(); this.cursor = 0; this.earliest = null; }
+  reset(id = null) { this.epoch = (this.epoch || 0) + 1; this.id = id; this.rows = new Map(); this.cursor = 0; this.earliest = null; this.restored = false; }
+  // A browser-cached copy of the rows read so far. The next latest-page read
+  // keeps the cached older rows only when that page overlaps them.
+  snapshot() { return { rows: [...this.rows.values()], cursor: this.cursor, earliest: this.earliest }; }
+  restore(id, snapshot) {
+    this.reset(id);
+    for (const row of snapshot.rows) this.rows.set(row.seq, row);
+    this.cursor = snapshot.cursor; this.earliest = snapshot.earliest; this.restored = true;
+  }
+  trace(thread, activeTurn) {
+    return claudeTrace([...this.rows.values()].sort((a,b) => a.seq-b.seq), { child: !!thread.subpath, activeTurn });
+  }
   call(path, body) { return this.api(`/v1/claude/${path}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }); }
   async prepare(nodeId, progress = () => {}) {
     let state = await this.call(`runtimes/${nodeId}/prepare`, {});
@@ -207,11 +218,21 @@ export class ClaudeRuntime {
     if (poll) query.set("after", this.cursor); else { query.set("view", "transcript"); query.set("before", older ? this.earliest || 0 : 0); }
     const result = await this.call(`sessions/${thread.sessionId}/${thread.subpath ? "history" : "events"}?${query}`);
     if (epoch !== this.epoch) return null;
+    let earliest = result.data.length ? result.earliest : null;
+    if (this.restored && !poll && !older) {
+      // Stream events after this page are re-read by the next poll.
+      this.restored = false; this.cursor = 0;
+      const cachedMax = Math.max(0, ...[...this.rows.values()].filter(row => row.payload?.type !== "stream_event").map(row => row.seq));
+      if (earliest !== null && earliest <= cachedMax) {
+        for (const seq of [...this.rows.keys()]) if (seq >= earliest) this.rows.delete(seq);
+        earliest = this.earliest;
+      } else this.rows.clear();
+    }
     for (const row of result.data) this.rows.set(row.seq, row);
     if (!older) this.cursor = Math.max(this.cursor, result.cursor || 0);
-    if (!poll) this.earliest = result.data.length ? result.earliest : null;
+    if (!poll) this.earliest = earliest;
     pruneCompletedStreams(this.rows);
-    return { ...claudeTrace([...this.rows.values()].sort((a,b) => a.seq-b.seq), { child: !!thread.subpath, activeTurn: result.session?.activeTurn }), session: result.session,
+    return { ...this.trace(thread, result.session?.activeTurn), session: result.session,
       nextCursor: this.earliest, changed: result.data.length > 0, more: poll && result.data.length > 0 };
   }
   send(thread, body) { return this.#retained(this.turnRequests, "turns", thread, body); }
