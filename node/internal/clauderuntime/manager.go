@@ -155,6 +155,9 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	if params["action"] == "steer" {
 		return m.steer(params)
 	}
+	if params["action"] == "cache-session" {
+		return m.sessionCache(params)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {

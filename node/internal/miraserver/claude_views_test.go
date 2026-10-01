@@ -141,9 +141,19 @@ func TestClaudeUnifiedProjectPagination(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := p.Exec(ctx, `UPDATE mira_claude_sessions SET updated_at=now()-interval '1 day' WHERE cwd='/older-project'`); err != nil {
+		t.Fatal(err)
+	}
 	first := f.call("GET", "/v1/claude/conversations?view=roots", nil)
 	if len(first["data"].([]any)) != 50 || len(first["projects"].([]any)) != 2 {
 		t.Fatalf("incomplete directory: %#v", first)
+	}
+	// Directories carry their latest activity, newest first, for cross-engine ordering.
+	for index, cwd := range []string{"/project", "/older-project"} {
+		project := first["projects"].([]any)[index].(map[string]any)
+		if project["cwd"] != cwd || project["updatedAt"] == nil {
+			t.Fatalf("project recency order: %#v", first["projects"])
+		}
 	}
 	second := f.call("GET", "/v1/claude/conversations?view=roots&cursor="+url.QueryEscape(first["nextCursor"].(string)), nil)
 	if len(second["data"].([]any)) != 15 || second["nextCursor"] != nil {

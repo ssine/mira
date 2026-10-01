@@ -14,6 +14,9 @@ type ThreadProject struct {
 	NodeID string `json:"nodeId"`
 	Cwd    string `json:"cwd"`
 	Count  int    `json:"count"`
+	// Latest activity among its roots and their descendants, so clients can
+	// order Codex and Claude project directories together.
+	UpdatedAt *time.Time `json:"updatedAt,omitempty"`
 }
 
 type directoryThread struct {
@@ -125,6 +128,11 @@ func buildThreadDirectory(items []*directoryThread) *threadDirectory {
 			index = len(directory.projects)
 			projects[item.project.Key] = index
 			directory.projects = append(directory.projects, item.project)
+			// Roots are newest first, so the first root carries the project's recency.
+			if !item.updated.IsZero() {
+				updated := item.updated
+				directory.projects[index].UpdatedAt = &updated
+			}
 		}
 		directory.projects[index].Count++
 	}

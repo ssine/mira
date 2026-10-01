@@ -24,12 +24,16 @@ export function conversationPageReader(api, engineOf) {
     if (Array.isArray(claude.projects)) catalog.claude = claude.projects;
     directories.set(scope, catalog);
     const projects = new Map();
+    const time = p => Date.parse(p?.updatedAt) || 0;
     for (const p of [...catalog.codex, ...catalog.claude]) {
-      const prior = projects.get(p.key); projects.set(p.key, { ...p, count: (prior?.count || 0) + p.count });
+      const prior = projects.get(p.key);
+      projects.set(p.key, { ...p, count: (prior?.count || 0) + p.count, updatedAt: time(prior) > time(p) ? prior.updatedAt : p.updatedAt });
     }
     const next = { codex: codex.nextCursor || null, claude: claude.nextCursor || null };
     return { ...codex, data: [...(codex.data || []), ...(claude.data || [])].sort((a,b) => Date.parse(b.updatedAt)-Date.parse(a.updatedAt)),
-      ...(codex.projects || claude.projects ? { projects: [...projects.values()] } : {}),
+      // Order directories by latest activity across both engines; the sort is
+      // stable, so Servers without updatedAt keep their own order.
+      ...(codex.projects || claude.projects ? { projects: [...projects.values()].sort((a, b) => time(b) - time(a)) } : {}),
       nextCursor: next.codex || next.claude ? JSON.stringify(next) : null,
       // Legacy Codex responses already contain the full family tree. Do not
       // reinterpret those rows as paginated roots merely because Claude pages.

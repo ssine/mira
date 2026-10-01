@@ -56,7 +56,7 @@ func newClaudeFixture(t *testing.T) *claudeFixture {
 	secret := base64.RawURLEncoding.EncodeToString(make([]byte, 32))
 	hash, _ := foundation.NodeSecretHash(secret)
 	token := "mira_node_" + credentialID + "_" + secret
-	if _, err = pool.Exec(ctx, `INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status,approved_at,last_seen_at) VALUES($1::uuid,$1::text,'claude-test','linux','amd64','linux','test','{"claudeRuntimeV1":true,"claudeAccountsV1":true,"claudeSessionCacheV1":true,"files":true}','[]','approved',NOW(),NOW())`, nodeID); err != nil {
+	if _, err = pool.Exec(ctx, `INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations,approval_status,approved_at,last_seen_at) VALUES($1::uuid,$1::text,'claude-test','linux','amd64','linux','test','{"claudeRuntimeV1":true,"claudeAccountsV1":true,"claudeSessionCacheV1":true,"claudeSessionCacheStatusV1":true,"files":true}','[]','approved',NOW(),NOW())`, nodeID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = pool.Exec(ctx, `INSERT INTO mira_node_credentials(credential_id,node_id,secret_hash) VALUES($1,$2,$3)`, credentialID, nodeID, hash); err != nil {
@@ -736,6 +736,12 @@ func TestClaudeManagedSDK(t *testing.T) {
 	settings = f.call("POST", cacheRoute+"/cache-status", map[string]any{})
 	if settings["usedBytes"].(float64) <= 0 || settings["entries"].(float64) <= 0 {
 		t.Fatalf("native resume did not populate the disposable cache: %v", settings)
+	}
+	if cache := f.call("GET", route+"/cache", nil); cache["state"] != "loaded" {
+		t.Fatalf("sidebar cache state after resume: %v", cache)
+	}
+	if code, _ := f.request("GET", route+"/cache?subpath=../escape", nil, nil); code != 400 {
+		t.Fatalf("invalid cache subpath: %d", code)
 	}
 
 	if !resumed.Load() {

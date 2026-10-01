@@ -157,6 +157,14 @@ test("mixed pagination keeps both cursors, all projects, and does not restart an
  assert.deepEqual(calls,[["codex",null],["claude",null],["claude","next"]]);
 });
 
+test("project directories are ordered by latest activity across engines", async () => {
+ const reader=conversationPageReader(async url=>url.startsWith("/v1/claude/")
+  ?{paged:true,data:[],projects:[{key:"claude-only",count:1,updatedAt:"2026-10-01T09:00:00Z"},{key:"shared",count:1,updatedAt:"2026-10-01T08:00:00Z"}]}
+  :{paged:true,data:[],projects:[{key:"shared",count:2,updatedAt:"2026-09-30T00:00:00Z"},{key:"codex-only",count:1,updatedAt:"2026-10-01T08:30:00Z"}]},()=>"codex");
+ const page=await reader(new URLSearchParams({view:"roots"}));
+ assert.deepEqual(page.projects.map(p=>[p.key,p.count,p.updatedAt]),[["claude-only",1,"2026-10-01T09:00:00Z"],["codex-only",1,"2026-10-01T08:30:00Z"],["shared",3,"2026-10-01T08:00:00Z"]]);
+});
+
 test("lost native turn response reuses exactly the same request and account",async()=>{
  const requests=[];const runtime=new ClaudeRuntime(async (_url,options)=>{requests.push(JSON.parse(options.body));if(requests.length===1)throw new Error("lost");return{turnId:"ok"};});
  await assert.rejects(runtime.send({sessionId:"s"},{text:"one",nodeAccountId:"A"}));
