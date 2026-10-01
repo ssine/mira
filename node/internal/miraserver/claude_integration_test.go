@@ -452,6 +452,8 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var ask atomic.Bool
 	var child atomic.Bool
 	var background, backgroundPhase, backgroundDone atomic.Bool
+	var backgroundAPIError, recoveryHold, recoverySteerSeen atomic.Bool
+	recoveryHeld, recoveryRelease := make(chan struct{}, 1), make(chan struct{}, 1)
 	backgroundStarted := make(chan struct{}, 1)
 	backgroundRelease := make(chan struct{})
 	var releaseBackground sync.Once
@@ -478,6 +480,9 @@ func TestClaudeManagedSDK(t *testing.T) {
 		}
 		if strings.Contains(string(bytes), "STEER_ADDED_MARKER") {
 			steerSeen.Store(true)
+		}
+		if strings.Contains(string(bytes), "STEER_AFTER_ERROR_MARKER") {
+			recoverySteerSeen.Store(true)
 		}
 		if hold.Load() {
 			<-r.Context().Done()
@@ -546,7 +551,37 @@ func TestClaudeManagedSDK(t *testing.T) {
 				}
 				backgroundDone.Store(true)
 				text = "BACKGROUND_CHILD_FINAL"
+			} else if !background.Load() && backgroundAPIError.CompareAndSwap(true, false) {
+				// Match the production ordering: the task completes and queues its
+				// notification before this foreground request returns an API error.
+				deadline := time.Now().Add(10 * time.Second)
+				for {
+					var notified bool
+					_ = f.server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_events e
+ JOIN mira_claude_sessions s ON s.active_turn=e.turn_id WHERE e.event_type='system'
+ AND e.payload->>'subtype'='task_notification' AND e.payload->>'status'='completed')`).Scan(&notified)
+					if notified {
+						break
+					}
+					if time.Now().After(deadline) || r.Context().Err() != nil {
+						t.Error("background notification did not precede the API error")
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(400) // Same native error-result path without minutes of 429 backoff.
+				fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"BACKGROUND_API_ERROR"}}`)
+				return
 			} else if backgroundDone.Load() {
+				if recoveryHold.CompareAndSwap(true, false) {
+					recoveryHeld <- struct{}{}
+					select {
+					case <-recoveryRelease:
+					case <-r.Context().Done():
+						return
+					}
+				}
 				text = "BACKGROUND_PARENT_FINAL"
 			}
 			block = map[string]any{"type": "text", "text": text}
@@ -854,6 +889,36 @@ func TestClaudeManagedSDK(t *testing.T) {
 			t.Fatal("a retried steer did not replay its recorded verdict")
 		}
 	}
+
+	// An error result can precede the parent's already queued background wakeup.
+	// Keep stdin usable, consume a newly added message, and report the recovered
+	// final response as successful instead of retaining the intermediate error.
+	backgroundDone.Store(false)
+	backgroundPhase.Store(true)
+	background.Store(true)
+	backgroundAPIError.Store(true)
+	recoveryHold.Store(true)
+	recoveryTurn := runTurn("Recover from an API error after background work completes.")
+	select {
+	case <-recoveryHeld:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timeout: background continuation after the API error")
+	}
+	var errorsSeen int
+	if err = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' AND payload->>'is_error'='true'`, recoveryTurn).Scan(&errorsSeen); err != nil || errorsSeen != 1 {
+		t.Fatalf("expected one intermediate API error: %d %v", errorsSeen, err)
+	}
+	f.call("POST", route+"/steer", map[string]any{"requestId": uuidClaude(), "expectedTurnId": recoveryTurn, "text": "STEER_AFTER_ERROR_MARKER"})
+	recoveryRelease <- struct{}{}
+	wait("recovered background turn", 45*time.Second, completed)
+	if !recoverySteerSeen.Load() {
+		t.Fatal("the message added after the API error did not reach the model")
+	}
+	var recoveryStatus string
+	if err = f.server.pool.QueryRow(ctx, `SELECT status FROM mira_claude_turns WHERE turn_id=$1`, recoveryTurn).Scan(&recoveryStatus); err != nil || recoveryStatus != "completed" {
+		t.Fatalf("recovered turn retained its intermediate failure: %s %v", recoveryStatus, err)
+	}
+	backgroundPhase.Store(false)
 
 	// A second approved Node uses a fresh SDK cache/config directory. Server ownership
 	// moves only after completion, and the old writer remains fenced out.

@@ -150,7 +150,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
     else if (e.type === "system" && e.subtype === "mirror_error") put(key, "error", "历史未完整保存", "部分原生记录未能保存到 Mira。", turnId);
     else if (e.type === "result") {
       for (const id of e.parent_tool_use_id ? [] : e.user_message_uuids || []) placeSteer(id, "inserted");
-      if (e.is_error && !interrupted) put(key, "error", "Claude 返回错误", (e.errors || [e.subtype]).join("\n"), turnId);
+      if (e.is_error && !interrupted) put(key, "error", "Claude 返回错误", (e.errors?.length ? e.errors : [e.result || e.subtype]).join("\n"), turnId);
       const last = [...items.values()].findLast(item => item.turnId === turnId && item.kind === "assistant" && item.body);
       if (last) Object.assign(last, { turnElapsedMs: e.duration_ms, turnCostEstimate: row.costEstimate, turnCompletedAt: row.completedAt ?? e.timestamp });
     } else if (e.type === "system" && e.subtype === "init" && e.cwd) cwd = e.cwd.replace(/\/+$/, "");

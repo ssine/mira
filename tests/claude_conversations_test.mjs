@@ -7,6 +7,14 @@ import { conversationPageReader } from "../server/public/conversation-pages.js";
 import { accountGroups, accountNode } from "../server/public/codex-accounts.js";
 import { AccountSpend } from "../server/public/account-spend.js";
 
+test("API errors in success-shaped results show the provider error text", () => {
+ const rows = [{seq:1,turnId:"turn",payload:{type:"result",subtype:"success",is_error:true,
+  result:"API Error: Request rejected (429) · No available OAuth accounts in pool"}}];
+ const error = claudeTrace(rows,{activeTurn:"turn"}).trace.find(item=>item.kind==="error");
+ assert.match(error.body,/429.*No available OAuth accounts/);
+ assert.notEqual(error.body,"success");
+});
+
 test("history acknowledgement is conservative for older Servers and distinct from historical completeness", () => {
   assert.equal(claudeHistoryAcknowledgementRequired({ persistence: "incomplete" }), true);
   assert.equal(claudeHistoryAcknowledgementRequired({ persistence: "incomplete", historyAcknowledgementRequired: false }), false);

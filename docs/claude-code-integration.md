@@ -169,10 +169,15 @@ JSON field extraction itself can reject escaped NUL anywhere in a raw object.
 - Turn completion and mirror status are independent. Degradation is sticky. The
   UI requires an explicit acknowledged-history choice before resuming a degraded
   conversation; subsequent successful batches do not silently erase missing history.
-- A foreground `result` is not the end of a Mira turn while native background
-  tasks remain active. Keep streaming input open using the SDK's replace-set
-  `background_tasks_changed` signal; task bookends are not ordered against that
-  signal. Wait for the parent's subsequent result after background work settles.
+- A foreground `result`, including an API error, is not the end of a Mira turn
+  while a background notification can still wake the parent. The pinned CLI
+  enables `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`; keep streaming input open until
+  its `session_state_changed: idle` event follows the last response and accepted
+  steers have been consumed. An empty task snapshot and `queued_turn_count: 0`
+  cannot prove completion: the latter excludes system-generated notifications.
+  Older explicit CLI overrides without state events retain the result/background
+  snapshot fallback. Final status reflects the last response, so an API error
+  recovered by a later response does not make the whole turn fail.
   Ambient watchers do not keep a turn running. An unexpected SDK exit without
   final completion is reported as a failure, never successful completion.
 - Managed resume throws when its main transcript is absent remotely, instead of

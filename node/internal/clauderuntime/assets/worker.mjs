@@ -242,6 +242,9 @@ async function main(spec) {
       },
       env: {
         ...process.env,
+        // A result may precede an already queued background notification. Wait
+        // for the native idle signal before closing streaming input.
+        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
         ...(process.env.MIRA_NODE_CLAUDE_CONFIG_DIR
           ? { CLAUDE_CONFIG_DIR: process.env.MIRA_NODE_CLAUDE_CONFIG_DIR }
           : {}),
@@ -258,7 +261,9 @@ async function main(spec) {
         degraded = true;
       await client.event(event);
       if (event.type === "result" && !event.parent_tool_use_id) {
-        failed ||= event.is_error === true && !interrupted;
+        // A background notification can recover from an earlier API error in
+        // this same worker. Completion reflects the latest native response.
+        failed = event.is_error === true && !interrupted;
       }
       if (lifecycle.observe(event)) {
         stopping = true;
