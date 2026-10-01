@@ -499,35 +499,19 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if s.ActiveTurn == nil {
 			return true, writeJSON(w, 200, s)
 		}
-		result, err := server.channel.Invoke(ctx, s.NodeID, "claude", map[string]any{"action": "status", "turnId": *s.ActiveTurn}, 30*time.Second)
+		target, err := scanClaudeExecution(server.pool.QueryRow(ctx, claudeExecutionSelect+` WHERE s.session_id=$1`, id))
+		if err == pgx.ErrNoRows {
+			return true, writeJSON(w, 200, map[string]any{"state": "stopped"})
+		}
 		if err != nil {
 			return true, err
 		}
-		state, _ := result.(map[string]any)
-		var runtimeID string
-		if err = server.pool.QueryRow(ctx, `SELECT runtime_id FROM mira_claude_turns WHERE turn_id=$1`, *s.ActiveTurn).Scan(&runtimeID); err != nil {
+		state, err := server.reconcileClaudeExecution(ctx, server.channel, target)
+		if err != nil {
 			return true, err
 		}
-		if runtimeID == "" || state["runtimeId"] != runtimeID {
-			return true, claudeError(409, "The owning Node runtime restarted; its empty worker list cannot prove the old turn stopped. Execution state remains unknown.")
-		}
-		if state["active"] == false {
-			tx, err := server.pool.Begin(ctx)
-			if err != nil {
-				return true, err
-			}
-			defer tx.Rollback(ctx)
-			_, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET active_turn=NULL,persistence='incomplete',updated_at=now() WHERE session_id=$1 AND active_turn=$2`, id, *s.ActiveTurn)
-			if err != nil {
-				return true, err
-			}
-			_, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status='failed',error='Runtime ended without an acknowledged completion',completed_at=now() WHERE turn_id=$1 AND completed_at IS NULL`, *s.ActiveTurn)
-			if err != nil {
-				return true, err
-			}
-			if err = tx.Commit(ctx); err != nil {
-				return true, err
-			}
+		if state["state"] == "unknown" {
+			return true, claudeError(409, "Cannot confirm that the owning runtime stopped. Execution remains unknown; keep the reservation until the Node supplies stop evidence (older Nodes may require an upgrade).")
 		}
 		return true, writeJSON(w, 200, state)
 	}
@@ -1002,7 +986,7 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 				// Push and native notification queues currently resolve Codex
 				// ThreadStore identities only. Claude completion must not depend
 				// on whether the administrator has subscribed to those queues.
-				_, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status=$2,completed_at=now() WHERE turn_id=$1`, turn, status)
+				_, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status=$2,completed_at=now() WHERE turn_id=$1 AND completed_at IS NULL`, turn, status)
 				if err != nil {
 					return err
 				}

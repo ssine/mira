@@ -247,13 +247,14 @@ func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[s
 	result["descendantCount"] = count
 	result["itemCount"] = seq
 	activity := "idle"
+	reason := ""
 	if s.ActiveTurn != nil {
-		activity = "running"
+		activity, reason = server.claudeActivity(s)
 		lastTurn = s.ActiveTurn
 	} else if status == "failed" || status == "interrupted" {
 		activity = status
 	}
-	result["activity"] = map[string]any{"state": activity, "turnId": lastTurn, "generation": 1, "itemCount": seq}
+	result["activity"] = map[string]any{"state": activity, "reason": reason, "turnId": lastTurn, "generation": 1, "itemCount": seq}
 	result["readState"] = map[string]any{"generation": 1, "latestItemSeq": latest, "readItemCount": read, "unread": latest > read}
 	if live != nil {
 		result["activity"].(map[string]any)["costEstimate"] = claudeLiveEstimate(&live.amount, live.unpriced)

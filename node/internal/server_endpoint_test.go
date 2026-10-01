@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 )
@@ -78,7 +79,7 @@ func TestControlRequestsUseDiscoveredEndpointAndFailOver(t *testing.T) {
 	}))
 	defer canonical.Close()
 
-	client := newControlClient(config{ServerURL: canonical.URL}, nil)
+	client := newControlClient(config{ServerURL: canonical.URL, IdentityFile: filepath.Join(t.TempDir(), "identity.json")}, nil)
 	defer client.close()
 	var result map[string]string
 	if err := client.requestJSON(context.Background(), http.MethodGet, "/probe", "test-token", nil, &result); err != nil {
