@@ -34,9 +34,11 @@ private browsing) only lose copies.
 - **Transcripts.** A Codex transcript is saved only when it has no history gap and a
   known tail version; on reopen it is shown and then synchronized incrementally
   from the cached cursor. A generation change or an item gap larger than 600
-  discards the copy. A Claude transcript is saved only while no turn is running; on
-  reopen the cached rows are shown, and the first latest-page read keeps the older
-  cached rows only when the new page overlaps them.
+  discards the copy. A Claude transcript is saved as recorded history changes,
+  including while a turn is running, and before switching conversations. On reopen
+  the cached rows are shown at the latest reply, and the first latest-page read
+  keeps the older cached rows only when the new page overlaps them. Execution state
+  still comes from the Server, independently of the cached transcript.
 - **Models.** A cached catalog is used immediately and refreshed in the background
   after five minutes; explicit refresh always reads the Node.
 - **Residency.** The cache circle keeps its last observation. After three minutes or
@@ -59,3 +61,6 @@ private browsing) only lose copies.
 
 `tests/client_cache_browser.mjs` checks version isolation, lazy writes, oversized
 entries, LRU eviction, removal and clearing against Chromium's IndexedDB.
+`tests/claude_cache_browser.mjs` checks active-turn snapshots in a portrait viewport,
+reopening at the latest reply before the history request returns, and updating the
+copy after revalidation.

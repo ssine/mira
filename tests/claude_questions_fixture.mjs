@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const questionThread = "00000000-0000-4000-8000-0000000000a1";
-export async function startQuestionFixture() {
+export async function startQuestionFixture({ cacheHistory = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001", accountId = "00000000-0000-4000-8000-000000000002";
   const turnId = "00000000-0000-4000-8000-000000000003", questionId = "00000000-0000-4000-8000-000000000004";
   const session = { sessionId: questionThread, nodeId, nodeAccountId: accountId, title: "Claude 问答回归", cwd: "/work", model: "opus", persistence: "pending", activeTurn: turnId };
@@ -22,6 +22,12 @@ export async function startQuestionFixture() {
   ];
   emit({ type: "mira_question", questionId, questions });
   emit({ type: "assistant", uuid: "tool-message", message: { id: "m", content: [{ type: "tool_use", id: "tool-question", name: "AskUserQuestion", input: { questions } }] } });
+  if (cacheHistory) {
+    events.length = 0;
+    for (let i = 0; i < 80; i++) emit({ type: "assistant", uuid: `saved-${i}`, message: { id: `saved-${i}`, content: [{ type: "text", text: `已保存的回复 ${i}\n\n${"竖屏对话内容。".repeat(40)}` }] } });
+  }
+  let holdHistory = false;
+  const heldHistory = new Set();
   const summary = () => ({ ...session, threadId: questionThread, engine: "claude", runtimeNodeId: nodeId, generation: 1, listRoot: true, childCount: 0,
     itemCount: events.length, updatedAt: new Date().toISOString(), activity: { state: session.activeTurn ? "running" : "idle", turnId: session.activeTurn, generation: 1, itemCount: events.length } });
   const source = await fs.readFile(new URL("../node/internal/webassets/webassets.go", import.meta.url), "utf8");
@@ -33,6 +39,9 @@ export async function startQuestionFixture() {
     const body = raw ? JSON.parse(raw) : {};
     if (path === "/__test/state") return json({ answers, turns, activeTurn: session.activeTurn, held: !!heldAnswer });
     if (path === "/__test/control") {
+      if (body.action === "hold-history") holdHistory = true;
+      if (body.action === "release-history") { holdHistory = false; for (const release of heldHistory) release(); heldHistory.clear(); }
+      if (body.action === "append-history") emit({ type: "assistant", uuid: "new-saved", message: { id: "new-saved", content: [{ type: "text", text: "新保存的回复，缓存也应更新。" }] } });
       if (body.action === "fail") failAnswer = true;
       if (body.action === "hold") delayAnswer = true;
       if (body.action === "release") { delayAnswer = false; heldAnswer?.(); heldAnswer = null; }
@@ -53,6 +62,7 @@ export async function startQuestionFixture() {
     if (path === `/v1/claude/conversations/${questionThread}`) return json(summary());
     if (path.includes("/runtimes/")) return json(path.endsWith("describe") ? { models: [{ value: "opus", displayName: "Claude" }] } : { status: "ready" });
     if (path.endsWith("/events")) {
+      if (holdHistory) await new Promise(resolve => { heldHistory.add(resolve); res.once("close", () => { heldHistory.delete(resolve); resolve(); }); });
       const before = Number(url.searchParams.get("before")), after = Number(url.searchParams.get("after"));
       const data = events.filter(e => e.seq > after && (!before || e.seq < before));
       return json({ data, cursor: events.at(-1)?.seq || 0, earliest: data[0]?.seq || 0, hasMore: false, session });
@@ -74,16 +84,25 @@ export async function startQuestionFixture() {
     if (path.endsWith("/costs")) return json({ generation: 1, turnCostEstimates: {} });
     if (path.startsWith("/v1/")) return json({ data: [] });
     try {
+      if (cacheHistory && path === "/__test/portrait") {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        return res.end(`<iframe style="width:390px;height:844px;border:0" src="/?thread=${questionThread}&cacheTest=1"></iframe>`);
+      }
       const resource = path === "/" ? "index.html" : path.slice(1);
       if (resource.includes("..")) throw Error("Invalid path");
-      const file = path === "/__test/scenarios.mjs" ? new URL("./claude_questions_scenarios.mjs", import.meta.url)
+      const file = path === "/__test/cache-scenarios.mjs" ? new URL("./claude_cache_scenarios.mjs", import.meta.url)
+        : path === "/__test/scenarios.mjs" ? new URL("./claude_questions_scenarios.mjs", import.meta.url)
         : new URL(resource.startsWith("vendor/") ? `../node/internal/webassets/web/${resource}` : `../server/public/${resource}`, import.meta.url);
       res.writeHead(200, { "Content-Type": resource.endsWith(".css") ? "text/css" : /\.(js|mjs)$/.test(resource) ? "text/javascript" : "text/html",
-        "Content-Security-Policy": csp, "Cache-Control": "no-store" });
-      res.end(await fs.readFile(file));
+        // The optional same-origin frame gives camoufoxctl a narrow viewport;
+        // the normal question suite still validates the production CSP.
+        "Content-Security-Policy": cacheHistory ? csp.replace("frame-ancestors 'none'", "frame-ancestors 'self'") : csp, "Cache-Control": "no-store" });
+      let content = await fs.readFile(file);
+      if (resource === "index.html" && url.searchParams.has("cacheTest")) content = content.toString().replace("</body>", '<script type="module" src="/__test/cache-scenarios.mjs"></script></body>');
+      res.end(content);
     } catch { res.end(); }
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   return { origin: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolve => server.close(resolve)) };
 }
-if (process.argv[1] === fileURLToPath(import.meta.url)) console.log((await startQuestionFixture()).origin);
+if (process.argv[1] === fileURLToPath(import.meta.url)) console.log((await startQuestionFixture({ cacheHistory: process.argv.includes("--cache") })).origin);

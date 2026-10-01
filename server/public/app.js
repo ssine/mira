@@ -374,7 +374,9 @@ async function loadClaudeTranscript(threadId, options = {}) {
       renderReplyProgress();
       if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
     }
-    if (!result.session.activeTurn && (!options.poll || result.changed || activeBefore)) saveOpenTranscript();
+    // Saved history remains useful while a turn runs. Waiting for completion
+    // leaves long-running conversations uncached every time they are reopened.
+    if (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null)) saveOpenTranscript();
     // A turn can settle without new events; its footer still needs the final cost.
     if (!thread.subpath && (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null))) {
       scheduleTranscriptCosts(threadId, { trace: agent.transcriptItems, generation: 1, itemCount: currentAgentThread()?.itemCount });
@@ -6238,6 +6240,7 @@ async function refreshActiveTurn(threadId, socket) {
 
 async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (agent.sendPromise) return;
+  saveOpenTranscript();
   void clientCache.flush(); // Settle the previous conversation's pending copy first.
   const cachedTranscript = clientCache.read(transcriptCacheKey(threadId));
   clearTimeout(claudePollTimer); claudeRuntime.reset();
@@ -6346,6 +6349,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   agent.draftProject = project;
   if (project) agent.projectOpen.set(project.key, true);
   if (updateRoute) writeBrowserRoute("agent");
+  saveOpenTranscript();
   void clientCache.flush();
   agent.selectionEpoch++;
   agent.threadId = null;
