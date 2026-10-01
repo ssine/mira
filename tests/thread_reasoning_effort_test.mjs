@@ -62,7 +62,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
     "renderTurnDiagnostics", "acceptThreadActivity", "setConversationMeta", "loadConversationModels",
     "syncActiveTurnUi", "renderAgentThreads", "setConversationNotice", "loadAgentTranscript",
     "startAgentRuntime", "scheduleAgentHeartbeat", "updateReplyProgress", "renderReplyProgress",
-    "refreshAccountChoices",
+    "refreshAccountChoices", "saveOpenTranscript",
   ]) context[name] = () => {};
   for (const name of [
     "modelCatalogForConversation", "conversationModelDefinition", "conversationEffortOptions", "lastUsedConversationSettings",
