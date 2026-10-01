@@ -4,14 +4,14 @@ Mira currently needs a small patch on top of the official Codex source tree so t
 App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
-- Base tag: `rust-v0.155.1` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `be2951ea34f0` (annotated tag object: `4e21628f9ec9`)
-- Patch source commit: `7d1d47261d33`
+- Base tag: `rust-v0.159.3` (pinned in repository-root `CODEX_VERSION`)
+- Base commit: `01fc69f40267` (annotated tag object: `8e46774a94a7`)
+- Patch source commit: `6cde59106b48`
 
 Apply it to a clean checkout:
 
 ```bash
-git clone --branch rust-v0.155.1 https://github.com/openai/codex.git codex
+git clone --branch rust-v0.159.3 https://github.com/openai/codex.git codex
 git -C codex am ../patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch
 ```
 
@@ -24,6 +24,14 @@ Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the e
 as an independent Codex runtime, downloaded by the Node on demand. The Node probes the remote ThreadStore configuration before advertising a build
 as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
 release matrix builds, not just changing the version file.
+
+Runtime `0.159.3-mira.1` rebases the existing Mira adapter and compatibility
+behavior onto official Codex 0.159.3, including its GPT-6.1 Sol catalog. The port
+retains upstream retry deadlines, multi-agent tool descriptions and execution
+capacity checks while preserving remote persistence, account handoff, input
+recovery and memory residency. Stable and experimental protocol bundles and the
+Python SDK types are regenerated from the new baseline. Model access still
+follows the selected account/provider.
 
 Runtime `0.155.1-mira.3` defaults to portable plaintext context for every provider,
 including built-in OpenAI, Azure and restored subagents. No per-account setting
