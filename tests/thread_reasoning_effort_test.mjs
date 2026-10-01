@@ -54,6 +54,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
     upsertTrace: () => ({ dataset: {} }), prepareTurnInput: async () => ({ message: "Continue", inputs: [] }),
     replyProgress: { finish() {} },
     accountRecovery: { select() {} },
+    clientCache: { flush() {}, read: async () => undefined }, transcriptCacheKey: id => id, restoreCachedTranscript: () => false,
     threadPager: () => ({ enabled: false, state: () => ({ checkedAt: 1 }) }),
   });
   for (const name of [

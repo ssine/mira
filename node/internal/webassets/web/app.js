@@ -7,6 +7,7 @@ import { marked } from "/vendor/marked.js";
 import { decorateTraceDiagrams } from "/trace-diagrams.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ComposerDrafts } from "/composer-drafts.js";
+import { ClientCache } from "/client-cache.js";
 import { ReplyProgress } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute, createCompletionNotifications } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
@@ -26,6 +27,7 @@ marked.setOptions({ gfm: true, breaks: false });
 
 const $ = (selector) => document.querySelector(selector);
 const composerDrafts = new ComposerDrafts();
+const clientCache = new ClientCache();
 let composerDraftKey = null;
 let composerDraftLoading = false;
 let composerDraftEpoch = 0;
@@ -84,12 +86,17 @@ async function restoreBrowserRoute() {
   }
   if (view === "agent") {
     show("agentView");
+    await restoreClientSnapshots();
+    if (epoch !== browserRouteEpoch) return;
     const list = loadAgentThreads();
+    const nodes = refreshAgentNodes({ maxAgeMs: 15_000 });
     if (threadId) {
       // A slow sidebar must not hold the selected conversation's history.
       void list.catch(error => { if (epoch === browserRouteEpoch) toast(`会话列表暂未加载：${error.message}`); });
-      await refreshAgentNodes();
-    } else await Promise.all([refreshAgentNodes(), list]);
+      // Cached node choices are enough to open the conversation; fresh ones follow.
+      if (dashboardNodes.size) void nodes.catch(error => { if (epoch === browserRouteEpoch) toast(`节点列表暂未刷新：${error.message}`); });
+      else await nodes;
+    } else await Promise.all([nodes, list]);
     if (epoch !== browserRouteEpoch) return;
     if (threadId) {
       if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(threadId)) {
@@ -105,7 +112,8 @@ async function restoreBrowserRoute() {
     }
   } else if (view === "runtime") {
     show("runtimeView");
-    await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+    await restoreClientSnapshots();
+    await Promise.all([refreshAgentNodes({ maxAgeMs: 15_000 }), loadAgentThreads()]);
   } else {
     stopAgentRecovery();
     show("dashboardView");
@@ -185,6 +193,7 @@ const agent = {
   connectionWanted: false,
   resumeRequestedThreadId: null,
   residency: { entries: new Map(), running: 0 },
+  cachedThreadIds: null,
   composerValue: "",
   socketInitialized: false,
   reconnectTimer: null,
@@ -350,7 +359,7 @@ async function loadClaudeTranscript(threadId, options = {}) {
       for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
       agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
       agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
-      let cards = options.poll && previous ? patchClaudeTranscript(previous, result.trace) : null;
+      let cards = (options.poll || options.restored) && previous ? patchClaudeTranscript(previous, result.trace) : null;
       if (cards) {
         // Question forms depend on the running turn even when unchanged.
         for (const item of result.trace) if (item.questionId && !cards.has(item.key)) cards.set(item.key, traceCard(item.key));
@@ -358,36 +367,14 @@ async function loadClaudeTranscript(threadId, options = {}) {
         renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
         cards = new Map([...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
       }
-      const byKey = new Map(result.trace.map(item => [item.key, item]));
-      for (const [key, card] of cards) {
-        const item = byKey.get(key);
-        if (!card || !item) continue;
-        const body = card.querySelector(".trace-body");
-        const images = item.nativeImages ?? (item.nativeImage ? [item.nativeImage] : []);
-        for (const src of images.slice(body.querySelectorAll(":scope > img.trace-image").length)) {
-          const img = element("img", "trace-image"); img.src = src; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
-        }
-        const steerNote = { queued: "等待加入本轮", cancelled: "本轮已结束，这条消息未被读取" }[item.steerState] || "";
-        if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
-        let note = card.querySelector(".trace-steer-state");
-        if (steerNote && !note) card.append(note = element("div", "trace-steer-state"));
-        if (note) { note.textContent = steerNote; note.hidden = !steerNote; }
-        const q = result.questions.get(item.questionId);
-        if (q) {
-          const form = forms.get(q.questionId) || claudeQuestionForm(q, thread.sessionId);
-          // A form is visible content even if the native event has no prose.
-          body.hidden = false;
-          card.classList.remove("trace-card-empty");
-          if (form.parentNode !== body) body.replaceChildren(form);
-          form.setActive(q.turnId === result.session.activeTurn);
-        }
-      }
+      decorateClaudeCards(cards, result, forms, thread);
       const progress = replyProgress.current(threadId);
       if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId &&
         (item.questionState === "pending" || item.kind === "assistant" && item.body?.trim())))) replyProgress.finish(progress);
       renderReplyProgress();
       if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
     }
+    if (!result.session.activeTurn && (!options.poll || result.changed || activeBefore)) saveOpenTranscript();
     // A turn can settle without new events; its footer still needs the final cost.
     if (!thread.subpath && (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null))) {
       scheduleTranscriptCosts(threadId, { trace: agent.transcriptItems, generation: 1, itemCount: currentAgentThread()?.itemCount });
@@ -403,6 +390,34 @@ async function loadClaudeTranscript(threadId, options = {}) {
         if (document.hidden) return;
         void loadClaudeTranscript(threadId, { poll: true }).catch(error => setConversationNotice(`连接暂时中断，恢复后会继续加载：${error.message}`, "error"));
       }, agent.activeTurns.has(threadId) ? 750 : 3000);
+    }
+  }
+}
+
+// Native images, steer notes and question forms are added after Markdown cards render.
+function decorateClaudeCards(cards, result, forms, thread) {
+  const byKey = new Map(result.trace.map(item => [item.key, item]));
+  for (const [key, card] of cards) {
+    const item = byKey.get(key);
+    if (!card || !item) continue;
+    const body = card.querySelector(".trace-body");
+    const images = item.nativeImages ?? (item.nativeImage ? [item.nativeImage] : []);
+    for (const src of images.slice(body.querySelectorAll(":scope > img.trace-image").length)) {
+      const img = element("img", "trace-image"); img.src = src; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
+    }
+    const steerNote = { queued: "等待加入本轮", cancelled: "本轮已结束，这条消息未被读取" }[item.steerState] || "";
+    if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
+    let note = card.querySelector(".trace-steer-state");
+    if (steerNote && !note) card.append(note = element("div", "trace-steer-state"));
+    if (note) { note.textContent = steerNote; note.hidden = !steerNote; }
+    const q = result.questions.get(item.questionId);
+    if (q) {
+      const form = forms.get(q.questionId) || claudeQuestionForm(q, thread.sessionId);
+      // A form is visible content even if the native event has no prose.
+      body.hidden = false;
+      card.classList.remove("trace-card-empty");
+      if (form.parentNode !== body) body.replaceChildren(form);
+      form.setActive(q.turnId === result.session.activeTurn);
     }
   }
 }
@@ -668,9 +683,7 @@ async function refreshAccountSidebarNodes() {
   accountNodesNextAt = Date.now() + ($("#agentAccountDetails").matches(":popover-open") ? 10_000 : 5 * 60_000);
   const deadline = setTimeout(() => controller.abort(), 15_000);
   try {
-    const response = await api("/v1/nodes", { signal: controller.signal });
-    if (accountNodesController !== controller) return;
-    dashboardNodes = new Map((response.data ?? []).map(node => [node.nodeId, node]));
+    await Promise.race([refreshAgentNodes({ maxAgeMs: 5_000 }), new Promise((_, reject) => controller.signal.addEventListener("abort", () => reject(new Error("aborted"))))]);
   } catch { /* Keep the last observations when the Server cannot be reached. */ }
   finally {
     clearTimeout(deadline);
@@ -843,6 +856,13 @@ function acceptThreadActivity(thread, checkedAt = Date.now()) {
   } else if (["idle", "interrupted", "failed"].includes(current.state) && current.turnId &&
     agent.activeTurns.has(thread.threadId) && (!agent.activeTurns.get(thread.threadId) ||
       agent.activeTurns.get(thread.threadId) === current.turnId)) {
+    // The open Claude conversation ends its turn from the events read, so the
+    // composer never unlocks before the final records are shown.
+    if (thread.engine === "claude" && thread.threadId === agent.threadId && !projection?.subpath && document.body.dataset.view === "agentView") {
+      clearTimeout(claudePollTimer);
+      void loadClaudeTranscript(thread.threadId, { poll: true }).catch(() => {});
+      return;
+    }
     agent.activeTurns.delete(thread.threadId);
     agent.turnThreads.delete(current.turnId);
     agent.turnTimings.set(current.turnId, { ...agent.turnTimings.get(current.turnId), completedAt: Date.now() });
@@ -916,7 +936,10 @@ function rememberThreadCost(thread) {
     tokenUsageSummary: thread.tokenUsageSummary,
     key: JSON.stringify([thread.threadId, thread.generation, thread.itemCount, thread.tokenUsage]), at: Date.now() });
   while (agent.costEstimates.size > 1000) agent.costEstimates.delete(agent.costEstimates.keys().next().value);
+  clientCache.writeSnapshot("costs", [...agent.costEstimates].slice(-300));
 }
+
+const costRecheckMs = 5 * 60_000;
 
 function scheduleSidebarCosts() {
   if (agent.costFrame || !agentThreadDrawerOpen || document.hidden || document.body.dataset.view !== "agentView") return;
@@ -930,8 +953,11 @@ function loadVisibleSidebarCosts() {
     if (agent.costRequests.size >= 2) break;
     const id = row.dataset.threadRow, usage = agent.tokenUsages.get(id);
     const cached = agent.costEstimates.get(id);
-    // Descendant usage can advance while the parent's own history stays fixed.
-    if (!usage || cached?.generation === usage.generation && Date.now() - cached.at < 10_000 || agent.costRequests.has(id) || agent.costRetryAfter.get(id) > Date.now()) continue;
+    // An estimate for the same usage snapshot stays valid; descendant usage can
+    // still advance under a fixed parent history, so recheck those slowly.
+    const age = Date.now() - (cached?.at ?? 0);
+    if (!usage || cached && (cached.key === conversationCostKey(id) ? age < costRecheckMs : cached.generation === usage.generation && age < 30_000) ||
+        agent.costRequests.has(id) || agent.costRetryAfter.get(id) > Date.now()) continue;
     if (row.closest("details:not([open])")) continue;
     const rect = row.getBoundingClientRect();
     if (!rect.height || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
@@ -1623,6 +1649,7 @@ async function refreshNodeModels(nodeId) {
       agent.modelCatalog = catalog;
       agent.modelCatalogLoadedAt = Date.now();
       agent.modelCatalogError = "";
+      rememberModelCatalog(key, catalog, agent.modelCatalogLoadedAt);
     }
     toast(`${nodeUserName(node)} 的模型目录已刷新 · ${catalog.models.length} 个模型`);
   } catch (error) {
@@ -2690,26 +2717,46 @@ function threadResidencyTarget(thread) {
     url: node?.nodeAccountId && `/v1/nodes/${encodeURIComponent(node.nodeId)}/codex-accounts/${encodeURIComponent(node.nodeAccountId)}/residency?threadId=${encodeURIComponent(thread.threadId)}` };
 }
 
+// The circle keeps the last known answer and only dims it as it ages: residency
+// changes rarely, and a confident "unknown" is less useful than an old fact.
+const residencyStaleMs = 3 * 60_000;
+
 function renderThreadResidency(indicator, thread) {
   const { node, key } = threadResidencyTarget(thread);
-  const observation = agent.residency.entries.get(key)?.observation;
-  const stale = observation?.checkedAt && Date.now() - Date.parse(observation.checkedAt) > 30_000;
-  const state = navigator.onLine === false || node?.status === "offline" ? "offline" : stale ? "unknown" : observation?.state ?? "unknown";
+  const entry = agent.residency.entries.get(key);
+  const observation = entry?.observation;
+  const checkedAt = Date.parse(observation?.checkedAt ?? "") || 0;
+  const stale = Boolean(observation) && (!checkedAt || Date.now() - checkedAt > residencyStaleMs || Boolean(entry.failed));
+  const state = navigator.onLine === false || node?.status === "offline" ? "offline" : observation?.state ?? "unknown";
   const labels = thread?.engine === "claude"
     ? { loaded: "已缓存 · 转录保存在节点磁盘上", unloaded: "未缓存 · 继续执行时从服务器加载", offline: "节点离线 · 无法确认缓存状态",
       unknown: "暂时无法确认缓存状态" }
     : { loaded: "已加载 · 驻留在内存中", unloaded: "已卸载 · 继续执行时恢复", offline: "节点离线 · 无法确认驻留状态",
       stopped: "运行实例已停止", unknown: "暂时无法确认驻留状态" };
   const details = [labels[state] ?? labels.unknown, node ? `节点：${node.displayName || node.hostname || node.nodeId}` : "尚未确定运行节点",
-    node?.accountName && `账号：${node.accountName}`, stale ? "上次检查已过期" : observation?.message,
-    observation?.checkedAt && `检查时间：${new Date(observation.checkedAt).toLocaleTimeString()}`].filter(Boolean).join("\n");
+    node?.accountName && `账号：${node.accountName}`, entry?.failed ? "最近一次检查失败，显示上次结果" : stale ? "上次检查已较久，等待刷新" : observation?.message,
+    checkedAt && `检查时间：${new Date(checkedAt).toLocaleTimeString()}`].filter(Boolean).join("\n");
   indicator.dataset.state = state;
+  indicator.toggleAttribute("data-stale", stale && state !== "offline");
   indicator.title = details;
   indicator.setAttribute("aria-label", details);
 }
 
+function saveResidencySnapshot() {
+  const entries = [...agent.residency.entries].filter(([, entry]) => entry.observation?.checkedAt && !entry.failed).slice(-256)
+    .map(([key, entry]) => [key, entry.observation]);
+  clientCache.writeSnapshot("residency", entries);
+}
+
+function restoreResidencySnapshot(entries) {
+  for (const [key, observation] of Array.isArray(entries) ? entries : []) {
+    if (!agent.residency.entries.has(key)) agent.residency.entries.set(key, { observation, nextAt: 0 });
+  }
+}
+
 // Observe only visible rows with bounded concurrency. This is independent of
 // the browser's socket subscriptions: checking residency must never resume.
+// Visible rows are rechecked every minute; the open conversation more often.
 function refreshConversationResidency({ force = false } = {}) {
   if (document.hidden || document.body.dataset.view !== "agentView") return;
   const state = agent.residency;
@@ -2724,7 +2771,8 @@ function refreshConversationResidency({ force = false } = {}) {
     const { node, key, url } = threadResidencyTarget(thread);
     if (!url || !node || navigator.onLine === false) continue;
     let entry = state.entries.get(key);
-    if (entry?.pending || state.running >= 3 || (!(force && thread.threadId === agent.threadId) && entry?.nextAt > Date.now())) continue;
+    const current = thread.threadId === agent.threadId;
+    if (entry?.pending || state.running >= 3 || (!(force && current) && entry?.nextAt > Date.now())) continue;
     if (!entry) {
       // Only completed observations can be discarded while their requests run.
       if (state.entries.size >= 256) for (const [oldKey, old] of state.entries) {
@@ -2732,10 +2780,10 @@ function refreshConversationResidency({ force = false } = {}) {
       }
       entry = {}; state.entries.set(key, entry);
     }
-    entry.pending = true; entry.nextAt = Date.now() + 10_000; state.running++;
+    entry.pending = true; entry.nextAt = Date.now() + (current ? 15_000 : 60_000); state.running++;
     void api(url, { signal: AbortSignal.timeout(10_000) })
-      .then(observation => { entry.observation = observation; })
-      .catch(() => { entry.observation = { state: "unknown", message: "状态检查暂不可用" }; })
+      .then(observation => { entry.observation = observation; entry.failed = false; saveResidencySnapshot(); })
+      .catch(() => { if (entry.observation) entry.failed = true; else entry.observation = { state: "unknown", message: "状态检查暂不可用" }; })
       .finally(() => { entry.pending = false; state.running--; refreshConversationResidency(); });
   }
 }
@@ -3137,11 +3185,25 @@ function installComposerChoiceMenu(toggle, menu) {
   });
 }
 
+// Model lists change only with node configuration; show the last list at once
+// and revalidate it in the background after five minutes.
+const modelCatalogSnapshots = new Map();
+
+function rememberModelCatalog(key, catalog, at) {
+  modelCatalogSnapshots.delete(key);
+  modelCatalogSnapshots.set(key, { catalog, at });
+  while (modelCatalogSnapshots.size > 24) modelCatalogSnapshots.delete(modelCatalogSnapshots.keys().next().value);
+  clientCache.writeSnapshot("models", [...modelCatalogSnapshots]);
+}
+
 async function loadConversationModels({ refresh = false } = {}) {
   const node = selectedAccountNode(), key = conversationModelKey();
   if (agent.modelCatalogJob?.key === key) return agent.modelCatalogJob.promise;
-  if (!refresh && agent.modelCatalogKey === key && agent.modelCatalog && Date.now() - agent.modelCatalogLoadedAt < 300_000) { renderConversationModel(); return; }
-  if (agent.modelCatalogKey !== key) { agent.modelCatalog = null; agent.modelCatalogError = ""; }
+  if (agent.modelCatalogKey !== key) {
+    const saved = modelCatalogSnapshots.get(key);
+    agent.modelCatalog = saved?.catalog ?? null; agent.modelCatalogLoadedAt = saved?.at ?? 0; agent.modelCatalogError = "";
+  }
+  if (!refresh && agent.modelCatalog && Date.now() - agent.modelCatalogLoadedAt < 300_000) { agent.modelCatalogKey = key; renderConversationModel(); return; }
   agent.modelCatalogKey = key;
   if (node?.status !== "online" || node.engine !== "claude" && node.reportedAppServer?.status !== "running") { renderConversationModel(); return; }
   const job = { key };
@@ -3154,6 +3216,7 @@ async function loadConversationModels({ refresh = false } = {}) {
       agent.modelCatalog = catalog;
       agent.modelCatalogLoadedAt = Date.now();
       agent.modelCatalogError = "";
+      rememberModelCatalog(key, catalog, agent.modelCatalogLoadedAt);
     } catch (error) {
       if (conversationModelKey() === key && agent.modelCatalogJob === job) agent.modelCatalogError = error.message;
     } finally {
@@ -4435,8 +4498,57 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     agent.transcriptTailVersion = tailVersion;
     agent.transcriptActivityCount = transcript.itemCount ?? null;
   }
+  saveOpenTranscript();
   requestAnimationFrame(scheduleThreadRead);
   return transcript;
+}
+
+// Canonical history is immutable within a generation, so the browser keeps the
+// pages it has read and only asks for the tail when the conversation reopens.
+const transcriptCacheKey = threadId => `transcript:${threadId}`;
+
+function saveOpenTranscript() {
+  const threadId = agent.threadId, epoch = agent.selectionEpoch;
+  if (!threadId || agent.transcriptThreadId !== threadId) return;
+  const current = () => agent.threadId === threadId && agent.selectionEpoch === epoch && agent.transcriptThreadId === threadId;
+  if (engineOf(threadId) === "claude") {
+    clientCache.write(transcriptCacheKey(threadId), () => current() && claudeRuntime.id === threadId && !claudeRuntime.restored
+      ? { engine: "claude", ...claudeRuntime.snapshot() } : undefined);
+    return;
+  }
+  // Evaluated when flushed: a tail read that just discovered a gap must not
+  // persist the hole as if it were complete history.
+  clientCache.write(transcriptCacheKey(threadId), () => current() && !agent.transcriptGap && agent.transcriptTailVersion !== null ? {
+    engine: "codex", generation: agent.transcriptGeneration, items: agent.transcriptItems, cursor: agent.transcriptCursor,
+    total: agent.transcriptTotal, tailVersion: agent.transcriptTailVersion, activityCount: agent.transcriptActivityCount,
+  } : undefined);
+}
+
+// Paint a cached transcript before any network read. Returns whether the
+// caller may revalidate incrementally instead of reloading the latest page.
+function restoreCachedTranscript(threadId, thread, cached) {
+  if (!cached || !thread || agent.threadId !== threadId) return false;
+  if (cached.engine === "claude" && thread.engine === "claude" && Array.isArray(cached.rows)) {
+    claudeRuntime.restore(threadId, cached);
+    const activeTurn = thread.subpath ? null : agent.activeTurns.get(threadId) ?? null;
+    const result = { ...claudeRuntime.trace(thread, activeTurn), session: { activeTurn } };
+    Object.assign(agent, { transcriptThreadId: threadId, transcriptGeneration: 1, transcriptItems: result.trace,
+      transcriptCursor: cached.earliest, transcriptTotal: result.trace.length, transcriptActivityCount: thread.itemCount });
+    renderTranscript(null, { anchorBottom: true });
+    decorateClaudeCards(new Map([...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card])),
+      result, new Map(), thread);
+    scrollTraceToBottom();
+    return true;
+  }
+  if (cached.engine !== "codex" || thread.engine === "claude" || !Array.isArray(cached.items)) return false;
+  // A new generation rewrote history; a long absence is cheaper to reload.
+  if (Number.isSafeInteger(thread.generation) && thread.generation !== cached.generation) return false;
+  if (Number.isSafeInteger(thread.itemCount) && Number.isSafeInteger(cached.activityCount) && thread.itemCount - cached.activityCount > 600) return false;
+  Object.assign(agent, { transcriptThreadId: threadId, transcriptGeneration: cached.generation, transcriptItems: cached.items,
+    transcriptCursor: cached.cursor, transcriptTotal: cached.total, transcriptTailVersion: cached.tailVersion,
+    transcriptActivityCount: cached.activityCount });
+  renderTranscript(null, { anchorBottom: true });
+  return true;
 }
 
 async function syncPersistedTranscript(threadId, signal) {
@@ -4742,9 +4854,23 @@ async function connectAgentSocket(nodeId, bindingId = $("#conversationAccount").
   scheduleAgentHeartbeat();
 }
 
-async function refreshAgentNodes() {
-  const response = await api("/v1/nodes");
-  const nodes = response.data ?? [];
+// One node list read serves every panel; navigation reuses a recent answer.
+let agentNodesRequest = null;
+let agentNodesFetchedAt = 0;
+
+async function refreshAgentNodes({ maxAgeMs = 0 } = {}) {
+  if (!agentNodesRequest && Date.now() - agentNodesFetchedAt < maxAgeMs) return [...dashboardNodes.values()];
+  agentNodesRequest ??= api("/v1/nodes").then(response => {
+    agentNodesFetchedAt = Date.now();
+    const nodes = response.data ?? [];
+    clientCache.writeSnapshot("nodes", nodes);
+    applyAgentNodes(nodes);
+    return nodes;
+  }).finally(() => { agentNodesRequest = null; });
+  return agentNodesRequest;
+}
+
+function applyAgentNodes(nodes) {
   dashboardNodes = new Map(nodes.map((node) => [node.nodeId, node]));
   const runtimeSelect = $("#agentRuntimeNode");
   const sourceSelect = $("#sessionSourceNode");
@@ -5128,6 +5254,7 @@ async function refreshConversationCost() {
   const panel = $("#conversationDetails"), threadId = panel.dataset.threadId;
   if (!panel.open || !threadId || panel._miraCostRequest) return;
   const key = conversationCostKey(threadId);
+  // One open panel is cheap; keep it fresh because descendants may still be running.
   if (panel._miraCostKey === key && Date.now() - panel._miraCostAt < 10_000) return;
   const job = { key, revision: panel._miraRevision };
   panel._miraCostRequest = job;
@@ -5599,7 +5726,7 @@ async function forkThreadFromMenu() {
 }
 
 async function showProjectDialog() {
-  await refreshAgentNodes();
+  await refreshAgentNodes({ maxAgeMs: 5_000 });
   $("#projectNode").replaceChildren(...[...$("#agentRuntimeNode").options].map((option) => option.cloneNode(true)));
   $("#projectNode").value = $("#agentRuntimeNode").value;
   $("#projectPath").value = $("#conversationCwd").value || dashboardNodes.get($("#projectNode").value)?.desiredAppServer?.defaultCwd || "";
@@ -5618,9 +5745,55 @@ function threadPager() {
       renderThreadStates();
       return changed || (page.data ?? []).some(thread => previous.get(thread.threadId) !== thread.updatedAt);
     },
-    () => renderAgentThreads(),
+    () => { renderAgentThreads(); saveThreadListSnapshot(); },
   );
   return agent.threadPager;
+}
+
+// The sidebar's last first page, shown while the Server is asked again. Rows
+// the next roots read does not confirm are dropped as possibly deleted.
+function saveThreadListSnapshot() {
+  const pager = agent.threadPager;
+  if (agent.cachedThreadIds || agent.showArchived || !pager || pager.archived) return;
+  const rows = agent.threads.filter(thread => !thread.archived)
+    .sort((a, b) => (Date.parse(b.updatedAt) || 0) - (Date.parse(a.updatedAt) || 0)).slice(0, 400);
+  clientCache.writeSnapshot("threads", { rows, projects: pager.projects, enabled: pager.enabled });
+}
+
+function restoreThreadListSnapshot(snapshot) {
+  if (!Array.isArray(snapshot?.rows) || agent.threads.length || agent.showArchived) return;
+  const pager = threadPager();
+  pager.enabled = snapshot.enabled === true;
+  pager.projects = Array.isArray(snapshot.projects) ? snapshot.projects : [];
+  agent.threads = snapshot.rows;
+  agent.cachedThreadIds = new Set(snapshot.rows.map(thread => thread.threadId));
+  for (const thread of snapshot.rows) acceptThreadTokenUsage(thread, 0);
+}
+
+function settleCachedThreads() {
+  const unconfirmed = agent.cachedThreadIds;
+  if (!unconfirmed) return;
+  agent.cachedThreadIds = null;
+  if (!unconfirmed.size) return;
+  agent.threads = agent.threads.filter(thread => !unconfirmed.has(thread.threadId) || thread.threadId === agent.threadId);
+  renderAgentThreads();
+}
+
+let clientSnapshotsRestored = false;
+
+// Paint the last known sidebar, node choices, circles, costs and models before
+// any list request. Every value is revalidated by the normal reads after it.
+async function restoreClientSnapshots() {
+  if (clientSnapshotsRestored) return;
+  clientSnapshotsRestored = true;
+  const [nodes, threads, residency, costs, models] = await Promise.all(
+    ["nodes", "threads", "residency", "costs", "models"].map(name => clientCache.readSnapshot(name)));
+  for (const [key, entry] of Array.isArray(models) ? models : []) if (!modelCatalogSnapshots.has(key)) modelCatalogSnapshots.set(key, entry);
+  for (const [id, entry] of Array.isArray(costs) ? costs : []) if (!agent.costEstimates.has(id)) agent.costEstimates.set(id, entry);
+  restoreResidencySnapshot(residency);
+  restoreThreadListSnapshot(threads);
+  if (Array.isArray(nodes) && !dashboardNodes.size) applyAgentNodes(nodes);
+  else renderAgentThreads();
 }
 
 async function loadAgentThreads() {
@@ -5628,11 +5801,14 @@ async function loadAgentThreads() {
   const pager = threadPager();
   if (pager.archived !== agent.showArchived) {
     pager.reset(agent.showArchived);
+    agent.cachedThreadIds = null;
     const selected = currentAgentThread();
     agent.threads = selected ? [selected] : [];
   }
   const response = await pager.load("roots", "", true);
   if (!response) return;
+  settleCachedThreads();
+  saveThreadListSnapshot();
   agent.activityCheckedAt = Date.now();
   if (currentAgentThread()) agent.draftProject = null;
   const title = currentAgentThread()?.title;
@@ -5691,6 +5867,7 @@ function mergeAgentThreadSummaries(threads, removed = []) {
   const previous = new Map(agent.threads.map(thread => [thread.threadId, thread]));
   const selected = currentAgentThread();
   agent.threads = agent.threadPager?.enabled ? mergeThreadPages(agent.threads, threads, removed) : [...threads];
+  for (const thread of threads) agent.cachedThreadIds?.delete(thread.threadId);
   for (const [threadId, summary] of agent.pendingThreadSummaries) {
     if (agent.threads.some(thread => thread.threadId === threadId)) agent.pendingThreadSummaries.delete(threadId);
     else if (Boolean(summary.archived) === agent.showArchived) agent.threads.push(summary);
@@ -5714,7 +5891,10 @@ function removeThreadFromWindow(threadId, deleted) {
     for (const [key, diagnostic] of agent.diagnostics) if (diagnostic.threadId === threadId) agent.diagnostics.delete(key);
   }
   if (selected) newAgentThread({ project, force: deleted });
-  if (deleted) void composerDrafts.write(`personal:thread:${threadId}`, undefined).catch(() => toast("对话已删除，但本机草稿清理失败。"));
+  if (deleted) {
+    void composerDrafts.write(`personal:thread:${threadId}`, undefined).catch(() => toast("对话已删除，但本机草稿清理失败。"));
+    clientCache.remove(transcriptCacheKey(threadId));
+  }
   renderAgentThreads();
 }
 
@@ -6045,6 +6225,8 @@ async function refreshActiveTurn(threadId, socket) {
 
 async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   if (agent.sendPromise) return;
+  void clientCache.flush(); // Settle the previous conversation's pending copy first.
+  const cachedTranscript = clientCache.read(transcriptCacheKey(threadId));
   clearTimeout(claudePollTimer); claudeRuntime.reset();
   if (updateRoute) writeBrowserRoute("agent", threadId);
   const epoch = ++agent.selectionEpoch;
@@ -6066,23 +6248,30 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   clear($("#conversationTrace")).append(element("div", "conversation-empty", "正在加载最近消息…"));
   renderTurnDiagnostics();
   let projected = currentAgentThread();
-  if (!projected) {
+  // A cached sidebar row may predate account, Node or activity changes, so it
+  // only stands in for the authoritative metadata when that read fails.
+  if (!projected || agent.cachedThreadIds?.has(threadId)) {
     try {
-      projected = await readConversation(threadId);
+      const fresh = await readConversation(threadId);
       if (epoch !== agent.selectionEpoch) return;
-      agent.threads.push(projected);
+      // Update in place: list rows and running reads hold this object.
+      if (projected) Object.assign(projected, fresh); else agent.threads.push(projected = fresh);
+      agent.cachedThreadIds?.delete(threadId);
       acceptThreadActivity(projected);
     } catch (error) {
       if (epoch !== agent.selectionEpoch) return;
-      stopAgentRecovery();
-      setConversationTitle("会话不可用");
-      setConversationNotice(error.message, "error");
-      return;
+      if (!projected) {
+        stopAgentRecovery();
+        setConversationTitle("会话不可用");
+        setConversationNotice(error.message, "error");
+        return;
+      }
+      toast(`会话信息暂未刷新：${error.message}`);
     }
   }
   void (async () => {
     const pager = threadPager();
-    if (!pager.state("roots").checkedAt) await pager.load("roots", "", true);
+    if (!pager.state("roots").checkedAt) { await pager.load("roots", "", true); settleCachedThreads(); }
     if (!pager.enabled || epoch !== agent.selectionEpoch) return;
     await loadThreadPath(threadId, epoch);
     if (epoch === agent.selectionEpoch) renderAgentThreads(true);
@@ -6110,7 +6299,11 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   // its metadata was loading, prepare the runtime now that its Node is known.
   if (agent.resumeRequestedThreadId === threadId) void prepareEditedThread(threadId, epoch);
   accountRecovery.select(projected?.engine === "claude" ? null : threadId, $("#conversationAccount").value);
-  await loadAgentTranscript(threadId);
+  const cached = await cachedTranscript;
+  if (epoch !== agent.selectionEpoch) return;
+  const restored = restoreCachedTranscript(threadId, projected, cached);
+  if (restored && projected?.engine !== "claude") await syncPersistedTranscript(threadId);
+  else await loadAgentTranscript(threadId, null, { restored });
 }
 
 async function prepareEditedThread(threadId, epoch) {
@@ -6140,6 +6333,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   agent.draftProject = project;
   if (project) agent.projectOpen.set(project.key, true);
   if (updateRoute) writeBrowserRoute("agent");
+  void clientCache.flush();
   agent.selectionEpoch++;
   agent.threadId = null;
   clearTimeout(claudePollTimer); claudeRuntime.reset(); refreshAccountChoices();
@@ -6520,7 +6714,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
 async function openAgentConsole() {
   writeBrowserRoute("agent", agent.threadId);
   show("agentView");
-  await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+  await Promise.all([refreshAgentNodes({ maxAgeMs: 15_000 }), loadAgentThreads()]);
   if (!composerDraftKey) {
     let project = null;
     try { project = await composerDrafts.read("personal:new-project"); } catch { /* Reported by the composer. */ }
@@ -6535,7 +6729,7 @@ async function openAgentConsole() {
 async function openRuntimeConsole() {
   writeBrowserRoute("runtime");
   show("runtimeView");
-  await Promise.all([refreshAgentNodes(), loadAgentThreads()]);
+  await Promise.all([refreshAgentNodes({ maxAgeMs: 15_000 }), loadAgentThreads()]);
 }
 
 async function leaveAgentConsole() {
@@ -6587,6 +6781,8 @@ $("#logoutButton").addEventListener("click", async () => {
     await api("/v1/admin/logout", { method: "POST", body: "{}" });
   } finally {
     await completionNotifications?.logout().catch(() => {});
+    await clientCache.clear();
+    clientSnapshotsRestored = false;
     csrfToken = null;
     agent.diagnostics.clear();
     clearAppRoute();
@@ -6771,7 +6967,8 @@ document.addEventListener("visibilitychange", () => {
   } else void recoverAgentSession({ probe: true });
 });
 window.addEventListener("pageshow", (event) => { syncAccountSidebar(); if (event.persisted) { scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); } });
-window.addEventListener("pagehide", () => { accountSidebar.select(null, false); clearTimeout(agent.activityTimer); });
+window.addEventListener("pagehide", () => { accountSidebar.select(null, false); clearTimeout(agent.activityTimer); void clientCache.flush(); });
+document.addEventListener("visibilitychange", () => { if (document.hidden) void clientCache.flush(); });
 document.addEventListener("resume", () => { scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); });
 window.addEventListener("online", () => { syncAccountSidebar(); scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); });
 window.addEventListener("offline", () => {
@@ -7286,8 +7483,12 @@ async function bootstrap() {
   $("#retryConnectionButton").disabled = true;
   $("#healthDot").classList.remove("ok", "bad");
   $("#healthText").textContent = "正在连接 Server";
+  // The session check does not depend on health; start both at once.
+  const sessionRequest = api("/v1/admin/session");
+  sessionRequest.catch(() => {});
   try {
     const health = await api("/healthz");
+    clientCache.setVersion(health.version);
     $("#healthDot").classList.add("ok");
     $("#healthText").textContent = `Server ${health.version ?? ""} 在线 · PostgreSQL`;
     const origin = window.location.origin;
@@ -7301,7 +7502,7 @@ async function bootstrap() {
       $("#installAndroid").href = `https://github.com/ssine/mira/releases/download/v${releaseVersion}/mira_${releaseVersion}_android_arm64.apk`;
     }
     if (!health.adminConfigured) { show("setupView"); return; }
-    const session = await api("/v1/admin/session");
+    const session = await sessionRequest;
     csrfToken = session.csrfToken;
     await restoreBrowserRoute();
   } catch (error) {

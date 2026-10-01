@@ -15,7 +15,7 @@ function startupFixture({ failAt, error } = {}) {
   const elements = new Map();
   const context = vm.createContext({
     csrfToken: "existing-token", window: { location: { origin: "https://mira.test" } },
-    view: null, restored: false,
+    view: null, restored: false, clientCache: { setVersion() {} },
     $(id) {
       if (!elements.has(id)) {
         const classes = new Set();

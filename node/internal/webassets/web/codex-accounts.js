@@ -89,7 +89,7 @@ export class CodexAccounts {
     this.render();
   }
 
-  async refresh() { const response = await this.api("/v1/nodes"); this.setNodes(response.data ?? []); await this.refreshNodes?.(); }
+  async refresh() { this.setNodes(this.refreshNodes ? await this.refreshNodes() : (await this.api("/v1/nodes")).data ?? []); }
 
   focusNode(nodeId) { this.filter.value = nodeId; this.render(); this.root.scrollIntoView({ block: "start" }); }
 
