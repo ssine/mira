@@ -32,6 +32,10 @@ func TestThreadDirectory(t *testing.T) {
 	if d.byID["root"].project.Key != d.byID["sibling"].project.Key || d.projects[0].Count != 2 {
 		t.Fatalf("project normalization: %+v", d.projects)
 	}
+	// A descendant's activity is the project's recency; undated projects omit it.
+	if d.projects[0].UpdatedAt == nil || !d.projects[0].UpdatedAt.Equal(now) || d.projects[len(d.projects)-1].UpdatedAt != nil {
+		t.Fatalf("project recency: %+v", d.projects)
+	}
 	if d.byID["orphan"].parent != nil {
 		t.Fatal("missing parent hid orphan")
 	}

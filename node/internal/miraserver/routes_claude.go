@@ -84,6 +84,9 @@ func scanClaude(row pgx.Row) (claudeSession, error) {
 	}
 	return s, err
 }
+func claudeSubpath(value string) bool {
+	return len(value) <= 1024 && !strings.ContainsAny(value, "\\\x00") && !strings.HasPrefix(value, "/") && (value == "" || path.Clean(value) == value && value != ".." && !strings.HasPrefix(value, "../"))
+}
 func claudeCwd(value, platform string) bool {
 	if value == "" || len(value) > 4096 {
 		return false
@@ -480,6 +483,18 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		}
 		return true, writeJSON(w, 200, result)
 	}
+	if op == "cache" && r.Method == "GET" {
+		subpath := r.URL.Query().Get("subpath")
+		if !claudeSubpath(subpath) {
+			return true, claudeError(400, "Invalid native transcript subpath")
+		}
+		result, err := server.claudeSessionCache(ctx, s, subpath)
+		if err != nil {
+			return true, err
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		return true, writeJSON(w, 200, result)
+	}
 	if op == "reconcile" && r.Method == "POST" {
 		if s.ActiveTurn == nil {
 			return true, writeJSON(w, 200, s)
@@ -786,7 +801,7 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		return claudeError(403, "Runtime does not own this turn")
 	}
 	subpath := r.URL.Query().Get("subpath")
-	if len(subpath) > 1024 || strings.ContainsAny(subpath, "\\\x00") || strings.HasPrefix(subpath, "/") || subpath != "" && (path.Clean(subpath) != subpath || subpath == ".." || strings.HasPrefix(subpath, "../")) {
+	if !claudeSubpath(subpath) {
 		return claudeError(400, "Invalid native transcript subpath")
 	}
 	if op == "subkeys" && r.Method == "GET" {
@@ -1039,4 +1054,56 @@ func (server *Server) claudeRead(ctx context.Context, w http.ResponseWriter, r *
 		return &HTTPError{Status: 409, Code: "stale_read_position", Message: "Read position is ahead of recorded history"}
 	}
 	return writeJSON(w, 200, map[string]any{"generation": 1, "latestItemSeq": latest, "readItemCount": read, "unread": latest > read})
+}
+
+// claudeSessionCache observes the owning Node's disposable transcript cache.
+// Only a prefix that still matches PostgreSQL counts as loaded: that is what
+// the next turn's worker would reuse instead of downloading the transcript.
+func (server *Server) claudeSessionCache(ctx context.Context, s claudeSession, subpath string) (map[string]any, error) {
+	result := map[string]any{"state": "unknown", "nodeId": s.NodeID, "checkedAt": time.Now().UTC().Format(time.RFC3339Nano), "message": ""}
+	node, err := server.nodes.Get(ctx, s.NodeID, false)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case node == nil || !server.channel.IsConnected(s.NodeID):
+		result["state"] = "offline"
+		return result, nil
+	case node.Capabilities["claudeSessionCacheStatusV1"] != true:
+		result["message"] = "升级该节点后可显示 Claude 缓存状态"
+		return result, nil
+	}
+	value, err := server.channel.Invoke(ctx, s.NodeID, "claude", map[string]any{"action": "cache-session", "sessionId": s.ID, "subpath": subpath}, 8*time.Second)
+	observed, _ := value.(map[string]any)
+	if err != nil || observed == nil {
+		result["message"] = "暂时无法读取节点缓存"
+		return result, nil
+	}
+	result["checkedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
+	var end int64
+	var payload []byte
+	cursor, _ := integer(observed["cursor"])
+	prefix, _ := observed["prefix"].(string)
+	err = server.pool.QueryRow(ctx, `SELECT coalesce((SELECT next_seq-1 FROM mira_claude_transcripts WHERE session_id=$1 AND subpath=$2),0),
+		(SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3)`, s.ID, subpath, cursor).Scan(&end, &payload)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(payload)
+	switch {
+	case observed["state"] == "disabled":
+		result["state"], result["message"] = "unloaded", "节点已关闭 Claude 会话缓存，继续执行时从服务器完整加载"
+	case observed["state"] != "cached":
+		result["state"], result["message"] = "unloaded", "节点没有可用缓存，继续执行时从服务器完整加载"
+	case payload == nil || cursor > end || hex.EncodeToString(digest[:]) != prefix:
+		result["state"], result["message"] = "unloaded", "节点缓存已过期，继续执行时从服务器完整加载"
+	default:
+		bytes, _ := integer(observed["bytes"])
+		message := fmt.Sprintf("缓存 %d 条记录 · %.1f MB", cursor, float64(bytes)/1024/1024)
+		if behind := end - cursor; behind > 0 {
+			message += fmt.Sprintf(" · 继续执行时增量同步 %d 条", behind)
+		}
+		result["state"], result["message"] = "loaded", message
+	}
+	return result, nil
 }

@@ -157,6 +157,20 @@ mean a complete legacy stream and must never be appended to a cached prefix.
 Ordinary GET is unchanged. Authentication/revision/ownership checks always apply,
 including cache hits, and storage failure never authorizes an offline resume.
 
+### Per-conversation cache state
+
+Nodes that advertise `claudeSessionCacheStatusV1` answer the private `cache-session`
+action with `{state:"cached"|"absent"|"disabled",maxBytes,cursor?,prefix?,bytes?}`
+for `{sessionId,subpath}` under the Node's current Server endpoint origin. It reads only
+cache metadata and file sizes; it takes neither the manager lock nor the writer lock.
+
+Administrator `GET sessions/{id}/cache?subpath=` returns `{state,nodeId,checkedAt,message}`
+for the Web sidebar indicator. `loaded` means the cached prefix still matches the
+immutable PostgreSQL sequence, so the next turn would download only the missing suffix;
+`unloaded` covers no cache, a disabled cache and a stale prefix. `offline` and `unknown`
+(including Nodes without the capability) make no claim. This is an observation only:
+the worker still validates the full digest and Server prefix on every load.
+
 ## Adding input to a running turn
 
 Desktop Nodes that can add input to a running turn advertise `claudeSteerV1`.

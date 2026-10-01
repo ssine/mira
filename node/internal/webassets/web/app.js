@@ -2676,19 +2676,30 @@ function setConversationMeta(cwd, model) {
   $("#conversationMeta").replaceChildren(directory, element("span", "conversation-meta-separator", "·"), runtimeModel);
 }
 
+// Codex residency is the App Server's memory; Claude has no resident process
+// between turns, so "loaded" means the Node's disk cache holds the transcript.
 function threadResidencyTarget(thread) {
+  if (thread?.engine === "claude") {
+    const node = dashboardNodes.get(thread.runtimeNodeId || thread.sourceNodeId);
+    const subpath = thread.subpath || "";
+    return { node, key: JSON.stringify(["claude", thread.threadId, node?.nodeId, subpath]),
+      url: `/v1/claude/sessions/${encodeURIComponent(thread.sessionId || thread.threadId)}/cache?${new URLSearchParams({ subpath })}` };
+  }
   const node = accountNode(dashboardNodes.get(thread?.runtimeNodeId || thread?.sourceNodeId), thread?.nodeAccountId || "");
-  return { node, key: JSON.stringify([thread?.threadId, node?.nodeId, node?.nodeAccountId, node?.reportedAppServer?.runtimeId]) };
+  return { node, key: JSON.stringify([thread?.threadId, node?.nodeId, node?.nodeAccountId, node?.reportedAppServer?.runtimeId]),
+    url: node?.nodeAccountId && `/v1/nodes/${encodeURIComponent(node.nodeId)}/codex-accounts/${encodeURIComponent(node.nodeAccountId)}/residency?threadId=${encodeURIComponent(thread.threadId)}` };
 }
 
 function renderThreadResidency(indicator, thread) {
-  if (thread?.engine === "claude") { indicator.hidden = true; return; }
   const { node, key } = threadResidencyTarget(thread);
   const observation = agent.residency.entries.get(key)?.observation;
   const stale = observation?.checkedAt && Date.now() - Date.parse(observation.checkedAt) > 30_000;
   const state = navigator.onLine === false || node?.status === "offline" ? "offline" : stale ? "unknown" : observation?.state ?? "unknown";
-  const labels = { loaded: "已加载 · 驻留在内存中", unloaded: "已卸载 · 继续执行时恢复", offline: "节点离线 · 无法确认驻留状态",
-    stopped: "运行实例已停止", unknown: "暂时无法确认驻留状态" };
+  const labels = thread?.engine === "claude"
+    ? { loaded: "已缓存 · 转录保存在节点磁盘上", unloaded: "未缓存 · 继续执行时从服务器加载", offline: "节点离线 · 无法确认缓存状态",
+      unknown: "暂时无法确认缓存状态" }
+    : { loaded: "已加载 · 驻留在内存中", unloaded: "已卸载 · 继续执行时恢复", offline: "节点离线 · 无法确认驻留状态",
+      stopped: "运行实例已停止", unknown: "暂时无法确认驻留状态" };
   const details = [labels[state] ?? labels.unknown, node ? `节点：${node.displayName || node.hostname || node.nodeId}` : "尚未确定运行节点",
     node?.accountName && `账号：${node.accountName}`, stale ? "上次检查已过期" : observation?.message,
     observation?.checkedAt && `检查时间：${new Date(observation.checkedAt).toLocaleTimeString()}`].filter(Boolean).join("\n");
@@ -2706,12 +2717,12 @@ function refreshConversationResidency({ force = false } = {}) {
   const bounds = $("#agentThreadList").getBoundingClientRect();
   for (const indicator of $("#agentThreadList").querySelectorAll("[data-thread-residency]")) {
     const thread = threads.get(indicator.dataset.threadResidency);
-    if (!thread || thread.engine === "claude") continue;
+    if (!thread) continue;
     renderThreadResidency(indicator, thread);
     const rect = indicator.getBoundingClientRect();
     if (!agentThreadDrawerOpen || !rect.height || rect.bottom < bounds.top || rect.top > bounds.bottom) continue;
-    const { node, key } = threadResidencyTarget(thread);
-    if (!node?.nodeAccountId || navigator.onLine === false) continue;
+    const { node, key, url } = threadResidencyTarget(thread);
+    if (!url || !node || navigator.onLine === false) continue;
     let entry = state.entries.get(key);
     if (entry?.pending || state.running >= 3 || (!(force && thread.threadId === agent.threadId) && entry?.nextAt > Date.now())) continue;
     if (!entry) {
@@ -2722,7 +2733,7 @@ function refreshConversationResidency({ force = false } = {}) {
       entry = {}; state.entries.set(key, entry);
     }
     entry.pending = true; entry.nextAt = Date.now() + 10_000; state.running++;
-    void api(`/v1/nodes/${encodeURIComponent(node.nodeId)}/codex-accounts/${encodeURIComponent(node.nodeAccountId)}/residency?threadId=${encodeURIComponent(thread.threadId)}`, { signal: AbortSignal.timeout(10_000) })
+    void api(url, { signal: AbortSignal.timeout(10_000) })
       .then(observation => { entry.observation = observation; })
       .catch(() => { entry.observation = { state: "unknown", message: "状态检查暂不可用" }; })
       .finally(() => { entry.pending = false; state.running--; refreshConversationResidency(); });

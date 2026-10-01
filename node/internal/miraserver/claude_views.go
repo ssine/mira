@@ -404,7 +404,7 @@ func (server *Server) claudeConversationList(ctx context.Context, r *http.Reques
 			}
 			data = append(data, value)
 		}
-		rows, err = server.pool.Query(ctx, `SELECT node_id::text,`+claudeProjectNormalized+`,min(cwd),count(*) FROM mira_claude_sessions WHERE archived=$1 GROUP BY node_id,`+claudeProjectNormalized, archived)
+		rows, err = server.pool.Query(ctx, `SELECT node_id::text,`+claudeProjectNormalized+`,min(cwd),count(*),max(updated_at) FROM mira_claude_sessions WHERE archived=$1 GROUP BY node_id,`+claudeProjectNormalized+` ORDER BY max(updated_at) DESC`, archived)
 		if err != nil {
 			return nil, err
 		}
@@ -412,11 +412,12 @@ func (server *Server) claudeConversationList(ctx context.Context, r *http.Reques
 		for rows.Next() {
 			var node, path, cwd string
 			var count int64
-			if err = rows.Scan(&node, &path, &cwd, &count); err != nil {
+			var updated time.Time
+			if err = rows.Scan(&node, &path, &cwd, &count, &updated); err != nil {
 				return nil, err
 			}
 			key, _ := json.Marshal([]string{node, path})
-			projects = append(projects, map[string]any{"key": string(key), "nodeId": node, "cwd": cwd, "count": count})
+			projects = append(projects, map[string]any{"key": string(key), "nodeId": node, "cwd": cwd, "count": count, "updatedAt": updated})
 		}
 		if err = rows.Err(); err != nil {
 			return nil, err
