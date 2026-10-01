@@ -223,7 +223,14 @@ The Server forwards it to the worker that owns `expectedTurnId` and returns
   messages in `user_message_uuids`. A successful result ends the turn only once
   no accepted message is outstanding.
 - `409 turn_not_steerable`: the turn is no longer `expectedTurnId`, or is
-  finishing. Nothing was queued; send the input as a new turn once it ends.
+  confirmed alive but finishing. Nothing was queued; send the input as a new
+  turn only after its reservation is released. While waiting, reconcile again
+  so a lost runtime does not leave the client blindly polling for completion.
+- `409 execution_unknown`: rejected input was not queued, but the owning runtime
+  could not confirm running or stopped. Preserve the reservation and the user's
+  draft; do not automatically start another turn. Rejected request replays use
+  the same current-state check. The reconcile endpoint also returns this code
+  when it lacks evidence; upgrading cannot recreate an older runtime's receipt.
 - `409 steer_unsupported`: the owning Node lacks `claudeSteerV1`.
 - `400`: invalid request, or input the worker could not read (such as an image).
 - `503`: the worker could not record the input, so it will not join this turn.

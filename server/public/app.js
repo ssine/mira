@@ -539,12 +539,24 @@ async function steerClaudeTurn(thread, text, attachments, progress) {
     await claudeRuntime.steer(thread, body);
   } catch (error) {
     if (error.code !== "turn_not_steerable") throw error;
-    updateReplyProgress(progress, { phase: "本轮已结束，正在作为新一轮发送…" });
+    updateReplyProgress(progress, { phase: "正在确认上一轮结束，随后作为新一轮发送…" });
     const deadline = Date.now() + 120_000;
-    while ((await claudeRuntime.call(`sessions/${thread.sessionId}`)).activeTurn === body.expectedTurnId) {
-      if (Date.now() > deadline) throw new Error("Claude 仍在结束上一轮，请稍后重试");
+    for (;;) {
+      const session = await claudeRuntime.call(`sessions/${thread.sessionId}`);
+      if (!session.activeTurn) break;
+      if (session.activeTurn !== body.expectedTurnId) throw new Error("消息未发送：会话已进入另一轮，请刷新后重试");
+      // A finishing worker can disappear while we wait. Reconciliation requires
+      // stop evidence and fails promptly if the owning execution is unknown.
+      try {
+        await claudeRuntime.call(`sessions/${thread.sessionId}/reconcile`, {});
+      } catch (error) {
+        error.message = `消息未发送：${error.message}`;
+        throw error;
+      }
+      if (Date.now() > deadline) throw new Error("消息未发送：Claude 仍在结束上一轮，请稍后重试");
       await new Promise(resolve => setTimeout(resolve, 750));
     }
+    await loadClaudeTranscript(thread.threadId, { poll: claudeRuntime.cursor > 0 });
     return { text: body.text, attachments: body.attachments };
   }
   replyProgress.finish(progress);
@@ -562,7 +574,8 @@ async function sendClaudeMessage(text, attachments, progress) {
     input = await steerClaudeTurn(current, text, attachments, progress);
     if (!input) return;
   }
-  if (claudeHistoryAcknowledgementRequired(current) && !claudeRuntime.turnRequests.has(current.sessionId) && !$("#claudeContinue").checked) {
+  const latest = currentAgentThread();
+  if (claudeHistoryAcknowledgementRequired(latest) && !claudeRuntime.turnRequests.has(latest.sessionId) && !$("#claudeContinue").checked) {
     $("#claudeContinue").focus();
     throw new Error("部分历史可能未保存。请先勾选“已知晓，使用已保存的记录继续”，再发送消息。");
   }

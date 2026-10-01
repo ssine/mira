@@ -507,11 +507,8 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 			return true, err
 		}
 		state, err := server.reconcileClaudeExecution(ctx, server.channel, target)
-		if err != nil {
-			return true, err
-		}
-		if state["state"] == "unknown" {
-			return true, claudeError(409, "Cannot confirm that the owning runtime stopped. Execution remains unknown; keep the reservation until the Node supplies stop evidence (older Nodes may require an upgrade).")
+		if err != nil || state["state"] == "unknown" {
+			return true, claudeExecutionUnknown(target, state)
 		}
 		return true, writeJSON(w, 200, state)
 	}
@@ -536,7 +533,6 @@ func (server *Server) claudeSteer(ctx context.Context, w http.ResponseWriter, r 
 	if len(text) > 4*1024*1024 {
 		return claudeError(400, "Message exceeds 4 MiB")
 	}
-	notSteerable := &HTTPError{Status: 409, Code: "turn_not_steerable", Message: "Claude 本轮已结束，请作为新一轮发送"}
 	var turn string
 	var seq int64
 	err = server.pool.QueryRow(ctx, `SELECT turn_id::text,seq FROM mira_claude_events WHERE event_id=$1 AND session_id=$2 AND event_type='mira_steer'`, steerID, s.ID).Scan(&turn, &seq)
@@ -546,7 +542,7 @@ func (server *Server) claudeSteer(ctx context.Context, w http.ResponseWriter, r 
 			return err
 		}
 		if rejected {
-			return notSteerable
+			return server.claudeSteerUnavailable(ctx, server.channel, s.ID, turn)
 		}
 		if s.ActiveTurn == nil || *s.ActiveTurn != turn {
 			return writeJSON(w, 200, map[string]any{"accepted": true, "turnId": turn, "replayed": true})
@@ -556,7 +552,7 @@ func (server *Server) claudeSteer(ctx context.Context, w http.ResponseWriter, r 
 		return err
 	}
 	if s.ActiveTurn == nil || *s.ActiveTurn != expected {
-		return notSteerable
+		return server.claudeSteerUnavailable(ctx, server.channel, s.ID, expected)
 	}
 	node, err := server.nodes.Get(ctx, s.NodeID, false)
 	if err != nil {
@@ -575,7 +571,7 @@ func (server *Server) claudeSteer(ctx context.Context, w http.ResponseWriter, r 
 	}
 	switch verdict["reason"] {
 	case "turn_finishing":
-		return notSteerable
+		return server.claudeSteerUnavailable(ctx, server.channel, s.ID, expected)
 	case "invalid_input":
 		message, _ := verdict["message"].(string)
 		return claudeError(400, "Claude 无法读取这条消息："+message)

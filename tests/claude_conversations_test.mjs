@@ -226,8 +226,69 @@ test("lost steer response retries the same request, and a finished turn clears i
  await runtime.steer({sessionId:"s"},{expectedTurnId:"t",text:"two"});
  assert.deepEqual(requests[0],requests[1]);assert.equal(requests[0][0],"/v1/claude/sessions/s/steer");
  assert.equal(runtime.steerRequests.size,0);
- const finished=new ClaudeRuntime(async()=>{throw Object.assign(new Error("finished"),{status:409,code:"turn_not_steerable"});});
- await assert.rejects(finished.steer({sessionId:"s"},{expectedTurnId:"t",text:"one"}));assert.equal(finished.steerRequests.size,0);
+ for(const code of ["turn_not_steerable","execution_unknown"]) {
+  const finished=new ClaudeRuntime(async()=>{throw Object.assign(new Error("rejected"),{status:409,code});});
+  await assert.rejects(finished.steer({sessionId:"s"},{expectedTurnId:"t",text:"one"}));assert.equal(finished.steerRequests.size,0);
+ }
+});
+
+test("reconciled Claude fallback uses the refreshed history acknowledgement", async () => {
+ const app=await fs.readFile(new URL("../server/public/app.js",import.meta.url),"utf8");
+ const start=app.indexOf("async function sendClaudeMessage(");
+ let current={threadId:"s",sessionId:"s",persistence:"pending"},focused=false;
+ const context=vm.createContext({
+  currentAgentThread:()=>current,agent:{activeTurns:new Map([["s","t"]])},
+  claudeRuntime:{turnRequests:new Map(),steerRequests:new Map()},
+  async steerClaudeTurn(){current={...current,persistence:"incomplete",historyAcknowledgementRequired:true};return {text:"draft",attachments:[]};},
+  claudeHistoryAcknowledgementRequired,$:()=>({checked:false,focus(){focused=true;}}),
+  selectedAccountNode(){assert.fail("must not start another turn before acknowledgement");},
+ });
+ vm.runInContext(app.slice(start,app.indexOf('\n$("#claudeReconcile")',start)),context);
+ await assert.rejects(context.sendClaudeMessage("draft",[],{}),/已知晓，使用已保存的记录继续/);
+ assert.equal(focused,true);
+});
+
+test("Claude rejected input only falls back after verified completion", async () => {
+ const app=await fs.readFile(new URL("../server/public/app.js",import.meta.url),"utf8");
+ const start=app.indexOf("async function steerClaudeTurn(");
+ const source=app.slice(start,app.indexOf("\nasync function sendClaudeMessage(",start));
+ for (const scenario of ["unknown","lost_while_finishing","different_turn","finished","recovered"]) {
+  const phases=[],calls=[],attachments=[{path:"/uploaded.png"}];
+  let reads=0,uploads=0,reloads=0;
+  const unknown=()=>Object.assign(new Error("无法确认上一轮是否已停止"),{status:409,code:"execution_unknown"});
+  const context=vm.createContext({
+   agent:{activeTurns:new Map([["s","t"]])},dashboardNodes:new Map(),
+   claudeRuntime:{steerRequests:new Map(),cursor:10,
+    async steer(){throw scenario==="unknown"?unknown():Object.assign(new Error("finishing"),{status:409,code:"turn_not_steerable"});},
+    async call(path,body){
+     calls.push(path);
+     if(path.endsWith("/reconcile")) {
+      assert.deepEqual(Object.keys(body),[]);
+      if(scenario==="lost_while_finishing")throw unknown();
+      return {state:"stopped"};
+     }
+     reads++;
+     return {activeTurn:scenario==="different_turn"?"other":scenario==="finished"||reads>1?null:"t"};
+    }},
+   async prepareTurnInput(){uploads++;return {nativeAttachments:attachments};},
+   updateReplyProgress(_progress,value){phases.push(value.phase);},
+   async loadClaudeTranscript(){reloads++;},setTimeout:callback=>callback(),
+  });
+  vm.runInContext(source,context);
+  const sending=context.steerClaudeTurn({threadId:"s",sessionId:"s"},"draft",[],{});
+  if(["finished","recovered"].includes(scenario)) {
+   const input=await sending;
+   assert.equal(input.text,"draft");assert.equal(input.attachments,attachments);
+   assert.equal(reloads,1,"refresh history acknowledgement before sending a new turn");
+  } else {
+   await assert.rejects(sending,error=>scenario==="different_turn"?/另一轮/.test(error.message):error.code==="execution_unknown");
+   assert.equal(reloads,0);
+  }
+  assert.equal(uploads,1);
+  assert.equal(phases.some(phase=>phase.includes("已结束")),false);
+  if(scenario==="unknown")assert.deepEqual(calls,[],"do not poll or fall back on an unknown execution");
+  if(scenario==="lost_while_finishing")assert.equal(reads,1,"stop waiting as soon as execution becomes unknown");
+ }
 });
 
 test("empty native pages preserve the legacy Codex full-tree contract", async () => {

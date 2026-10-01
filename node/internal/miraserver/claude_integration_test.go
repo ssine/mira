@@ -407,7 +407,7 @@ func TestClaudeSteerRoute(t *testing.T) {
 	record(accepted, map[string]any{"type": "mira_steer", "steerId": accepted, "text": "accepted"})
 	record(rejected, map[string]any{"type": "mira_steer", "steerId": rejected, "text": "rejected"})
 	record(uuidClaude(), map[string]any{"type": "mira_steer_rejected", "steerId": rejected})
-	if status, code := steer(map[string]any{"requestId": rejected, "expectedTurnId": turn, "text": "rejected"}); status != 409 || code != "turn_not_steerable" {
+	if status, code := steer(map[string]any{"requestId": rejected, "expectedTurnId": turn, "text": "rejected"}); status != 409 || code != "execution_unknown" {
 		t.Fatalf("rejected steer replay while running: %d %s", status, code)
 	}
 	record(uuidClaude(), map[string]any{"type": "mira_completed"})
@@ -423,6 +423,112 @@ func TestClaudeSteerRoute(t *testing.T) {
 	other, _, _ := f.reserved()
 	if status, _ := f.request("POST", "/v1/claude/sessions/"+other+"/steer", map[string]any{"requestId": accepted, "expectedTurnId": turn, "text": "accepted"}, nil); status == 200 {
 		t.Fatal("steer replay crossed sessions")
+	}
+}
+
+func TestClaudeSteerRejectedExecutionState(t *testing.T) {
+	f := newClaudeFixture(t)
+	ctx := context.Background()
+	if _, err := f.server.pool.Exec(ctx, `UPDATE codex_nodes SET capabilities=capabilities||'{"claudeSteerV1":true,"claudeExecutionStatusV1":true}' WHERE node_id=$1`, f.nodeID); err != nil {
+		t.Fatal(err)
+	}
+	var state atomic.Value
+	state.Store("unknown")
+	var steers, probes atomic.Int32
+	dialer := websocket.Dialer{Subprotocols: []string{"mira-node-v1", "auth." + base64.RawURLEncoding.EncodeToString([]byte(f.token))}}
+	ws, _, err := dialer.Dial("ws"+strings.TrimPrefix(f.endpoint, "http")+"/v1/nodes/"+f.nodeID+"/connect", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.Close()
+	go func() {
+		for {
+			var b map[string]any
+			if ws.ReadJSON(&b) != nil {
+				return
+			}
+			if b["type"] != "request" {
+				continue
+			}
+			p := b["params"].(map[string]any)
+			var result map[string]any
+			switch p["action"] {
+			case "steer":
+				steers.Add(1)
+				result = map[string]any{"accepted": false, "reason": "turn_finishing"}
+			case "reconcile":
+				probes.Add(1)
+				result = map[string]any{"state": state.Load(), "turnId": p["turnId"], "expectedRuntimeId": p["runtimeId"], "runtimeId": "owner", "proof": "turn_fenced"}
+			default:
+				t.Errorf("unexpected action: %v", p["action"])
+			}
+			if ws.WriteJSON(map[string]any{"type": "response", "requestId": b["requestId"], "ok": true, "result": result}) != nil {
+				return
+			}
+		}
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for !f.server.channel.IsConnected(f.nodeID) {
+		if time.Now().After(deadline) {
+			t.Fatal("Node did not connect")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, execution := range []string{"unknown", "running", "stopped"} {
+		t.Run(execution, func(t *testing.T) {
+			state.Store(execution)
+			target, headers := reserveClaudeExecution(t, f)
+			route := "/v1/claude/sessions/" + target.session
+			// A previously cached observation must not authorize fallback.
+			f.server.rememberClaudeExecution(target, "running", "")
+			request := map[string]any{"requestId": uuidClaude(), "expectedTurnId": target.turn, "text": "follow up"}
+			want := "turn_not_steerable"
+			if execution == "unknown" {
+				want = "execution_unknown"
+			}
+			check := func(path string) {
+				t.Helper()
+				status, body := f.request("POST", route+path, request, nil)
+				var value map[string]any
+				_ = json.Unmarshal(body, &value)
+				if status != 409 || value["code"] != want {
+					t.Fatalf("%s: %d %s", path, status, body)
+				}
+				if strings.Contains(string(body), "已结束") || strings.Contains(string(body), "升级") {
+					t.Fatalf("misleading response for an upgraded Node: %s", body)
+				}
+			}
+			beforeSteers, beforeProbes := steers.Load(), probes.Load()
+			check("/steer")
+			if steers.Load() != beforeSteers+1 || probes.Load() != beforeProbes+1 {
+				t.Fatal("rejected steer did not probe the owning execution")
+			}
+			if execution == "unknown" {
+				check("/reconcile")
+				// A durable rejected verdict must probe again without resending input.
+				steerID := request["requestId"]
+				for _, e := range []map[string]any{{"type": "mira_steer", "steerId": steerID}, {"type": "mira_steer_rejected", "steerId": steerID}} {
+					eventID := steerID
+					if e["type"] == "mira_steer_rejected" {
+						eventID = uuidClaude()
+					}
+					if status, body := f.request("POST", route+"/events", map[string]any{"eventId": eventID, "payload": e}, headers); status != 200 {
+						t.Fatalf("record: %d %s", status, body)
+					}
+				}
+				check("/steer")
+				if steers.Load() != beforeSteers+1 || probes.Load() != beforeProbes+3 {
+					t.Fatal("replayed rejection resent input or skipped state validation")
+				}
+			}
+			s := f.call("GET", route, nil)
+			if (s["activeTurn"] == nil) != (execution == "stopped") {
+				t.Fatalf("reservation: %v", s)
+			}
+			if execution == "stopped" && s["historyAcknowledgementRequired"] != true {
+				t.Fatal("recovery must retain the history acknowledgement requirement")
+			}
+		})
 	}
 }
 

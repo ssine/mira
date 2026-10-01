@@ -238,6 +238,13 @@ repeat execution. Both Node and Server must support execution reconciliation for
 automatic release after an unacknowledged exit. This does not retroactively produce
 shutdown evidence for turns stranded by an older release.
 
+A rejected added message does not establish that a turn has ended. Before the
+Web falls back to a new turn, Server checks the current reservation against its
+owning runtime. Unknown execution stops submission immediately and preserves the
+draft. While waiting for a confirmed live worker to finish, Web reconciles again
+and stops waiting if evidence becomes unavailable. A recovered unacknowledged exit
+still requires the user to acknowledge the saved history before sending.
+
 Wire endpoints and ownership rules are in
 [Claude sessions v1](../protocol/claude-sessions-v1.md).
 

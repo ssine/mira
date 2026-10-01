@@ -62,6 +62,42 @@ func scanClaudeExecution(row pgx.Row) (claudeExecutionTarget, error) {
 	return target, err
 }
 
+func claudeExecutionUnknown(target claudeExecutionTarget, state map[string]any) *HTTPError {
+	message := "执行节点未提供上一轮的退出凭据，请检查原执行进程。"
+	switch state["reason"] {
+	case "offline":
+		message = "执行节点离线，请待节点重新连接后检查状态。"
+	case "connection":
+		message = "暂时无法联系执行节点，请稍后检查状态。"
+	default:
+		if !target.protocol {
+			message = "执行节点不支持退出状态核验，请升级节点后检查原执行进程。"
+		}
+	}
+	return &HTTPError{Status: 409, Code: "execution_unknown", Message: "无法确认上一轮是否已停止，暂时保留运行占用。" + message}
+}
+
+// Rejecting input does not prove that the owning execution ended. In particular,
+// a restarted Node may lack both the old worker and its shutdown receipt. Read
+// the current reservation and probe it before allowing the Web's next-turn path.
+func (server *Server) claudeSteerUnavailable(ctx context.Context, invoker channel.CapabilityInvoker, session, turn string) error {
+	notSteerable := &HTTPError{Status: 409, Code: "turn_not_steerable", Message: "本轮无法再追加消息，确认结束后可作为新一轮发送"}
+	target, err := scanClaudeExecution(server.pool.QueryRow(ctx, claudeExecutionSelect+` WHERE s.session_id=$1 AND s.active_turn=$2`, session, turn))
+	if err == pgx.ErrNoRows {
+		return notSteerable
+	}
+	if err != nil {
+		return err
+	}
+	state, err := server.reconcileClaudeExecution(ctx, invoker, target)
+	if err != nil || state["state"] == "unknown" {
+		failure := claudeExecutionUnknown(target, state)
+		failure.Message = "消息未发送：" + failure.Message
+		return failure
+	}
+	return notSteerable
+}
+
 // Do not hold a database lock over a Node round trip. Finalization below rechecks
 // the exact ownership tuple under the same session lock used by native writes.
 func (server *Server) reconcileClaudeExecution(ctx context.Context, invoker channel.CapabilityInvoker, target claudeExecutionTarget) (map[string]any, error) {
