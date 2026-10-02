@@ -396,17 +396,13 @@ async function loadClaudeTranscript(threadId, options = {}) {
   }
 }
 
-// Native images, steer notes and question forms are added after Markdown cards render.
+// Steer notes and question forms are added after Markdown cards render.
 function decorateClaudeCards(cards, result, forms, thread) {
   const byKey = new Map(result.trace.map(item => [item.key, item]));
   for (const [key, card] of cards) {
     const item = byKey.get(key);
     if (!card || !item) continue;
     const body = card.querySelector(".trace-body");
-    const images = item.nativeImages ?? (item.nativeImage ? [item.nativeImage] : []);
-    for (const src of images.slice(body.querySelectorAll(":scope > img.trace-image").length)) {
-      const img = element("img", "trace-image"); img.src = src; img.alt = "会话图片"; img.loading = "lazy"; body.append(img);
-    }
     const steerNote = { queued: "等待加入本轮", cancelled: "本轮已结束，这条消息未被读取" }[item.steerState] || "";
     if (steerNote) card.dataset.steerState = item.steerState; else delete card.dataset.steerState;
     let note = card.querySelector(".trace-steer-state");
@@ -428,10 +424,10 @@ function traceCard(key) {
   return $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
 }
 
-// The fields a Claude transcript card shows. Output images are only appended.
+// The fields a Claude transcript card shows.
 function sameClaudeItem(left, right) {
-  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "nativeImage", "steerState", "questionId", "questionState", "completedAt", "turnElapsedMs", "turnCompletedAt"]
-    .every(field => left[field] === right[field]) && (left.nativeImages?.length ?? 0) === (right.nativeImages?.length ?? 0) &&
+  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "steerState", "questionId", "questionState", "completedAt", "turnElapsedMs", "turnCompletedAt"]
+    .every(field => left[field] === right[field]) && left.image?.url === right.image?.url &&
     JSON.stringify([left.activity, left.turnCostEstimate]) === JSON.stringify([right.activity, right.turnCostEstimate]);
 }
 

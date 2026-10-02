@@ -124,8 +124,13 @@ test("tool calls carry readable activities, keep their images, and omit sub-agen
  assert.deepEqual(tools.agent.actions,[{kind:"agent",label:"调查超时"}]);
  assert.deepEqual(tools.mcp,{status:"running",durationMs:null,actions:[{kind:"tool",label:"home_nodes · process"}]});
  assert.deepEqual(tools.grep.actions,[{kind:"search",label:"“TODO”（src）"}]);
- assert.deepEqual(view.trace.find(x=>x.key==="tool:shot").nativeImages,["data:image/png;base64,AAAA"]);
- assert.equal(view.trace.some(x=>x.title==="图片"||x.title==="子任务"),false);
+ // Output images follow their tool as Codex-style image cards.
+ const keys = view.trace.map(x=>x.key), shot = view.trace.find(x=>x.kind==="image");
+ assert.deepEqual(shot.image,{url:"data:image/png;base64,AAAA"});
+ assert.equal(shot.turnId,"turn");
+ assert.ok(keys.indexOf(shot.key) > keys.indexOf("tool:shot"));
+ assert.equal(view.trace.find(x=>x.key==="tool:shot").body.includes("AAAA"),false);
+ assert.equal(view.trace.some(x=>x.title==="子任务"),false);
  assert.equal(view.trace.find(x=>x.kind==="reasoning").body,"**Checking** the result");
  // The turn ended without these results.
  const ended = claudeTrace(rows).trace.filter(x=>x.activity?.status==="interrupted").map(x=>x.key);
@@ -330,4 +335,22 @@ test("account model IDs borrow effort levels from the SDK alias and expose the a
  const unknown=await runtime.models(node({model:"claude-unknown"}));
  assert.deepEqual(unknown.models[0].supportedReasoningEfforts,[]);
  assert.equal((await runtime.models(node({model:"legacy"}))).models.length,3);
+});
+
+test("Claude user images render as Codex-style image cards after the message", () => {
+ const png = {type:"image",source:{type:"base64",media_type:"image/png",data:"AAAA"}};
+ const rows = [
+  {seq:1,turnId:"turn",payload:{type:"mira_user",text:"看图",attachments:[{name:"a.png",path:"/tmp/a.png"}],
+   message:{role:"user",content:[{type:"text",text:"看图"},png]}}},
+  {seq:2,turnId:"turn",payload:{type:"mira_steer",steerId:"s",text:"再看",message:{role:"user",content:[{type:"text",text:"再看"},png]}}},
+  {seq:3,turnId:"turn",payload:{type:"command_lifecycle",command_uuid:"s",state:"started"}},
+ ];
+ const trace = claudeTrace(rows,{activeTurn:"turn"}).trace;
+ assert.deepEqual(trace.map(x=>[x.kind,x.image?.url ?? x.body]),[
+  ["user","看图\n附件：a.png"],["image","data:image/png;base64,AAAA"],
+  ["user","再看"],["image","data:image/png;base64,AAAA"],
+ ]);
+ // Unsupported or non-inline sources are not rendered.
+ const other = claudeTrace([{seq:1,payload:{type:"mira_user",text:"x",message:{content:[{type:"image",source:{type:"url",url:"https://x"}}]}}}]).trace;
+ assert.equal(other.some(x=>x.kind==="image"),false);
 });

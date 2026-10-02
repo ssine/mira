@@ -71,6 +71,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
   const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map(), endedTurns = new Set();
   let interrupted = false, cwd = "";
   const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, ...extra });
+  const image = (key, url, turnId, timing) => put(key, "image", "图片", "", turnId, { ...timing, image: { url } });
   function blocks(message, key, role, turnId, timestamp, toolResult) {
     const timing = timestamp ? { completedAt: timestamp, timingScope: "recorded" } : {};
     const content = typeof message?.content === "string" ? [{ type: "text", text: message.content }] : message?.content || [];
@@ -92,10 +93,11 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
         }
         const started = Date.parse(prior?.startedAt), finished = Date.parse(timestamp);
         const activity = { status: b.is_error ? "failed" : "completed", durationMs: finished >= started ? finished - started : null, actions };
-        // Screenshots and other tool output images stay with their tool call.
         put(`tool:${b.tool_use_id}`, "tool", prior?.title || "工具结果", [prior?.body, text].filter(Boolean).join("\n\n"), turnId,
-          { ...timing, status: activity.status, activity, startedAt: prior?.startedAt, nativeImages: [...prior?.nativeImages || [], ...images] });
-      } else if (nativeImage(b)) put(k, role, "图片", "", turnId, { ...timing, nativeImage: nativeImage(b) });
+          { ...timing, status: activity.status, activity, startedAt: prior?.startedAt });
+        // Like Codex, screenshots and other output images follow their tool as image cards.
+        images.forEach((url, i) => image(`${k}:image:${i}`, url, turnId, timing));
+      } else if (nativeImage(b)) image(k, nativeImage(b), turnId, timing);
     }
   }
   function userInput(key, e, turnId, extra = {}) {

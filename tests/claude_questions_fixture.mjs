@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const questionThread = "00000000-0000-4000-8000-0000000000a1";
-export async function startQuestionFixture({ cacheHistory = false } = {}) {
+export async function startQuestionFixture({ cacheHistory = false, images = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001", accountId = "00000000-0000-4000-8000-000000000002";
   const turnId = "00000000-0000-4000-8000-000000000003", questionId = "00000000-0000-4000-8000-000000000004";
   const session = { sessionId: questionThread, nodeId, nodeAccountId: accountId, title: "Claude 问答回归", cwd: "/work", model: "opus", persistence: "pending", activeTurn: turnId };
@@ -25,6 +25,17 @@ export async function startQuestionFixture({ cacheHistory = false } = {}) {
   if (cacheHistory) {
     events.length = 0;
     for (let i = 0; i < 80; i++) emit({ type: "assistant", uuid: `saved-${i}`, message: { id: `saved-${i}`, content: [{ type: "text", text: `已保存的回复 ${i}\n\n${"竖屏对话内容。".repeat(40)}` }] } });
+  }
+  if (images) {
+    // A 1×1 PNG sent by the user and returned by a screenshot tool.
+    const png = { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" } };
+    events.length = 0;
+    session.activeTurn = null;
+    emit({ type: "mira_user", text: "看这张图", attachments: [{ name: "a.png", path: "/work/a.png" }], message: { role: "user", content: [{ type: "text", text: "看这张图" }, png] } });
+    emit({ type: "assistant", uuid: "shot-use", message: { id: "shot", content: [{ type: "tool_use", id: "shot", name: "mcp__home_nodes__screen", input: { action: "screenshot" } }] } });
+    emit({ type: "user", uuid: "shot-result", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "shot", content: [png] }] } });
+    emit({ type: "assistant", uuid: "reply", message: { id: "reply", content: [{ type: "text", text: "看到了。" }] } });
+    emit({ type: "mira_completed" });
   }
   let holdHistory = false;
   const heldHistory = new Set();

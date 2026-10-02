@@ -1098,5 +1098,4 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-recovery-settings .toggle:has(input:disabled) { opacity: .65; cursor: wait; }
 
 .thread-engine { color: var(--muted); font-size: 9px; }
-.trace-body > .trace-image { max-width: 100%; height: auto; }
 #claudePersistence[hidden], #claudeReconcile[hidden] { display: none; }
