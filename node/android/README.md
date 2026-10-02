@@ -94,6 +94,30 @@ an explicit **Stop** remains stopped. The UI must not display a persisted "Conne
 the service no longer exists. **Android app settings** opens the platform configuration page.
 This is not a promise that every OEM will keep an app alive indefinitely.
 
+Non-root screen capture uses one user-authorized MediaProjection session owned
+by the foreground service. There is no Mira inactivity timer for this grant.
+Android can end it when the screen locks, the user stops sharing, another
+projection takes over, or the application process exits. Reconnection cannot
+recreate a revoked session without the platform confirmation flow.
+
+The capture controller keeps one latest Image and reserves two ImageReader slots
+for acquisition. It copies pixels and closes the Image under the same lock used
+by frame callbacks and reader teardown, before PNG compression. Screenshot
+encoding is serialized; old-session callbacks cannot revoke a replacement grant.
+This prevents a slow screenshot plus arriving frames from exhausting ImageReader
+and crashing the whole Android process.
+
+Run the deterministic ownership/lifecycle regression with a JDK:
+
+```sh
+python3 tests/android_capture_regression.py
+```
+
+This uses a bounded ImageReader test double with the real controller, not a real
+MediaProjection session. Device acceptance must still cover repeated captures
+while another app animates, concurrent requests, user stop/regrant, and screen
+lock, checking both Node continuity and the Android crash log.
+
 ## Embedded OpenSSH APK
 
 The APK always packages the linked Go + OpenSSH image. There is no builtin Go SSH

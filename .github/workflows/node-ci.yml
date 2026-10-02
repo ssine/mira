@@ -14,6 +14,7 @@ on:
       - "scripts/release-state.sh"
       - "tests/installers_e2e.mjs"
       - "tests/release_publication_test.mjs"
+      - "tests/android_capture_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
       - ".github/workflows/promote-release.yml"
@@ -30,6 +31,7 @@ on:
       - "scripts/release-state.sh"
       - "tests/installers_e2e.mjs"
       - "tests/release_publication_test.mjs"
+      - "tests/android_capture_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
       - ".github/workflows/promote-release.yml"
@@ -39,6 +41,17 @@ permissions:
   contents: read
 
 jobs:
+  android-capture-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Verify non-root screen frame ownership and session cleanup
+        run: python3 tests/android_capture_regression.py
+
   embedded-openssh:
     uses: ./.github/workflows/openssh.yml
 
