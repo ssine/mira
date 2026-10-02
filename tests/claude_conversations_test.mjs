@@ -354,3 +354,29 @@ test("Claude user images render as Codex-style image cards after the message", (
  const other = claudeTrace([{seq:1,payload:{type:"mira_user",text:"x",message:{content:[{type:"image",source:{type:"url",url:"https://x"}}]}}}]).trace;
  assert.equal(other.some(x=>x.kind==="image"),false);
 });
+
+test("Claude compaction renders like Codex with its summary", () => {
+ const row = (seq,payload,turnId="turn") => ({seq,turnId,payload});
+ const boundary = {type:"system",subtype:"compact_boundary",uuid:"b",timestamp:"2026-10-02T18:47:00Z",
+  compact_metadata:{trigger:"auto",pre_tokens:167625,post_tokens:5554,preserved_messages:{anchor_uuid:"sum"}}};
+ const summary = {type:"user",uuid:"sum",isSynthetic:true,message:{role:"user",content:[{type:"text",text:"Summary:\n1. 发版"}]}};
+ const running = claudeTrace([row(1,{type:"mira_user",text:"继续"}),row(2,{type:"system",subtype:"status",status:"compacting"})],{activeTurn:"turn"}).trace;
+ assert.deepEqual(running.at(-1).kind,"compaction");
+ assert.match(running.at(-1).body,/正在压缩/);
+ const rows = [row(1,{type:"mira_user",text:"继续"}),row(2,{type:"system",subtype:"status",status:"compacting"}),
+  row(3,{type:"system",subtype:"status",status:"compacting",uuid:"again"}),
+  row(4,{type:"system",subtype:"status",status:null,compact_result:"success"}),row(4.5,boundary),row(5,summary),
+  row(6,{type:"assistant",uuid:"a",message:{id:"m",content:[{type:"text",text:"好的"}]}})];
+ const trace = claudeTrace(rows,{activeTurn:"turn"}).trace;
+ assert.deepEqual(trace.map(x=>x.kind),["user","compaction","assistant"]);
+ const card = trace[1];
+ assert.equal(card.title,"上下文自动压缩");
+ assert.equal(card.body,"较早的上下文已自动压缩（167,625 → 5,554 tokens）。");
+ assert.equal(card.compactionSummary,"Summary:\n1. 发版");
+ // Native sub-agent history marks the summary instead of linking it.
+ const child = claudeTrace([row(1,{type:"system",subtype:"compact_boundary",uuid:"b",compactMetadata:{trigger:"manual",preTokens:9000}}),
+  row(2,{type:"user",uuid:"s",isCompactSummary:true,message:{role:"user",content:"摘要"}})],{child:true}).trace;
+ assert.deepEqual(child.map(x=>[x.kind,x.title,x.body,x.compactionSummary]),[["compaction","上下文压缩","较早的上下文已压缩（压缩前 9,000 tokens）。","摘要"]]);
+ // A compaction cut off with its turn leaves no running notice.
+ assert.equal(claudeTrace(rows.slice(0,2)).trace.some(x=>x.kind==="compaction"),false);
+});

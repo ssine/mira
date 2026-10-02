@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const questionThread = "00000000-0000-4000-8000-0000000000a1";
-export async function startQuestionFixture({ cacheHistory = false, images = false } = {}) {
+export async function startQuestionFixture({ cacheHistory = false, images = false, compaction = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001", accountId = "00000000-0000-4000-8000-000000000002";
   const turnId = "00000000-0000-4000-8000-000000000003", questionId = "00000000-0000-4000-8000-000000000004";
   const session = { sessionId: questionThread, nodeId, nodeAccountId: accountId, title: "Claude 问答回归", cwd: "/work", model: "opus", persistence: "pending", activeTurn: turnId };
@@ -35,6 +35,16 @@ export async function startQuestionFixture({ cacheHistory = false, images = fals
     emit({ type: "assistant", uuid: "shot-use", message: { id: "shot", content: [{ type: "tool_use", id: "shot", name: "mcp__home_nodes__screen", input: { action: "screenshot" } }] } });
     emit({ type: "user", uuid: "shot-result", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "shot", content: [png] }] } });
     emit({ type: "assistant", uuid: "reply", message: { id: "reply", content: [{ type: "text", text: "看到了。" }] } });
+    emit({ type: "mira_completed" });
+  }
+  if (compaction) {
+    events.length = 0;
+    session.activeTurn = null;
+    emit({ type: "mira_user", text: "继续发版" });
+    emit({ type: "system", subtype: "status", status: "compacting" });
+    emit({ type: "system", subtype: "compact_boundary", uuid: "boundary", compact_metadata: { trigger: "auto", pre_tokens: 167625, post_tokens: 5554, preserved_messages: { anchor_uuid: "summary" } } });
+    emit({ type: "user", uuid: "summary", isSynthetic: true, message: { role: "user", content: [{ type: "text", text: "Summary:\n1. 推送 main 并发布新版本。" }] } });
+    emit({ type: "assistant", uuid: "reply", message: { id: "reply", content: [{ type: "text", text: "继续处理。" }] } });
     emit({ type: "mira_completed" });
   }
   let holdHistory = false;

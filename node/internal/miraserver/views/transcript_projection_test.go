@@ -88,6 +88,30 @@ func TestPaginateTranscript(t *testing.T) {
 	}
 }
 
+func TestProjectTranscriptCompactionTokens(t *testing.T) {
+	usage := func(input, total int) map[string]any {
+		return record("event_msg", map[string]any{"type": "token_count", "info": map[string]any{"last_token_usage": map[string]any{"input_tokens": input, "total_tokens": total}, "model_context_window": 258400}})
+	}
+	items := []map[string]any{
+		record("event_msg", map[string]any{"type": "task_started", "turn_id": "turn"}),
+		usage(222357, 226776),
+		record("compacted", map[string]any{"message": "summary"}),
+		record("turn_context", map[string]any{"turn_id": "turn"}),
+		usage(0, 18609),
+		record("compacted", map[string]any{"message": "", "latest_token_usage_record": map[string]any{"usage": map[string]any{"input_tokens": 1234567}}}),
+	}
+	trace := ProjectCodexTranscript(items, ProjectionOptions{})
+	if len(trace) != 2 || trace[0]["body"] != "较早的上下文已自动压缩（222,357 → 18,609 tokens）。" {
+		t.Fatalf("compaction must show its token change: %#v", trace)
+	}
+	if trace[1]["body"] != "较早的上下文已自动压缩（压缩前 1,234,567 tokens）。" {
+		t.Fatalf("a compaction without its estimate keeps the recorded size: %#v", trace[1])
+	}
+	if body := ProjectCodexTranscript(items[2:3], ProjectionOptions{})[0]["body"]; body != "较早的上下文已自动压缩。" {
+		t.Fatalf("unknown token counts keep the plain notice: %#v", body)
+	}
+}
+
 func TestProjectTranscriptCompactionSummary(t *testing.T) {
 	summary := "Handoff instructions\n# 压缩摘要\n\n已完成检查，接下来修改页面。"
 	items := []map[string]any{

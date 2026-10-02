@@ -426,7 +426,7 @@ function traceCard(key) {
 
 // The fields a Claude transcript card shows.
 function sameClaudeItem(left, right) {
-  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "steerState", "questionId", "questionState", "completedAt", "turnElapsedMs", "turnCompletedAt"]
+  return Boolean(left) && ["kind", "title", "body", "status", "turnId", "compactionSummary", "steerState", "questionId", "questionState", "completedAt", "turnElapsedMs", "turnCompletedAt"]
     .every(field => left[field] === right[field]) && left.image?.url === right.image?.url &&
     JSON.stringify([left.activity, left.turnCostEstimate]) === JSON.stringify([right.activity, right.turnCostEstimate]);
 }

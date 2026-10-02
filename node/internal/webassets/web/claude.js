@@ -67,8 +67,23 @@ function pruneCompletedStreams(rows) {
   }
 }
 
+const plainText = content => typeof content === "string" ? content
+  : (content || []).filter(b => b?.type === "text").map(b => b.text).join("\n\n");
+
+// A compact boundary, like Codex's contextCompaction, with token counts when recorded.
+function compaction(e) {
+  const meta = e.compact_metadata || e.compactMetadata || {};
+  const manual = meta.trigger === "manual", count = n => Number.isFinite(n) ? n.toLocaleString("en-US") : null;
+  const before = count(meta.pre_tokens ?? meta.preTokens), after = count(meta.post_tokens ?? meta.postTokens);
+  const tokens = before && after ? `（${before} → ${after} tokens）` : before ? `（压缩前 ${before} tokens）` : "";
+  return { title: manual ? "上下文压缩" : "上下文自动压缩", body: `${manual ? "较早的上下文已压缩" : "较早的上下文已自动压缩"}${tokens}。`,
+    anchor: meta.preserved_messages?.anchor_uuid ?? meta.preserved_segment?.anchor_uuid ?? null };
+}
+
 export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
   const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map(), endedTurns = new Set();
+  // Compaction is reported as status -> boundary -> a synthetic user message holding the summary.
+  const compacting = new Map(), summaries = new Map();
   let interrupted = false, cwd = "";
   const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, ...extra });
   const image = (key, url, turnId, timing) => put(key, "image", "图片", "", turnId, { ...timing, image: { url } });
@@ -128,6 +143,11 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
       if (e.message?.id) streams.set(scope, e.message.id);
       for (const k of items.keys()) if (k.startsWith(`stream:${scope}:${e.message?.id}:`)) items.delete(k);
       blocks(e.message, key, "assistant", turnId, e.timestamp);
+    } else if (e.type === "user" && summaries.has(scope) && (e.isCompactSummary || e.uuid === summaries.get(scope).anchor ||
+      !summaries.get(scope).anchor && e.isSynthetic)) {
+      const item = items.get(summaries.get(scope).key);
+      summaries.delete(scope);
+      if (item) item.compactionSummary = plainText(e.message?.content);
     } else if (e.type === "user" && (child || e.message?.content?.some?.(b => b.type === "tool_result"))) blocks(e.message, key, "user", turnId, e.timestamp, e.tool_use_result ?? e.toolUseResult);
     else if (e.type === "stream_event") {
       const raw = e.event;
@@ -160,6 +180,24 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
       const last = [...items.values()].findLast(item => item.turnId === turnId && item.kind === "assistant" && item.body);
       if (last) Object.assign(last, { turnElapsedMs: e.duration_ms, turnCostEstimate: row.costEstimate, turnCompletedAt: row.completedAt ?? e.timestamp });
     } else if (e.type === "system" && e.subtype === "init" && e.cwd) cwd = e.cwd.replace(/\/+$/, "");
+    else if (e.type === "system" && e.subtype === "status") {
+      // The status repeats while one compaction runs.
+      if (e.status === "compacting") {
+        if (!compacting.has(scope)) compacting.set(scope, `compacting:${key}`);
+        put(compacting.get(scope), "compaction", "上下文自动压缩", "正在压缩较早的上下文…", turnId);
+      } else if (compacting.has(scope)) {
+        const pending = compacting.get(scope);
+        compacting.delete(scope);
+        if (e.compact_result && e.compact_result !== "success") put(pending, "compaction", "上下文压缩", "上下文压缩未完成。", turnId);
+        else items.delete(pending);
+      }
+    } else if (e.type === "system" && e.subtype === "compact_boundary") {
+      if (compacting.has(scope)) items.delete(compacting.get(scope));
+      compacting.delete(scope);
+      const { title, body, anchor } = compaction(e);
+      put(key, "compaction", title, body, turnId, { compactionSummary: "", ...(e.timestamp ? { completedAt: e.timestamp, timingScope: "recorded" } : {}) });
+      summaries.set(scope, { key, anchor });
+    }
     // Sub-agent task events are not listed here: the Agent tool call shows its
     // result, and the sidebar opens the sub-agent's own conversation.
   }
@@ -167,6 +205,8 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
   for (const item of items.values()) {
     if (item.activity?.status === "running" && item.turnId !== activeTurn) item.activity = { ...item.activity, status: "interrupted" };
   }
+  // A compaction that never reported its end was cut off with its turn.
+  for (const pending of compacting.values()) if (items.get(pending)?.turnId !== activeTurn) items.delete(pending);
   for (const [id, steer] of steers) placeSteer(id, steer.turnId === activeTurn ? "queued" : "cancelled");
   for (const [id, question] of questions) {
     if (question.turnId === activeTurn && !endedTurns.has(question.turnId)) continue;

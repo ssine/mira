@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -207,6 +208,25 @@ type toolState struct {
 	hasInput, hasOutput          bool
 }
 
+// compactionBody matches the Claude compaction notice, with token counts when recorded.
+func compactionBody(before, after int64) string {
+	switch {
+	case before > 0 && after > 0:
+		return fmt.Sprintf("较早的上下文已自动压缩（%s → %s tokens）。", groupedInteger(before), groupedInteger(after))
+	case before > 0:
+		return fmt.Sprintf("较早的上下文已自动压缩（压缩前 %s tokens）。", groupedInteger(before))
+	}
+	return "较早的上下文已自动压缩。"
+}
+
+func groupedInteger(value int64) string {
+	text := strconv.FormatInt(value, 10)
+	for index := len(text) - 3; index > 0; index -= 3 {
+		text = text[:index] + "," + text[index:]
+	}
+	return text
+}
+
 // ProjectCodexTranscript builds the stable Web trace without mutating records.
 func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) []map[string]any {
 	records := items
@@ -382,6 +402,8 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 		}
 	}
 
+	var lastInputTokens, compactionTokens int64
+	compactionKey := ""
 	for index, record := range records {
 		payload := object(record["payload"])
 		itemSeq := options.ItemOffset + int64(index) + 1
@@ -397,11 +419,30 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			continue
 		}
 		if recordType == "compacted" {
-			entry := map[string]any{"key": fmt.Sprintf("history-%d-compaction", itemSeq), "turnId": nullableString(recordTurnID), "sourceItemSeq": itemSeq, "kind": "compaction", "title": "上下文自动压缩", "markdown": false, "body": "较早的上下文已自动压缩。"}
+			if tokens, ok := safeInteger(object(object(first(payload["latest_token_usage_record"], record["latest_token_usage_record"]))["usage"])["input_tokens"]); ok && tokens > 0 {
+				lastInputTokens = tokens
+			}
+			entry := map[string]any{"key": fmt.Sprintf("history-%d-compaction", itemSeq), "turnId": nullableString(recordTurnID), "sourceItemSeq": itemSeq, "kind": "compaction", "title": "上下文自动压缩", "markdown": false, "body": compactionBody(lastInputTokens, 0)}
 			if summary := stringValue(payload["message"]); strings.TrimSpace(summary) != "" {
 				entry["compactionSummary"] = boundedText(summary)
 			}
 			push(entry)
+			compactionKey, compactionTokens = stringValue(entry["key"]), lastInputTokens
+			continue
+		}
+		// The compaction request's token_count precedes the compacted record;
+		// the first zero-input token_count after it carries the new estimate.
+		if recordType == "event_msg" && stringValue(payload["type"]) == "token_count" {
+			usage := object(object(payload["info"])["last_token_usage"])
+			input, _ := safeInteger(usage["input_tokens"])
+			if total, ok := safeInteger(usage["total_tokens"]); ok && input == 0 && total > 0 && compactionKey != "" {
+				if entry := projectedByID[compactionKey]; entry != nil {
+					entry["body"] = compactionBody(compactionTokens, total)
+				}
+				compactionKey = ""
+			} else if input > 0 {
+				lastInputTokens, compactionKey = input, ""
+			}
 			continue
 		}
 		if recordType == "event_msg" && includes(activityStarts, stringValue(payload["type"])) {
