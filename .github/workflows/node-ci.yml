@@ -15,6 +15,7 @@ on:
       - "tests/installers_e2e.mjs"
       - "tests/release_publication_test.mjs"
       - "tests/android_capture_regression.py"
+      - "tests/android_accessibility_capture_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
       - ".github/workflows/promote-release.yml"
@@ -32,6 +33,7 @@ on:
       - "tests/installers_e2e.mjs"
       - "tests/release_publication_test.mjs"
       - "tests/android_capture_regression.py"
+      - "tests/android_accessibility_capture_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
       - ".github/workflows/promote-release.yml"
@@ -50,7 +52,9 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Verify non-root screen frame ownership and session cleanup
-        run: python3 tests/android_capture_regression.py
+        run: |
+          python3 tests/android_capture_regression.py
+          python3 tests/android_accessibility_capture_regression.py
 
   embedded-openssh:
     uses: ./.github/workflows/openssh.yml

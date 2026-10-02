@@ -81,6 +81,9 @@ Android cross-compile remains useful only as a shared-code compile check, not a 
 The Release workflow can be dispatched with `publish=false` to produce signed acceptance artifacts
 without a tag/release; install those on a real device before tagging the release. Verify a domain
 Server URL, not just an IP address, along with screen/file/process capabilities and in-place update.
+For an APK-only test build, also set `android_only=true`: this uses the existing
+Android signing identity, uploads `mira-android-acceptance`, and skips all release,
+draft, tag and container publication steps.
 
 Root-created Node identities inherit the app-private directory's owner and SELinux label, retaining
 0600 permissions. Switching root/app mode must keep the same credential and approval; never solve
@@ -94,8 +97,20 @@ an explicit **Stop** remains stopped. The UI must not display a persisted "Conne
 the service no longer exists. **Android app settings** opens the platform configuration page.
 This is not a promise that every OEM will keep an app alive indefinitely.
 
-Non-root screen capture uses one user-authorized MediaProjection session owned
-by the foreground service. There is no Mira inactivity timer for this grant.
+On Android 11+, non-root screen capture prefers the enabled Mira accessibility
+service's on-demand screenshot API. Enable **non-root UI control** once; no
+screen-sharing grant or continuous recording session is needed for this path.
+After upgrading, Android may require toggling the accessibility service off/on
+to refresh its screenshot capability. The app reports **ready (on demand)** when
+the connected service actually advertises that capability. Screenshot requests
+are serialized, spaced to respect Android's rate limit, and have a bounded wait.
+Hardware buffers are closed before PNG encoding; late callbacks also release
+their buffers. Screenshot dimensions come from the captured bitmap, including
+after rotation or folding. Secure content remains subject to Android restrictions.
+
+On older Android versions, or when accessibility capture is unavailable, the
+**Grant screen sharing (fallback capture)** button enables a user-authorized
+MediaProjection session owned by the foreground service. There is no Mira inactivity timer for this grant.
 Android can end it when the screen locks, the user stops sharing, another
 projection takes over, or the application process exits. Reconnection cannot
 recreate a revoked session without the platform confirmation flow.
@@ -111,12 +126,15 @@ Run the deterministic ownership/lifecycle regression with a JDK:
 
 ```sh
 python3 tests/android_capture_regression.py
+python3 tests/android_accessibility_capture_regression.py
 ```
 
-This uses a bounded ImageReader test double with the real controller, not a real
-MediaProjection session. Device acceptance must still cover repeated captures
+These run the real capture classes against Android API test doubles, not real
+device sessions. Device acceptance must still cover repeated captures
 while another app animates, concurrent requests, user stop/regrant, and screen
-lock, checking both Node continuity and the Android crash log.
+lock, checking both Node continuity and the Android crash log. For accessibility
+capture, additionally verify screenshots without a projection grant, after
+rotation/folding, after unlocking, and after disabling/re-enabling accessibility.
 
 ## Embedded OpenSSH APK
 

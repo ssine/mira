@@ -10,6 +10,10 @@ on:
         description: "Publish a release (false builds signed acceptance artifacts only)"
         type: boolean
         default: false
+      android_only:
+        description: "Build only a signed Android test APK; never publish or create a release"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -21,7 +25,63 @@ concurrency:
 
 jobs:
   embedded-openssh:
+    if: ${{ !inputs.android_only }}
     uses: ./.github/workflows/openssh.yml
+  android-acceptance:
+    if: github.event_name == 'workflow_dispatch' && inputs.android_only
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+      - name: Check Android capture regressions
+        run: |
+          python3 tests/android_capture_regression.py
+          python3 tests/android_accessibility_capture_regression.py
+      - name: Build signed Android acceptance APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.MIRA_ANDROID_KEYSTORE_BASE64 }}
+          MIRA_ANDROID_STORE_PASSWORD: ${{ secrets.MIRA_ANDROID_STORE_PASSWORD }}
+          MIRA_ANDROID_KEY_ALIAS: ${{ secrets.MIRA_ANDROID_KEY_ALIAS }}
+          MIRA_ANDROID_KEY_PASSWORD: ${{ secrets.MIRA_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          export MIRA_ANDROID_KEYSTORE="$RUNNER_TEMP/mira-acceptance.jks"
+          trap 'rm -f "$MIRA_ANDROID_KEYSTORE"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$MIRA_ANDROID_KEYSTORE"
+          chmod 600 "$MIRA_ANDROID_KEYSTORE"
+          ndk_version=$(<node/android/NDK_VERSION)
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${ndk_version}"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/$ndk_version"
+          gradle -p node/android --no-daemon assembleRelease
+          mkdir -p dist/android-acceptance
+          cp node/android/build/outputs/apk/release/mira-node-release.apk dist/android-acceptance/mira-screen-capture.apk
+          git rev-parse HEAD > dist/android-acceptance/SOURCE_COMMIT
+          (cd dist/android-acceptance && sha256sum mira-screen-capture.apk > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-android-acceptance
+          path: dist/android-acceptance/*
+          retention-days: 7
   release:
     needs: embedded-openssh
     runs-on: ubuntu-latest
