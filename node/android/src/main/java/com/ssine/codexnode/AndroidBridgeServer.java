@@ -132,7 +132,7 @@ final class AndroidBridgeServer {
             case "permissions":
                 return new JSONObject().put("accessibility",
                                 MiraAccessibilityService.isConnected() ? "ready" : "user_grant_required")
-                        .put("screenCapture", ScreenCaptureController.isReady()
+                        .put("screenCapture", (AccessibilityScreenCapture.isReady() || ScreenCaptureController.isReady())
                                 ? "ready" : "user_grant_required")
                         .put("sharedFiles", Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
                                 ? "all_files" : "app_sandbox")
@@ -143,18 +143,29 @@ final class AndroidBridgeServer {
                         .put("sizeOutput", "Android API: " + display.widthPixels + "x" + display.heightPixels)
                         .put("densityOutput", "Android API: " + display.densityDpi);
             case "screenshot": {
-                if (!ScreenCaptureController.isReady()) {
+                final byte[] png;
+                final int width;
+                final int height;
+                if (AccessibilityScreenCapture.isReady()) {
+                    AccessibilityScreenCapture.Screenshot screenshot = AccessibilityScreenCapture.screenshot();
+                    png = screenshot.png;
+                    width = screenshot.width;
+                    height = screenshot.height;
+                } else if (ScreenCaptureController.isReady()) {
+                    png = capture.screenshot();
+                    width = capture.width();
+                    height = capture.height();
+                } else {
                     throw new PermissionException("screen_capture_permission_required");
                 }
-                byte[] png = capture.screenshot();
                 if (png.length > 10 * 1024 * 1024) {
                     throw new Exception("screenshot exceeds 10 MiB");
                 }
                 return new JSONObject().put("action", "screenshot")
                         .put("mimeType", "image/png").put("encoding", "base64")
                         .put("content", Base64.encodeToString(png, Base64.NO_WRAP))
-                        .put("bytes", png.length).put("width", capture.width())
-                        .put("height", capture.height()).put("capturedAt", System.currentTimeMillis());
+                        .put("bytes", png.length).put("width", width)
+                        .put("height", height).put("capturedAt", System.currentTimeMillis());
             }
             case "hierarchy": {
                 MiraAccessibilityService service = requireAccessibility();

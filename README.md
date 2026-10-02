@@ -5,6 +5,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.74 在 Android 11 及以上改用无障碍服务按需截图：开启 Mira 的无障碍控制后，日常截图无需反复授权屏幕共享；旧系统和未开启无障碍截图时仍可使用屏幕共享。同时修复连续截图耗尽图片缓冲区、导致整个 Android Node 崩溃掉线的问题。此功能需更新 Android APK。
+
 1.0.73 让 Claude 对话像 Codex 一样展示上下文压缩：压缩卡片出现在对应位置，可展开查看压缩摘要；Claude 与 Codex 的压缩卡片都会显示压缩前后的 token 数（例如 222,357 → 18,609 tokens）。只需升级 Server。
 
 1.0.71 修复 Claude 在恢复会话、首次回复前停止时无法收尾的问题，等待原生执行确认空闲和历史写入排空后释放会话；运行中的 Claude 对话也会保存网页缓存，竖屏重新打开可先显示最近回复，再刷新历史。需升级执行 Node 以修复停止逻辑，升级 Server 以更新网页缓存逻辑。
@@ -180,13 +182,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.73
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.74
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.73'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.74'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询

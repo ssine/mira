@@ -121,7 +121,7 @@ public final class MainActivity extends Activity {
         button(content, "Request / verify root", view -> MiraNodeService.requestRootProbe(this));
         button(content, "Enable non-root UI control", view ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
-        button(content, "Grant non-root screen capture", view -> requestScreenCapture());
+        button(content, "Grant screen sharing (fallback capture)", view -> requestScreenCapture());
         button(content, "Grant shared-file access", view -> requestAllFilesAccess());
         button(content, "Check for updates", view -> checkForUpdates((Button) view));
         TextView backgroundHelp = new TextView(this);
@@ -257,7 +257,8 @@ public final class MainActivity extends Activity {
         }
         statusView.setText("Status: " + status + "\nEffective mode: " + mode
                 + "\nAccessibility: " + (MiraAccessibilityService.isConnected() ? "ready" : "permission required")
-                + "\nScreen capture: " + (ScreenCaptureController.isReady() ? "ready" : "permission required")
+                + "\nScreen capture: " + (AccessibilityScreenCapture.isReady() ? "ready (on demand)"
+                        : ScreenCaptureController.isReady() ? "ready (screen sharing)" : "enable UI control or screen sharing")
                 + "\nShared files: " + (Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager() ? "ready" : "app sandbox only"));
     }
 
