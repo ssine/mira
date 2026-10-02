@@ -5,6 +5,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.72 让 Claude 对话中的图片像 Codex 一样直接显示：用户发送的图片和工具返回的截图会以独立图片卡片出现在对应消息或工具之后，支持懒加载和点击放大。只需升级 Server。
+
 1.0.71 修复 Claude 在恢复会话、首次回复前停止时无法收尾的问题，等待原生执行确认空闲和历史写入排空后释放会话；运行中的 Claude 对话也会保存网页缓存，竖屏重新打开可先显示最近回复，再刷新历史。需升级执行 Node 以修复停止逻辑，升级 Server 以更新网页缓存逻辑。
 
 1.0.70 修正 Claude 追加消息失败后的状态判断：无法确认旧轮次是否停止时，明确提示消息未发送并保留输入，不再误报“本轮已结束”后等待自动重发；异常收尾后仍须确认已保存的历史才能继续。旧轮次缺失退出凭据时仍需排查，升级不能补回凭据。
@@ -178,13 +180,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.71
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.72
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.71'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.72'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
