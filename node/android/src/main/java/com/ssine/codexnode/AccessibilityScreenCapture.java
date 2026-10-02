@@ -63,7 +63,6 @@ final class AccessibilityScreenCapture {
                 }
                 long wait = 350 - (SystemClock.elapsedRealtime() - lastRequestAt);
                 if (lastRequestAt >= 0 && wait > 0) Thread.sleep(wait);
-                lastRequestAt = SystemClock.elapsedRealtime();
                 try {
                     return request(service);
                 } catch (CaptureFailure failure) {
@@ -107,6 +106,9 @@ final class AccessibilityScreenCapture {
                     result.completeExceptionally(new CaptureFailure(code));
                 }
             });
+            // Count from dispatch completion: first-use class loading or a slow
+            // platform call must not shorten the interval between actual requests.
+            lastRequestAt = SystemClock.elapsedRealtime();
             try {
                 bitmap = result.get(5, TimeUnit.SECONDS);
             } catch (ExecutionException error) {

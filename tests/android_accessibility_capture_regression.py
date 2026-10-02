@@ -55,6 +55,7 @@ public class AccessibilityService {
     public int failures, failureCode=3; public boolean hold;
     public final java.util.List<Long> times=new java.util.ArrayList<>();
     public volatile Runnable pending;
+    public CompletableFuture<Void> delivered=new CompletableFuture<>();
     public AccessibilityServiceInfo getServiceInfo(){return info;}
     public interface TakeScreenshotCallback {void onSuccess(ScreenshotResult result);void onFailure(int code);}
     public static class ScreenshotResult {
@@ -63,9 +64,14 @@ public class AccessibilityService {
         public android.graphics.ColorSpace getColorSpace(){return new android.graphics.ColorSpace();}
     }
     public void takeScreenshot(int display, Executor executor, TakeScreenshotCallback callback){
+        // Model cold-start dispatch overhead before the platform sees the first request.
+        if(times.isEmpty())try{Thread.sleep(90);}catch(InterruptedException e){throw new RuntimeException(e);}
         times.add(android.os.SystemClock.elapsedRealtime());
         if(failures-->0){executor.execute(()->callback.onFailure(failureCode));return;}
-        Runnable deliver=()->executor.execute(()->callback.onSuccess(new ScreenshotResult()));
+        Runnable deliver=()->executor.execute(()->{
+            try {callback.onSuccess(new ScreenshotResult());delivered.complete(null);}
+            catch(Throwable error){delivered.completeExceptionally(error);}
+        });
         if(hold)pending=deliver;else deliver.run();
     }
 }
@@ -112,8 +118,8 @@ public class CaptureHarness {
         Bitmap.encode=false;failure("encode");Bitmap.encode=true;
         Bitmap.failCopy=true;failure("copy failed");Bitmap.failCopy=false;
         System.out.println("PASS copy and encoding failure cleanup");
-        service.hold=true;failure("TimeoutException");
-        service.pending.run();Thread.sleep(100);clean();service.hold=false;
+        service.hold=true;service.delivered=new CompletableFuture<>();failure("TimeoutException");
+        service.pending.run();service.delivered.get(2,TimeUnit.SECONDS);clean();service.hold=false;
         System.out.println("PASS timeout and late callback hardware cleanup");
         ExecutorService clients=Executors.newFixedThreadPool(2);
         try {
