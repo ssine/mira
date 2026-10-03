@@ -7150,6 +7150,12 @@ $("#conversationInput").addEventListener("input", (event) => {
   void prepareEditedThread(threadId, agent.selectionEpoch);
 });
 $("#conversationAttach").addEventListener("click", () => $("#conversationFileInput").click());
+$("#conversationOptionsToggle").addEventListener("click", (event) => {
+  const toggle = event.currentTarget, open = toggle.getAttribute("aria-expanded") !== "true";
+  toggle.setAttribute("aria-expanded", String(open));
+  toggle.title = open ? "收起账号、模型与附件" : "展开账号、模型与附件";
+  toggle.setAttribute("aria-label", toggle.title);
+});
 $("#conversationUploadCancel").addEventListener("click", () => {
   agent.uploadController?.abort();
   $("#conversationHint").textContent = "正在取消并清理当前上传…";
