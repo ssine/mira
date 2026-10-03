@@ -32,6 +32,88 @@ func TestCostCacheEvictionAndStaleWriters(t *testing.T) {
 	}
 }
 
+func TestPostgresPricingUpdateRebuildsUnknownModelCosts(t *testing.T) {
+	endpoint := os.Getenv("MIRA_VIEWS_TEST_DATABASE_URL")
+	if endpoint == "" {
+		t.Skip("set MIRA_VIEWS_TEST_DATABASE_URL")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	if err := foundation.InitializeDatabase(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := "pricing-update-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, table := range []string{"codex_thread_events", "codex_thread_projections", "codex_store_events", "codex_store_heads"} {
+			exec("DELETE FROM "+table+" WHERE store_id=$1", store)
+		}
+	})
+	const operation = "329e5c70-1436-4100-a71b-b4619f280b78"
+	exec(`INSERT INTO codex_store_heads(store_id,version,history_floor) VALUES($1,1,0)`, store)
+	exec(`INSERT INTO codex_store_events(store_id,operation_id,event_seq,previous_event_seq,result_version,appended_item_count)
+ VALUES($1,$2,1,0,1,2)`, store, operation)
+	exec(`INSERT INTO codex_thread_projections(store_id,thread_id,active_generation,item_count,state,through_event_seq)
+ VALUES($1,'thread',1,2,'{}',1)`, store)
+	request := usageRecord(usage(100000, 80000, 1000, 5000), usage(100000, 80000, 1000, 5000), "turn")
+	request["timestamp"] = "2026-10-04T00:00:00Z"
+	for index, item := range []map[string]any{contextRecord("gpt-6.1-sol", "turn"), request} {
+		raw, err := json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		exec(`INSERT INTO codex_thread_events(store_id,thread_id,generation,item_seq,event_format_version,payload,payload_sha256,operation_id)
+ VALUES($1,'thread',1,$2,1,$3::json,'fixture',$4)`, store, index+1, string(raw), operation)
+	}
+	// The old Server already consumed this unchanged canonical history, but
+	// neither its checkpoint nor its account ledger could price the model.
+	legacy := NewCostProjection(false, []string{})
+	legacy.model, legacy.turnID, legacy.last = "gpt-6.1-sol", "turn", [4]int64{100000, 80000, 5000, 1000}
+	legacy.costTotals = costTotals{observed: true, unpriced: 1, reasons: []string{"unknown_model"}}
+	saved, err := json.Marshal(checkpointCost(legacy, ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec(`INSERT INTO mira_account_cost_checkpoints(store_id,thread_id,generation,revision,source_key,item_seq,checkpoint)
+ VALUES($1,'thread',1,'pricing-before-gpt-6.1-sol','["", null]',2,$2::jsonb)`, store, string(saved))
+	exec(`INSERT INTO mira_account_cost_entries(store_id,thread_id,item_seq,happened_at,turn_id,provider,observed,priced,unpriced,long_requests,input,cached,write,output,models,reasons)
+ VALUES($1,'thread',2,'2026-10-04T00:00:00Z','turn','',true,0,1,0,0,0,0,0,'{}','{unknown_model}')`, store)
+
+	service := New(pool)
+	if work, err := service.projectAccountCosts(ctx); err != nil || work != 1 {
+		t.Fatalf("pricing revision did not queue unchanged history: work=%d err=%v", work, err)
+	}
+	var revision string
+	var priced, unpriced int64
+	var amount float64
+	if err := pool.QueryRow(ctx, `SELECT c.revision,e.priced,e.unpriced,((e.input+e.cached+e.write+e.output)/1000000000)::float8
+ FROM mira_account_cost_checkpoints c JOIN mira_account_cost_entries e USING(store_id,thread_id)
+ WHERE c.store_id=$1 AND e.item_seq=2`, store).Scan(&revision, &priced, &unpriced, &amount); err != nil {
+		t.Fatal(err)
+	}
+	if revision != accountCostRevision || priced != 1 || unpriced != 0 || !closeFloat(amount, .0605) {
+		t.Fatalf("account ledger retained old pricing: revision=%s priced=%d unpriced=%d amount=%v", revision, priced, unpriced, amount)
+	}
+	thread := Thread{ThreadID: "thread", Generation: 1, ItemCount: 2}
+	estimate, err := service.GetThreadCost(ctx, store, thread)
+	if err != nil || estimate["status"] != "complete" || estimate["amount"] != .0605 {
+		t.Fatalf("rebuilt conversation cost: %#v %v", estimate, err)
+	}
+	turns, err := service.GetTurnCosts(ctx, store, thread, []string{"turn"})
+	if err != nil || turns["turn"]["status"] != "complete" || turns["turn"]["amount"] != .0605 {
+		t.Fatalf("historical turn cost: %#v %v", turns, err)
+	}
+}
+
 func TestPostgresCostCacheRetainsLargeSubagentTree(t *testing.T) {
 	endpoint := os.Getenv("MIRA_VIEWS_TEST_DATABASE_URL")
 	if endpoint == "" {

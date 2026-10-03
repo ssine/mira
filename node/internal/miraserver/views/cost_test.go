@@ -2,6 +2,7 @@ package views
 
 import (
 	"math/big"
+	"strconv"
 	"testing"
 )
 
@@ -74,6 +75,50 @@ func TestCostProjectionPricesModelsTurnsAndRepeatedSnapshots(t *testing.T) {
 	turns := TurnCostEstimates(state)
 	if !closeFloat(turns["turn-a"]["amount"].(float64), .33) || !closeFloat(turns["turn-b"]["amount"].(float64), .066) {
 		t.Fatalf("unexpected turns: %#v", turns)
+	}
+}
+
+func TestCostProjectionPricesCurrentSolAndLunaModels(t *testing.T) {
+	for _, fixture := range []struct {
+		model   string
+		amounts [4]float64
+	}{
+		{"gpt-6.1-sol", [4]float64{.058, .0605, .1765, .348004}},
+		{"gpt-6-sol", [4]float64{.066, .0685, .1965, .388004}},
+		{"gpt-6-luna", [4]float64{.0033, .003425, .009825, .0194002}},
+	} {
+		t.Run(fixture.model, func(t *testing.T) {
+			state := NewCostProjection(false, nil)
+			var cumulative [4]int64
+			var expected float64
+			for index, request := range [][4]int64{
+				{100000, 80000, 0, 1000},
+				{100000, 80000, 5000, 1000},
+				{272000, 200000, 5000, 1000},
+				{272001, 200000, 5000, 1000},
+			} {
+				turn := "turn-" + strconv.Itoa(index)
+				ApplyCostRecord(state, contextRecord(fixture.model, turn), "")
+				for component, count := range request {
+					cumulative[component] += count
+				}
+				record := usageRecord(usage(cumulative[0], cumulative[1], cumulative[3], cumulative[2]),
+					usage(request[0], request[1], request[3], request[2]), turn)
+				ApplyCostRecord(state, record, "")
+				ApplyCostRecord(state, record, "") // Repeated snapshots must not double the price.
+				estimate := TurnCostEstimates(state)[turn]
+				amount, ok := estimate["amount"].(float64)
+				if !ok || estimate["status"] != "complete" || !closeFloat(amount, fixture.amounts[index]) || estimate["pricedRequests"] != int64(1) {
+					t.Fatalf("turn %s: %#v", turn, estimate)
+				}
+				expected += fixture.amounts[index]
+			}
+			estimate := CostEstimate(state, Thread{})
+			amount, ok := estimate["amount"].(float64)
+			if !ok || estimate["status"] != "complete" || !closeFloat(amount, expected) || estimate["pricedRequests"] != int64(4) || estimate["longRequests"] != int64(1) {
+				t.Fatalf("thread: %#v", estimate)
+			}
+		})
 	}
 }
 

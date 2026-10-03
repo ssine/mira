@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	PricingDate   = "2026-09-06"
+	PricingDate   = "2026-10-04"
 	PricingSource = "https://developers.openai.com/api/docs/pricing"
 	costPredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(turn_context|thread_settings_applied|token_count)"'`
 )
@@ -19,7 +19,10 @@ type modelPrice struct {
 }
 
 var modelPrices = map[string]modelPrice{
+	"gpt-6.1-sol":   {input: 2_000, cached: 100, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
 	"gpt-6-astra":   {input: 10_000, cached: 1_000, write: 12_500, output: 50_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-sol":     {input: 2_000, cached: 200, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-luna":    {input: 100, cached: 10, write: 125, output: 500, hasWrite: true, longContext: 272_000},
 	"gpt-5.6-sol":   {input: 4_000, cached: 400, write: 5_000, output: 20_000, hasWrite: true, longContext: 272_000},
 	"gpt-5.6-terra": {input: 2_000, cached: 200, write: 2_500, output: 12_000, hasWrite: true, longContext: 272_000},
 	"gpt-5.6-luna":  {input: 200, cached: 20, write: 250, output: 1_200, hasWrite: true, longContext: 272_000},

@@ -96,6 +96,11 @@ in output. Long-context multipliers use the individual request's input length, n
 input. Integer nanodollars avoid per-request rounding loss. Missing history, unknown model prices and
 metadata ahead of history produce partial/unavailable estimates, not invented zero costs.
 
+The 2026-10-04 price table includes `gpt-6.1-sol`, `gpt-6-sol` and `gpt-6-luna`. Sol 6.1
+cache reads cost 5% of its input rate; Sol 6 and Luna cache reads cost 10%. Prices are part of the
+account projection revision, so a price-table update automatically rebuilds older checkpoints and
+account entries from canonical usage, including requests previously marked `unknown_model`.
+
 This is equivalent API model-token spend at the stated current Standard price, not a historical invoice
 or ChatGPT plan deduction. Tool fees, service tiers, regional pricing and other billing adjustments are
 excluded. Token-count events do not identify the server-executed model. In runtime 0.153.1-mira.7,
