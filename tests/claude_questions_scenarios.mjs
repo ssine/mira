@@ -22,7 +22,7 @@ export async function runQuestionPhase(phase) {
     assert(form.querySelectorAll("fieldset").length === 3, "Missing questions");
     assert(form.querySelectorAll("input:checked").length === 0, "An answer was selected without the user");
     assert(form.textContent.includes("检查页面交互"), "Option description is missing");
-    await until(() => $("#conversationActivityText").textContent === "Claude 等待你的回答", "Activity did not show the waiting state");
+    await until(() => $("#conversationActivityText").textContent === "Claude 等待你的回答" && !$("#conversationActivity").classList.contains("hidden"), "Activity did not show the waiting state");
   }
   if (phase === 1) {
     form.requestSubmit();
