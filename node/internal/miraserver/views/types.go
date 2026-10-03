@@ -91,6 +91,7 @@ type TranscriptOptions struct {
 
 type ProjectionOptions struct {
 	ItemOffset                    int64
+	InitialCwd                    string
 	InitialTurnID                 string
 	InitialTurnStartedAt          string
 	InitialTurnStartedApproximate bool

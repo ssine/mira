@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
@@ -12,6 +13,9 @@ import (
 
 func (server *Server) route(ctx context.Context, response http.ResponseWriter, request *http.Request) error {
 	path := request.URL.Path
+	if strings.HasPrefix(path, "/v1/files/") || path == "/v1/file-previews" || strings.HasPrefix(path, "/v1/file-previews/") {
+		return server.fileRoutes(response, request)
+	}
 	if request.Method == http.MethodGet && path == "/healthz" {
 		if _, err := server.pool.Exec(ctx, "SELECT 1"); err != nil {
 			return err

@@ -32,6 +32,7 @@ type Config struct {
 }
 
 type Server struct {
+	previews              previewStore
 	stopClaudeExecution   func()
 	claudeExecutionMu     sync.Mutex
 	claudeExecution       map[string]claudeExecutionObservation
@@ -180,6 +181,10 @@ func (server *Server) Shutdown(ctx context.Context) error {
 		if server.stopAccountCosts != nil {
 			server.stopAccountCosts()
 		}
+		server.previews.Lock()
+		server.previews.sessions = nil
+		server.previews.Unlock()
+		server.channel.ShutdownFileStreams()
 		result = server.http.Shutdown(ctx)
 		if result != nil {
 			// Shutdown waits for active HTTP handlers. Once its deadline is
@@ -200,6 +205,10 @@ func (server *Server) Shutdown(ctx context.Context) error {
 }
 
 func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if id, ok := server.previewHost(request.Host); ok {
+		server.servePreviewHost(response, request, id)
+		return
+	}
 	if server.channel.Handles(request) {
 		server.channel.ServeHTTP(response, request)
 		return
@@ -207,6 +216,9 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	tracked := &trackingResponseWriter{ResponseWriter: response}
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			if recovered == http.ErrAbortHandler {
+				panic(recovered)
+			}
 			server.config.Logger.Printf("request panic: %v", recovered)
 			if !tracked.written {
 				_ = foundation.WriteErrorJSON(tracked, 500, "internal server error", "internal_error")
@@ -240,6 +252,8 @@ func (response *trackingResponseWriter) Write(payload []byte) (int, error) {
 	}
 	return response.ResponseWriter.Write(payload)
 }
+
+func (response *trackingResponseWriter) Unwrap() http.ResponseWriter { return response.ResponseWriter }
 
 func (response *trackingResponseWriter) Flush() {
 	if !response.written {

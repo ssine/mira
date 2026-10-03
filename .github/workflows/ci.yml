@@ -69,6 +69,7 @@ jobs:
             tests/account_history_cache_test.mjs \
             tests/quota_reference.mjs \
             tests/conversation_progress_test.mjs \
+            tests/file_preview_paths_test.mjs \
             tests/pwa_notifications_test.mjs \
             tests/thread_list_test.mjs \
             tests/thread_pages_test.mjs \
@@ -111,6 +112,7 @@ jobs:
           DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
           MIRA_SECURE_COOKIES: "false"
           LISTEN_HOST: 127.0.0.1
+          MIRA_NODE_PREVIEW_DOMAIN: preview.localhost
         run: |
           docker compose -f compose.yaml up -d --wait postgres
           go -C node build -o "$RUNNER_TEMP/mira" ./cmd/mira
@@ -124,6 +126,7 @@ jobs:
             sleep 0.5
           done
           node tests/web_console_e2e.mjs
+          MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/file_preview_e2e.mjs
           npm ci --ignore-scripts
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium

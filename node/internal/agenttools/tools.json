@@ -94,6 +94,32 @@
           "minimum": 0,
           "maximum": 4294967295,
           "description": "Optional Windows session ID when more than one interactive user is active."
+        },
+        "archive": {
+          "type": "boolean",
+          "description": "Read-only ZIP provider; path is the ZIP file."
+        },
+        "archiveEntry": {
+          "type": "string",
+          "description": "Safe relative ZIP entry path; empty is the archive root."
+        },
+        "entryId": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Central directory ordinal disambiguating duplicate names."
+        },
+        "pageSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "cursor": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "archiveVersion": {
+          "type": "string",
+          "description": "ZIP stat/list version; rejects changed archive ordinals."
         }
       },
       "required": [

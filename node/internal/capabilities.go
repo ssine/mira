@@ -11,21 +11,25 @@ import (
 )
 
 type capabilityRuntime struct {
-	configuration config
-	roots         []string
-	realRoots     []string
-	bridge        *androidBridge
-	processMu     sync.Mutex
-	processes     map[string]*managedProcess
-	ptyMu         sync.Mutex
-	ptys          map[string]*managedPTY
-	resourceMu    sync.Mutex
-	lastCPU       cpuSample
-	hasLastCPU    bool
-	identityMu    sync.Mutex
-	identityAt    time.Time
-	identityBusy  bool
-	identityState map[string]any
+	configuration   config
+	roots           []string
+	realRoots       []string
+	bridge          *androidBridge
+	processMu       sync.Mutex
+	processes       map[string]*managedProcess
+	ptyMu           sync.Mutex
+	ptys            map[string]*managedPTY
+	fileCacheMu     sync.Mutex
+	fileCacheBytes  int64
+	fileCacheClosed bool
+	fileCache       map[string]*zipPreviewCacheEntry
+	resourceMu      sync.Mutex
+	lastCPU         cpuSample
+	hasLastCPU      bool
+	identityMu      sync.Mutex
+	identityAt      time.Time
+	identityBusy    bool
+	identityState   map[string]any
 }
 
 type boundedCommandBuffer struct {
@@ -102,6 +106,7 @@ func (runtime *capabilityRuntime) execute(
 		if err := json.Unmarshal(params, &value); err != nil {
 			return nil, fmt.Errorf("decode file params: %w", err)
 		}
+		value.operationContext = ctx
 		return runtime.fileWithExecutionContext(value)
 	case "process":
 		var value processParams
@@ -149,6 +154,7 @@ func commandOutputLimited(ctx context.Context, maximum int, name string, args ..
 }
 
 func (runtime *capabilityRuntime) close() {
+	runtime.closeZIPCache()
 	runtime.processMu.Lock()
 	processes := make([]*managedProcess, 0, len(runtime.processes))
 	for _, process := range runtime.processes {

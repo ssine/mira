@@ -233,6 +233,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 	responseCalls := map[string]bool{}
 	materializedTools := map[string]map[string]any{}
 	turnTimings := map[string]*turnTiming{}
+	fileCwds := map[string]string{options.InitialTurnID: options.InitialCwd}
 	scannedTurnID := options.InitialTurnID
 	if scannedTurnID != "" && options.InitialTurnStartedAt != "" {
 		turnTimings[scannedTurnID] = &turnTiming{startedAt: options.InitialTurnStartedAt, startedApproximate: options.InitialTurnStartedApproximate}
@@ -250,6 +251,9 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			turnID = scannedTurnID
 		}
 		if turnID != "" {
+			if stringValue(record["type"]) == "turn_context" {
+				fileCwds[turnID] = stringValue(payload["cwd"])
+			}
 			timing := turnTimings[turnID]
 			if timing == nil {
 				timing = &turnTiming{}
@@ -600,6 +604,11 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 		}
 		return result[i]["kind"] != "image" && result[j]["kind"] == "image"
 	})
+	for _, item := range result {
+		if cwd := fileCwds[stringValue(item["turnId"])]; cwd != "" {
+			item["sourceContext"] = map[string]any{"cwd": cwd}
+		}
+	}
 	return result
 }
 

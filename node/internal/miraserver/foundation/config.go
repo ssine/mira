@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -19,6 +20,7 @@ const (
 // Config contains the process-independent Mira Server foundation settings.
 // Environment names intentionally stay compatible with the released server.
 type Config struct {
+	PreviewDomain      string
 	ListenHost         string
 	ListenPort         int
 	DatabaseURL        string
@@ -58,8 +60,18 @@ func ConfigFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil || poolSize < 4 || poolSize > 128 {
 		return Config{}, fmt.Errorf("MIRA_NODE_DATABASE_POOL_SIZE must be an integer between 4 and 128")
 	}
+	previewDomain := strings.ToLower(strings.TrimSuffix(envOr(lookup, "MIRA_NODE_PREVIEW_DOMAIN", ""), "."))
+	validDomain := regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+	validPreview := len(previewDomain) <= 253 && strings.Contains(previewDomain, ".")
+	for _, label := range strings.Split(previewDomain, ".") {
+		validPreview = validPreview && validDomain.MatchString(label)
+	}
+	if previewDomain != "" && !validPreview {
+		return Config{}, fmt.Errorf("MIRA_NODE_PREVIEW_DOMAIN must be a DNS suffix without wildcard or scheme")
+	}
 	return Config{
-		ListenHost: host, ListenPort: port, DatabaseURL: databaseURL,
+		PreviewDomain: previewDomain,
+		ListenHost:    host, ListenPort: port, DatabaseURL: databaseURL,
 		CodexStoreEndpoint: endpoint,
 		SecureCookies:      !securePresent || secureCookies != "false",
 		TrustProxyHeaders:  trustProxy == "true",

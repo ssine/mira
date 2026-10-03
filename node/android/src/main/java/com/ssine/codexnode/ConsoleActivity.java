@@ -170,7 +170,7 @@ public final class ConsoleActivity extends Activity {
     @SuppressLint("SetJavaScriptEnabled") private void configure() {
         WebSettings settings = web.getSettings(); settings.setJavaScriptEnabled(true); settings.setDomStorageEnabled(true);
         settings.setAllowFileAccess(false); settings.setAllowContentAccess(true); settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
-        settings.setJavaScriptCanOpenWindowsAutomatically(false); settings.setSupportMultipleWindows(false);
+        settings.setJavaScriptCanOpenWindowsAutomatically(false); settings.setSupportMultipleWindows(true);
         CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(web, false);
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         web.setWebViewClient(new WebViewClient() {
@@ -199,6 +199,10 @@ public final class ConsoleActivity extends Activity {
             // TLS failures retain WebView's default cancellation behavior.
         });
         web.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onCreateWindow(WebView view, boolean dialog, boolean gesture, android.os.Message result) {
+                if (!gesture || !trusted(view.getUrl())) return false;
+                return FilePreviewActivity.createWindow(ConsoleActivity.this, result, origin);
+            }
             @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (!trusted(view.getUrl())) return false;
                 if (fileCallback != null) fileCallback.onReceiveValue(null);
@@ -294,8 +298,13 @@ public final class ConsoleActivity extends Activity {
     @Override protected void onPause() { if (web != null) { CookieManager.getInstance().flush(); web.onPause(); } super.onPause(); }
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); web.saveState(state); }
     @Override public void onBackPressed() {
-        if (web.canGoBack()) web.goBack(); else super.onBackPressed();
+        if (!trusted(web.getUrl())) { navigateBack(); return; }
+        // A narrow-screen Markdown/media reader overlays the warm console.
+        // Close that reader before traversing the console's browser history.
+        web.evaluateJavascript("(()=>{const d=document.getElementById('nodeFileDialog');const b=document.getElementById('nodeFileClose');if(d&&d.open&&b){b.click();return true}return false})()",
+                result -> { if (!"true".equals(result)) navigateBack(); });
     }
+    private void navigateBack() { if (web.canGoBack()) web.goBack(); else super.onBackPressed(); }
     @Override public void onRequestPermissionsResult(int code, String[] permissions, int[] grants) {
         super.onRequestPermissionsResult(code, permissions, grants);
         if (code == NOTIFICATIONS && permissionReply != null) {

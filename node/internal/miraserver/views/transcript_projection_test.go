@@ -146,3 +146,20 @@ func contains(value, part string) bool {
 	}
 	return false
 }
+
+func TestFileContextUsesGeneratingTurnCwd(t *testing.T) {
+	records := []map[string]any{
+		record("turn_context", map[string]any{"turn_id": "a", "cwd": "/original"}),
+		record("event_msg", map[string]any{"type": "agent_message", "message": "[file](a.md)"}),
+		record("turn_context", map[string]any{"turn_id": "b", "cwd": "/changed"}),
+		record("event_msg", map[string]any{"type": "agent_message", "message": "[file](a.md)"}),
+	}
+	trace := ProjectCodexTranscript(records, ProjectionOptions{})
+	if len(trace) != 2 || object(trace[0]["sourceContext"])["cwd"] != "/original" || object(trace[1]["sourceContext"])["cwd"] != "/changed" {
+		t.Fatal(trace)
+	}
+	tail := ProjectCodexTranscript(records[1:2], ProjectionOptions{InitialTurnID: "a", InitialCwd: "/original", Fragments: true})
+	if len(tail) != 1 || object(tail[0]["sourceContext"])["cwd"] != "/original" {
+		t.Fatal(tail)
+	}
+}

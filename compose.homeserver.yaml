@@ -10,6 +10,7 @@ services:
       LISTEN_HOST: 0.0.0.0
       LISTEN_PORT: "8787"
       MIRA_SECURE_COOKIES: "true"
+      MIRA_NODE_PREVIEW_DOMAIN: ${MIRA_NODE_PREVIEW_DOMAIN:-}
       MIRA_CODEX_STORE_ENDPOINT: ${MIRA_CODEX_STORE_ENDPOINT:?set the public HTTPS Mira URL in .env}
       # Safe only because the published port is loopback-only and Caddy is the
       # sole network-facing caller.

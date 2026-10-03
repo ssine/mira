@@ -73,3 +73,7 @@ response does not prove that its side effects did not occur.
 Server broker still emits Codex `inputText` and data-URL `inputImage` items.
 All these paths share the same definitions and capability dispatch; Codex's
 WebSocket, thread store, account routes and session lifecycle are unchanged.
+
+Read-only ZIP fields, directory pagination and the binary Web preview data plane
+are specified in [file-preview-v1](file-preview-v1.md). Binary payloads are not
+Agent tool results or JSON control-message bodies.

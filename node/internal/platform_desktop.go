@@ -117,6 +117,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 		"codexThreadHandoffV1":       true,
 		"executionContexts":          runtime.GOOS == "windows",
 		"codexSessions":              true,
+		"filePreviewV1":              true,
 		"fileChunkedWrite":           true,
 		"codexRuntimeDownload":       runtimeValue.configuration.CodexBinary == "" && runtime.GOARCH == "amd64" && (runtime.GOOS == "linux" || runtime.GOOS == "windows"),
 		"ssh":                        BundledOpenSSH == "true", "sshProtocolVersion": 1, "sshFeatures": []string{"exec", "shell", "pty", "sftp"},

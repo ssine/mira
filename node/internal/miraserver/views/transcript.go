@@ -117,6 +117,9 @@ func (service *Service) getTranscriptLegacy(ctx context.Context, storeID, thread
 	}
 	projectionStarted := time.Now()
 	projected := ProjectCodexTranscript(items, ProjectionOptions{})
+	if err := service.attachFileContexts(ctx, storeID, threadID, generation, projected); err != nil {
+		return Result{}, err
+	}
 	referenceTranscriptImages(projected, storeID, threadID, generation)
 	var cursor *int
 	if options.Cursor != nil {
@@ -473,6 +476,7 @@ func (service *Service) getTranscriptTail(ctx context.Context, storeID, threadID
 	if contextRow != nil {
 		context := contextRow.payload
 		projectionOptions.InitialTurnID = stringValue(object(context["payload"])["turn_id"])
+		projectionOptions.InitialCwd = stringValue(object(context["payload"])["cwd"])
 		projectionOptions.InitialTurnStartedAt = turnStartedAt(context)
 		projectionOptions.InitialTurnStartedApproximate = projectionOptions.InitialTurnStartedAt == ""
 		if projectionOptions.InitialTurnStartedAt == "" {
@@ -546,6 +550,9 @@ func (service *Service) getTranscriptTail(ctx context.Context, storeID, threadID
 	referenceTranscriptImages(projected, storeID, threadID, generation)
 	loaded := options.ToolDetails == nil || *options.ToolDetails
 	trace := transcriptToolDetails(projected[startIndex:], pageCursor, limit, loaded)
+	if err := service.attachFileContexts(ctx, storeID, threadID, generation, trace); err != nil {
+		return Result{}, err
+	}
 	before := start
 	if len(projected) > limit && len(trace) > 0 {
 		sequences := make([]int64, 0, len(trace))

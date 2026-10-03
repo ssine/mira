@@ -76,14 +76,16 @@ type activeThreadStart struct {
 }
 
 type Channel struct {
-	executionQueue executionQueue
-	db             Database
-	nodes          NodeRegistry
-	auth           Authenticator
-	audit          AuditFunc
-	logger         *slog.Logger
-	upgrader       websocket.Upgrader
-	detachGrace    time.Duration
+	fileStreamsClosed bool
+	fileStreams       map[string]*fileStream
+	executionQueue    executionQueue
+	db                Database
+	nodes             NodeRegistry
+	auth              Authenticator
+	audit             AuditFunc
+	logger            *slog.Logger
+	upgrader          websocket.Upgrader
+	detachGrace       time.Duration
 
 	mu           sync.Mutex
 	nodeSockets  map[string]*socket
@@ -178,10 +180,14 @@ func (channel *Channel) Handles(request *http.Request) bool {
 		return false
 	}
 	path := request.URL.Path
-	return nodeConnectPattern.MatchString(path) || appServerPattern.MatchString(path) || sshSessionPattern.MatchString(path)
+	return fileStreamPattern.MatchString(path) || nodeConnectPattern.MatchString(path) || appServerPattern.MatchString(path) || sshSessionPattern.MatchString(path)
 }
 
 func (channel *Channel) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if match := fileStreamPattern.FindStringSubmatch(request.URL.Path); match != nil {
+		channel.serveFileUpgrade(response, request, match[1])
+		return
+	}
 	if match := sshSessionPattern.FindStringSubmatch(request.URL.Path); match != nil {
 		channel.ssh.serveUpgrade(response, request, match[1], match[2])
 		return
@@ -529,6 +535,7 @@ func (channel *Channel) writeNodeStatus(nodeID string, status any) {
 func (channel *Channel) rejectNodeWork(nodeID string) {
 	channel.accounts.CloseNode(nodeID)
 	channel.ssh.DisconnectNode(nodeID)
+	channel.closeFileStreams(nodeID)
 	channel.mu.Lock()
 	for requestID, pending := range channel.pending {
 		if pending.nodeID == nodeID {
@@ -555,6 +562,7 @@ func (channel *Channel) DisconnectNode(nodeID, reason string) {
 	}
 	channel.accounts.CloseNode(nodeID)
 	channel.ssh.DisconnectNode(nodeID)
+	channel.closeFileStreams(nodeID)
 	channel.mu.Lock()
 	connection := channel.nodeSockets[nodeID]
 	var affected []*proxy
@@ -596,6 +604,7 @@ func (channel *Channel) Close() error {
 	channel.executionQueue.close()
 	channel.accounts.Close()
 	channel.ssh.Close()
+	channel.closeFileStreams("")
 	for _, connection := range nodes {
 		connection.close(websocket.CloseGoingAway, "server shutting down")
 	}

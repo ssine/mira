@@ -32,6 +32,10 @@ type asset struct {
 }
 
 var specs = map[string]assetSpec{
+	"/file-preview.js":           {"web/file-preview.js", "text/javascript; charset=utf-8"},
+	"/file-preview.css":          {"web/file-preview.css", "text/css; charset=utf-8"},
+	"/files.html":                {"web/files.html", "text/html; charset=utf-8"},
+	"/files.js":                  {"web/files.js", "text/javascript; charset=utf-8"},
 	"/conversation-pages.js":     {"web/conversation-pages.js", "text/javascript; charset=utf-8"},
 	"/claude.js":                 {"web/claude.js", "text/javascript; charset=utf-8"},
 	"/trace-diagrams.js":         {"web/trace-diagrams.js", "text/javascript; charset=utf-8"},

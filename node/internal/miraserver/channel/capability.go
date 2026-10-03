@@ -116,6 +116,9 @@ func (service *CapabilityService) Invoke(ctx context.Context, actor *foundation.
 	if !ok {
 		return nil, fmt.Errorf("Node resolver returned an invalid result")
 	}
+	if capability == "file" && (validated["archive"] == true || validated["pageSize"] != nil) && target.Capabilities["filePreviewV1"] != true {
+		return nil, channelError("target Node requires filePreviewV1; upgrade it first", 409, "preview_unavailable")
+	}
 	if !advertised(target, capability) {
 		return nil, channelError("target Node does not advertise "+capability, http.StatusConflict, "capability_unavailable")
 	}
@@ -246,6 +249,29 @@ func validateCapabilityParams(capability string, params map[string]any) (map[str
 		}
 		if err == nil {
 			err = validateInteger(params, "length", 1, 4*1024*1024)
+		}
+		if err == nil {
+			err = validateInteger(params, "cursor", 0, maxSafeInteger)
+		}
+		if err == nil {
+			err = validateInteger(params, "pageSize", 1, 1000)
+		}
+		if err == nil {
+			err = validateInteger(params, "entryId", 0, 100000)
+		}
+		if err == nil {
+			err = validateText(params, "archiveEntry", false, 32768)
+			if err == nil {
+				err = validateText(params, "archiveVersion", false, 128)
+			}
+		}
+		if err == nil && params["archive"] != nil {
+			if _, ok := params["archive"].(bool); !ok {
+				err = channelError("archive must be boolean", 400, "invalid_request")
+			}
+		}
+		if err == nil && params["archive"] == true && action != "stat" && action != "list" && action != "read" {
+			err = channelError("archives are read-only", 400, "invalid_request")
 		}
 		if err == nil {
 			err = validateExecutionContext(params, true)

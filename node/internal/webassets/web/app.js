@@ -1,3 +1,4 @@
+import { FileReader, FileWorkspace, workspaceURL } from "/file-preview.js";
 import { ClaudeRuntime, claudeHistoryAcknowledgementRequired } from "/claude.js";
 import { conversationPageReader } from "/conversation-pages.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
@@ -276,8 +277,6 @@ const agent = {
   uploadController: null,
   uploadState: null,
   statusPlaceholder: "",
-  fileReadController: null,
-  filePreview: null,
   sessionImportController: null,
   newThreadRequestId: null,
   newThreadRequestSignature: null,
@@ -3372,11 +3371,15 @@ function conversationNodeCandidates() {
   ].filter(Boolean))];
 }
 
-function resolveNodeFileReference(value) {
+function resolveNodeFileReference(value, context = {}) {
   let reference = String(value ?? "").trim();
   if (!reference || reference.startsWith("#") || /^(?:https?|mailto|tel|data|blob|javascript):/i.test(reference)) return null;
   try { reference = decodeURIComponent(reference); } catch { /* retain malformed percent escapes */ }
   if (reference.startsWith("<") && reference.endsWith(">")) reference = reference.slice(1, -1).trim();
+  const lineMatch = reference.match(/(?:#L|:)(\d+)(?::(\d+))?$/);
+  const line = lineMatch ? Number(lineMatch[1]) : null;
+  const column = lineMatch?.[2] ? Number(lineMatch[2]) : null;
+  if (lineMatch) reference = reference.slice(0, -lineMatch[0].length);
   if (/^[a-z][a-z0-9+.-]*:/i.test(reference) && !/^file:/i.test(reference) && !/^[A-Za-z]:[\\/]/.test(reference)) return null;
   if (/^file:/i.test(reference)) {
     try {
@@ -3388,11 +3391,7 @@ function resolveNodeFileReference(value) {
   // Markdown links can contain a URL-style Windows drive path without file:.
   // Node file operations need the native absolute form, e.g. C:/Reports/file.json.
   if (/^\/[A-Za-z]:[\\/]/.test(reference)) reference = reference.slice(1);
-  const lineMatch = reference.match(/:(\d+)(?::(\d+))?$/);
-  const line = lineMatch ? Number(lineMatch[1]) : null;
-  const column = lineMatch?.[2] ? Number(lineMatch[2]) : null;
-  if (lineMatch) reference = reference.slice(0, -lineMatch[0].length);
-  const cwd = $("#conversationCwd")?.value.trim() ?? "";
+  const cwd = context.cwd ?? $("#conversationCwd")?.value.trim() ?? "";
   const absolute = reference.startsWith("/") || /^[A-Za-z]:[\\/]/.test(reference) || reference.startsWith("\\\\");
   const pathLike = absolute || reference.startsWith("./") || reference.startsWith("../") ||
     reference.includes("/") || reference.includes("\\") || /\.[\p{L}][\p{L}\p{N}._-]{0,15}$/u.test(reference);
@@ -3404,10 +3403,10 @@ function resolveNodeFileReference(value) {
   return { path: reference, line, column };
 }
 
-function decorateTraceFileReferences(root, fileReferences = new Map()) {
+function decorateTraceFileReferences(root, fileReferences = new Map(), context = {}) {
   for (const anchor of root.querySelectorAll("a[href]")) {
     const href = anchor.getAttribute("href");
-    const reference = fileReferences.get(href) ?? resolveNodeFileReference(href);
+    const reference = fileReferences.get(href) ?? resolveNodeFileReference(href, context);
     if (reference) {
       anchor.dataset.nodeFilePath = reference.path;
       if (reference.line) anchor.dataset.nodeFileLine = String(reference.line);
@@ -3422,7 +3421,7 @@ function decorateTraceFileReferences(root, fileReferences = new Map()) {
   }
   for (const image of root.querySelectorAll("img[src]")) {
     const src = image.getAttribute("src");
-    const reference = fileReferences.get(src) ?? resolveNodeFileReference(src);
+    const reference = fileReferences.get(src) ?? resolveNodeFileReference(src, context);
     if (!reference) continue;
     const button = element("button", "node-file-image-link", `▧ ${image.alt || baseName(reference.path)}`);
     button.type = "button";
@@ -3432,7 +3431,7 @@ function decorateTraceFileReferences(root, fileReferences = new Map()) {
   }
   for (const code of root.querySelectorAll("code")) {
     if (code.closest("pre, a, button")) continue;
-    const reference = resolveNodeFileReference(code.textContent);
+    const reference = resolveNodeFileReference(code.textContent, context);
     if (!reference) continue;
     const button = element("button", "node-file-code-link");
     button.type = "button";
@@ -3442,6 +3441,11 @@ function decorateTraceFileReferences(root, fileReferences = new Map()) {
     button.append(code.cloneNode(true));
     code.replaceWith(button);
   }
+ for (const link of root.querySelectorAll('[data-node-file-path]')) {
+   link.dataset.fileContext = JSON.stringify(context);
+   link.title = `查看当前文件 · ${context.nodeId || "请选择所属 Node"} · ${link.dataset.nodeFilePath}`;
+ }
+
 }
 
 function createTraceCopyButton(card) {
@@ -3568,9 +3572,10 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
   node.classList.toggle("markdown-body", markdown);
   if (markdown) {
     const fileReferences = new Map();
+    const sourceContext = card._miraFileContext ?? {};
     const html = marked.parse(value, { walkTokens(token) {
       if (token.type !== "link" && token.type !== "image") return;
-      const reference = resolveNodeFileReference(token.href);
+      const reference = resolveNodeFileReference(token.href, sourceContext);
       if (!reference) return;
       // Keep local paths out of browser URLs: DOMPurify correctly rejects C:
       // and file: schemes. Restore them only as Node file actions after sanitizing.
@@ -3578,7 +3583,7 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
       fileReferences.set(token.href, reference);
     } });
     node.innerHTML = DOMPurify.sanitize(html);
-    decorateTraceFileReferences(node, fileReferences);
+    decorateTraceFileReferences(node, fileReferences, sourceContext);
     decorateTraceDiagrams(node, () => {
       const scroller = traceScroller();
       const follow = traceNearBottom(scroller);
@@ -3730,6 +3735,11 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     card = element("article", `trace-card ${kind}`);
     if (key) card.dataset.traceKey = key;
     card.dataset.traceKind = kind;
+    card._miraFileContext = options.sourceContext ?? (options.transcriptKey ? { cwd: "" } : {
+      nodeId: agent.threadRuntimeNodeId || agent.socketNodeId || currentAgentThread()?.runtimeNodeId,
+      cwd: currentAgentThread()?.cwd || $("#conversationCwd")?.value.trim() || "",
+      sourceThreadId: agent.threadId, sourceTurnId: options.turnId,
+    });
     card._miraExpandable = ["tool", "reasoning"].includes(kind);
     const copy = ["user", "compaction", "recovery", "image"].includes(kind) ? null : createTraceCopyButton(card);
     if (card._miraExpandable) {
@@ -3769,6 +3779,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   } else {
     card.className = `trace-card ${kind}`;
     card.dataset.traceKind = kind;
+    if (options.sourceContext) card._miraFileContext = options.sourceContext;
     if (card.querySelector(".trace-kind")) card.querySelector(".trace-kind").textContent = title;
     if (card.querySelector(".trace-status")) card.querySelector(".trace-status").textContent = status;
     if (!["image", "compaction", "recovery"].includes(kind) && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
@@ -3835,40 +3846,12 @@ function nodeFileMimeType(path) {
   return types[extension] ?? "application/octet-stream";
 }
 
-function base64Bytes(value) {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return bytes;
-}
-
 function bytesBase64(bytes) {
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 32 * 1024) {
     binary += String.fromCharCode(...bytes.subarray(offset, Math.min(offset + 32 * 1024, bytes.length)));
   }
   return btoa(binary);
-}
-
-async function readNodeFile(nodeId, path, stat, controller, progress = (text) => { $("#nodeFileLoading").textContent = text; }) {
-  const size = Number(stat.size ?? 0);
-  if (!Number.isSafeInteger(size) || size < 0) throw new Error("Node 返回了无效的文件大小");
-  const chunks = [];
-  for (let offset = 0; offset < size;) {
-    controller.signal.throwIfAborted();
-    progress(`正在从 Node 读取 ${formatBytes(offset)} / ${formatBytes(size)}…`);
-    const result = await invokeNode(nodeId, "file", {
-      action: "read", path, offset, length: Math.min(nodeFileChunkBytes, size - offset), encoding: "base64",
-    }, 60_000, controller.signal);
-    controller.signal.throwIfAborted();
-    if (result.encoding !== "base64") throw new Error("Node 没有返回预期的二进制文件数据");
-    const chunk = base64Bytes(result.content ?? "");
-    if (!chunk.length && !result.eof) throw new Error("Node 文件读取没有取得进展");
-    chunks.push(chunk);
-    offset += chunk.length;
-    if (result.eof) break;
-  }
-  return new Blob(chunks, { type: nodeFileMimeType(path) });
 }
 
 function openTraceImagePreview(blob, path) {
@@ -3889,9 +3872,10 @@ function openTraceImagePreview(blob, path) {
 }
 
 function resetNodeFileDialog() {
-  agent.fileReadController?.abort();
-  agent.fileReadController = null;
-  agent.filePreview = null;
+ nodeFileReader?.dispose(); nodeFileReader=null; nodeFileWorkspace?.dispose(); nodeFileWorkspace=null;
+ $("#nodeFileReader").hidden=true;
+ document.body.classList.remove("file-reader-open");
+ $("#nodeFileDialog").classList.remove("file-dock");
   $("#nodeFileTextMore").classList.add("hidden");
   if (agent.fileObjectUrl) URL.revokeObjectURL(agent.fileObjectUrl);
   agent.fileObjectUrl = null;
@@ -3909,81 +3893,54 @@ function resetNodeFileDialog() {
   $("#nodeFileLoading").textContent = "正在从 Node 读取文件…";
 }
 
-async function openNodeFile(path, line = null) {
-  const dialog = $("#nodeFileDialog");
-  resetNodeFileDialog();
-  const controller = new AbortController();
-  agent.fileReadController = controller;
-  $("#nodeFileTitle").textContent = baseName(path);
-  $("#nodeFileMeta").textContent = "正在查找包含此文件的节点…";
-  $("#nodeFilePath").textContent = path;
-  if (!dialog.open) dialog.showModal();
-  const candidates = conversationNodeCandidates();
-  if (!candidates.length) throw new Error("这个会话没有可用于读取文件的节点");
-  let selectedNode = null;
-  let stat = null;
-  let lastError = null;
-  for (const nodeId of candidates) {
-    try {
-      const candidate = await invokeNode(nodeId, "file", { action: "stat", path }, 30_000);
-      controller.signal.throwIfAborted();
-      if (candidate.type !== "file") throw new Error("路径不是普通文件");
-      selectedNode = nodeId;
-      stat = candidate;
-      break;
-    } catch (error) { controller.signal.throwIfAborted(); lastError = error; }
+let nodeFileReader = null;
+let nodeFileWorkspace = null;
+let nodeFileReturnFocus = null;
+const nodeFileReaderStates = new Map();
+function openNodeFile(path, line = null, context = {}) {
+  const ref = { nodeId: context.nodeId, path, ...(line ? { line } : {}) };
+  const standalone = !line && (/\.(?:html?|zip)$/i.test(path) || /[\\/]$/.test(path) || !baseName(path).includes("."));
+  if (ref.nodeId && standalone) {
+    // Reserve the window during the click, sever its opener before navigating,
+    // and retain a visible retry link only when a client blocks the popup.
+    const target = window.open("about:blank", "_blank");
+    if (target) {
+      target.opener = null;
+      target.location.replace(workspaceURL(ref, { site:/\.html?$/i.test(path), sourceThreadId:context.sourceThreadId || agent.threadId }));
+      if ($("#nodeFileDialog").open) closeNodeFileDialog();
+      return Promise.resolve();
+    }
   }
-  if (!selectedNode) throw new Error(`无法从会话关联的节点读取此文件：${lastError?.message ?? "文件不存在"}`);
-  const blob = await readNodeFile(selectedNode, path, stat, controller);
-  controller.signal.throwIfAborted();
-  const mime = blob.type || "application/octet-stream";
-  const node = dashboardNodes.get(selectedNode);
-  $("#nodeFileMeta").textContent = `${formatBytes(blob.size)} · ${mime} · ${node ? nodeUserName(node) : selectedNode}${line ? ` · 第 ${line} 行` : ""}`;
-  $("#nodeFileLoading").classList.add("hidden");
-  agent.fileObjectUrl = URL.createObjectURL(blob);
-  const download = $("#nodeFileDownload");
-  download.href = agent.fileObjectUrl;
-  download.download = baseName(path);
-  download.classList.remove("hidden");
-  if (mime.startsWith("image/")) {
-    $("#nodeFileImage").src = agent.fileObjectUrl;
-    $("#nodeFileImage").classList.remove("hidden");
-  } else if (mime.startsWith("video/")) {
-    $("#nodeFileVideo").src = agent.fileObjectUrl;
-    $("#nodeFileVideo").classList.remove("hidden");
-  } else if (mime.startsWith("audio/")) {
-    $("#nodeFileAudio").src = agent.fileObjectUrl;
-    $("#nodeFileAudio").classList.remove("hidden");
-  } else if (mime === "application/pdf") {
-    $("#nodeFileFrame").src = agent.fileObjectUrl;
-    $("#nodeFileFrame").classList.remove("hidden");
-  } else if (mime.startsWith("text/") || ["application/json", "application/xml", "application/x-ndjson"].includes(mime)) {
-    const preview = $("#nodeFileText");
-    agent.filePreview = { blob, offset: 0, decoder: new TextDecoder() };
-    preview.classList.remove("hidden");
-    await loadMoreFilePreview();
-    if (line) requestAnimationFrame(() => {
-      const lineHeight = Number.parseFloat(getComputedStyle(preview).lineHeight) || 20;
-      preview.scrollTop = Math.max(0, (line - 3) * lineHeight);
+  const dialog = $("#nodeFileDialog");
+  if (!dialog.open) nodeFileReturnFocus = document.activeElement;
+  // Changing from a historical image modal to the live file dock must also
+  // remove the modal's top-layer state, while retaining the same DOM surface.
+  if (dialog.matches(":modal")) { dialog.close(); }
+  resetNodeFileDialog();
+  const host = $("#nodeFileReader"); host.hidden = false; host.replaceChildren();
+  dialog.classList.add("file-dock");
+  $("#nodeFileTitle").textContent = baseName(path); $("#nodeFileMeta").textContent = "Node 上的当前内容";
+  $("#nodeFilePath").textContent = path; $("#nodeFileLoading").classList.add("hidden");
+  if (ref.nodeId && standalone) {
+    host.append(element("p", "muted", "窗口被拦截，请点击下面的链接打开文件页面。"));
+    const link = element("a", "", "再次打开 →"); link.href = workspaceURL(ref, { site: /\.html?$/i.test(path), sourceThreadId: context.sourceThreadId || agent.threadId }); link.target = "_blank"; link.rel = "noopener"; host.append(link);
+  } else if (ref.nodeId) {
+    const reader = new FileReader(host, { states:nodeFileReaderStates, independent: value => window.open(workspaceURL(value, { sourceThreadId:context.sourceThreadId || agent.threadId }), "_blank", "noopener") });
+    nodeFileReader = reader;
+    void reader.open(ref).then(() => {
+      if (nodeFileReader === reader && reader.stat?.type === "directory") {
+        // An explicit link remains available when type discovery is asynchronous.
+        nodeFileWorkspace = new FileWorkspace(host); void nodeFileWorkspace.open(ref).catch(e => toast(e.message));
+      }
     });
   } else {
-    $("#nodeFileUnsupported").classList.remove("hidden");
+    const candidates = context.candidateNodeIds?.length ? context.candidateNodeIds : conversationNodeCandidates();
+    host.append(element("p", "file-status", "这条历史输出没有明确的文件所属 Node，请选择后打开。"));
+    for (const nodeId of candidates) { const button = element("button", "ghost", nodeDisplayName(nodeId)); button.type = "button"; button.onclick = () => openNodeFile(path,line,{...context,nodeId}); host.append(button); }
+    if (!candidates.length) host.append(element("p", "file-status", "请先连接所属 Node，再重试。"));
   }
-}
-
-async function loadMoreFilePreview() {
-  const value = agent.filePreview;
-  if (!value || value.loading) return;
-  value.loading = true;
-  try {
-    const end = Math.min(value.offset + 64 * 1024, value.blob.size);
-    const bytes = await value.blob.slice(value.offset, end).arrayBuffer();
-    if (agent.filePreview !== value) return;
-    $("#nodeFileText").append(document.createTextNode(value.decoder.decode(bytes, { stream: end < value.blob.size })));
-    value.offset = end;
-    $("#nodeFileTextMore").classList.toggle("hidden", end >= value.blob.size);
-    $("#nodeFileTextMore").textContent = `显示更多 · 已展示 ${formatBytes(end)} / ${formatBytes(value.blob.size)}`;
-  } finally { value.loading = false; }
+  if (!dialog.open) dialog.show(); document.body.classList.add("file-reader-open");
+  return Promise.resolve();
 }
 
 function appendTraceText(key, kind, title, delta, status = "运行中") {
@@ -4362,7 +4319,7 @@ function compactionSummaryKeys(items) {
 function transcriptTraceOptions(item) {
   return {
     autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, turnId: item.turnId,
-    transcriptKey: item.key, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
+    transcriptKey: item.key, sourceContext: { cwd: "", ...item.sourceContext, sourceThreadId: agent.threadId, sourceTurnId: item.turnId }, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
     completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
     elapsedApproximate: item.elapsedApproximate,
     ...(Number.isFinite(item.turnElapsedMs) ? {
@@ -7124,7 +7081,7 @@ $("#conversationTrace").addEventListener("click", (event) => {
   const file = event.target.closest("[data-node-file-path]");
   if (file) {
     event.preventDefault();
-    openNodeFile(file.dataset.nodeFilePath, Number(file.dataset.nodeFileLine) || null).catch((error) => {
+    openNodeFile(file.dataset.nodeFilePath, Number(file.dataset.nodeFileLine) || null, JSON.parse(file.dataset.fileContext || "{}")).catch((error) => {
       if (error.name === "AbortError") return;
       $("#nodeFileMeta").textContent = "读取失败";
       $("#nodeFileLoading").textContent = error.message;
@@ -7268,7 +7225,11 @@ $("#conversationDropZone").addEventListener("drop", (event) => {
   event.currentTarget.classList.remove("dragging");
   addComposerFiles(event.dataTransfer?.files ?? []);
 });
-$("#nodeFileClose").addEventListener("click", () => $("#nodeFileDialog").close());
+function closeNodeFileDialog() {
+  nodeFileReader?.rememberPosition();
+  $("#nodeFileDialog").close();
+}
+$("#nodeFileClose").addEventListener("click", closeNodeFileDialog);
 let nodeFileBackdropPointer = null;
 function isNodeFileBackdrop(event) {
   const dialog = $("#nodeFileDialog");
@@ -7282,12 +7243,22 @@ $("#nodeFileDialog").addEventListener("pointerdown", (event) => {
 $("#nodeFileDialog").addEventListener("pointercancel", () => { nodeFileBackdropPointer = null; });
 $("#nodeFileDialog").addEventListener("click", (event) => {
   if (nodeFileBackdropPointer !== null && (event.pointerId === undefined || nodeFileBackdropPointer === event.pointerId) && isNodeFileBackdrop(event)) {
-    $("#nodeFileDialog").close();
+    closeNodeFileDialog();
   }
   nodeFileBackdropPointer = null;
 });
-$("#nodeFileTextMore").addEventListener("click", () => loadMoreFilePreview().catch((error) => toast(error.message)));
-$("#nodeFileDialog").addEventListener("close", () => { nodeFileBackdropPointer = null; resetNodeFileDialog(); });
+$("#nodeFileDialog").addEventListener("close", () => {
+  // A close event can arrive after the dock has already been reopened.
+  if ($("#nodeFileDialog").open) return;
+  nodeFileBackdropPointer = null; resetNodeFileDialog();
+  if (nodeFileReturnFocus?.isConnected) nodeFileReturnFocus.focus({ preventScroll: true });
+  nodeFileReturnFocus = null;
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && $("#nodeFileDialog").open && $("#nodeFileDialog").classList.contains("file-dock")) {
+    event.preventDefault(); closeNodeFileDialog();
+  }
+});
 $("#agentInterrupt").addEventListener("click", async () => {
   const threadId = agent.threadId;
   const turnId = agent.turnId;

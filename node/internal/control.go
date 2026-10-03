@@ -41,6 +41,8 @@ type controlClient struct {
 	tunnelsMu       sync.Mutex
 	tunnels         map[string]*websocket.Conn
 	tunnelAccounts  map[string]appServerTunnelAccount
+	fileMu          sync.Mutex
+	fileWorkers     map[string]context.CancelFunc
 	sshMu           sync.Mutex
 	sshWorkers      map[string]context.CancelFunc
 }
@@ -515,6 +517,10 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 			response["error"] = err.Error()
 		}
 		_ = client.writeControl(response)
+	case "file.open":
+		client.startFileStream(ctx, message)
+	case "file.close":
+		client.stopFileStream(message.SessionID)
 	case "ssh.open":
 		client.startSSH(ctx, message)
 	case "ssh.close":

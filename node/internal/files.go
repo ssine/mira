@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -13,6 +14,13 @@ import (
 const maxFileBytes = 4 * 1024 * 1024
 
 type fileParams struct {
+	operationContext context.Context
+	ArchiveVersion   string  `json:"archiveVersion"`
+	Archive          bool    `json:"archive"`
+	ArchiveEntry     string  `json:"archiveEntry"`
+	EntryID          *int    `json:"entryId"`
+	Cursor           int     `json:"cursor"`
+	PageSize         int     `json:"pageSize"`
 	Action           string  `json:"action"`
 	Path             string  `json:"path"`
 	Destination      string  `json:"destination"`
@@ -114,6 +122,9 @@ func (runtime *capabilityRuntime) file(params fileParams) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if params.Archive {
+		return runtime.archiveFile(target, params)
+	}
 	switch params.Action {
 	case "stat":
 		value, err := os.Lstat(target)
@@ -122,6 +133,9 @@ func (runtime *capabilityRuntime) file(params fileParams) (any, error) {
 		}
 		return statView(target, value), nil
 	case "list":
+		if params.PageSize > 0 {
+			return runtime.listFilePage(target, params)
+		}
 		return runtime.listFiles(target)
 	case "read":
 		return runtime.readFile(target, params)

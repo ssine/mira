@@ -16,6 +16,7 @@
     <script src="/theme.js"></script>
     <link rel="stylesheet" href="/vendor/xterm.css">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/file-preview.css">
     <script type="module" src="/app.js"></script>
   </head>
   <body>
@@ -516,6 +517,7 @@
           <div><p class="eyebrow">NODE FILE</p><h2 id="nodeFileTitle">文件</h2><p id="nodeFileMeta" class="muted">正在准备…</p></div>
           <button id="nodeFileClose" class="ghost" type="button" aria-label="关闭文件预览">关闭</button>
         </header>
+        <div id="nodeFileReader" hidden></div>
         <div id="nodeFileLoading" class="node-file-loading">正在从 Node 读取文件…</div>
         <img id="nodeFileImage" class="node-file-media hidden" alt="节点文件图片预览">
         <video id="nodeFileVideo" class="node-file-media hidden" controls></video>
