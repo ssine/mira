@@ -103,6 +103,10 @@ const assets = {};
 for (const [pathname, contentType] of [
   ["/", "text/html"],
   ["/app.js", "text/javascript"],
+  ["/file-preview.js", "text/javascript"],
+  ["/file-preview.css", "text/css"],
+  ["/files.html", "text/html"],
+  ["/files.js", "text/javascript"],
   ["/thread-interrupt.js", "text/javascript"],
   ["/trace-activity.js", "text/javascript"],
   ["/theme.js", "text/javascript"],
@@ -188,7 +192,7 @@ for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentTh
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "desiredAppServer?.developerInstructionsFile", "saveAgentRuntimeDeveloperInstructionsFile", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "readNodeFile", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "desiredAppServer?.developerInstructionsFile", "saveAgentRuntimeDeveloperInstructionsFile", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "new FileReader(host", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
 }
 assert(!assets["/app.js"].includes('$("#conversationSend").disabled = false'),
