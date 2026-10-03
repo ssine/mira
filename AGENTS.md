@@ -430,8 +430,12 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   `mira update --version <version>` perform validation, stop/start, pointer commit and rollback.
 - OpenWrt/FriendlyWrt may auto-select procd only for Mira-owned, system-scoped Node installs. Keep
   `/etc/init.d/mira` pointed at `current/mira supervisor`; never add an installer-driven update path.
-- Nix and Mira service ownership are mutually exclusive for one state directory. Nix ownership may
-  generate a reviewable module but must never run `nixos-rebuild` or mutate an external repository.
+- Nix and Mira service ownership are mutually exclusive for one state directory. The Mira installer
+  may generate a reviewable Nix module but must never run `nixos-rebuild` or mutate an external repository.
+  For user-requested deployment configuration changes, coding agents may edit the owning Nix repository
+  and run its existing `nixops deploy` workflow. This is the sole deployment entry point for Nix-managed
+  host configuration; do not replace it with manual systemd overrides or direct `nixos-rebuild`.
+  Preserve unrelated user changes. Mira image updates remain owned by the existing Supervisor.
 - Windows PTY uses real ConPTY behind a build-tagged adapter. Test native Windows, not just cross
   compilation. Keep UTF-8 decoding state across output chunks and bound all retained data.
 - Plain Go builds are compile/development checks, never release artifacts; there is no Go SSH/SFTP fallback.
