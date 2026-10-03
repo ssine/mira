@@ -87,4 +87,5 @@ separate deployment steps.
   loaded contents are not retained after closing the reader.
 - Native decoding depends on the Web client. Android opens file windows in a
   separate WebView Activity with no `MiraAndroid` bridge; its original console
-  remains warm. Device acceptance remains necessary before releasing an APK.
+  remains warm. Real-device checks are recommended when a test device is available;
+  automated APK build and signing validation are required for publication.

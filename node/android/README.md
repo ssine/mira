@@ -79,8 +79,9 @@ both root and app mode. No hard-coded DNS server, Server IP or disabled TLS veri
 Android cross-compile remains useful only as a shared-code compile check, not a deployable APK.
 
 The Release workflow can be dispatched with `publish=false` to produce signed acceptance artifacts
-without a tag/release; install those on a real device before tagging the release. Verify a domain
-Server URL, not just an IP address, along with screen/file/process capabilities and in-place update.
+without a tag/release. When a test device is available, real-device checks are recommended using a
+domain Server URL, along with screen/file/process capabilities and in-place update; they do not block
+release publication. Automated build, signing and acceptance checks remain required.
 For an APK-only test build, also set `android_only=true`: this uses the existing
 Android signing identity, uploads `mira-android-acceptance`, and skips all release,
 draft, tag and container publication steps.
@@ -130,7 +131,7 @@ python3 tests/android_accessibility_capture_regression.py
 ```
 
 These run the real capture classes against Android API test doubles, not real
-device sessions. Device acceptance must still cover repeated captures
+device sessions. Recommended device acceptance covers repeated captures
 while another app animates, concurrent requests, user stop/regrant, and screen
 lock, checking both Node continuity and the Android crash log. For accessibility
 capture, additionally verify screenshots without a projection grant, after

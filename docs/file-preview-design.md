@@ -199,7 +199,7 @@ Node 继续主动连接 Server。文件读取与 ZIP 解压在持有文件的 No
 - `file_archive.go` / `file_zip_cache.go`：分页目录、ZIP 虚拟目录、重复条目 ID、版本校验和选中条目的随机读取缓存。
 - `file_stream.go` 与 Server channel：Node 主动连接的有界二进制通道，HTTP Range、条件读取、取消与断连清理。
 - `miraserver/file_preview.go`：通配符 Host 分发、一次性引导、HttpOnly 授权、过期／关闭／撤销与独立站点边界。
-- Android 文件窗口使用单独的 WebView Activity，不安装 `MiraAndroid`；原对话 Activity 保持不变。APK 与真机验收需在发布阶段单独完成。
+- Android 文件窗口使用单独的 WebView Activity，不安装 `MiraAndroid`；原对话 Activity 保持不变。发布阶段必须完成 APK 自动构建与签名校验；有测试设备时建议补充真机验收，不作为发布门槛。
 
 首版按页显示目录而不将全部条目加入 DOM，文本／Markdown 由用户继续分块加载；手动刷新保留为主要更新方式。ZIP 中央目录与临时解压缓存有明确的资源预算。完整参数、当前边界和部署步骤见[部署说明](file-preview-deployment.md)与[协议](../protocol/file-preview-v1.md)。
 

@@ -412,7 +412,9 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - Android changes should also build the debug APK when an Android SDK is available.
 - Deployable Android APKs must use `node/build-android.sh` with the pinned NDK and cgo/system DNS.
   The pure-Go Android cross-compile below is compile-only; it does not validate Android domain DNS.
-  Verify enrollment and WSS against a domain on a real device before releasing Android changes.
+  Real-device enrollment and domain WSS checks are recommended when a test device is available;
+  they are not a release requirement. Automated checks, native builds, installer acceptance and
+  signed APK validation remain required for releases.
 - `VERSION` is the unified Mira release SemVer. Keep checked mirrors consistent and derive Android
   versionName/versionCode and release build metadata from it. Codex version and Node wire protocol
   version are separate concepts. Never regenerate the production Android signing identity.
