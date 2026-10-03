@@ -629,7 +629,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .composer-input-row { display: block; min-height: 42px; padding: 5px 10px 0; }
 .composer-toolbar { display: flex; align-items: center; gap: 3px; min-width: 0; min-height: 40px; padding: 1px 4px 4px; }
 .composer-options { display: contents; }
-.composer-options-toggle { display: none; }
+.composer-icon.composer-options-toggle { display: none; }
 .composer-choice { position: relative; min-width: 0; }
 .composer-model-choice { flex: 0 1 auto; }
 .composer-effort-choice { flex: none; }
@@ -792,7 +792,7 @@ progress { width: 100%; accent-color: var(--accent); }
   .conversation-attachments { grid-column: 1 / -1; grid-row: 2; }
   .composer-input-row { grid-column: 2; grid-row: 3; align-self: center; min-width: 0; min-height: 40px; padding: 2px 0; }
   .composer-toolbar { display: contents; }
-  .composer-options-toggle { display: inline-grid; grid-column: 1; grid-row: 3; border: 0; background: transparent; color: var(--muted); }
+  .composer-icon.composer-options-toggle { display: inline-grid; grid-column: 1; grid-row: 3; border: 0; background: transparent; color: var(--muted); }
   .composer-options-toggle:hover, .composer-options-toggle[aria-expanded="true"] { background: var(--hover); color: var(--text); }
   .composer-options-toggle svg { transition: transform var(--motion-fast); }
   .composer-options-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
