@@ -225,6 +225,8 @@
                   <textarea id="conversationInput" disabled rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>
                 </div>
                 <div class="composer-toolbar">
+                  <button id="conversationOptionsToggle" class="composer-icon composer-options-toggle" type="button" aria-label="展开账号、模型与附件" title="展开账号、模型与附件" aria-expanded="false" aria-controls="conversationComposerOptions"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m5.5 12 4.5-4.5 4.5 4.5"></path></svg></button>
+                  <div id="conversationComposerOptions" class="composer-options">
                   <label class="composer-choice composer-account-choice"><span class="visually-hidden">本轮账号</span><select id="conversationAccount" aria-label="选择对话账号"></select></label>
                   <button id="conversationAttach" class="composer-icon composer-attach" type="button" aria-label="添加图片或文件" title="添加图片或文件"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m7.1 10.9 5.7-5.7a3 3 0 0 1 4.2 4.2l-7.2 7.2a5 5 0 0 1-7.1-7.1l7-7"></path><path d="m5.5 11.9 6.8-6.8"></path></svg></button>
                   <div class="composer-choice composer-model-choice">
@@ -240,6 +242,7 @@
                       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m5 6.5 3 3 3-3"></path></svg>
                     </button>
                     <div id="conversationEffortMenu" class="composer-choice-menu composer-effort-menu" popover="auto" role="listbox" aria-label="选择思考强度"></div>
+                  </div>
                   </div>
                   <div class="composer-submit-slot">
                     <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>

@@ -71,7 +71,8 @@ try {
   for (const width of [600, 390, 320]) {
     await page.setViewportSize({ width, height: 844 });
     assert.equal(await page.locator("#conversationAccount").isVisible(), false);
-    assert.equal(await page.locator("#conversationAttach").isVisible(), true);
+    assert.equal(await page.locator("#conversationAttach").isVisible(), false);
+    assert.equal(await page.locator("#conversationOptionsToggle").isVisible(), true);
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
   }
   await page.locator("#conversationDetailsToggle").click();

@@ -152,14 +152,35 @@ try {
   await page.setViewportSize({width:390,height:844});
   await page.waitForFunction(()=>document.querySelector('#agentThreadDrawer').getAttribute('aria-hidden')==='true');
   await page.locator('#agentThreadDrawer').evaluate(element=>Promise.all(element.getAnimations().map(animation=>animation.finished.catch(()=>{}))));
-  assert.equal(await picker.isVisible(),false,'mobile hides the model picker');
-  assert.equal(await page.locator('#conversationEffortSelect').isVisible(),false,'mobile hides the effort picker');
-  const attachBox=await page.locator('#conversationAttach').boundingBox();
-  const mobileInput=await page.locator('#conversationInput').boundingBox();
-  const sendBox=await page.locator('#conversationSend').boundingBox();
-  assert.ok(attachBox.x+attachBox.width<=mobileInput.x&&mobileInput.x+mobileInput.width<=sendBox.x,'mobile input sits between attachment and send');
-  assert.ok(Math.abs(attachBox.y+attachBox.height/2-(mobileInput.y+mobileInput.height/2))<=2&&Math.abs(sendBox.y-attachBox.y)<=1,'mobile composer uses one row');
-  assert.ok(sendBox.x+sendBox.width<=390,'mobile composer stays inside the viewport');
+  const optionsToggle=page.locator('#conversationOptionsToggle');
+  // 840 px with a touch pointer stands in for an unfolded foldable.
+  const touch=await context.newCDPSession(page);
+  for (const width of [390,840]) {
+    await page.setViewportSize({width,height:844});
+    await touch.send('Emulation.setTouchEmulationEnabled',{enabled:width>680,maxTouchPoints:5});
+    assert.equal(await picker.isVisible(),false,'mobile collapses the model picker');
+    assert.equal(await page.locator('#conversationEffortSelect').isVisible(),false,'mobile collapses the effort picker');
+    assert.equal(await page.locator('#conversationAttach').isVisible(),false,'mobile collapses attachments');
+    const toggleBox=await optionsToggle.boundingBox();
+    const mobileInput=await page.locator('#conversationInput').boundingBox();
+    const sendBox=await page.locator('#conversationSend').boundingBox();
+    assert.ok(toggleBox.x+toggleBox.width<=mobileInput.x&&mobileInput.x+mobileInput.width<=sendBox.x,'mobile input sits between the options toggle and send');
+    assert.ok(Math.abs(toggleBox.y+toggleBox.height/2-(mobileInput.y+mobileInput.height/2))<=2&&Math.abs(sendBox.y-toggleBox.y)<=1,'mobile composer uses one row');
+    assert.ok(sendBox.x+sendBox.width<=width,'mobile composer stays inside the viewport');
+    await optionsToggle.click();
+    assert.equal(await optionsToggle.getAttribute('aria-expanded'),'true');
+    const optionBoxes=await Promise.all(['#conversationAccount','#conversationAttach','#conversationModelSelect','#conversationEffortSelect'].map(selector=>page.locator(selector).boundingBox()));
+    assert.ok(optionBoxes.every(box=>box&&box.y+box.height<=toggleBox.y+1&&box.x+box.width<=width),'options open as one row above the input');
+    await optionsToggle.click();
+    assert.equal(await picker.isVisible(),false,'options collapse again');
+    if (process.env.MIRA_WEB_SCREENSHOT_DIR) {
+      await optionsToggle.click();
+      await page.screenshot({path:`${process.env.MIRA_WEB_SCREENSHOT_DIR}/composer-mobile-options-${width}.png`});
+      await optionsToggle.click();
+    }
+  }
+  await touch.send('Emulation.setTouchEmulationEnabled',{enabled:false});
+  await page.setViewportSize({width:390,height:844});
   await page.locator('#conversationDetailsToggle').click();
   assert.equal(await page.locator('#conversationDetailsName').textContent(),'新会话');
   assert.equal(await page.locator('#conversationDetailsModel').inputValue(),'custom-provider-model');

@@ -628,6 +628,8 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-drop-zone.dragging { background: var(--accent-soft); }
 .composer-input-row { display: block; min-height: 42px; padding: 5px 10px 0; }
 .composer-toolbar { display: flex; align-items: center; gap: 3px; min-width: 0; min-height: 40px; padding: 1px 4px 4px; }
+.composer-options { display: contents; }
+.composer-options-toggle { display: none; }
 .composer-choice { position: relative; min-width: 0; }
 .composer-model-choice { flex: 0 1 auto; }
 .composer-effort-choice { flex: none; }
@@ -773,14 +775,6 @@ progress { width: 100%; accent-color: var(--accent); }
   .tool-group-counts { text-align: left; }
   .tool-group-latest { grid-column: 1; }
   .conversation-composer { padding: 4px 0 max(8px, env(safe-area-inset-bottom)); }
-  .conversation-drop-zone { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; gap: 0 3px; padding: 3px; }
-  .conversation-attachments { grid-column: 1 / -1; }
-  .composer-input-row { grid-column: 2; grid-row: 2; align-self: center; min-width: 0; min-height: 40px; padding: 2px 0; }
-  .composer-toolbar { display: contents; }
-  .composer-choice { display: none; }
-  .composer-attach { grid-column: 1; grid-row: 2; }
-  .composer-submit-slot { grid-column: 3; grid-row: 2; margin-left: 0; }
-  .composer-icon { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
   .attachment-name { max-width: 145px; }
   .debug-preset-fields { grid-template-columns: 1fr; }
   .debug-preset-field.wide, .debug-no-params { grid-column: 1; }
@@ -788,6 +782,23 @@ progress { width: 100%; accent-color: var(--accent); }
   .node-file-dialog { width: calc(100vw - 12px); max-height: calc(100dvh - 12px); }
   .node-file-dialog-shell { max-height: calc(100dvh - 14px); }
   .node-file-dialog-actions { align-items: stretch; flex-direction: column; }
+}
+/* Phones and unfolded foldables: one row of options toggle, input and send; the
+   toggle reveals account, attachment, model and effort controls above it. */
+@media (max-width: 680px), (pointer: coarse) {
+  .conversation-drop-zone { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: end; gap: 0 3px; padding: 3px; }
+  .composer-options { grid-column: 1 / -1; grid-row: 1; display: none; align-items: center; gap: 3px; min-width: 0; padding: 0 0 2px; overflow-x: auto; scrollbar-width: none; }
+  .composer-options-toggle[aria-expanded="true"] + .composer-options { display: flex; }
+  .conversation-attachments { grid-column: 1 / -1; grid-row: 2; }
+  .composer-input-row { grid-column: 2; grid-row: 3; align-self: center; min-width: 0; min-height: 40px; padding: 2px 0; }
+  .composer-toolbar { display: contents; }
+  .composer-options-toggle { display: inline-grid; grid-column: 1; grid-row: 3; border: 0; background: transparent; color: var(--muted); }
+  .composer-options-toggle:hover, .composer-options-toggle[aria-expanded="true"] { background: var(--hover); color: var(--text); }
+  .composer-options-toggle svg { transition: transform var(--motion-fast); }
+  .composer-options-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+  .composer-submit-slot { grid-column: 3; grid-row: 3; margin-left: 0; }
+  .composer-icon { width: 40px; min-width: 40px; height: 40px; min-height: 40px; }
+  .composer-model-choice .composer-choice-toggle { max-width: min(300px, 42vw); }
 }
 /* Installed/mobile shell: leave room for cutouts, gestures and the soft keyboard. */
 .pwa-install-dialog { width: min(400px, calc(100% - 32px)); padding: 24px; border: 1px solid var(--line); border-radius: var(--radius-float); color: var(--text); background: var(--surface-raised); box-shadow: var(--shadow-float); }
