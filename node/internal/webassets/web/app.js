@@ -274,6 +274,8 @@ const agent = {
   sendPromise: null,
   replySubmission: null,
   uploadController: null,
+  uploadState: null,
+  statusPlaceholder: "",
   fileReadController: null,
   filePreview: null,
   sessionImportController: null,
@@ -721,40 +723,86 @@ function readableErrorMessage(value, depth = 0) {
 
 function renderReplyProgress() {
   const entry = replyProgress.current(agent.threadId);
-  $("#conversationProgress").classList.toggle("hidden", !entry);
-  if (entry) {
-    $("#conversationProgressText").textContent = entry.phase;
-    $("#conversationProgressTime").textContent = `${Math.max(0, Math.floor((Date.now() - entry.startedAt) / 1000))} 秒`;
-  }
-  if (entry && !replyProgressTimer) replyProgressTimer = setInterval(renderReplyProgress, 1000);
-  if (!entry && replyProgressTimer) { clearInterval(replyProgressTimer); replyProgressTimer = null; }
-  renderTurnActivity(Boolean(entry));
+  const ticking = renderTurnActivity(entry);
+  if (ticking && !replyProgressTimer) replyProgressTimer = setInterval(renderReplyProgress, 1000);
+  if (!ticking && replyProgressTimer) { clearInterval(replyProgressTimer); replyProgressTimer = null; }
 }
 
-function renderTurnActivity(submitting) {
+function formatElapsed(ms) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+// Run status stays out of the layout: a highlight on the composer edge, a ring
+// on the stop button and the input placeholder. Only states that need the
+// user's attention (a pending question, an unconfirmed run) keep a text row.
+function renderTurnActivity(entry) {
   const activity = threadActivity(agent.threadId);
-  const turnId = activity.turnId ?? agent.activeTurns.get(agent.threadId);
+  const turnId = entry?.turnId ?? activity.turnId ?? agent.activeTurns.get(agent.threadId);
   const phase = agent.turnActivity.get(turnId) ?? "working";
-  const visible = Boolean(["running", "unknown"].includes(activity.state) && !submitting && phase !== "failed");
-  const status = $("#conversationActivity");
-  status.classList.toggle("activity-unknown", activity.state === "unknown");
-  if (status.classList.contains("hidden") === visible) {
-    const follow = traceNearBottom();
-    status.classList.toggle("hidden", !visible);
-    if (follow) scrollTraceToBottom();
-  }
+  const running = Boolean(["running", "unknown"].includes(activity.state) && phase !== "failed");
+  const visible = Boolean(entry) || running;
+  const unknown = !entry && activity.state === "unknown";
   const engine = engineOf(agent.threadId) === "claude" ? "Claude" : "Codex";
-  const waiting = engine === "Claude" && agent.transcriptThreadId === agent.threadId &&
+  const waiting = !entry && engine === "Claude" && agent.transcriptThreadId === agent.threadId &&
     agent.transcriptItems.some(item => item.turnId === turnId && item.questionState === "pending");
-  const text = activity.state === "unknown" ? activityLabel(activity, agent.threadId) : waiting ? "Claude 等待你的回答" : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
-  const label = $("#conversationActivityText");
-  if (visible && label.textContent !== text) label.textContent = text;
+  const text = entry ? (agent.uploadState ? "正在上传附件…" : entry.phase)
+    : unknown ? activityLabel(activity, agent.threadId) : waiting ? "Claude 等待你的回答"
+      : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
+  const startedAt = entry?.startedAt ?? agent.turnTimings.get(turnId)?.startedAt;
+  const elapsed = visible && Number.isFinite(startedAt) ? formatElapsed(Date.now() - startedAt) : "";
   const stored = agent.persistedActivity.get(agent.threadId);
   const estimate = visible && turnId && stored?.turnId === turnId ? stored.costEstimate : null;
-  const cost = $("#conversationActivityCost");
-  cost.hidden = !estimate;
-  cost.textContent = estimate ? `本轮约 ${compactCost(estimate)}` : "";
-  cost.title = estimate?.note ?? "";
+  const cost = estimate ? `本轮约 ${compactCost(estimate)}` : "";
+
+  const zone = $("#conversationDropZone");
+  zone.classList.toggle("status-active", visible && !unknown);
+  zone.classList.toggle("status-unknown", visible && unknown);
+  zone.classList.toggle("status-tool", visible && !entry && phase === "tool");
+  const line = $("#conversationStatus");
+  line.classList.toggle("hidden", !visible);
+  if (!visible) setStatusDetails(false);
+  const live = $("#conversationStatusLive");
+  if (live.textContent !== (visible ? text : "")) live.textContent = visible ? text : "";
+
+  const notice = $("#conversationActivity");
+  const actionable = visible && (unknown || waiting);
+  notice.classList.toggle("activity-unknown", unknown);
+  $("#conversationActivityText").textContent = visible ? text : "";
+  if (notice.classList.contains("hidden") === actionable) {
+    const follow = traceNearBottom();
+    notice.classList.toggle("hidden", !actionable);
+    if (follow) scrollTraceToBottom();
+  }
+
+  $("#conversationStatusTitle").textContent = text;
+  const time = $("#conversationStatusTime");
+  time.hidden = !elapsed;
+  time.textContent = elapsed ? `已运行 ${elapsed}` : "";
+  const costLabel = $("#conversationActivityCost");
+  costLabel.hidden = !cost;
+  costLabel.textContent = cost;
+  costLabel.title = estimate?.note ?? "";
+  const effort = $("#conversationEffortSelect").disabled ? "" : $("#conversationEffortLabel").textContent;
+  $("#conversationStatusModel").textContent = [$("#conversationModelLabel").textContent, effort].filter(Boolean).join(" · ");
+
+  agent.statusPlaceholder = visible ? [text, elapsed, cost && cost.replace("本轮", "")].filter(Boolean).join(" · ") : "";
+  syncComposerPlaceholder();
+  return visible && Boolean(elapsed);
+}
+
+function syncComposerPlaceholder() {
+  const input = $("#conversationInput");
+  const placeholder = agent.statusPlaceholder || (conversationEngine() === "claude" ? "给 Claude 发消息…" : "给 Codex 发消息…");
+  if (input.placeholder !== placeholder) input.placeholder = placeholder;
+}
+
+function setStatusDetails(open) {
+  const line = $("#conversationStatus");
+  line.setAttribute("aria-expanded", String(open));
+  line.title = open ? "收起运行详情" : "查看运行详情";
+  line.setAttribute("aria-label", line.title);
+  $("#conversationStatusDetails").classList.toggle("hidden", !open);
 }
 
 function activityLabel(activity, threadId) {
@@ -2962,7 +3010,7 @@ function syncConversationSendUi() {
   $("#conversationSend").classList.toggle("hidden", running);
   $("#conversationSend").disabled = busy || !composerDraftKey || composerDraftLoading || !selectedNode || native && (running || child);
   $("#conversationInput").disabled = !composerDraftKey || composerDraftLoading || child;
-  $("#conversationInput").placeholder = native ? "给 Claude 发消息…" : "给 Codex 发消息…";
+  syncComposerPlaceholder();
   $("#conversationInput").setAttribute("aria-label", native ? "给 Claude 发消息" : "给 Codex 发消息");
   const stop = $("#agentInterrupt");
   stop.classList.toggle("hidden", !running);
@@ -2982,7 +3030,7 @@ function syncConversationSendUi() {
   $("#claudeContinue").disabled = running || child;
   $(".conversation-recovery-settings").classList.toggle("hidden", native);
   renderConversationModel();
-  for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = busy || composerDraftLoading;
+  for (const button of $("#conversationAttachments").querySelectorAll("button")) button.disabled = !("uploadCancel" in button.dataset) && (busy || composerDraftLoading);
   for (const button of $("#agentThreadList").querySelectorAll("button[data-thread-id]")) button.disabled = busy;
   for (const button of $("#agentThreadList").querySelectorAll("button[data-project-new]")) button.disabled = busy || !button.dataset.projectNode;
 }
@@ -6503,7 +6551,7 @@ async function prepareTurnInput(text, attachments, progress) {
   const total = attachments.reduce((sum, file) => sum + file.size, 0);
   const nodeId = conversationEngine() === "claude" ? $("#agentRuntimeNode").value : agent.socketNodeId;
   const nativeAttachments = [];
-  $("#conversationUploadCancel").classList.toggle("hidden", !attachments.length);
+  if (attachments.length) agent.uploadState = { attachments, index: 0, offset: 0 };
   try {
     if (attachments.length) {
       const cwd = $("#conversationCwd").value.trim();
@@ -6517,6 +6565,8 @@ async function prepareTurnInput(text, attachments, progress) {
           signal.throwIfAborted();
           const status = `上传 ${index + 1}/${attachments.length} · ${file.name} · ${formatBytes(uploaded)} / ${formatBytes(total)}${total ? ` · ${Math.floor(uploaded / total * 100)}%` : ""}`;
           $("#conversationHint").textContent = status;
+          agent.uploadState = { attachments, index, offset };
+          renderComposerAttachments();
           updateReplyProgress(progress, { phase: status });
           const bytes = new Uint8Array(await file.slice(offset, offset + nodeFileChunkBytes).arrayBuffer());
           signal.throwIfAborted();
@@ -6550,24 +6600,42 @@ async function prepareTurnInput(text, attachments, progress) {
     throw error;
   } finally {
     if (agent.uploadController === controller) agent.uploadController = null;
-    $("#conversationUploadCancel").classList.add("hidden");
+    if (agent.uploadState?.attachments === attachments) { agent.uploadState = null; renderComposerAttachments(); }
   }
 }
 
 function renderComposerAttachments() {
   const target = clear($("#conversationAttachments"));
   target.classList.toggle("hidden", agent.attachments.length === 0);
+  const upload = agent.uploadState;
   for (const [index, file] of agent.attachments.entries()) {
     const item = element("div", "conversation-attachment");
+    // Upload progress lives on the chip itself; its × cancels the whole upload.
+    const order = upload ? upload.attachments.indexOf(file) : -1;
+    const sent = order < 0 ? null : order < upload.index ? file.size : order === upload.index ? upload.offset : 0;
+    const size = sent === null ? formatBytes(file.size)
+      : order < upload.index ? "已上传" : order > upload.index ? "等待上传"
+        : `${file.size ? Math.floor(sent / file.size * 100) : 100}% · ${formatBytes(sent)} / ${formatBytes(file.size)}`;
+    if (sent !== null) {
+      item.classList.add("uploading");
+      item.style.setProperty("--progress", `${file.size ? sent / file.size * 100 : 100}%`);
+    }
     item.append(
       element("span", "attachment-kind", nativeImageAttachment(file) ? "图片" : "文件"),
       element("span", "attachment-name", file.name),
-      element("small", "", formatBytes(file.size)),
+      element("small", "", size),
     );
     const remove = element("button", "attachment-remove", "×");
     remove.type = "button";
-    remove.dataset.attachmentIndex = String(index);
-    remove.setAttribute("aria-label", `移除 ${file.name}`);
+    if (sent !== null) {
+      remove.dataset.uploadCancel = "";
+      remove.title = "取消上传";
+      remove.setAttribute("aria-label", "取消上传");
+    } else {
+      remove.dataset.attachmentIndex = String(index);
+      remove.setAttribute("aria-label", `移除 ${file.name}`);
+      remove.disabled = Boolean(agent.sendPromise) || composerDraftLoading;
+    }
     item.append(remove);
     target.append(item);
   }
@@ -7156,15 +7224,27 @@ $("#conversationOptionsToggle").addEventListener("click", (event) => {
   toggle.title = open ? "收起账号、模型与附件" : "展开账号、模型与附件";
   toggle.setAttribute("aria-label", toggle.title);
 });
-$("#conversationUploadCancel").addEventListener("click", () => {
-  agent.uploadController?.abort();
-  $("#conversationHint").textContent = "正在取消并清理当前上传…";
+$("#conversationStatus").addEventListener("click", (event) => {
+  setStatusDetails(event.currentTarget.getAttribute("aria-expanded") !== "true");
+});
+document.addEventListener("pointerdown", (event) => {
+  if (!event.target.closest("#conversationStatus, #conversationStatusDetails")) setStatusDetails(false);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || $("#conversationStatus").getAttribute("aria-expanded") !== "true") return;
+  setStatusDetails(false);
+  $("#conversationStatus").focus();
 });
 $("#conversationFileInput").addEventListener("change", (event) => {
   addComposerFiles(event.target.files ?? []);
   event.target.value = "";
 });
 $("#conversationAttachments").addEventListener("click", (event) => {
+  if (event.target.closest("button[data-upload-cancel]")) {
+    agent.uploadController?.abort();
+    $("#conversationHint").textContent = "正在取消并清理当前上传…";
+    return;
+  }
   const button = event.target.closest("button[data-attachment-index]");
   if (!button || composerDraftLoading || agent.sendPromise) return;
   agent.attachments.splice(Number(button.dataset.attachmentIndex), 1);

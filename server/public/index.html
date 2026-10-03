@@ -216,10 +216,12 @@
             </aside>
             <form id="conversationForm" class="conversation-composer">
               <p id="conversationConnection" class="hidden" role="status"></p>
-              <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText" role="status" aria-live="polite"></span><span id="conversationActivityCost" hidden></span></div>
-              <div id="conversationProgress" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationProgressText" role="status" aria-live="polite"></span><span id="conversationProgressTime" aria-hidden="true"></span><button id="conversationUploadCancel" class="composer-cancel hidden" type="button" aria-label="取消上传" title="取消上传">×</button></div>
+              <div id="conversationActivity" class="conversation-progress hidden"><span class="reply-spinner" aria-hidden="true"></span><span id="conversationActivityText"></span></div>
+              <span id="conversationStatusLive" class="visually-hidden" role="status" aria-live="polite"></span>
               <input id="conversationCwd" type="hidden">
               <div id="conversationDropZone" class="conversation-drop-zone">
+                <button id="conversationStatus" class="drop-zone-status hidden" type="button" aria-label="查看运行详情" title="查看运行详情" aria-expanded="false" aria-controls="conversationStatusDetails"></button>
+                <div id="conversationStatusDetails" class="status-details hidden" role="group" aria-label="运行详情"><strong id="conversationStatusTitle"></strong><span id="conversationStatusTime" hidden></span><span id="conversationActivityCost" hidden></span><span id="conversationStatusModel"></span></div>
                 <div id="conversationAttachments" class="conversation-attachments hidden" aria-live="polite"></div>
                 <div class="composer-input-row">
                   <textarea id="conversationInput" disabled rows="1" enterkeyhint="send" aria-label="给 Codex 发消息" title="Enter 发送，Shift+Enter 换行" placeholder="给 Codex 发消息…"></textarea>

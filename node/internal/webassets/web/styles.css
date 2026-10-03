@@ -619,17 +619,33 @@ progress { width: 100%; accent-color: var(--accent); }
 .claude-persistence [hidden] { display: none; }
 .conversation-composer { position: relative; z-index: 4; width: min(100%, 808px); margin: 0 auto; padding: 4px 0 max(8px, env(safe-area-inset-bottom)); border: 0; background: var(--canvas); }
 .conversation-progress { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 2px 6px; color: var(--muted); font-size: 10px; }
-#conversationProgressText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#conversationProgressTime, #conversationActivityCost { margin-left: auto; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#conversationActivityText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reply-spinner { width: 11px; height: 11px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: reply-spin 1s linear infinite; }
 .activity-unknown .reply-spinner { animation: none; border-color: var(--muted); border-style: dotted; }
-.conversation-drop-zone { border: 1px solid color-mix(in srgb, var(--input-border) 55%, var(--canvas)); border-radius: 8px; background: var(--canvas); box-shadow: 0 2px 8px rgb(22 34 52 / 4%); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }
+.conversation-drop-zone { position: relative; border: 1px solid color-mix(in srgb, var(--input-border) 55%, var(--canvas)); border-radius: 8px; background: var(--canvas); box-shadow: 0 2px 8px rgb(22 34 52 / 4%); transition: border-color var(--motion-fast), box-shadow var(--motion-fast); }
 .conversation-drop-zone.dragging { border-color: var(--accent); box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent), 0 3px 12px rgb(22 34 52 / 5%); }
 .conversation-drop-zone.dragging { background: var(--accent-soft); }
+/* Run status: a highlight that fades out before the rounded corners, a ring on
+   the stop button and the placeholder text. The line opens a details card. */
+.conversation-composer .drop-zone-status { position: absolute; z-index: 2; top: -6px; left: 10px; right: 10px; width: auto; height: 13px; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; cursor: pointer; }
+.drop-zone-status::before { position: absolute; top: 5px; left: 0; right: 0; height: 2px; border-radius: 2px; content: ""; background: linear-gradient(90deg, transparent, var(--accent) 50%, transparent) 0 0 / 35% 100% no-repeat; mask: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent); animation: status-sweep 1.8s ease-in-out infinite; }
+.conversation-composer .drop-zone-status:hover { background: transparent; }
+.drop-zone-status:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.status-tool .drop-zone-status::before { animation-duration: 2.8s; }
+.status-unknown .drop-zone-status::before { background: repeating-linear-gradient(90deg, var(--muted) 0 3px, transparent 3px 7px); opacity: .55; animation: none; }
+@keyframes status-sweep { from { background-position: -60% 0; } to { background-position: 160% 0; } }
+.status-details { position: absolute; z-index: 5; left: 8px; bottom: calc(100% + 8px); display: grid; gap: 3px; min-width: 210px; max-width: calc(100% - 16px); padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--glass); color: var(--text); box-shadow: var(--shadow-float); backdrop-filter: blur(14px) saturate(125%); font: 12px/1.5 var(--font-ui); }
+.status-details strong { font-weight: 600; }
+.status-details span { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.status-details span:empty, .status-details [hidden] { display: none; }
+.conversation-composer .conversation-drop-zone textarea::placeholder { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.conversation-attachment.uploading { position: relative; overflow: hidden; }
+.conversation-attachment.uploading::after { position: absolute; left: 0; bottom: 0; width: var(--progress); height: 2px; background: var(--accent); content: ""; transition: width var(--motion-fast); }
+.conversation-attachment.uploading small { font-variant-numeric: tabular-nums; }
 .composer-input-row { display: block; min-height: 42px; padding: 5px 10px 0; }
 .composer-toolbar { display: flex; align-items: center; gap: 3px; min-width: 0; min-height: 40px; padding: 1px 4px 4px; }
 .composer-options { display: contents; }
-.composer-options-toggle { display: none; }
+.composer-icon.composer-options-toggle { display: none; }
 .composer-choice { position: relative; min-width: 0; }
 .composer-model-choice { flex: 0 1 auto; }
 .composer-effort-choice { flex: none; }
@@ -792,7 +808,7 @@ progress { width: 100%; accent-color: var(--accent); }
   .conversation-attachments { grid-column: 1 / -1; grid-row: 2; }
   .composer-input-row { grid-column: 2; grid-row: 3; align-self: center; min-width: 0; min-height: 40px; padding: 2px 0; }
   .composer-toolbar { display: contents; }
-  .composer-options-toggle { display: inline-grid; grid-column: 1; grid-row: 3; border: 0; background: transparent; color: var(--muted); }
+  .composer-icon.composer-options-toggle { display: inline-grid; grid-column: 1; grid-row: 3; border: 0; background: transparent; color: var(--muted); }
   .composer-options-toggle:hover, .composer-options-toggle[aria-expanded="true"] { background: var(--hover); color: var(--text); }
   .composer-options-toggle svg { transition: transform var(--motion-fast); }
   .composer-options-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
@@ -1002,9 +1018,12 @@ progress { width: 100%; accent-color: var(--accent); }
   .thread-project-summary, .thread-project-history-summary { border-color: CanvasText; }
 }
 .composer-submit-slot { display: grid; place-items: center; }
-.composer-stop { appearance: none; border: 0; box-shadow: none; color: var(--text); background: transparent; }
+.composer-stop { position: relative; appearance: none; border: 0; box-shadow: none; color: var(--text); background: transparent; }
 .composer-stop:hover { background: var(--hover); }
 .composer-stop svg { fill: currentColor; stroke: none; }
+.status-active .composer-stop::before, .status-unknown .composer-stop::before { position: absolute; inset: 4px; border: 2px solid color-mix(in srgb, var(--accent) 16%, transparent); border-top-color: var(--accent); border-radius: 50%; content: ""; animation: reply-spin 1s linear infinite; pointer-events: none; }
+.status-unknown .composer-stop::before { border-color: var(--line); border-style: dotted; animation: none; }
+.status-active .composer-stop svg, .status-unknown .composer-stop svg { width: 12px; height: 12px; }
 .thread-options-menu { position: fixed; inset: auto; width: 194px; margin: 0; padding: 5px; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text); background: var(--surface-raised); box-shadow: var(--shadow-float); }
 .thread-options-menu .thread-delete-action { color: var(--danger); }
 .thread-options-menu > * { display: block; width: 100%; min-height: 36px; padding: 8px 10px; border: 0; border-radius: var(--radius-control); color: var(--text); background: transparent; font-size: 13px; text-align: left; text-decoration: none; }

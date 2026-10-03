@@ -48,7 +48,7 @@ try {
   await page.locator('#loginForm button[type="submit"]').click();
   await page.locator("#dashboardView:not(.hidden)").waitFor();
   await page.goto(`${origin}/?thread=${runningId}`);
-  const status = page.locator("#conversationActivity");
+  const status = page.locator("#conversationStatus");
   const runningLabel = page.locator(`[data-thread-activity="${runningId}"]`);
   const idleLabel = page.locator(`[data-thread-activity="${idleId}"]`);
   await status.waitFor({ state: "visible" });
@@ -57,6 +57,15 @@ try {
   assert.equal(await page.locator(".thread-activity-icon").count(), 0, "list status uses the whole row, without a spinner");
   assert.equal(await idleLabel.getAttribute("data-state"), "idle");
   assert.equal(sockets, 0, "reading persisted activity never resumes a thread or starts a runtime");
+  assert.equal(await page.locator("#conversationActivity").isVisible(), false, "a plain running turn takes no extra composer row");
+  assert.match(await page.locator("#conversationInput").getAttribute("placeholder"), /^Codex /, "running status moves into the placeholder");
+  assert.equal(await page.locator("#conversationDropZone").evaluate(zone => zone.classList.contains("status-active")), true);
+  await status.click();
+  await page.locator("#conversationStatusDetails").waitFor({ state: "visible" });
+  assert.equal(await status.getAttribute("aria-expanded"), "true");
+  assert.match(await page.locator("#conversationStatusTitle").textContent(), /^Codex /);
+  await status.click();
+  await page.locator("#conversationStatusDetails").waitFor({ state: "hidden" });
   await page.reload();
   await status.waitFor({ state: "visible" });
   assert.equal(await runningLabel.getAttribute("data-state"), "running", "full reload recovers activity from the Server");
@@ -91,6 +100,7 @@ try {
   assert(calls > beforePoll);
   assert.equal(await status.isVisible(), true);
   assert.match(await page.locator("#conversationActivityText").innerText(), /节点离线/);
+  assert.equal(await page.locator("#conversationActivity").isVisible(), true, "an unconfirmed run keeps its explanation visible");
   assert.equal(await page.locator("#threadOptionsMenu").evaluate(element => element.matches(":popover-open")), true);
   await page.locator("#conversationInput").click();
   rows[0].activity = { ...rows[0].activity, state: "idle", itemCount: 3 };

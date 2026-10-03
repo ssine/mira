@@ -110,7 +110,7 @@ try {
   await page.reload();
   await page.waitForFunction(() => document.querySelector("#conversationTitle").textContent === "Remember this account");
   assert.equal(await view.locator("#conversationAccount").inputValue(), ids[1]);
-  await view.locator("#conversationActivity:not(.hidden)").waitFor();
+  await view.locator("#conversationStatus:not(.hidden)").waitFor();
   assert.match(await view.locator("#conversationActivityText").textContent(), /^Claude /);
   await page.waitForFunction(() => document.querySelector("#conversationActivityCost").textContent === "本轮约 $0.12");
   assert.equal(await view.locator("#conversationComposer #claudeReconcile").count(), 0);

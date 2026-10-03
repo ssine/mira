@@ -97,8 +97,9 @@ export async function runDraftPhase(phase) {
     attach(); await saved();
     await control({ uploadDelay: 500 });
     $("#conversationForm").requestSubmit();
-    await until(() => !$("#conversationUploadCancel").classList.contains("hidden"), "Upload did not start");
-    $("#conversationUploadCancel").click();
+    await until(() => $("#conversationAttachments [data-upload-cancel]") && $(".conversation-attachment.uploading"), "Upload did not start");
+    assert(/%/.test($(".conversation-attachment.uploading small").textContent), "Upload progress is not on the attachment");
+    $("#conversationAttachments [data-upload-cancel]").click();
     await until(() => !$("#conversationSend").disabled && $("#conversationNotice").textContent.includes("已取消上传"), "Upload cancellation did not finish");
     assert($("#conversationInput").value === "recovered after quota", "Cancellation discarded text");
     assert((await readDraft(b)).files.length === 1, "Cancellation discarded attachment");

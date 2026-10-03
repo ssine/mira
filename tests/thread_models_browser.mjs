@@ -104,6 +104,7 @@ try {
   assert.ok(inputBox.y+inputBox.height<=toolbarBox.y+1,'attachment, model, effort and send controls stay on the bottom row');
   assert.equal(await page.locator('.composer-toolbar #conversationAttach').count(),1);
   assert.equal(await page.locator('.composer-toolbar #conversationSend').count(),1);
+  assert.equal(await page.locator('#conversationOptionsToggle').isVisible(),false,'desktop has no options toggle');
   assert.equal(mainCalls.length,0,'previewing defaults does not resume/create a thread');
   assert.equal(modelCalls.find(call=>call.method==='config/read').params.cwd,'/work');
   await chooseModel('gpt-5.6-sol');await chooseEffort('high');
