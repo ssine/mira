@@ -55,3 +55,10 @@ Bootstrap and management paths are reserved under `/__mira_preview/`.
 Source contexts are projections of canonical turn cwd and execution events, not
 new authoritative history. Unknown/multiple origins require explicit Node
 selection. No quote-back action or preview runtime state is stored in ThreadStore.
+
+Multi-ingress deployments configure console-origin to preview-origin mappings on
+Server. The same POST API returns the complete URL for the current configured
+console origin, including the preview port; no Web or Node protocol changes are
+needed. All configured preview suffixes are reserved, and each transient session
+is bound to the single complete origin selected at creation. A grant or cookie
+presented at another hostname or port cannot claim or read that session.

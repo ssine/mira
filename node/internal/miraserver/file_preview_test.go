@@ -62,3 +62,66 @@ func TestExpiredSiteCannotServeAssets(t *testing.T) {
 		t.Fatal(w.Code)
 	}
 }
+
+func TestPreviewIngressSelectionDoesNotInheritConsolePort(t *testing.T) {
+	s := &Server{config: Config{Foundation: foundation.Config{SecureCookies: true, PreviewDomain: "legacy.example.test", PreviewIngresses: []foundation.PreviewIngress{
+		{ConsoleOrigin: "https://console.example.test", PreviewOrigin: "https://preview.example.test:9443"},
+		{ConsoleOrigin: "https://direct.example.test:24443", PreviewOrigin: "https://preview.direct.example.test:34443"},
+	}}}}
+	for _, test := range []struct{ host, want string }{
+		{"console.example.test", "https://preview.example.test:9443"},
+		{"CONSOLE.example.test:443", "https://preview.example.test:9443"},
+		{"direct.example.test:24443", "https://preview.direct.example.test:34443"},
+		{"direct.example.test", ""},
+		{"unknown.example.test:24443", ""},
+	} {
+		r := httptest.NewRequest("POST", "https://"+test.host+"/v1/file-previews", nil)
+		r.Header.Set("X-Forwarded-Host", "console.example.test")
+		if got := s.previewOrigin(r); got != test.want {
+			t.Fatalf("%s: %s, want %s", test.host, got, test.want)
+		}
+	}
+	s.config.Foundation.PreviewIngresses = nil
+	r := httptest.NewRequest("POST", "https://console.example.test:8443/v1/file-previews", nil)
+	if got := s.previewOrigin(r); got != "https://legacy.example.test:8443" {
+		t.Fatal("legacy configuration changed", got)
+	}
+}
+
+func TestAllPreviewSuffixesReserveAdminRoutes(t *testing.T) {
+	s := &Server{config: Config{Foundation: foundation.Config{PreviewIngresses: []foundation.PreviewIngress{
+		{PreviewOrigin: "https://preview.example.test"},
+		{PreviewOrigin: "https://direct.preview.example.test:24443"},
+	}}}}
+	for _, host := range []string{"id.preview.example.test", "id.direct.preview.example.test:24443", "direct.preview.example.test", "a.b.direct.preview.example.test"} {
+		for _, route := range []string{"/app.js", "/v1/admin/session", "/v1/nodes/a/connect"} {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest("GET", "https://"+host+route, nil))
+			if w.Code != 410 {
+				t.Fatal(host, route, w.Code)
+			}
+		}
+	}
+	if id, ok := s.previewHost("id.direct.preview.example.test:24443"); !ok || id != "id" {
+		t.Fatal("most specific preview suffix did not win", id, ok)
+	}
+}
+
+func TestPreviewSessionCannotMoveToAnotherIngress(t *testing.T) {
+	s := &Server{config: Config{Foundation: foundation.Config{SecureCookies: true, PreviewIngresses: []foundation.PreviewIngress{
+		{PreviewOrigin: "https://preview.example.test"},
+		{PreviewOrigin: "https://preview.direct.example.test:24443"},
+	}}}, previews: previewStore{sessions: map[string]*previewSession{"active": {ID: "active", Origin: "https://active.preview.example.test", Expires: time.Now().Add(time.Minute)}}}}
+	for _, host := range []string{"active.preview.direct.example.test:24443", "active.preview.example.test:24443"} {
+		for _, route := range []string{"/__mira_preview/bootstrap", "/__mira_preview/claim", "/index.html"} {
+			w := httptest.NewRecorder()
+			s.ServeHTTP(w, httptest.NewRequest("POST", "https://"+host+route, nil))
+			if w.Code != 410 {
+				t.Fatal("session accepted on another origin", host, route, w.Code)
+			}
+		}
+	}
+	if s.previews.sessions["active"] == nil {
+		t.Fatal("wrong ingress invalidated the owner's session")
+	}
+}

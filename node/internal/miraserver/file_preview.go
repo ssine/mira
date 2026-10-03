@@ -27,6 +27,7 @@ type previewSession struct {
 	NodeID       string
 	Resource     resourcewire.Request
 	ControlURL   string
+	Origin       string
 	Entry        string
 	GrantHash    string
 	CookieHash   string
@@ -175,9 +176,12 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		if r.Method != "POST" {
 			return foundation.WriteErrorJSON(w, 405, "POST required", "method_not_allowed")
 		}
-		domain := server.config.Foundation.PreviewDomain
-		if domain == "" {
+		if server.config.Foundation.PreviewDomain == "" && len(server.config.Foundation.PreviewIngresses) == 0 {
 			return foundation.WriteErrorJSON(w, 409, "尚未配置网站预览域名；请设置 MIRA_NODE_PREVIEW_DOMAIN 并准备通配符 DNS 与证书", "preview_domain_unconfigured")
+		}
+		previewOrigin := server.previewOrigin(r)
+		if previewOrigin == "" {
+			return foundation.WriteErrorJSON(w, 409, "当前 Mira 入口尚未配置对应的网站预览地址", "preview_ingress_unconfigured")
 		}
 		var body struct {
 			NodeID   string               `json:"nodeId"`
@@ -240,6 +244,8 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 			controlQuery.Set("userSessionId", strconv.FormatUint(uint64(*p.UserSessionID), 10))
 		}
 		session.ControlURL = requestOrigin(r, server.config.Foundation.SecureCookies) + "/files.html?" + controlQuery.Encode()
+		parsedPreview, _ := url.Parse(previewOrigin)
+		session.Origin = parsedPreview.Scheme + "://" + id + "." + parsedPreview.Host
 
 		server.previews.Lock()
 		if server.previews.sessions == nil {
@@ -256,11 +262,7 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		}
 		server.previews.sessions[id] = session
 		server.previews.Unlock()
-		scheme := "https"
-		if !server.config.Foundation.SecureCookies {
-			scheme = "http"
-		}
-		return writeJSON(w, 201, map[string]any{"id": id, "url": scheme + "://" + id + "." + domain + previewPort(r.Host, scheme) + "/__mira_preview/bootstrap#" + grant, "expiresAt": session.Expires})
+		return writeJSON(w, 201, map[string]any{"id": id, "url": session.Origin + "/__mira_preview/bootstrap#" + grant, "expiresAt": session.Expires})
 	default:
 		id := strings.TrimPrefix(r.URL.Path, "/v1/file-previews/")
 		server.previews.Lock()
@@ -309,10 +311,22 @@ func (server *Server) previewHost(host string) (string, bool) {
 		host = h
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	suffix := "." + server.config.Foundation.PreviewDomain
-	if server.config.Foundation.PreviewDomain == "" || (!strings.HasSuffix(host, suffix) && host != strings.TrimPrefix(suffix, ".")) {
+	domains := []string{server.config.Foundation.PreviewDomain}
+	for _, ingress := range server.config.Foundation.PreviewIngresses {
+		u, _ := url.Parse(ingress.PreviewOrigin)
+		domains = append(domains, u.Hostname())
+	}
+	// Prefer the most specific suffix when configured preview domains overlap.
+	domain := ""
+	for _, candidate := range domains {
+		if candidate != "" && (host == candidate || strings.HasSuffix(host, "."+candidate)) && len(candidate) > len(domain) {
+			domain = candidate
+		}
+	}
+	if domain == "" {
 		return "", false
 	}
+	suffix := "." + domain
 	id := strings.TrimSuffix(host, suffix)
 	if strings.Contains(id, ".") || id == host {
 		return "", true
@@ -333,7 +347,8 @@ func (server *Server) servePreviewHost(w http.ResponseWriter, r *http.Request, i
 		s = &copy
 	}
 	server.previews.Unlock()
-	if s == nil || time.Now().After(s.Expires) {
+	origin, originError := foundation.NormalizeHTTPOrigin(requestOrigin(r, server.config.Foundation.SecureCookies))
+	if s == nil || time.Now().After(s.Expires) || originError != nil || origin != s.Origin {
 		http.Error(w, "预览已过期或已关闭，请从 Mira 对话重新打开。", 410)
 		return
 	}
@@ -428,6 +443,26 @@ func requestOrigin(r *http.Request, secure bool) string {
 		scheme = "https"
 	}
 	return scheme + "://" + r.Host
+}
+
+func (server *Server) previewOrigin(r *http.Request) string {
+	config := server.config.Foundation
+	if len(config.PreviewIngresses) != 0 {
+		ingress, ok := config.PreviewIngressForOrigin(requestOrigin(r, config.SecureCookies))
+		if !ok {
+			return ""
+		}
+		return ingress.PreviewOrigin
+	}
+	if config.PreviewDomain == "" {
+		return ""
+	}
+	// Preserve the released single-suffix behavior for legacy deployments.
+	scheme := "http"
+	if config.SecureCookies {
+		scheme = "https"
+	}
+	return scheme + "://" + config.PreviewDomain + previewPort(r.Host, scheme)
 }
 
 const previewBootstrap = `<!doctype html><meta charset="utf-8"><title>Mira 网站预览</title><p id="status">正在打开网站…</p><script>

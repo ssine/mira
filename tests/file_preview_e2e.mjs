@@ -51,6 +51,31 @@ try{
  r=await fetch(`${base}/v1/files/content?${resource('bundle.zip',{archive:'true',archiveEntry:'duplicate.txt'})}`,{headers:{cookie}});assert.equal(r.status,400);
  const missingCSRF=await fetch(base+'/v1/file-previews',{method:'POST',headers:{cookie,'Content-Type':'application/json'},body:'{}'});assert.equal(missingCSRF.status,403);
  const created=await api('/v1/file-previews','POST',{nodeId:nodeID,root:path.join(root,'site'),entry:'pages/index.html',resource:{path:path.join(root,'site/pages/index.html')}});assert.equal(created.r.status,201,JSON.stringify(created.b));const u=new URL(created.b.url);const host=u.host;const origin=u.origin;
+ // Multiple public ingress hosts reach this same Server listener.
+ if(process.env.MIRA_TEST_PREVIEW_INGRESSES){
+  const ingresses=JSON.parse(process.env.MIRA_TEST_PREVIEW_INGRESSES);assert.ok(ingresses.length>=2);
+  const ingressAPI=async(consoleHost,route,method='GET',body)=>{
+   const response=await hostFetch(base+route,{method,headers:{Host:consoleHost,cookie,'x-mira-csrf':auth.csrfToken,'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+   return {r:response,b:await response.json()};
+  };
+  const siteBody={nodeId:nodeID,root:path.join(root,'site'),entry:'pages/index.html',resource:{path:path.join(root,'site/pages/index.html')}};
+  for(const ingress of ingresses){
+   const consoleHost=new URL(ingress.consoleOrigin).host;
+   const result=await ingressAPI(consoleHost,'/v1/file-previews','POST',siteBody);assert.equal(result.r.status,201,JSON.stringify(result.b));
+   const siteURL=new URL(result.b.url);const expected=new URL(ingress.previewOrigin);expected.hostname=result.b.id+'.'+expected.hostname;assert.equal(siteURL.origin,expected.origin);
+   const other=ingresses.find(value=>value.previewOrigin!==ingress.previewOrigin);assert.ok(other);
+   const otherURL=new URL(other.previewOrigin);otherURL.hostname=result.b.id+'.'+otherURL.hostname;
+   let response=await hostFetch(base+'/__mira_preview/claim',{method:'POST',headers:{Host:otherURL.host,Origin:otherURL.origin,'Content-Type':'application/json'},body:JSON.stringify({grant:siteURL.hash.slice(1)})});assert.equal(response.status,410);
+   response=await hostFetch(base+'/__mira_preview/claim',{method:'POST',headers:{Host:siteURL.host,Origin:siteURL.origin,'Content-Type':'application/json'},body:JSON.stringify({grant:siteURL.hash.slice(1)})});assert.equal(response.status,200);const boundCookie=response.headers.get('set-cookie').split(';')[0];
+   response=await hostFetch(base+'/assets/data.json',{headers:{Host:siteURL.host,cookie:boundCookie}});assert.equal(response.status,200);assert.equal((await response.json()).value,'relative fetch works');
+   response=await hostFetch(base+'/assets/data.json',{headers:{Host:otherURL.host,cookie:boundCookie}});assert.equal(response.status,410);
+   const wrongPort=new URL(siteURL);wrongPort.port=siteURL.port==='24444'?'24445':'24444';
+   response=await hostFetch(base+'/assets/data.json',{headers:{Host:wrongPort.host,cookie:boundCookie}});assert.equal(response.status,410);
+   response=await hostFetch(base+'/v1/admin/session',{headers:{Host:siteURL.host,cookie}});assert.notEqual(response.status,200);
+   await ingressAPI(consoleHost,`/v1/file-previews/${result.b.id}`,'DELETE');
+  }
+  const unmapped=await ingressAPI('unknown.console.example.test:24443','/v1/file-previews','POST',siteBody);assert.equal(unmapped.r.status,409);assert.equal(unmapped.b.code,'preview_ingress_unconfigured');
+ }
  const preview=async(route,headers={},method='GET',body)=>hostFetch(base+route,{method,headers:{Host:host,...headers},...(body?{body}:{})});
  r=await preview('/pages/index.html');assert.equal(r.status,403);
  assert.equal(r.headers.get('cross-origin-opener-policy'),'same-origin');
@@ -68,5 +93,5 @@ try{
  r=await hostFetch(base+'/__mira_preview/claim',{method:'POST',headers:{Host:logoutURL.host,Origin:logoutURL.origin,'Content-Type':'application/json'},body:JSON.stringify({grant:logoutURL.hash.slice(1)})});assert.equal(r.status,200);const logoutCookie=r.headers.get('set-cookie').split(';')[0];await api('/v1/admin/logout','POST',{});
  r=await hostFetch(base+'/assets/data.json',{headers:{Host:logoutURL.host,cookie:logoutCookie}});assert.equal(r.status,403);
  if(process.env.MIRA_KEEP_FILE_FIXTURE){await fs.writeFile(process.env.MIRA_KEEP_FILE_FIXTURE,JSON.stringify({root,nodeID,base,pid:child.pid,media:Boolean(process.env.MIRA_TEST_FFMPEG)}));console.log('fixture retained for browser acceptance');await new Promise(resolve=>{process.once('SIGTERM',resolve);process.once('SIGINT',resolve)});}
- console.log(JSON.stringify({ok:true,binaryStream:true,range:true,cancel:true,zip:true,isolatedSite:true,zipSite:true,oneTimeGrant:true,csrf:true,close:true,logoutRevocation:true}));
+ console.log(JSON.stringify({ok:true,binaryStream:true,range:true,cancel:true,zip:true,isolatedSite:true,zipSite:true,multiIngress:Boolean(process.env.MIRA_TEST_PREVIEW_INGRESSES),oneTimeGrant:true,csrf:true,close:true,logoutRevocation:true}));
 }catch(e){console.error(e);console.error(logs.slice(-1200));process.exitCode=1;}finally{if(child.exitCode===null){const exit=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');await exit;}await fs.rm(root,{recursive:true,force:true});}

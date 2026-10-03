@@ -21,6 +21,7 @@ const (
 // Environment names intentionally stay compatible with the released server.
 type Config struct {
 	PreviewDomain      string
+	PreviewIngresses   []PreviewIngress
 	ListenHost         string
 	ListenPort         int
 	DatabaseURL        string
@@ -69,11 +70,16 @@ func ConfigFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	if previewDomain != "" && !validPreview {
 		return Config{}, fmt.Errorf("MIRA_NODE_PREVIEW_DOMAIN must be a DNS suffix without wildcard or scheme")
 	}
+	secure := !securePresent || secureCookies != "false"
+	previewIngresses, err := parsePreviewIngresses(envOr(lookup, "MIRA_NODE_PREVIEW_INGRESSES", ""), secure, previewDomain)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
-		PreviewDomain: previewDomain,
-		ListenHost:    host, ListenPort: port, DatabaseURL: databaseURL,
+		PreviewDomain: previewDomain, PreviewIngresses: previewIngresses,
+		ListenHost: host, ListenPort: port, DatabaseURL: databaseURL,
 		CodexStoreEndpoint: endpoint,
-		SecureCookies:      !securePresent || secureCookies != "false",
+		SecureCookies:      secure,
 		TrustProxyHeaders:  trustProxy == "true",
 		MaxBodyBytes:       DefaultMaxBodyBytes, PoolSize: int32(poolSize),
 	}, nil

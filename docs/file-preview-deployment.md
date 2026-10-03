@@ -19,6 +19,55 @@ Keep `MIRA_SECURE_COOKIES=true` on HTTPS deployments. The suffix is optional for
 ordinary document/media/ZIP browsing. It is required for website previews.
 Preview state is transient; restarting Server expires open sites.
 
+For multiple console entry points, configure explicit Server-owned mappings:
+
+```text
+MIRA_NODE_PREVIEW_INGRESSES=[{"consoleOrigin":"https://mira.example.test","previewOrigin":"https://preview.mira.example.test"},{"consoleOrigin":"https://direct.mira.example.test:24443","previewOrigin":"https://preview.direct.mira.example.test:24443"}]
+```
+
+Each `previewOrigin` supplies the scheme, DNS suffix and port of the preview
+ingress; Server inserts the generated site ID as one hostname label. It matches
+the request's console origin against the configured list and returns the complete
+URL. The Web client opens that URL; Nodes continue supplying files through their
+existing outbound connection without learning preview domains. Node endpoint
+discovery and browser preview selection remain independent.
+
+Origins must contain no credentials, query, fragment or application path. The
+schemes must agree with `MIRA_SECURE_COOKIES` (HTTPS by default). Default ports,
+hostname case and an optional trailing slash are normalized. Duplicate console
+origins and preview suffixes capturing a console hostname fail startup. Each
+configured preview suffix reserves its entire namespace before console/API routes.
+The preview grant and cookie authorize only the selected complete origin;
+replacing its hostname or port cannot move a session to another ingress.
+
+Once mappings are configured, an unmapped console origin cannot create a site;
+it receives `preview_ingress_unconfigured`. Configure all supported console
+aliases explicitly. With no mappings, the released `MIRA_NODE_PREVIEW_DOMAIN`
+single-suffix behavior remains compatible, including its inherited ingress port.
+The legacy suffix, if retained alongside mappings, stays reserved but does not
+act as a fallback for an unmapped console.
+
+Prepare DNS and wildcard TLS separately for every preview suffix. For a direct
+entry point behind a nonstandard public port, point its preview CNAME at the
+direct hostname and configure Caddy with the explicit port:
+
+```caddyfile
+https://*.preview.direct.mira.example.test:24443 {
+    tls {
+        dns alidns {
+            access_key_id {env.ALIYUN_ACCESS_KEY_ID}
+            access_key_secret {env.ALIYUN_ACCESS_KEY_SECRET}
+        }
+    }
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+The port is the external browser-facing port; an existing router may forward it
+to Caddy's internal port 443. In that case, use the existing 443 listener for the
+wildcard site and keep 24443 in the Server mapping. Do not introduce a new public
+port or change unrelated forwarding merely to match the URL.
+
 Caddy needs the `dns.providers.alidns` module. A reviewable site block is:
 
 ```caddyfile
@@ -55,6 +104,10 @@ a random preview label, the wildcard SAN, HTTPS/WSS relay and a real Node file
 preview. Test two independent sites, root-relative assets/module/fetch, logout,
 Node revocation and session expiry. TLS preparation and a Mira release are
 separate deployment steps.
+
+For multiple entry points, also create and claim a site from each console origin,
+verify its full returned URL and relative assets, and reject that same site's
+grant/cookie on another hostname or port. Include an unmapped console origin.
 
 ## Current boundaries
 
