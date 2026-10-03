@@ -325,6 +325,7 @@ func (server *Server) servePreviewHost(w http.ResponseWriter, r *http.Request, i
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), display-capture=()")
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	server.previews.Lock()
 	s := server.previews.sessions[id]
 	if s != nil {

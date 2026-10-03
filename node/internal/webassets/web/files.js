@@ -22,7 +22,7 @@ async function site() {
   $('fileTreeToggle').onclick=()=>document.body.classList.toggle('file-tree-visible');
   if(query.get('view')==='site'){
     $('siteControls').hidden=false;const current=ref.archive?ref.archiveEntry:ref.path;$('siteRoot').value=parentPath(current);if(ref.archive&&$('siteRoot').value==='/')$('siteRoot').value='';$('siteEntry').value=fileName(ref);if(query.has('root'))$('siteRoot').value=query.get('root');if(query.has('entry'))$('siteEntry').value=query.get('entry');
-    $('siteOpen').onclick=async()=>{const target=window.open('about:blank','_blank');try{const url=await site();if(target)target.location.replace(url);else{$('filePageStatus').textContent='窗口被拦截，请允许打开预览窗口'}}catch(e){target?.close();$('filePageStatus').textContent=e.message}};
+    $('siteOpen').onclick=async()=>{const target=window.open('about:blank','_blank');if(target)target.opener=null;try{const url=await site();if(target)target.location.replace(url);else{$('filePageStatus').textContent='窗口被拦截，请允许打开预览窗口'}}catch(e){target?.close();$('filePageStatus').textContent=e.message}};
     $('siteStop').onclick=async()=>{try{await api(`/v1/file-previews/${sessionID}`,'DELETE');sessionID=null;clearInterval(lease);$('siteStop').hidden=true;$('filePageStatus').textContent='预览会话已关闭'}catch(e){$('filePageStatus').textContent=e.message}};
     // Retain this authenticated loading page for root adjustment and leases;
     // first navigation replaces it only when no adjustment controls are needed.

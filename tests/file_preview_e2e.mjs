@@ -53,9 +53,11 @@ try{
  const created=await api('/v1/file-previews','POST',{nodeId:nodeID,root:path.join(root,'site'),entry:'pages/index.html',resource:{path:path.join(root,'site/pages/index.html')}});assert.equal(created.r.status,201,JSON.stringify(created.b));const u=new URL(created.b.url);const host=u.host;const origin=u.origin;
  const preview=async(route,headers={},method='GET',body)=>hostFetch(base+route,{method,headers:{Host:host,...headers},...(body?{body}:{})});
  r=await preview('/pages/index.html');assert.equal(r.status,403);
+ assert.equal(r.headers.get('cross-origin-opener-policy'),'same-origin');
+ r=await preview('/__mira_preview/bootstrap');assert.equal(r.status,200);assert.equal(r.headers.get('cross-origin-opener-policy'),'same-origin');
  r=await preview('/__mira_preview/claim',{'Content-Type':'application/json',Origin:origin},'POST',JSON.stringify({grant:u.hash.slice(1)}));assert.equal(r.status,200,await r.clone().text());const siteCookie=r.headers.get('set-cookie').split(';')[0];assert.equal((await r.json()).entry,'/pages/index.html');
  r=await preview('/__mira_preview/claim',{'Content-Type':'application/json',Origin:origin},'POST',JSON.stringify({grant:u.hash.slice(1)}));assert.equal(r.status,403);
- for(const [route,text]of [['/pages/index.html','Preview website'],['/assets/main.js','fetch'],['/assets/data.json','relative fetch works']]){r=await preview(route,{cookie:siteCookie});assert.equal(r.status,200);assert.ok((await r.text()).includes(text));}
+ for(const [route,text]of [['/pages/index.html','Preview website'],['/assets/main.js','fetch'],['/assets/data.json','relative fetch works']]){r=await preview(route,{cookie:siteCookie});assert.equal(r.status,200);assert.equal(r.headers.get('cross-origin-opener-policy'),'same-origin');assert.ok((await r.text()).includes(text));}
  r=await preview('/v1/admin/session',{cookie:siteCookie+'; '+cookie});assert.notEqual(r.status,200);assert.ok(!(await r.text()).includes('csrfToken'));
  r=await preview('/leak.txt',{cookie:siteCookie});assert.equal(r.status,400);assert.ok(!(await r.text()).includes('secret outside site'));
  r=await hostFetch(base+'/assets/data.json',{headers:{Host:'another.'+host.split('.').slice(1).join('.'),cookie:siteCookie}});assert.equal(r.status,410);

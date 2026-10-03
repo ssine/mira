@@ -146,6 +146,24 @@ try:
     run('close-tab',str(popup)); owned.discard(popup); run('select',str(own))
     assert evaluate("document.querySelector('#conversationInput').value === 'Unsaved draft remains while reading files'")
     print('Agent HTML click → isolated new window, no opener, warm conversation draft: passed')
+    run('goto',fixture['base']+'/files.html?nodeId='+fixture['nodeID']+'&path='+str(root/'site/pages/index.html')+'&root='+str(root/'site')+'&entry=pages/index.html&view=site&noauto=1')
+    wait("!document.querySelector('#siteControls')?.hidden")
+    before = {row['index'] for row in run('tabs')['tabs']}
+    activate('#siteOpen')
+    popup = None
+    for _ in range(60):
+        added = [row for row in run('tabs')['tabs'] if row['index'] not in before]
+        if added:
+            popup = added[0]['index']; owned.add(popup); break
+        time.sleep(.2)
+    assert popup is not None, 'Root adjustment did not create an independent window'
+    run('select',str(popup))
+    wait("document.body.dataset.result === 'relative fetch works'",30)
+    assert evaluate("window.opener === null")
+    run('close-tab',str(popup)); owned.discard(popup); run('select',str(own))
+    activate('#siteStop')
+    wait("document.querySelector('#siteStop').hidden")
+    print('Root adjustment → isolated new window without an opener: passed')
     query='?nodeId='+fixture['nodeID']+'&path='+str(root/'bundle.zip')
     run('goto',fixture['base']+'/files.html'+query)
     wait("document.querySelectorAll('.file-tree-row').length > 0")
