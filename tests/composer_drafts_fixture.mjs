@@ -4,12 +4,22 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 const { WebSocketServer } = await import("ws").catch(() => import("../server/node_modules/ws/wrapper.mjs"));
 
-export async function startDraftFixture({ port = 0, forkTest = false, resumeTest = false, activityTest = false } = {}) {
+export async function startDraftFixture({ port = 0, forkTest = false, resumeTest = false, activityTest = false, menuTest = false } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001";
   const ids = ["00000000-0000-4000-8000-0000000000a1", "00000000-0000-4000-8000-0000000000b2"];
   const node = { nodeId, hostname: "Draft fixture", platform: "linux", status: "online", approvalStatus: "approved", capabilities: { appServer: true, files: true }, reportedAppServer: { status: "running" }, desiredAppServer: { defaultCwd: "/work" } };
   const summary = (threadId, cwd = "/work") => ({ threadId, cwd, title: `Draft ${threadId.slice(-2)}`, runtimeNodeId: nodeId, generation: 1, itemCount: 1, model: "fixture", activity: { state: "idle" }, updatedAt: new Date().toISOString() });
   let rows = ids.map(id => summary(id));
+  if (menuTest) {
+    rows.push(...Array.from({ length: 20 }, (_, index) => ({
+      ...summary(`10000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`),
+      updatedAt: new Date(Date.now() - 1000 * (index + 1)).toISOString(),
+    })));
+    for (const row of rows) {
+      row.tokenUsage = { inputTokens: 125000, cachedInputTokens: 100000, outputTokens: 8000 };
+      row.costEstimate = { amount: 0.75, status: "complete" };
+    }
+  }
   let fail = false, delay = 0, uploadDelay = 0;
   const uploads = [];
   let forkPending = null;
@@ -83,7 +93,8 @@ export async function startDraftFixture({ port = 0, forkTest = false, resumeTest
     try {
       const resource = path === "/" ? "index.html" : path.slice(1);
       if (resource.includes("..")) throw Error("Invalid path");
-      const file = path === "/__test/scenarios.mjs" ? new URL("./composer_drafts_scenarios.mjs", import.meta.url) : new URL(resource.startsWith("vendor/") ? `../node/internal/webassets/web/${resource}` : `../server/public/${resource}`, import.meta.url);
+      const scenarios = { "/__test/scenarios.mjs": "composer_drafts_scenarios.mjs", "/__test/thread-menu.mjs": "thread_menu_scenarios.mjs" };
+      const file = scenarios[path] ? new URL(`./${scenarios[path]}`, import.meta.url) : new URL(resource.startsWith("vendor/") ? `../node/internal/webassets/web/${resource}` : `../server/public/${resource}`, import.meta.url);
       const type = resource.endsWith(".css") ? "text/css" : /\.(?:js|mjs)$/.test(resource) ? "text/javascript" : resource.endsWith(".html") ? "text/html" : "application/octet-stream";
       response.setHeader("Content-Type", type);
       response.setHeader("Content-Security-Policy", csp);
@@ -128,6 +139,6 @@ export async function startDraftFixture({ port = 0, forkTest = false, resumeTest
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const fixture = await startDraftFixture({ port: Number(process.argv[2] ?? 0), forkTest: process.argv.includes("--fork"), resumeTest: process.argv.includes("--resume") });
+  const fixture = await startDraftFixture({ port: Number(process.argv[2] ?? 0), forkTest: process.argv.includes("--fork"), resumeTest: process.argv.includes("--resume"), menuTest: process.argv.includes("--thread-menu") });
   console.log(fixture.origin);
 }

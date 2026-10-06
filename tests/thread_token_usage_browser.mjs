@@ -65,14 +65,13 @@ try {
   assert.ok(Math.abs(separatorSpacing.outer - separatorSpacing.inner) < 1,
     `price separator spacing ${separatorSpacing.outer}px matches token separator spacing ${separatorSpacing.inner}px`);
   const height = (await row.boundingBox()).height;
-  const button = row.locator('button[data-thread-id]'), menu = row.locator('.thread-menu-toggle');
+  const button = row.locator('button[data-thread-id]');
   assert.equal(await button.evaluate(element => getComputedStyle(element).paddingLeft), '8px', 'thread content has breathing room beside the border');
-  assert.equal((await button.boundingBox()).width, (await row.boundingBox()).width, 'the menu reserves no column');
+  assert.equal((await button.boundingBox()).width, (await row.boundingBox()).width, 'thread content uses the full row');
+  assert.equal(await row.locator('button').count(), 1, 'options do not occupy or cover the row');
   const beforeHover = await row.locator('strong').boundingBox();
   await row.hover();
-  assert.equal(await menu.evaluate(element => getComputedStyle(element).position), 'absolute');
-  assert.deepEqual(await row.locator('strong').boundingBox(), beforeHover, 'hover overlay does not reflow the title');
-  assert.ok((await menu.boundingBox()).x > beforeHover.x && (await menu.boundingBox()).x < beforeHover.x + beforeHover.width);
+  assert.deepEqual(await row.locator('strong').boundingBox(), beforeHover, 'hover does not reflow the title');
   const resize = page.locator('#agentSidebarResize');
   const handle = await resize.boundingBox();
   await page.mouse.move(handle.x + 3, 300); await page.mouse.down(); await page.mouse.move(handle.x + 123, 300, {steps:8});
@@ -93,7 +92,7 @@ try {
 
   const panel = page.locator("#conversationDetails");
   const settled = () => panel.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished.catch(() => {}))));
-  const openDetails = async id => { await page.locator(`[data-thread-row="${id}"]`).hover(); await page.locator(`[data-thread-menu="${id}"]`).click(); await page.locator("#threadShowDetails").click(); await page.waitForFunction(() => document.querySelector("#conversationDetailsStatus")?.textContent === ""); await settled(); };
+  const openDetails = async id => { await page.locator(`[data-thread-row="${id}"]`).click({ button: "right" }); await page.locator("#threadShowDetails").click(); await page.waitForFunction(() => document.querySelector("#conversationDetailsStatus")?.textContent === ""); await settled(); };
   await openDetails(ids[0]);
   const facts = page.locator("#conversationTokenUsageFacts");
   assert.deepEqual(await facts.locator("dd").allTextContents(), ["125,000", "100,000", "8,000"]);
@@ -162,7 +161,7 @@ try {
   if (process.env.MIRA_WEB_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.MIRA_WEB_SCREENSHOT_DIR}/thread-token-usage-mobile.png` });
   await page.locator("#conversationDetailsClose").click();
   await page.setViewportSize({ width: 320, height: 844 });
-  assert.equal(await summary.isVisible(), true, "overlay menus free enough width for usage even on narrow phones");
+  assert.equal(await summary.isVisible(), true, "usage remains visible on narrow phones");
   assert.equal(await page.locator(`[data-thread-activity="${ids[0]}"]`).isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await panel.waitFor({ state: "hidden" });

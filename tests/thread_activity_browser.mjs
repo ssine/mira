@@ -93,7 +93,7 @@ try {
   await otherWindow.close();
   await page.bringToFront();
   // Polling must update in place, preserving focus and the open options menu.
-  await page.locator(`[data-thread-menu="${runningId}"]`).click();
+  await page.locator(`[data-thread-row="${runningId}"]`).click({ button: "right" });
   const beforePoll = calls;
   rows[0].activity = { ...rows[0].activity, state: "unknown", reason: "offline" };
   await page.waitForFunction(id => document.querySelector(`[data-thread-activity="${id}"]`)?.dataset.state === "unknown", runningId);

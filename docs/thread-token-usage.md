@@ -40,7 +40,8 @@ exact cached-input count. Narrow rows hide only the compact summary. Polling upd
 keeps selection/status and row height stable, and rejects older generation/item-count responses.
 Unknown input/output does not produce a misleading zero summary. Sidebar prices use `· $0.75`
 (`*` marks a partial estimate, with a full explanation on hover). Compact rows use `125k↑ 8k↓`.
-The menu overlays the title with a matching fade, reserving no column. Desktop sidebar width is
+Row options use right-click, long press or the keyboard menu shortcut, leaving usage and cost
+unobscured. Desktop sidebar width is
 resizable from 240 to 480 px, supports keyboard arrows/Home/End and persists as a local preference;
 mobile retains its existing gesture drawer. Recency labels use only time today, weekday within seven
 calendar days, and date for older conversations (including the year when different).
