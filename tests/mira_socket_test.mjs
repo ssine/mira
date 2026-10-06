@@ -54,6 +54,41 @@ test('closing an opening WebSocket prevents HTTP fallback', async t=>{
  const socket=new MiraSocket('wss://close.test/connect',['test-v1']);socket.close();await delay(5);
  assert.equal(socket.readyState,3);assert.equal(http,0);
 });
+test('auto falls back on a failed handshake; explicit websocket stays selected', async t=>{
+ globals(t);
+ for(const preference of ['auto','websocket']){
+  globalThis.location.href=`https://${preference}-handshake.test/?miraTransport=${preference}`;let posts=0;
+  globalThis.fetch=async(url,options)=>{
+   if(url.includes('transport=https')){posts++;return handshake()}
+   if(url.endsWith('/close'))return new Response(null,{status:204});
+   return untilAbort(options.signal);
+  };
+  class Native extends EventTarget {constructor(){super();queueMicrotask(()=>this.dispatchEvent(new Event('error')))}close(){this.dispatchEvent(Object.assign(new Event('close'),{code:1006,reason:''}))}}
+  globalThis.WebSocket=Native;
+  const socket=new MiraSocket(`wss://${preference}-handshake.test/connect`,['test-v1']);
+  await new Promise(resolve=>socket.addEventListener(preference==='auto'?'open':'close',resolve,{once:true}));
+  assert.equal(posts,preference==='auto'?1:0);socket.close();
+ }
+});
+test('two established abnormal closes select HTTPS on the next connection', async t=>{
+ globals(t);globalThis.location.href='https://abnormal.test/';let nativeCount=0,posts=0;
+ class Native extends EventTarget {constructor(){super();nativeCount++;this.protocol='test-v1';queueMicrotask(()=>this.dispatchEvent(new Event('open')))}close(){}}
+ globalThis.WebSocket=Native;
+ globalThis.fetch=async(url,options)=>{
+  if(url.includes('transport=https')){posts++;return handshake()}
+  if(url.endsWith('/close'))return new Response(null,{status:204});
+  return untilAbort(options.signal);
+ };
+ for(let i=0;i<2;i++){
+  const socket=new MiraSocket('wss://abnormal.test/connect',['test-v1']);
+  await new Promise(resolve=>socket.addEventListener('open',resolve,{once:true}));
+  socket.native.dispatchEvent(Object.assign(new Event('close'),{code:1006,reason:'connection lost'}));
+  assert.equal(socket.readyState,3);
+ }
+ const socket=new MiraSocket('wss://abnormal.test/connect',['test-v1']);
+ await new Promise(resolve=>socket.addEventListener('open',resolve,{once:true}));
+ assert.equal(nativeCount,2);assert.equal(posts,1);socket.close();
+});
 test('malformed HTTPS batches publish no partial messages', async t=>{
  globals(t);
  globalThis.fetch=async(url)=>{

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -155,6 +156,54 @@ func TestHTTPSExpiredSessionCannotReplay(t *testing.T) {
 		t.Fatalf("expired session: %v", err)
 	}
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestHTTPSConcurrentCloseWaitsForRemoteCleanup(t *testing.T) {
+	client, _, _ := harness(t, "")
+	c := client.(*clientConn)
+	network := c.http.Transport
+	started, release := make(chan struct{}), make(chan struct{})
+	var closes atomic.Int32
+	c.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(r.URL.Path, "/close") {
+			if closes.Add(1) == 1 {
+				close(started)
+			}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return nil, r.Context().Err()
+			}
+		}
+		return network.RoundTrip(r)
+	})
+	done := make(chan error, 2)
+	go func() { done <- c.Close() }()
+	<-started
+	go func() { done <- c.Close() }()
+	select {
+	case err := <-done:
+		t.Fatalf("Close returned before remote cleanup: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("Close did not complete")
+		}
+	}
+	if closes.Load() != 1 {
+		t.Fatal("duplicated remote cleanup")
+	}
+}
 func TestHTTPSBackpressureAndShutdown(t *testing.T) {
 	_, c, registry := harness(t, "")
 	payload := make([]byte, 64*1024)
@@ -208,6 +257,73 @@ func TestHTTPSFallbackCannotBypassAuthentication(t *testing.T) {
 	_, _, err := Dial(context.Background(), websocket.DefaultDialer, "ws"+strings.TrimPrefix(host.URL, "http"), nil, "auto")
 	if err == nil || posts.Load() != 1 {
 		t.Fatalf("fallback retained authentication err=%v posts=%d", err, posts.Load())
+	}
+}
+
+func TestAutoFallsBackOnEveryFailedWebSocketHandshake(t *testing.T) {
+	for _, failure := range []string{"400", "401", "403", "404", "426", "500", "503", "timeout", "closed"} {
+		t.Run(failure, func(t *testing.T) {
+			var posts atomic.Int32
+			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "POST" {
+					if r.URL.Query().Get("transport") == "https" {
+						posts.Add(1)
+						w.WriteHeader(201)
+						_, _ = io.WriteString(w, `{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","protocol":"test-v1"}`)
+					} else {
+						w.WriteHeader(204)
+					}
+					return
+				}
+				switch failure {
+				case "timeout":
+					time.Sleep(150 * time.Millisecond)
+				case "closed":
+					raw, _, _ := w.(http.Hijacker).Hijack()
+					_ = raw.Close()
+				default:
+					status, _ := strconv.Atoi(failure)
+					w.WriteHeader(status)
+				}
+			}))
+			defer host.Close()
+			dialer := *websocket.DefaultDialer
+			dialer.HandshakeTimeout = 50 * time.Millisecond
+			dialer.Subprotocols = []string{"test-v1"}
+			client, _, err := Dial(context.Background(), &dialer, "ws"+strings.TrimPrefix(host.URL, "http"), nil, "auto")
+			if err != nil || posts.Load() != 1 {
+				t.Fatalf("fallback: posts=%d err=%v", posts.Load(), err)
+			}
+			_ = client.Close()
+		})
+	}
+}
+
+func TestExplicitWebSocketAndCancellationDisableFallback(t *testing.T) {
+	for _, mode := range []string{"websocket", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			var posts atomic.Int32
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "POST" {
+					posts.Add(1)
+				}
+				if mode == "cancelled" {
+					cancel()
+				}
+				w.WriteHeader(403)
+			}))
+			defer host.Close()
+			preference := mode
+			if mode == "cancelled" {
+				preference = "auto"
+			}
+			_, _, err := Dial(ctx, websocket.DefaultDialer, "ws"+strings.TrimPrefix(host.URL, "http"), nil, preference)
+			if err == nil || posts.Load() != 0 {
+				t.Fatalf("unexpected fallback: posts=%d err=%v", posts.Load(), err)
+			}
+		})
 	}
 }
 

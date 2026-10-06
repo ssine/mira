@@ -55,7 +55,7 @@ async function closeFixtureDatabase(databasePool,adminPool,name){
   }
   await adminPool.query(`DROP DATABASE ${name}`);
 }
-function launch(executable,args,env={}){const p=spawn(executable,args,{cwd:repo,env:{...process.env,...env},stdio:['ignore','pipe','pipe']});for(const s of [p.stdout,p.stderr])s.on('data',b=>{logs.push(b.toString());if(logs.length>150)logs.shift()});processes.push(p);return p;}
+function launch(executable,args,env={}){const p=spawn(executable,args,{cwd:repo,env:{...process.env,...env},stdio:['ignore','pipe','pipe']});if(process.env.MIRA_OPENSSH_TEST_VERBOSE==='1')console.log('FIXTURE',p.pid,args[0],env.MIRA_NODE_KEY??'');for(const s of [p.stdout,p.stderr])s.on('data',b=>{if(process.env.MIRA_OPENSSH_TEST_VERBOSE==='1')process.stdout.write(b);logs.push(b.toString());if(logs.length>150)logs.shift()});processes.push(p);return p;}
 function clientPrivateKey(token){
   const match=/^mira_node_([0-9a-f-]+)_([A-Za-z0-9_-]{43})$/.exec(token);assert(match);
   const seed=Buffer.from(crypto.hkdfSync('sha256',Buffer.from(match[2],'base64url'),Buffer.from(match[1]),Buffer.from('mira/ssh/v1/client'),32));
@@ -64,7 +64,7 @@ function clientPrivateKey(token){
 }
 function cli(identity,args,{input='',timeout=20000,executable=cliBinary}={}){return new Promise((resolve,reject)=>{
   const p=spawn(executable,args,{env:{...process.env,MIRA_IDENTITY_FILE:identity,MIRA_NODE_OPENSSH_DIR:''}});
-  const out=[],err=[];const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error(`CLI timeout: ${args[0]}`))},timeout);
+  const out=[],err=[];const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error(`CLI timeout: ${JSON.stringify(args)}; stderr: ${Buffer.concat(err).toString().slice(-4096)}`))},timeout);
   p.stdout.on('data',b=>out.push(b));p.stderr.on('data',b=>err.push(b));p.on('error',reject);
   p.on('close',code=>{clearTimeout(timer);resolve({code,stdout:Buffer.concat(out),stderr:Buffer.concat(err).toString()})});p.stdin.on('error',()=>{});p.stdin.end(input);
 });}
@@ -154,9 +154,14 @@ try{
   }finally{await pool.query('UPDATE mira_node_ssh_keys SET host_key=$1 WHERE credential_id=$2',[bKey.host_key,bKey.credential_id])}
   await good(a.identity,['ssh',b.key,'--','true']);
   console.log('PASS wrong caller key, SSH username and pinned host key are rejected');
+  // Completed ProxyCommands must release HTTPS sessions immediately. More
+  // than the target's eight worker slots catches a leaked polling lease.
+  for(let i=0;i<12;i++)await good(a.identity,['ssh',b.key,'--','true']);
+  console.log('PASS completed SSH connections release worker capacity');
   r=await cli(a.identity,['ssh',b.key,'--','printf OUT; printf ERR >&2; exit 23']);assert.equal(r.code,23);assert.equal(r.stdout.toString(),'OUT');assert(r.stderr.includes('ERR'));
   const data=crypto.randomBytes(2*1024*1024);r=await good(a.identity,['ssh',b.key,'--','cat'],{input:data});assert.deepEqual(r.stdout,data);
   r=await good(a.identity,['ssh','-tt',b.key,'--','test -t 0 && printf PTY_OK']);assert(r.stdout.includes('PTY_OK'));
+  if(process.env.MIRA_OPENSSH_TEST_VERBOSE==='1')console.log('FIXTURE concurrent SSH');
   await Promise.all(Array.from({length:4},()=>good(a.identity,['ssh',b.key,'--','true'])));
   const source=path.join(a.dir,'folder');await fs.mkdir(source);await fs.writeFile(path.join(source,'中文.bin'),data);
   await good(a.identity,['scp','-rp',source,`${b.key}:${b.dir}/`]);assert.deepEqual(await fs.readFile(path.join(b.dir,'folder/中文.bin')),data);

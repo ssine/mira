@@ -17,6 +17,8 @@ import (
 // The standard OpenSSH ProxyCommand owns this process for the lifetime of its
 // transport, including ControlPersist. Node credentials never enter argv.
 func (client *cliClient) runSSHProxy(ctx context.Context, args []string, in io.Reader, out io.Writer) error {
+	ctx, cancel := sshProxyContext(ctx)
+	defer cancel()
 	client.configureSSHHTTP()
 	if len(args) != 1 {
 		return fmt.Errorf("SSH proxy requires one Node selector")

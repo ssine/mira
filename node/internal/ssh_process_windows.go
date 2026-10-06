@@ -3,10 +3,15 @@
 package node
 
 import (
+	"context"
 	"golang.org/x/sys/windows"
 	"os"
 	"unsafe"
 )
+
+func sshProxyContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(ctx)
+}
 
 // Closing the supervisor's job handle kills a worker's entire descendant tree,
 // including on supervisor crash. Modern Windows supports nested jobs.

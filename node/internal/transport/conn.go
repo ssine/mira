@@ -211,6 +211,8 @@ type clientConn struct {
 	received, sent              uint64
 	pending                     []frame
 	closed                      bool
+	closeDone                   chan struct{}
+	closeErr                    error
 }
 
 func (c *clientConn) request(ctx context.Context, method, route string, data []byte) ([]byte, error) {
@@ -365,16 +367,23 @@ func (c *clientConn) RemoteAddr() net.Addr { return httpAddr(c.url) }
 func (c *clientConn) Close() error {
 	c.mu.Lock()
 	if c.closed {
+		done := c.closeDone
 		c.mu.Unlock()
-		return nil
+		<-done
+		return c.closeErr
 	}
 	c.closed = true
+	c.closeDone = make(chan struct{})
 	c.mu.Unlock()
 	c.cancel()
 	ctx, done := context.WithTimeout(context.Background(), 2*time.Second)
 	defer done()
 	_, err := c.request(ctx, "POST", "/close", nil)
 	c.http.CloseIdleConnections()
+	c.mu.Lock()
+	c.closeErr = err
+	close(c.closeDone)
+	c.mu.Unlock()
 	return err
 }
 

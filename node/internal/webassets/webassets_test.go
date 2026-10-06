@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -137,14 +138,18 @@ func TestUnhandledRequestsDelegate(t *testing.T) {
 
 // A missing public module breaks every page before authentication can render.
 func TestApplicationImportsArePublished(t *testing.T) {
-	imports := regexp.MustCompile(`(?m)^import .* from ["'](/[^"']+)["']`)
+	imports := regexp.MustCompile(`(?m)^import .* from ["']([./][^"']+)["']`)
 	for route, entry := range assets {
 		if !strings.HasSuffix(route, ".js") || strings.HasPrefix(route, "/vendor/") {
 			continue
 		}
 		for _, match := range imports.FindAllSubmatch(entry.payload, -1) {
-			if _, ok := assets[string(match[1])]; !ok {
-				t.Errorf("%s imports unpublished %s", route, match[1])
+			target := string(match[1])
+			if !strings.HasPrefix(target, "/") {
+				target = path.Join(path.Dir(route), target)
+			}
+			if _, ok := assets[target]; !ok {
+				t.Errorf("%s imports unpublished %s", route, target)
 			}
 		}
 	}

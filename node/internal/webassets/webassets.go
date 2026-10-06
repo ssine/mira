@@ -42,6 +42,7 @@ var specs = map[string]assetSpec{
 	"/vendor/mermaid.js":         {"web/vendor/mermaid.js", "text/javascript; charset=utf-8"},
 	"/":                          {"web/index.html", "text/html; charset=utf-8"},
 	"/app.js":                    {"web/app.js", "text/javascript; charset=utf-8"},
+	"/mira-socket.js":            {"web/mira-socket.js", "text/javascript; charset=utf-8"},
 	"/thread-title.js":           {"web/thread-title.js", "text/javascript; charset=utf-8"},
 	"/thread-interrupt.js":       {"web/thread-interrupt.js", "text/javascript; charset=utf-8"},
 	"/thread-list.js":            {"web/thread-list.js", "text/javascript; charset=utf-8"},

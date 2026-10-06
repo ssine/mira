@@ -67,9 +67,13 @@ authenticated request, with a 10-second cleanup interval.
 
 `MIRA_NODE_TRANSPORT=auto|websocket|https` selects native external transports.
 Node configuration also accepts `transport`; auto is the default. Auto tries a
-WebSocket handshake for up to three seconds, then HTTPS with the same credential, including proxy-generated 403.
+WebSocket handshake for up to three seconds. Any handshake error triggers HTTPS
+with the same credential, including timeouts, connection loss and all HTTP
+rejections (such as 401, proxy-generated 403, 426 and 5xx). A cancelled caller
+does not start a fallback handshake.
 HTTPS independently enforces authentication and authorization.
-After two short-lived established WebSocket disconnects the Node uses HTTPS on
+After two consecutive established WebSocket connections each disconnect within
+one minute, the Node uses HTTPS on
 subsequent connections. Browser adapters use the same fallback and track
 abnormal disconnects per origin. Explicit WebSocket mode disables fallback.
 No handshake is replayed after an uncertain HTTPS handshake response.
