@@ -8,8 +8,11 @@ import (
 )
 
 func TestSingleImageSSHLinksStayPrivateAndRejectConflicts(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native Windows linked-image acceptance covers hardlinks")
+	role := func(name string) string {
+		if runtime.GOOS == "windows" {
+			return name + ".exe"
+		}
+		return name
 	}
 	source := filepath.Join(t.TempDir(), "mira")
 	if err := os.WriteFile(source, []byte("isolated image fixture"), 0700); err != nil {
@@ -20,7 +23,7 @@ func TestSingleImageSSHLinksStayPrivateAndRejectConflicts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actual, err := os.Stat(filepath.Join(dir, "sshd"))
+	actual, err := os.Stat(filepath.Join(dir, role("sshd")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,14 +32,14 @@ func TestSingleImageSSHLinksStayPrivateAndRejectConflicts(t *testing.T) {
 		t.Fatal("role is a second image")
 	}
 	info, _ := os.Stat(dir)
-	if info.Mode().Perm() != 0700 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0700 {
 		t.Fatal("roles directory is not private")
 	}
 	if again, err := ensureSingleImageOpenSSHRoles(source, parent); err != nil || again != dir {
 		t.Fatal(again, err)
 	}
-	_ = os.Remove(filepath.Join(dir, "sftp"))
-	if err := os.WriteFile(filepath.Join(dir, "sftp"), []byte("unrelated executable"), 0700); err != nil {
+	_ = os.Remove(filepath.Join(dir, role("sftp")))
+	if err := os.WriteFile(filepath.Join(dir, role("sftp")), []byte("unrelated executable"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	// Simulate another process starting with a fresh local cache.
