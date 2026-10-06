@@ -30,7 +30,16 @@ details panel keeps its own 1100px breakpoint: forcing a left drawer must not
 reserve a phantom third column. Docked sidebars do not intercept the conversation's
 gesture for opening details. Resizing or changing layout cancels an active drag.
 
+Conversation rows use their full width for the title, status, usage and cost.
+Open a row's options with right-click, a stationary 500ms touch/pen press, or
+Shift+F10/the menu key while focused. Moving 8px, scrolling, multiple contacts or
+cancelling the contact cancels a pending long press; releasing a successful long
+press does not also select the conversation. The current conversation retains
+its visible options button in the top-right corner of the conversation pane.
+
 `tests/sidebar_layout_browser.mjs` covers layout selection, geometry, persistence,
 fallback/restore, manual collapse, width clamping, conversation navigation, right
 details, keyboard use and unavailable storage. The existing shell, swipe and
 token-usage browser regressions also exercise the shared controls.
+`tests/thread_menu_browser.mjs` covers row options, keyboard access, long presses,
+gesture cancellation and unobscured costs in desktop and touch layouts.

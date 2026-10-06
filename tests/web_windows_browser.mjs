@@ -40,8 +40,7 @@ try {
   if (await page.locator("#agentThreadDrawer").getAttribute("aria-hidden") === "true") await page.locator("#agentThreadDrawerToggle").click();
   assert.equal(await page.locator('[data-open-thread-window]').count(), 0, 'new-window actions do not occupy conversation rows');
   const row = page.locator(`[data-thread-row="${threads[1].threadId}"]`);
-  await row.hover();
-  await row.locator('[data-thread-menu]').click();
+  await row.click({ button: "right" });
   const open = page.locator('#threadOpenWindow');
   assert.equal(await open.getAttribute("href"), `/?thread=${threads[1].threadId}`);
   const popupReady = context.waitForEvent("page");
@@ -57,8 +56,7 @@ try {
   assert.equal(await page.locator("#conversationScroll").evaluate((scroll) => scroll.scrollTop), position);
   assert.equal(new URL(page.url()).searchParams.get("thread"), threads[0].threadId);
   // Opening the same thread twice creates independent windows, never navigates a named window.
-  await row.hover();
-  await row.locator('[data-thread-menu]').click();
+  await row.click({ button: "right" });
   const thirdReady = context.waitForEvent("page");
   await open.click();
   const third = await thirdReady;

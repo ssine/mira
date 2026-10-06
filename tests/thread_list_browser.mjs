@@ -114,8 +114,7 @@ try {
   await page.waitForURL(`**/?thread=${grandchild.threadId}`);
   await page.getByText(`History ${grandchild.threadId}`, { exact: true }).waitFor();
   assert.equal(await threadButton(grandchild.threadId).getAttribute("aria-current"), "page");
-  await page.locator(`[data-thread-row="${grandchild.threadId}"]`).hover();
-  await page.locator(`[data-thread-menu="${grandchild.threadId}"]`).click();
+  await page.locator(`[data-thread-row="${grandchild.threadId}"]`).click({ button: "right" });
   assert.equal(await page.locator("#threadOptionsMenu").evaluate(element => element.matches(":popover-open")), true);
   await page.keyboard.press("Escape");
 

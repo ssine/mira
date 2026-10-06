@@ -4973,6 +4973,7 @@ function renderAgentThreadRow(thread) {
   button.type = "button";
   button.disabled = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise);
   button.dataset.threadId = thread.threadId;
+  button.setAttribute("aria-keyshortcuts", "Shift+F10");
   if (thread.threadId === agent.threadId) button.setAttribute("aria-current", "page");
   button.title = thread.title || "未命名会话";
   const status = element("span", "thread-state-label");
@@ -4995,13 +4996,7 @@ function renderAgentThreadRow(thread) {
   meta.append(residency, status, usage, cost);
   button.append(element("strong", "", button.title), meta);
   meta.prepend(element("span", "thread-engine", thread.engine === "claude" ? "Claude" : "Codex"));
-  const menu = element("button", "chat-icon-button thread-menu-toggle", "⋯");
-  menu.type = "button";
-  menu.dataset.threadMenu = thread.threadId;
-  menu.title = `对话选项：${button.title}`;
-  menu.setAttribute("aria-label", menu.title);
-  menu.setAttribute("aria-haspopup", "menu");
-  row.append(button, menu);
+  row.append(button);
   return row;
 }
 
@@ -5504,6 +5499,69 @@ async function openConversationDetails(threadId) {
   }
 }
 
+function installThreadListMenu() {
+  const list = $("#agentThreadList");
+  let press = null, clickThreadId = null;
+  const rowAt = target => {
+    const row = target.closest?.("[data-thread-row]");
+    return row && list.contains(row) ? row : null;
+  };
+  const cancelPress = () => { clearTimeout(press?.timer); press = null; };
+  // Track the actual contact instead of relying on browser-specific touch
+  // context menus. Movement and native scrolling keep their existing gestures.
+  document.addEventListener("pointerdown", event => {
+    cancelPress();
+    if (event.isPrimary) clickThreadId = null;
+    if (!event.isPrimary || event.button !== 0 || !["touch", "pen"].includes(event.pointerType) ||
+        document.querySelector("dialog[open], [popover]:popover-open")) return;
+    const row = rowAt(event.target);
+    if (!row) return;
+    const contact = press = { id: event.pointerId, row, x: event.clientX, y: event.clientY };
+    contact.timer = setTimeout(() => {
+      if (press !== contact || !row.isConnected || row.closest("[inert]") || document.body.dataset.view !== "agentView") {
+        cancelPress(); return;
+      }
+      clickThreadId = row.dataset.threadRow;
+      cancelPress();
+      resetAgentDrawerDrag();
+      openThreadMenu(row.dataset.threadRow, row, { x: contact.x, y: contact.y });
+    }, 500);
+  }, { passive: true });
+  document.addEventListener("pointermove", event => {
+    if (press?.id === event.pointerId && Math.hypot(event.clientX - press.x, event.clientY - press.y) >= 8) cancelPress();
+  }, { passive: true });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+    document.addEventListener(type, event => { if (press?.id === event.pointerId) cancelPress(); }, { passive: true });
+  }
+  list.addEventListener("scroll", cancelPress, { capture: true, passive: true });
+  window.addEventListener("resize", cancelPress);
+  window.addEventListener("blur", cancelPress);
+  document.addEventListener("visibilitychange", cancelPress);
+  list.addEventListener("click", event => {
+    // A long press must not also navigate when the finger is eventually lifted.
+    // The next primary pointerdown clears this, so a new tap works immediately.
+    if (clickThreadId && event.detail && rowAt(event.target)?.dataset.threadRow === clickThreadId) {
+      event.preventDefault(); event.stopImmediatePropagation(); clickThreadId = null;
+    }
+  }, { capture: true });
+  list.addEventListener("contextmenu", event => {
+    const row = rowAt(event.target);
+    if (!row) return;
+    event.preventDefault();
+    if (press?.row === row) clickThreadId = row.dataset.threadRow;
+    cancelPress();
+    // Some browsers also emit contextmenu after our long-press timer fires.
+    if (row.dataset.threadRow === clickThreadId && $("#threadOptionsMenu").matches(":popover-open") && agent.menuThreadId === row.dataset.threadRow) return;
+    resetAgentDrawerDrag();
+    openThreadMenu(row.dataset.threadRow, row, { x: event.clientX, y: event.clientY });
+  });
+  list.addEventListener("keydown", event => {
+    if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+    const row = rowAt(event.target);
+    if (row) { event.preventDefault(); cancelPress(); openThreadMenu(row.dataset.threadRow, row); }
+  });
+}
+
 function openThreadMenu(threadId, anchor, point = null) {
   if (!threadId) return;
   agent.menuThreadId = threadId;
@@ -5514,11 +5572,12 @@ function openThreadMenu(threadId, anchor, point = null) {
   const menu = $("#threadOptionsMenu");
   $("#threadOpenWindow").href = `/?thread=${encodeURIComponent(threadId)}`;
   $("#threadArchive").textContent = agent.threads.find(thread => thread.threadId === threadId)?.archived ? "恢复对话" : "归档对话";
+  anchor.querySelector("button[data-thread-id]")?.focus({ preventScroll: true });
   menu.showPopover();
   const bounds = anchor.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(point?.x ?? bounds.right - menu.offsetWidth, innerWidth - menu.offsetWidth - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(point?.y ?? bounds.bottom + 4, innerHeight - menu.offsetHeight - 8))}px`;
-  $("#threadRename").focus();
+  menu.querySelector('[role="menuitem"]:not(.hidden):not(:disabled)')?.focus();
 }
 
 async function editThreadTitle() {
@@ -7062,8 +7121,6 @@ $("#agentThreadList").addEventListener("click", (event) => {
     $("#conversationInput").focus();
     return;
   }
-  const menu = event.target.closest("button[data-thread-menu]");
-  if (menu) { openThreadMenu(menu.dataset.threadMenu, menu); return; }
   const button = event.target.closest("button[data-thread-id]");
   if (button) {
     closeAgentThreadDrawerIfOverlaid();
@@ -7277,19 +7334,9 @@ $("#agentInterrupt").addEventListener("click", async () => {
 });
 
 $("#conversationMenuToggle").addEventListener("click", (event) => openThreadMenu(agent.threadId, event.currentTarget));
-$("#agentThreadList").addEventListener("contextmenu", (event) => {
-  const row = event.target.closest("[data-thread-row]");
-  if (!row) return;
-  event.preventDefault();
-  openThreadMenu(row.dataset.threadRow, row, { x: event.clientX, y: event.clientY });
-});
-$("#agentThreadList").addEventListener("keydown", (event) => {
-  if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-  const row = event.target.closest("[data-thread-row]");
-  if (row) { event.preventDefault(); openThreadMenu(row.dataset.threadRow, row); }
-});
+installThreadListMenu();
 $("#threadOptionsMenu").addEventListener("keydown", (event) => {
-  const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]')];
+  const items = [...event.currentTarget.querySelectorAll('[role="menuitem"]:not(:disabled)')].filter(item => item.getClientRects().length);
   const index = items.indexOf(document.activeElement);
   const next = { ArrowDown: (index + 1) % items.length, ArrowUp: (index + items.length - 1) % items.length, Home: 0, End: items.length - 1 }[event.key];
   if (next !== undefined) { event.preventDefault(); items[next].focus(); }
