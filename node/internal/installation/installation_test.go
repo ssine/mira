@@ -158,7 +158,7 @@ func TestNixOSAllowsExplicitMiraOwnership(t *testing.T) {
 	stateDir := t.TempDir()
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=nixos\n")}
-	plan, err := BuildPlan(PlanOptions{StateDir: stateDir, Version: "1.2.3", Platform: "linux", ServiceOwner: ServiceOwnerMira, SystemdUnitPath: unitPath}, files)
+	plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd, StateDir: stateDir, Version: "1.2.3", Platform: "linux", ServiceOwner: ServiceOwnerMira, SystemdUnitPath: unitPath}, files)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestOwnershipConflictStopsInstallRepairAndUninstallBeforeSideEffects(t *tes
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
 	runner := &testRunner{}
-	miraPlan, err := BuildPlan(PlanOptions{
+	miraPlan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, SystemdUnitPath: unitPath,
 	}, files)
 	if err != nil {
@@ -468,7 +468,7 @@ func TestLinuxPlanInstallsSupervisorUnitAndDoctorReportsDrift(t *testing.T) {
 	if err := os.Symlink(filepath.Join("versions", "1.0.0"), filepath.Join(stateDir, "current")); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := BuildPlan(PlanOptions{
+	plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, ServiceScope: ScopeSystem, SystemdUnitPath: unitPath,
 	}, files)
 	if err != nil {
@@ -737,7 +737,7 @@ func TestUninstallWaitsForSupervisorUpdateMaintenanceLock(t *testing.T) {
 	if err := os.Symlink(filepath.Join("versions", "1.0.0"), filepath.Join(stateDir, "current")); err != nil {
 		t.Fatal(err)
 	}
-	plan, err := BuildPlan(PlanOptions{
+	plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
 		ServiceScope: ScopeSystem, SystemdUnitPath: unitPath,
 	}, files)
@@ -804,7 +804,7 @@ func TestRepairRestoresRecordedLinuxServiceDefinition(t *testing.T) {
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
 	runner := &testRunner{}
-	plan, err := BuildPlan(PlanOptions{
+	plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, SystemdUnitPath: unitPath,
 	}, files)
 	if err != nil {
@@ -831,7 +831,7 @@ func TestRepairMigratesManagedSystemdTemplateAndRestartsService(t *testing.T) {
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
 	runner := &testRunner{}
-	plan, err := BuildPlan(PlanOptions{
+	plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
 		ServiceScope: ScopeSystem, SystemdUnitPath: unitPath,
 	}, files)
@@ -1029,7 +1029,7 @@ func TestFreshInstallRefusesExistingServiceFromAnotherStateDirectory(t *testing.
 		if err := os.WriteFile(unitPath, []byte("another installation\n"), 0644); err != nil {
 			t.Fatal(err)
 		}
-		plan, err := BuildPlan(PlanOptions{
+		plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 			StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, SystemdUnitPath: unitPath,
 		}, files)
 		if err != nil {
@@ -1048,7 +1048,7 @@ func TestFreshInstallRefusesExistingServiceFromAnotherStateDirectory(t *testing.
 		stateDir := t.TempDir()
 		unitPath := filepath.Join(t.TempDir(), "mira.service")
 		files := &testFileSystem{osRelease: []byte("ID=debian\n")}
-		plan, err := BuildPlan(PlanOptions{
+		plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 			StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, SystemdUnitPath: unitPath,
 		}, files)
 		if err != nil {
@@ -1095,7 +1095,7 @@ func TestRecordCurrentVersionPreservesOwnerAndServiceDefinition(t *testing.T) {
 	stateDir := t.TempDir()
 	unitPath := filepath.Join(t.TempDir(), "mira.service")
 	files := &testFileSystem{osRelease: []byte("ID=debian\n")}
-	plan, err := BuildPlan(PlanOptions{
+	plan, err := BuildPlan(PlanOptions{ServiceManager: ServiceManagerSystemd,
 		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira,
 		SystemdUnitPath: unitPath, Role: RoleServer,
 	}, files)
@@ -1153,7 +1153,7 @@ func TestAutoServiceManagerProbesSelectedScope(t *testing.T) {
 				}
 				return "", errors.New("no service manager bus")
 			}}
-			plan, err := BuildPlan(PlanOptions{StateDir: t.TempDir(), Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode, ServiceScope: scope, ManagerProbe: runner}, &testFileSystem{osRelease: []byte("ID=container\n")})
+			plan, err := BuildPlan(PlanOptions{StateDir: t.TempDir(), Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode, ServiceScope: scope, ManagerProbe: runner, SystemdUnitPath: filepath.Join(t.TempDir(), "mira.service")}, &testFileSystem{osRelease: []byte("ID=container\n")})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1168,6 +1168,9 @@ func TestAutoServiceManagerProbesSelectedScope(t *testing.T) {
 	}
 }
 func TestBuiltinStatePrecedesStartupAndDoctorChecksLiveness(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("builtin Supervisor state uses Linux filesystem semantics")
+	}
 	dir := t.TempDir()
 	plan, err := BuildPlan(PlanOptions{StateDir: dir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode, ServiceManager: ServiceManagerBuiltin}, &testFileSystem{osRelease: []byte("ID=container\n")})
 	if err != nil {
