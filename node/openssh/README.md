@@ -103,6 +103,9 @@ switching the version pointer. Link creation failure aborts installation. Public
 PATH contains only Mira launchers, never replacements for system `ssh`/`sshd`.
 Android uses private symlinks into its current APK native-library directory.
 Identity/configuration live outside versioned binaries and survive updates.
+If a linked image is copied alone, Mira prepares a private versioned role-link cache below the
+identity directory and verifies every role against that image. Unrelated adjacent SSH programs are
+never selected or overwritten. An explicit `MIRA_NODE_OPENSSH_DIR` still requires verified aliases.
 
 The marker and manifest are build guards, not a substitute for signed distribution.
 Release archive SHA-256 and Android signing verification remain in the install path.

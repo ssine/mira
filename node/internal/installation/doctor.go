@@ -42,7 +42,20 @@ func Doctor(ctx context.Context, stateDir string, dependencies Dependencies) Doc
 			report.Findings = append(report.Findings, Finding{Code: "service_definition_drift", Message: "installed service definition differs from install state"})
 		}
 	}
-	if state.ServiceManager == ServiceManagerProcd {
+	if state.ServiceManager == ServiceManagerBuiltin {
+		executable := filepath.Join(stateDir, "current", "mira")
+		output, statusErr := dependencies.Runner.Run(ctx, executable, "--json", "status", "--state-dir", stateDir)
+		var status struct {
+			Data struct {
+				Status string `json:"status"`
+			} `json:"data"`
+		}
+		if statusErr != nil || json.Unmarshal([]byte(output), &status) != nil {
+			report.Findings = append(report.Findings, Finding{Code: "service_status_unreadable", Message: "could not read builtin Supervisor status"})
+		} else if status.Data.Status != "running" {
+			report.Findings = append(report.Findings, Finding{Code: "service_inactive", Message: "Mira builtin Supervisor is not running"})
+		}
+	} else if state.ServiceManager == ServiceManagerProcd {
 		if info, statErr := dependencies.Files.Stat(state.ServicePath); statErr != nil {
 			report.Findings = append(report.Findings, Finding{Code: "service_status_unreadable", Message: statErr.Error()})
 		} else if info.Mode()&0111 == 0 {
@@ -157,7 +170,7 @@ func currentServiceDefinition(ctx context.Context, dependencies Dependencies, st
 			} else if os.IsNotExist(linkErr) {
 				return "", linkErr
 			}
-		} else if state.ServiceOwner == ServiceOwnerMira {
+		} else if state.ServiceOwner == ServiceOwnerMira && state.ServiceManager == ServiceManagerSystemd {
 			arguments := []string{}
 			if state.ServiceScope == ScopeUser {
 				arguments = append(arguments, "--user")

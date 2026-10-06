@@ -115,8 +115,17 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 			if err != nil {
 				return InstallPlan{}, err
 			}
-		} else if manager != ServiceManagerSystemd && manager != ServiceManagerProcd {
-			return InstallPlan{}, fmt.Errorf("Linux service manager must be %q or %q", ServiceManagerSystemd, ServiceManagerProcd)
+			if manager == ServiceManagerProcd && (role != RoleNode || options.ServiceScope == ScopeUser) {
+				manager = ServiceManagerBuiltin
+			}
+			if manager != ServiceManagerProcd {
+				manager = ServiceManagerBuiltin
+				if usableSystemd(options, role) {
+					manager = ServiceManagerSystemd
+				}
+			}
+		} else if manager != ServiceManagerSystemd && manager != ServiceManagerProcd && manager != ServiceManagerBuiltin {
+			return InstallPlan{}, fmt.Errorf("Linux service manager must be %q, %q or %q", ServiceManagerSystemd, ServiceManagerProcd, ServiceManagerBuiltin)
 		}
 		if manager == ServiceManagerProcd {
 			if owner != ServiceOwnerMira {
@@ -221,6 +230,12 @@ func BuildPlan(options PlanOptions, files FileSystem) (InstallPlan, error) {
 			{Name: "systemctl", Args: append(append([]string(nil), managerArgs...), "daemon-reload")},
 			{Name: "systemctl", Args: append(append([]string(nil), managerArgs...), "enable", "--now", state.ServiceName)},
 		}
+	} else if platform == "linux" && manager == ServiceManagerBuiltin {
+		state.ServiceName = "mira"
+		state.ServicePath = filepath.Join(layout.StateDir, "builtin-service.json")
+		state.ServiceDefinition = fmt.Sprintf(`{"stateDir":%q,"role":%q,"manager":"builtin"}`+"\n", layout.StateDir, role)
+		plan.Files = []PlannedFile{{Path: state.ServicePath, Content: []byte(state.ServiceDefinition), Mode: 0600, DirMode: 0700}}
+		plan.Commands = []Command{{Name: filepath.Join(layout.StateDir, "current", "mira"), Args: []string{"start", "--state-dir", layout.StateDir}}}
 	} else if platform == "linux" {
 		path := options.ProcdInitPath
 		if path == "" {

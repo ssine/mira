@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/ssine/mira/node/internal/transport"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -64,12 +65,12 @@ func sshPublicKeys(token string) (map[string]string, error) {
 // A WebSocket is only a framed byte transport. SSH channels retain their own
 // stdout/stderr, EOF, exit status and flow control end-to-end.
 type sshWebSocketConn struct {
-	*websocket.Conn
+	transport.Conn
 	reader  io.Reader
 	writeMu sync.Mutex
 }
 
-func dialSSHTransport(ctx context.Context, server, token, sessionID, side string) (*sshWebSocketConn, error) {
+func dialSSHTransport(ctx context.Context, server, token, sessionID, side, mode string) (*sshWebSocketConn, error) {
 	u, err := url.Parse(server)
 	if err != nil {
 		return nil, err
@@ -85,7 +86,7 @@ func dialSSHTransport(ctx context.Context, server, token, sessionID, side string
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second, ReadBufferSize: sshFrameLimit, WriteBufferSize: sshFrameLimit,
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: platformCertificatePool(), NextProtos: []string{"http/1.1"}},
 		Subprotocols:    []string{"mira-ssh-v1", "auth." + base64.RawURLEncoding.EncodeToString([]byte(token))}}
-	ws, response, err := dialer.DialContext(ctx, u.String(), nil)
+	ws, response, err := transport.Dial(ctx, &dialer, u.String(), nil, mode)
 	if err != nil {
 		if response != nil {
 			return nil, fmt.Errorf("SSH transport rejected (HTTP %d)", response.StatusCode)
@@ -136,8 +137,8 @@ func (conn *sshWebSocketConn) Write(p []byte) (int, error) {
 	}
 	return written, nil
 }
-func (conn *sshWebSocketConn) LocalAddr() net.Addr  { return conn.UnderlyingConn().LocalAddr() }
-func (conn *sshWebSocketConn) RemoteAddr() net.Addr { return conn.UnderlyingConn().RemoteAddr() }
+func (conn *sshWebSocketConn) LocalAddr() net.Addr  { return conn.Conn.LocalAddr() }
+func (conn *sshWebSocketConn) RemoteAddr() net.Addr { return conn.Conn.RemoteAddr() }
 func (conn *sshWebSocketConn) SetDeadline(t time.Time) error {
 	if err := conn.SetReadDeadline(t); err != nil {
 		return err

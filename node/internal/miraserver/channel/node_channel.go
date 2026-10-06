@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 var (
@@ -76,6 +77,7 @@ type activeThreadStart struct {
 }
 
 type Channel struct {
+	transports        *transport.Server
 	fileStreamsClosed bool
 	fileStreams       map[string]*fileStream
 	executionQueue    executionQueue
@@ -127,11 +129,13 @@ func New(options Options) (*Channel, error) {
 		upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096,
 			EnableCompression: false, CheckOrigin: func(*http.Request) bool { return true }},
 	}
+	channel.transports = transport.NewServer(channel.authorizeTransport)
 	channel.accounts = NewAccountReader(channel.TrySendToNode, options.AccountTimeout)
 	channel.capabilities = NewCapabilityService(options.Nodes, channel, audit)
 	channel.ssh = NewSSHRelay(options.Database, options.Auth, channel, audit, SSHOptions{
 		MaxSessions: options.SSHMaxSessions, MaxPerNode: options.SSHMaxSessionsPerNode,
 	})
+	channel.ssh.transports = channel.transports
 	return channel, nil
 }
 
@@ -180,10 +184,14 @@ func (channel *Channel) Handles(request *http.Request) bool {
 		return false
 	}
 	path := request.URL.Path
-	return fileStreamPattern.MatchString(path) || nodeConnectPattern.MatchString(path) || appServerPattern.MatchString(path) || sshSessionPattern.MatchString(path)
+	return strings.HasPrefix(path, transport.Prefix) || fileStreamPattern.MatchString(path) || nodeConnectPattern.MatchString(path) || appServerPattern.MatchString(path) || sshSessionPattern.MatchString(path)
 }
 
 func (channel *Channel) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if strings.HasPrefix(request.URL.Path, transport.Prefix) {
+		channel.transports.ServeHTTP(response, request)
+		return
+	}
 	if match := fileStreamPattern.FindStringSubmatch(request.URL.Path); match != nil {
 		channel.serveFileUpgrade(response, request, match[1])
 		return
@@ -227,7 +235,7 @@ func (channel *Channel) serveNodeUpgrade(response http.ResponseWriter, request *
 		http.Error(response, "forbidden", 403)
 		return
 	}
-	connection, err := channel.upgrader.Upgrade(response, request, http.Header{"Sec-WebSocket-Protocol": []string{"mira-node-v1"}})
+	connection, err := channel.upgradeTransport(response, request, "mira-node-v1")
 	if err != nil {
 		return
 	}
@@ -290,7 +298,7 @@ func (channel *Channel) serveProxyUpgrade(response http.ResponseWriter, request 
 	if account != nil {
 		target = nodes.AccountNode(target, *account)
 	}
-	connection, err := channel.upgrader.Upgrade(response, request, http.Header{"Sec-WebSocket-Protocol": []string{"mira-client-v1"}})
+	connection, err := channel.upgradeTransport(response, request, "mira-client-v1")
 	if err != nil {
 		return
 	}
@@ -582,6 +590,7 @@ func (channel *Channel) DisconnectNode(nodeID, reason string) {
 }
 
 func (channel *Channel) Close() error {
+	channel.transports.Close()
 	channel.mu.Lock()
 	if channel.closed {
 		channel.mu.Unlock()

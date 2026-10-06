@@ -13,6 +13,7 @@ import (
 )
 
 type config struct {
+	Transport          string
 	ServerURL          string
 	Token              string
 	IdentityFile       string
@@ -33,6 +34,7 @@ type config struct {
 }
 
 type fileConfig struct {
+	Transport          string   `json:"transport"`
 	ServerURL          string   `json:"serverUrl"`
 	Token              string   `json:"token"`
 	IdentityFile       string   `json:"identityFile"`
@@ -290,8 +292,18 @@ func loadConfigArgs(args []string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	transportMode := stored.Transport
+	if value := os.Getenv("MIRA_NODE_TRANSPORT"); value != "" {
+		transportMode = value
+	}
+	if transportMode == "" {
+		transportMode = "auto"
+	}
+	if transportMode != "auto" && transportMode != "websocket" && transportMode != "https" {
+		return config{}, fmt.Errorf("MIRA_NODE_TRANSPORT must be auto, websocket or https")
+	}
 	return config{
-		ServerURL: serverURL, Token: token, IdentityFile: identityFile, NodeKey: nodeKey, AllowedRoots: roots,
+		Transport: transportMode, ServerURL: serverURL, Token: token, IdentityFile: identityFile, NodeKey: nodeKey, AllowedRoots: roots,
 		HeartbeatInterval: time.Duration(heartbeatSeconds) * time.Second,
 		PrivilegeMode:     privilegeMode, BridgeURL: bridgeURL, BridgeToken: bridgeToken,
 		ExitWithParent: exitWithParent, CodexBinary: codexBinary,

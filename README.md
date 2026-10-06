@@ -5,6 +5,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.81 新增 Linux builtin 后台 Supervisor：没有可用 systemd/procd 时自动选择，支持启停、worker 恢复及事务更新。Node 控制、App Server、SSH/SCP/SFTP 和文件流支持自动 HTTPS 降级，并统一使用出站代理配置。Server 与需要降级的客户端都应升级；见 [安装说明](INSTALL.md)。
+
 1.0.80 移除侧栏每个对话右侧的三个点，让 API 费用完整显示；电脑右键、手机长按或键盘 `Shift+F10` 打开对话菜单，当前对话右上角保留可见入口。只需升级 Server。
 
 1.0.79 支持网站预览的多个访问入口：Server 根据当前控制台入口选择配置好的预览域名与端口，网页直接打开返回的完整地址；普通入口和直连入口可以使用各自的通配符域名。配置与单域名兼容方式见[部署说明](docs/file-preview-deployment.md)，本次功能只需升级 Server。
@@ -192,13 +194,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.80
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.81
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.80'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.81'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询

@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 const (
@@ -84,12 +85,12 @@ type Result struct {
 type socket struct {
 	internalWrite func([]byte) error
 	internalClose func()
-	connection    *websocket.Conn
+	connection    transport.Conn
 	writeMu       sync.Mutex
 	closeOnce     sync.Once
 }
 
-func newSocket(connection *websocket.Conn, limit int64) *socket {
+func newSocket(connection transport.Conn, limit int64) *socket {
 	connection.SetReadLimit(limit)
 	return &socket{connection: connection}
 }

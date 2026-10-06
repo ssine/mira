@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,6 +61,67 @@ func closeServer(t *testing.T, server *Server, manager *fakeManager) {
 	defer cancel()
 	if err := server.Close(ctx); err != nil {
 		t.Errorf("close Supervisor API: %v", err)
+	}
+}
+
+func TestBuiltinStopAuthenticatesAndExcludesUpdate(t *testing.T) {
+	for _, updateFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("updateFirst=%v", updateFirst), func(t *testing.T) {
+			manager := newFakeManager(nil)
+			var stops atomic.Int32
+			server, err := Start(Config{StateDir: t.TempDir(), Manager: manager, Stop: func() { stops.Add(1) }, RuntimeStatus: func() any { return map[string]string{"status": "running"} }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { closeServer(t, server, manager) })
+			client, err := Discover(server.config.StateDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := func(method, route, token string) int {
+				req, _ := http.NewRequest(method, server.URL()+route, nil)
+				req.Header.Set("Authorization", "Bearer "+token)
+				response, err := http.DefaultClient.Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer response.Body.Close()
+				return response.StatusCode
+			}
+			for _, route := range []string{"/v1/service", "/v1/service/stop"} {
+				method := "GET"
+				if strings.HasSuffix(route, "stop") {
+					method = "POST"
+				}
+				if code := request(method, route, ""); code != 401 {
+					t.Fatal(code)
+				}
+			}
+			if code := request("GET", "/v1/service", client.Token); code != 200 {
+				t.Fatal(code)
+			}
+			if updateFirst {
+				if _, err := client.RequestUpdate(context.Background(), "2.0.0"); err != nil {
+					t.Fatal(err)
+				}
+				waitStarted(t, manager)
+				if code := request("POST", "/v1/service/stop", client.Token); code != 409 || stops.Load() != 0 {
+					t.Fatal(code, stops.Load())
+				}
+			} else {
+				if code := request("POST", "/v1/service/stop", client.Token); code != 202 || stops.Load() != 1 {
+					t.Fatal(code, stops.Load())
+				}
+				if _, err := client.RequestUpdate(context.Background(), "2.0.0"); !errors.Is(err, ErrUpdateInProgress) {
+					t.Fatal(err)
+				}
+				select {
+				case <-manager.started:
+					t.Fatal("update started after accepted stop")
+				default:
+				}
+			}
+		})
 	}
 }
 

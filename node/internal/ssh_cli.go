@@ -38,7 +38,7 @@ func (client *cliClient) sshTransport(ctx context.Context, selector string) (*ss
 	if session.Username == "" || len(session.Username) > 256 || strings.ContainsAny(session.Username, "\x00\r\n") {
 		return nil, nil, "", fmt.Errorf("Server returned invalid SSH username")
 	}
-	conn, err := dialSSHTransport(ctx, client.identity.ServerURL, client.identity.Token, session.SessionID, "source")
+	conn, err := dialSSHTransport(ctx, client.identity.ServerURL, client.identity.Token, session.SessionID, "source", "")
 	return conn, host, session.Username, err
 }
 

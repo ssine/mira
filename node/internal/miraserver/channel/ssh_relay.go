@@ -10,12 +10,14 @@ import (
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 const (
@@ -62,6 +64,7 @@ type sshSession struct {
 }
 
 type SSHRelay struct {
+	transports  *transport.Server
 	db          Database
 	auth        Authenticator
 	nodes       SSHNodeSender
@@ -184,6 +187,16 @@ func sshUsername(keys *sshKeys) (string, string, bool) {
 	return username, backend, true
 }
 
+func sshRuntimeFailure(keys *sshKeys) string {
+	if detail := strings.TrimSpace(stringValue(keys.runtime["error"])); detail != "" {
+		if len(detail) > 1024 {
+			detail = detail[:1024]
+		}
+		return "target Node SSH backend is unavailable: " + detail
+	}
+	return "target Node has an invalid SSH account"
+}
+
 func (relay *SSHRelay) Describe(ctx context.Context, targetNodeID string) (Result, error) {
 	target, err := relay.keys(ctx, targetNodeID)
 	if err != nil {
@@ -194,7 +207,7 @@ func (relay *SSHRelay) Describe(ctx context.Context, targetNodeID string) (Resul
 	}
 	username, backend, ok := sshUsername(target)
 	if !ok {
-		return sshFailure(409, "target Node has an invalid SSH account"), nil
+		return sshFailure(409, sshRuntimeFailure(target)), nil
 	}
 	return Result{Status: 200, Body: map[string]any{"hostKey": target.hostKey, "username": username, "protocolVersion": 1, "backend": backend}}, nil
 }
@@ -216,7 +229,7 @@ func (relay *SSHRelay) Create(ctx context.Context, principal *foundation.Princip
 	}
 	username, _, ok := sshUsername(target)
 	if !ok {
-		return sshFailure(409, "target Node has an invalid SSH account"), nil
+		return sshFailure(409, sshRuntimeFailure(target)), nil
 	}
 	sessionID, err := randomUUID()
 	if err != nil {
@@ -298,7 +311,7 @@ func (relay *SSHRelay) serveUpgrade(response http.ResponseWriter, request *http.
 	}
 	session.claimed[side] = true
 	relay.mu.Unlock()
-	connection, err := relay.upgrader.Upgrade(response, request, http.Header{"Sec-WebSocket-Protocol": []string{"mira-ssh-v1"}})
+	connection, err := relay.upgradeTransport(response, request)
 	if err != nil {
 		relay.mu.Lock()
 		if relay.sessions[sessionID] == session {

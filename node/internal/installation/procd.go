@@ -1,17 +1,18 @@
 package installation
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const defaultProcdInitPath = "/etc/init.d/mira"
 
-// DetectLinuxServiceManager deliberately recognizes only OpenWrt's documented
-// procd layout. Other Linux/NAS service managers remain unsupported rather than
-// being guessed from a similarly named executable.
+// DetectLinuxServiceManager recognizes OpenWrt procd and the systemd host layout.
+// BuildPlan additionally probes the selected scope before auto selects systemd.
 func DetectLinuxServiceManager(files FileSystem) (ServiceManager, error) {
 	if files == nil {
 		files = OSFileSystem{}
@@ -20,13 +21,15 @@ func DetectLinuxServiceManager(files FileSystem) (ServiceManager, error) {
 	if err != nil {
 		return "", err
 	}
-	if !openWrt {
-		return ServiceManagerSystemd, nil
+	if openWrt && validateProcdHost(files) == nil {
+		return ServiceManagerProcd, nil
 	}
-	if err := validateProcdHost(files); err != nil {
+	if _, err := files.Stat("/run/systemd/system"); err == nil {
+		return ServiceManagerSystemd, nil
+	} else if !os.IsNotExist(err) {
 		return "", err
 	}
-	return ServiceManagerProcd, nil
+	return ServiceManagerBuiltin, nil
 }
 
 func detectOpenWrt(files FileSystem) (bool, error) {
@@ -117,4 +120,24 @@ func procdCommands(servicePath string, action string) []Command {
 		commands = append(commands, Command{Name: servicePath, Args: []string{action}})
 	}
 	return commands
+}
+
+func usableSystemd(options PlanOptions, role string) bool {
+	scope := options.ServiceScope
+	if scope == "" {
+		scope = ScopeSystem
+		if role == RoleNode {
+			scope = ScopeUser
+		}
+	}
+	args := []string{}
+	if scope == ScopeUser {
+		args = append(args, "--user")
+	}
+	args = append(args, "show", "--property=Version", "--value")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	runner := withDefaults(Dependencies{Runner: options.ManagerProbe}).Runner
+	output, err := runner.Run(ctx, "systemctl", args...)
+	return err == nil && strings.TrimSpace(output) != ""
 }

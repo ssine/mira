@@ -312,7 +312,7 @@ func TestProcdDetectionOverrideAndConstraints(t *testing.T) {
 
 	missingProcd := &testFileSystem{osRelease: []byte("ID=openwrt\n"), openWrtRelease: true}
 	if _, err := BuildPlan(PlanOptions{
-		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode,
+		StateDir: stateDir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode, ServiceManager: ServiceManagerProcd,
 	}, missingProcd); err == nil || !strings.Contains(err.Error(), "/etc/rc.common") {
 		t.Fatalf("OpenWrt without procd prerequisites was not rejected: %v", err)
 	}
@@ -1134,5 +1134,70 @@ func TestRecordCurrentVersionPreservesOwnerAndServiceDefinition(t *testing.T) {
 	}
 	if state.Version != "2.0.0" || state.ServiceOwner != ServiceOwnerMira || state.Role != RoleServer || state.ServiceDefinition != plan.State.ServiceDefinition {
 		t.Fatalf("unexpected recorded state: %+v", state)
+	}
+}
+
+func TestAutoServiceManagerProbesSelectedScope(t *testing.T) {
+	for _, scope := range []string{ScopeUser, ScopeSystem} {
+		for _, available := range []bool{false, true} {
+			runner := &testRunner{handle: func(command Command) (string, error) {
+				want := []string{"show", "--property=Version", "--value"}
+				if scope == ScopeUser {
+					want = append([]string{"--user"}, want...)
+				}
+				if command.Name != "systemctl" || !reflect.DeepEqual(command.Args, want) {
+					t.Errorf("incorrect manager probe: %+v", command)
+				}
+				if available {
+					return "256\n", nil
+				}
+				return "", errors.New("no service manager bus")
+			}}
+			plan, err := BuildPlan(PlanOptions{StateDir: t.TempDir(), Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode, ServiceScope: scope, ManagerProbe: runner}, &testFileSystem{osRelease: []byte("ID=container\n")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := ServiceManagerBuiltin
+			if available {
+				want = ServiceManagerSystemd
+			}
+			if plan.State.ServiceManager != want {
+				t.Fatalf("scope=%s available=%v got=%s", scope, available, plan.State.ServiceManager)
+			}
+		}
+	}
+}
+func TestBuiltinStatePrecedesStartupAndDoctorChecksLiveness(t *testing.T) {
+	dir := t.TempDir()
+	plan, err := BuildPlan(PlanOptions{StateDir: dir, Version: "1.0.0", Platform: "linux", ServiceOwner: ServiceOwnerMira, Role: RoleNode, ServiceManager: ServiceManagerBuiltin}, &testFileSystem{osRelease: []byte("ID=container\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &testRunner{handle: func(command Command) (string, error) {
+		if _, err := LoadState(nil, dir); err != nil {
+			t.Fatalf("startup ran before ownership state: %v", err)
+		}
+		return `{"schemaVersion":1,"data":{"status":"running"}}`, nil
+	}}
+	if _, err := Install(context.Background(), plan, Dependencies{Runner: runner}, ApplyOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.snapshot()) != 1 || runner.snapshot()[0].Args[0] != "start" {
+		t.Fatal(runner.snapshot())
+	}
+	layout, _ := supervisor.NewLayout(dir)
+	if err := os.MkdirAll(filepath.Join(dir, "versions", "1.0.0"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := layout.InitializeCurrent("1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if report := Doctor(context.Background(), dir, Dependencies{Runner: runner}); !report.Healthy {
+		t.Fatal(report.Findings)
+	}
+	runner.handle = func(Command) (string, error) { return `{"schemaVersion":1,"data":{"status":"stopped"}}`, nil }
+	report := Doctor(context.Background(), dir, Dependencies{Runner: runner})
+	if report.Healthy || report.Findings[0].Code != "service_inactive" {
+		t.Fatal(report)
 	}
 }

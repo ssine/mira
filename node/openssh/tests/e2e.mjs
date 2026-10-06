@@ -9,6 +9,7 @@ import {spawn,execFileSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 import net from 'node:net';
+import http from 'node:http';
 import {loginAdmin,approvePendingNode,adminRequest} from '../../../tests/auth_helpers.mjs';
 
 const repo=path.resolve(import.meta.dirname,'../../..');
@@ -21,11 +22,25 @@ const baseURL=process.env.MIRA_TEST_DATABASE_URL??'postgresql://mira:mira-local@
 const connection=new URL(baseURL);connection.pathname='/'+database;
 const rootPool=new pg.Pool({connectionString:baseURL});let pool,created=false;
 const port=Number(process.env.MIRA_OPENSSH_TEST_PORT??18879);
-const url=`http://127.0.0.1:${port}`;
+const blockedUpgrade=process.env.MIRA_OPENSSH_TEST_BLOCK_UPGRADE==='1';
+const backendURL=`http://127.0.0.1:${port}`;
+const url=blockedUpgrade?`http://127.0.0.1:${port+100}`:backendURL;
+let proxy,upgradeAttempts=0,httpsSessions=0;
+if(blockedUpgrade){
+ proxy=http.createServer((req,res)=>{
+  if(req.url.includes('transport=https'))httpsSessions++;
+  const upstream=http.request(backendURL+req.url,{method:req.method,headers:req.headers},response=>{res.writeHead(response.statusCode,response.headers);response.pipe(res)});
+  upstream.on('error',()=>{if(!res.headersSent)res.writeHead(502);res.end()});
+  req.pipe(upstream);res.on('close',()=>upstream.destroy());
+ });
+ proxy.on('upgrade',(req,socket)=>{upgradeAttempts++;socket.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')});
+ await new Promise(resolve=>proxy.listen(port+100,'127.0.0.1',resolve));
+}
 const publicURL=process.env.MIRA_OPENSSH_TEST_PUBLIC_URL??url;
 const binaries=path.join(fixture,'bin');await fs.mkdir(binaries);
 const openSSHDir=binaries;
-const nodeBinary=path.join(binaries,'mira'),cliBinary=nodeBinary;
+const standalone=path.join(fixture,'standalone');await fs.mkdir(standalone);
+const nodeBinary=path.join(process.env.MIRA_OPENSSH_TEST_SINGLE_IMAGE==='1'?standalone:binaries,'mira'),cliBinary=nodeBinary;
 const processes=[],logs=[];
 const noPasswdUID=2147483000;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -88,6 +103,7 @@ try{
   assert(process.env.MIRA_TEST_LINUX_SINGLEFILE,'set MIRA_TEST_LINUX_SINGLEFILE to the linked Linux image');
   const image=path.resolve(process.env.MIRA_TEST_LINUX_SINGLEFILE);
   await fs.copyFile(image,nodeBinary);await fs.chmod(nodeBinary,targetWithoutPasswd&&process.getuid()===0?0o755:0o700);
+  if(process.env.MIRA_OPENSSH_TEST_SINGLE_IMAGE==='1')await fs.writeFile(path.join(standalone,'ssh'),'#!/bin/sh\nexit 98\n',{mode:0o700});
   for(const role of ['ssh','sshd','sshd-session','sshd-auth','scp','sftp','sftp-server','ssh-keygen'])await fs.link(nodeBinary,path.join(binaries,role));
   assert.equal(execFileSync(nodeBinary,['--mira-openssh-build'],{encoding:'utf8'}).trim(),'MIRA_LINKED_OPENSSH_LINUX_STATIC_V1');
   const password=crypto.randomBytes(24).toString('base64url');
@@ -171,8 +187,10 @@ try{
   await wait(async()=>{try{process.kill(pid,0);return false}catch(e){return e.code==='ESRCH'}},'reap OpenSSH descendant after revoke');
   assert.notEqual((await cli(a.identity,['ssh',b.key,'--','true'])).code,0);
   console.log('PASS revocation closes encrypted relay, reaps remote command and denies new connections');
+  if(blockedUpgrade){assert(upgradeAttempts>0);assert(httpsSessions>10);console.log('PASS every Upgrade rejected with 403: automatic HTTPS control, SSH, SCP, SFTP and revocation')}
 }catch(e){console.error(logs.join('').slice(-10000));throw e}
 finally{
   for(const p of processes.reverse()){if(p.exitCode!==null)continue;p.kill('SIGTERM');await Promise.race([new Promise(r=>p.once('close',r)),sleep(2500)]);if(p.exitCode===null)p.kill('SIGKILL')}
+  if(proxy){proxy.closeAllConnections();await new Promise(resolve=>proxy.close(resolve))}
   if(created)await closeFixtureDatabase(pool,rootPool,database);else await pool?.end();await rootPool.end();await fs.rm(fixture,{recursive:true,force:true});
 }

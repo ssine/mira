@@ -1,3 +1,4 @@
+import { MiraSocket } from "./mira-socket.js";
 import { accountQuery } from "./codex-accounts.js";
 
 // Stopping a persisted turn must work in a reader that never resumed it.
@@ -5,7 +6,7 @@ import { accountQuery } from "./codex-accounts.js";
 export async function interruptThread({ nodeId, nodeAccountId, threadId, turnId, timeoutMs = 30_000 }) {
   if (!nodeId || !threadId || !turnId) throw new Error("无法确定本轮的运行机器，请刷新会话后重试。");
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${encodeURIComponent(nodeId)}/app-server?storeId=personal${accountQuery(nodeAccountId)}`, ["mira-client-v1"]);
+  const socket = new MiraSocket(`${scheme}//${location.host}/v1/nodes/${encodeURIComponent(nodeId)}/app-server?storeId=personal${accountQuery(nodeAccountId)}`, ["mira-client-v1"]);
   const pending = new Map();
   let nextId = 0, failure, rejectOpen;
   const fail = error => {

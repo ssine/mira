@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/ssine/mira/node/internal/resourcewire"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 var fileStreamPattern = regexp.MustCompile(`(?i)^/v1/file-streams/([0-9a-f-]{36})$`)
@@ -19,10 +20,10 @@ var fileStreamPattern = regexp.MustCompile(`(?i)^/v1/file-streams/([0-9a-f-]{36}
 type fileStream struct {
 	nodeID     string
 	epoch      *socket
-	ready      chan *websocket.Conn
+	ready      chan transport.Conn
 	done       chan struct{}
 	once       sync.Once
-	connection *websocket.Conn
+	connection transport.Conn
 }
 
 func (s *fileStream) close() {
@@ -61,9 +62,7 @@ func (channel *Channel) serveFileUpgrade(w http.ResponseWriter, r *http.Request,
 		http.Error(w, "stream expired", 409)
 		return
 	}
-	upgrader := channel.upgrader
-	upgrader.Subprotocols = []string{resourcewire.Protocol}
-	ws, err := upgrader.Upgrade(w, r, nil)
+	ws, err := channel.upgradeTransport(w, r, resourcewire.Protocol)
 	if err != nil {
 		channel.mu.Unlock()
 		return
@@ -72,7 +71,9 @@ func (channel *Channel) serveFileUpgrade(w http.ResponseWriter, r *http.Request,
 	ws.SetReadLimit(resourcewire.FrameBytes)
 	s.ready <- ws
 	channel.mu.Unlock()
-	<-s.done
+	if r.URL.Query().Get("transport") != "https" {
+		<-s.done
+	}
 }
 
 // StreamFile connects a single authenticated outbound Node socket to this HTTP
@@ -101,7 +102,7 @@ func (channel *Channel) StreamFile(ctx context.Context, w http.ResponseWriter, r
 	if channel.fileStreams == nil {
 		channel.fileStreams = map[string]*fileStream{}
 	}
-	s := &fileStream{nodeID: nodeID, epoch: epoch, ready: make(chan *websocket.Conn, 1), done: make(chan struct{})}
+	s := &fileStream{nodeID: nodeID, epoch: epoch, ready: make(chan transport.Conn, 1), done: make(chan struct{})}
 	channel.fileStreams[id] = s
 	channel.mu.Unlock()
 	defer func() {
@@ -126,7 +127,7 @@ func (channel *Channel) StreamFile(ctx context.Context, w http.ResponseWriter, r
 	}
 	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
-	var ws *websocket.Conn
+	var ws transport.Conn
 	select {
 	case ws = <-s.ready:
 	case <-s.done:

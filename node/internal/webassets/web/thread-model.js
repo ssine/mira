@@ -1,3 +1,4 @@
+import { MiraSocket } from "./mira-socket.js";
 import { accountQuery } from "./codex-accounts.js";
 const cache = new Map();
 
@@ -20,7 +21,7 @@ export async function readModelCatalog(nodeId, cwd, { refresh = false, nodeAccou
   const entry = {};
   const job = (async () => {
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${nodeId}/app-server?storeId=personal${accountQuery(nodeAccountId)}`, ["mira-client-v1"]);
+    const socket = new MiraSocket(`${scheme}//${location.host}/v1/nodes/${nodeId}/app-server?storeId=personal${accountQuery(nodeAccountId)}`, ["mira-client-v1"]);
     const pending = new Map();
     let requestId = 0, rejectOpen;
     const fail = error => { rejectOpen?.(error); for (const request of pending.values()) request.reject(error); };

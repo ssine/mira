@@ -16,35 +16,37 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/ssine/mira/node/internal/clauderuntime"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 type controlClient struct {
-	notificationMu  sync.Mutex
-	claude          *clauderuntime.Manager
-	desktop         *desktopStatus
-	configuration   config
-	endpoints       *serverEndpointSelector
-	runtime         *capabilityRuntime
-	appServer       *appServerManager
-	accountsMu      sync.Mutex
-	desiredAccounts []desiredCodexAccount
-	accountRuntimes map[string]*accountRuntime
-	accountsClosed  bool
-	http            *http.Client
-	state           *persistedNodeState
-	token           string
-	nodeID          string
-	desired         desiredAppServer
-	writeMu         sync.Mutex
-	connectionMu    sync.Mutex
-	connection      *websocket.Conn
-	tunnelsMu       sync.Mutex
-	tunnels         map[string]*websocket.Conn
-	tunnelAccounts  map[string]appServerTunnelAccount
-	fileMu          sync.Mutex
-	fileWorkers     map[string]context.CancelFunc
-	sshMu           sync.Mutex
-	sshWorkers      map[string]context.CancelFunc
+	notificationMu    sync.Mutex
+	claude            *clauderuntime.Manager
+	desktop           *desktopStatus
+	configuration     config
+	endpoints         *serverEndpointSelector
+	runtime           *capabilityRuntime
+	appServer         *appServerManager
+	accountsMu        sync.Mutex
+	desiredAccounts   []desiredCodexAccount
+	accountRuntimes   map[string]*accountRuntime
+	accountsClosed    bool
+	http              *http.Client
+	state             *persistedNodeState
+	token             string
+	nodeID            string
+	desired           desiredAppServer
+	writeMu           sync.Mutex
+	connectionMu      sync.Mutex
+	connection        transport.Conn
+	websocketFailures int
+	tunnelsMu         sync.Mutex
+	tunnels           map[string]*websocket.Conn
+	tunnelAccounts    map[string]appServerTunnelAccount
+	fileMu            sync.Mutex
+	fileWorkers       map[string]context.CancelFunc
+	sshMu             sync.Mutex
+	sshWorkers        map[string]context.CancelFunc
 }
 
 type appServerTunnelAccount struct {
@@ -412,7 +414,7 @@ func (client *controlClient) serve(ctx context.Context) error {
 		"mira-node-v1",
 		"auth." + base64.RawURLEncoding.EncodeToString([]byte(client.token)),
 	}
-	connection, response, err := dialer.DialContext(ctx, endpoint, nil)
+	connection, response, err := transport.Dial(ctx, &dialer, endpoint, nil, client.controlTransportMode())
 	if err != nil {
 		if ctx.Err() == nil && (response == nil || response.StatusCode == http.StatusBadGateway || response.StatusCode == http.StatusServiceUnavailable || response.StatusCode == http.StatusGatewayTimeout) {
 			client.failServerEndpoint(server)
@@ -424,6 +426,7 @@ func (client *controlClient) serve(ctx context.Context) error {
 	}
 	client.connectionMu.Lock()
 	client.connection = connection
+	connectedAt := time.Now()
 	client.connectionMu.Unlock()
 	stopConnection := make(chan struct{})
 	go func() {
@@ -436,6 +439,13 @@ func (client *controlClient) serve(ctx context.Context) error {
 	defer func() {
 		close(stopConnection)
 		client.connectionMu.Lock()
+		if _, isWS := connection.(*websocket.Conn); isWS && ctx.Err() == nil {
+			if time.Since(connectedAt) < time.Minute {
+				client.websocketFailures++
+			} else {
+				client.websocketFailures = 0
+			}
+		}
 		if client.connection == connection {
 			client.connection = nil
 		}
@@ -468,6 +478,16 @@ func (client *controlClient) serve(ctx context.Context) error {
 		}
 		client.handleMessage(loopCtx, message)
 	}
+}
+
+func (client *controlClient) controlTransportMode() string {
+	client.connectionMu.Lock()
+	defer client.connectionMu.Unlock()
+	mode := client.configuration.Transport
+	if (mode == "" || mode == "auto") && client.websocketFailures >= 2 {
+		return "https"
+	}
+	return mode
 }
 
 func (client *controlClient) heartbeatLoop(ctx context.Context) {

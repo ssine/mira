@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/ssine/mira/node/internal/installation"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 type cliOptions struct {
@@ -788,7 +790,7 @@ func (client *cliClient) runAppServer(ctx context.Context, args []string, stdin 
 	dialer := *websocket.DefaultDialer
 	dialer.HandshakeTimeout = client.options.Timeout
 	dialer.Subprotocols = []string{"mira-client-v1", "auth." + base64.RawURLEncoding.EncodeToString([]byte(client.identity.Token))}
-	connection, response, err := dialer.DialContext(ctx, endpoint.String(), nil)
+	connection, response, err := transport.Dial(ctx, &dialer, endpoint.String(), nil, "")
 	if err != nil {
 		if response != nil {
 			return nil, &cliHTTPError{Status: response.StatusCode, Message: "App Server connection rejected"}
@@ -973,15 +975,24 @@ Shows non-secret identity metadata. The Node credential itself is never printed.
 		"setup": `Usage: mira setup [options]
 
 Configure or enroll this machine. Run this command's platform-specific setup before starting mira node-worker.`,
-		"install": `Usage: mira install [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd] [--state-dir DIR] [--server-url URL] [--dry-run]
+		"install": `Usage: mira install [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd|builtin] [--state-dir DIR] [--server-url URL] [--dry-run]
 
 On NixOS, an interactive install asks who owns the system service. Non-interactive
 installs must pass --service-owner explicitly. Nix and Mira ownership are mutually exclusive.`,
 		"doctor":    `Usage: mira doctor [--state-dir DIR]`,
 		"repair":    `Usage: mira repair [--state-dir DIR] [--dry-run]`,
 		"uninstall": `Usage: mira uninstall [--state-dir DIR] [--dry-run]`,
-		"status":    `Usage: mira status [--json]`,
-		"version":   `Usage: mira version [--json]`,
+		"start": `Usage: mira start [--state-dir DIR]
+
+Start the installed builtin Supervisor in the background.`,
+		"stop": `Usage: mira stop [--state-dir DIR]
+
+Gracefully stop the installed builtin Supervisor and its workers.`,
+		"restart": `Usage: mira restart [--state-dir DIR]
+
+Restart the installed builtin Supervisor, inheriting the current environment.`,
+		"status":  `Usage: mira status [--state-dir DIR] [--json]`,
+		"version": `Usage: mira version [--json]`,
 		"update": `Usage: mira update [--check] [--version VERSION] [--state-dir DIR] [--no-wait] [--json]
 
 The installed executable discovers its own state directory. --state-dir is
@@ -1081,7 +1092,7 @@ func printNodesHuman(writer io.Writer, value any, get bool) error {
 }
 
 func cliUsage() string {
-	return "usage: mira [--json] [--timeout 30s] <install|doctor|repair|uninstall|setup|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
+	return "usage: mira [--json] [--timeout 30s] <install|doctor|repair|uninstall|setup|start|stop|restart|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
 }
 
 func cliExitCode(err error) int {
@@ -1154,10 +1165,12 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 		return 0
 	}
-	if remaining[0] == "install" || remaining[0] == "doctor" || remaining[0] == "repair" || remaining[0] == "uninstall" || remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" || remaining[0] == "codex-runtime" {
+	if remaining[0] == "start" || remaining[0] == "stop" || remaining[0] == "restart" || remaining[0] == "install" || remaining[0] == "doctor" || remaining[0] == "repair" || remaining[0] == "uninstall" || remaining[0] == "setup" || remaining[0] == "status" || remaining[0] == "update" || remaining[0] == "codex-runtime" {
 		var value any
 		var localErr error
 		switch remaining[0] {
+		case "start", "stop", "restart":
+			value, localErr = runLocalService(ctx, remaining[0], remaining[1:])
 		case "install":
 			value, localErr = runSystemInstall(ctx, remaining[1:], stdin, stdout)
 		case "doctor":
@@ -1169,7 +1182,13 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		case "setup":
 			value, localErr = runSetup(remaining[1:])
 		case "status":
-			value, localErr = localStatus(ctx, options)
+			stateDir, _ := defaultSupervisorStateDir()
+			installed, _ := installation.LoadState(nil, stateDir)
+			if len(remaining) > 1 || installed.ServiceManager == installation.ServiceManagerBuiltin {
+				value, localErr = runLocalService(ctx, "status", remaining[1:])
+			} else {
+				value, localErr = localStatus(ctx, options)
+			}
 		case "update":
 			value, localErr = runUpdate(ctx, options, remaining[1:], stdin, stdout, stderr)
 		case "codex-runtime":
@@ -1181,6 +1200,13 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 		if !options.JSON && remaining[0] == "status" {
 			view, _ := value.(map[string]any)
+			if view["serviceManager"] == "builtin" {
+				fmt.Fprintf(stdout, "Mira Supervisor: %v\nState: %v\n", view["status"], view["stateDir"])
+				if pid := view["pid"]; pid != nil {
+					fmt.Fprintf(stdout, "PID: %v\nVersion: %v\n", pid, view["version"])
+				}
+				return 0
+			}
 			fmt.Fprintf(stdout, "Mira %s\nServer: %v\nEnrollment: %v\n", Version, view["serverUrl"], view["status"])
 			if code, ok := view["verificationCode"].(string); ok && code != "" {
 				fmt.Fprintf(stdout, "Verification code: %s\n", code)

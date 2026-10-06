@@ -69,7 +69,8 @@ connect to `/v1/ssh/sessions/{sessionId}/target` and `/source`, with subprotocol
 they are not bearer credentials. Each side authenticates its exact Node/credential
 and can attach once. The worker bootstrap arrives over a private anonymous pipe.
 
-- Binary WSS frames, maximum 64 KiB; boundaries have no SSH protocol meaning.
+- Binary WebSocket or [HTTPS transport v1](https-transport-v1.md) frames, maximum 64 KiB;
+  boundaries have no SSH protocol meaning. Auto mode falls back after any failed WebSocket handshake.
 - Bounded streaming/backpressure. Bulk data bypasses JSON control buffers.
 - WSS compression is disabled; native SSH compression is available with `-C`.
 - Both sides must attach within 30 seconds; SSH LoginGraceTime is 15 seconds.
@@ -147,6 +148,9 @@ All role names must resolve to the same running image. Desktop role links live
 inside an immutable version directory; only Mira's two public launchers enter PATH.
 Windows ZIP contains one PE; installation creates NTFS hard links. Android retargets
 private role symlinks after an APK upgrade. No system sshd or system SSH config is changed.
+Copied linked images without adjacent verified aliases create private versioned role links below the
+identity directory. Unix uses symlinks; Windows uses protected hardlinks. An explicit
+`MIRA_NODE_OPENSSH_DIR` remains strict and must contain aliases to the running image.
 
 Native package manifests include image SHA-256, platform, role list and pinned
 source digests; dependency notices accompany releases and the APK. Packaging refuses

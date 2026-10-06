@@ -50,7 +50,7 @@ func runSystemInstall(ctx context.Context, args []string, stdin io.Reader, stdou
 	stateDir := set.String("state-dir", defaultState, "Mira state directory")
 	role := set.String("role", installation.RoleNode, "node or server")
 	ownerValue := set.String("service-owner", "", "nix or mira")
-	serviceManager := set.String("service-manager", "", "auto, systemd, or procd")
+	serviceManager := set.String("service-manager", "", "auto, systemd, procd, or builtin")
 	serviceScope := set.String("service-scope", "", "user or system")
 	systemdUnit := set.String("systemd-unit", "", "systemd unit path")
 	nixSnippet := set.String("nix-snippet", "", "generated Nix module path")

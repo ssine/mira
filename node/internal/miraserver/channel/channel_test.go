@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 const (
@@ -504,5 +505,46 @@ func TestNativeCompletionUsesPrivateFrameAndOwnedAcknowledgement(t *testing.T) {
 	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestHTTPSNodeAndAppServerPreserveNativeProtocol(t *testing.T) {
+	channel := newTestChannel(t)
+	defer channel.Close()
+	server := httptest.NewServer(channel)
+	defer server.Close()
+	connect := func(path, protocol, token string) transport.Conn {
+		dialer := websocket.Dialer{Subprotocols: []string{protocol, "auth." + base64.RawURLEncoding.EncodeToString([]byte(token))}}
+		conn, _, err := transport.Dial(context.Background(), &dialer, "ws"+strings.TrimPrefix(server.URL, "http")+path, nil, "https")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.Close() })
+		return conn
+	}
+	node := connect("/v1/nodes/"+testNodeA+"/connect", "mira-node-v1", "token-a")
+	waitConnected(t, channel, testNodeA)
+	client := connect("/v1/nodes/"+testNodeA+"/app-server?storeId=personal", "mira-client-v1", "token-b")
+	var opened map[string]any
+	if err := node.ReadJSON(&opened); err != nil {
+		t.Fatal(err)
+	}
+	if opened["type"] != "appserver.open" {
+		t.Fatal(opened)
+	}
+	if err := client.WriteJSON(map[string]any{"id": 1, "method": "thread/start", "params": map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	var forwarded map[string]any
+	if err := node.ReadJSON(&forwarded); err != nil {
+		t.Fatal(err)
+	}
+	rpc, err := decodeObject([]byte(forwarded["payload"].(string)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	params := rpc["params"].(map[string]any)
+	if params["approvalPolicy"] != "never" || params["sandbox"] != "danger-full-access" || len(params["dynamicTools"].([]any)) != 1 {
+		t.Fatal(params)
 	}
 }

@@ -20,7 +20,7 @@ func Install(ctx context.Context, plan InstallPlan, dependencies Dependencies, o
 // registration and state persistence. This prevents two installers from each
 // switching current before only one discovers the ownership conflict.
 func InstallPrepared(ctx context.Context, plan InstallPlan, dependencies Dependencies, options ApplyOptions, prepare func() error) (ApplyReport, error) {
-	return installPrepared(ctx, plan, dependencies, options, prepare, installBehavior{})
+	return installPrepared(ctx, plan, dependencies, options, prepare, installBehavior{persistStateBeforeLastCommand: plan.State.ServiceManager == ServiceManagerBuiltin})
 }
 
 type installBehavior struct {
@@ -216,7 +216,9 @@ func Repair(ctx context.Context, plan InstallPlan, dependencies Dependencies, op
 	if _, err := requireOwner(dependencies.Files, plan.StateDir, plan.State.ServiceOwner, false); err != nil {
 		return ApplyReport{Plan: plan}, err
 	}
-	if plan.State.ServiceManager == ServiceManagerProcd {
+	if plan.State.ServiceManager == ServiceManagerBuiltin {
+		plan.Commands = []Command{{Name: filepath.Join(plan.StateDir, "current", "mira"), Args: []string{"restart", "--state-dir", plan.StateDir}}}
+	} else if plan.State.ServiceManager == ServiceManagerProcd {
 		plan.Commands = procdCommands(plan.State.ServicePath, "restart")
 	} else if plan.State.ServiceManager == ServiceManagerSystemd {
 		arguments := []string{}
@@ -273,6 +275,9 @@ func Uninstall(ctx context.Context, stateDir string, owner ServiceOwner, depende
 		return UninstallReport{}, fmt.Errorf("refusing to remove a service definition that drifted from Mira install state")
 	}
 	commands := uninstallCommands(state)
+	if state.ServiceManager == ServiceManagerBuiltin {
+		commands = []Command{{Name: filepath.Join(stateDir, "current", "mira"), Args: []string{"stop", "--state-dir", stateDir}}}
+	}
 	if options.DryRun {
 		return UninstallReport{Commands: commands}, nil
 	}

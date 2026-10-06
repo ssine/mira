@@ -32,6 +32,7 @@ type Server struct {
 	randomMu sync.Mutex
 	status   *OperationStatus
 	active   bool
+	stopping bool
 
 	updates   sync.WaitGroup
 	close     sync.Once
@@ -104,6 +105,28 @@ func Start(configuration Config) (*Server, error) {
 		return nil, err
 	}
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/service", func(w http.ResponseWriter, r *http.Request) {
+		if server.config.RuntimeStatus == nil {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(server.config.RuntimeStatus())
+	})
+	mux.HandleFunc("POST /v1/service/stop", func(w http.ResponseWriter, r *http.Request) {
+		server.mu.Lock()
+		defer server.mu.Unlock()
+		if server.active {
+			http.Error(w, "update in progress", 409)
+			return
+		}
+		if server.config.Stop == nil {
+			http.Error(w, "service manager owns stop", 409)
+			return
+		}
+		server.stopping = true
+		w.WriteHeader(http.StatusAccepted)
+		server.config.Stop()
+	})
 	mux.HandleFunc("POST /v1/update", server.handleUpdate)
 	mux.HandleFunc("GET /v1/update/status", server.handleStatus)
 	server.http = &http.Server{
@@ -197,6 +220,11 @@ func (server *Server) handleUpdate(response http.ResponseWriter, request *http.R
 		UpdatedAt:   now,
 	}
 	server.mu.Lock()
+	if server.stopping {
+		server.mu.Unlock()
+		http.Error(response, "Supervisor is stopping", http.StatusConflict)
+		return
+	}
 	if server.active {
 		current := *server.status
 		server.mu.Unlock()

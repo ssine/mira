@@ -19,6 +19,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/ssine/mira/node/internal/resourcewire"
+	"github.com/ssine/mira/node/internal/transport"
 )
 
 func (client *controlClient) startFileStream(ctx context.Context, message controlMessage) {
@@ -49,7 +50,7 @@ func (client *controlClient) startFileStream(ctx context.Context, message contro
 		u.RawQuery = ""
 		u.Fragment = ""
 		dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second, ReadBufferSize: resourcewire.FrameBytes, WriteBufferSize: resourcewire.FrameBytes, TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: platformCertificatePool()}, Subprotocols: []string{resourcewire.Protocol, "auth." + base64.RawURLEncoding.EncodeToString([]byte(client.token))}}
-		ws, _, err := dialer.DialContext(ctx, u.String(), nil)
+		ws, _, err := transport.Dial(ctx, &dialer, u.String(), nil, client.controlTransportMode())
 		if err != nil {
 			return
 		}
@@ -130,7 +131,7 @@ func (client *controlClient) stopFileStream(id string) {
 }
 
 type fileStreamWriter struct {
-	ws      *websocket.Conn
+	ws      transport.Conn
 	headers http.Header
 	started bool
 }

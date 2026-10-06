@@ -3,6 +3,7 @@ package node
 import (
 	"fmt"
 	"os"
+	"sync"
 )
 
 // Used by one bounded pipe reader. Splitting oversized writes keeps each file
@@ -75,3 +76,15 @@ func (log *rotatingLog) Write(data []byte) (int, error) {
 }
 
 func (log *rotatingLog) Close() error { return log.file.Close() }
+
+// Workers may write stdout and stderr concurrently.
+type synchronizedLog struct {
+	mu  sync.Mutex
+	log *rotatingLog
+}
+
+func (w *synchronizedLog) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.log.Write(p)
+}

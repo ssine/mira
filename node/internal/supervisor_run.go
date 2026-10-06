@@ -164,10 +164,32 @@ func RunSupervisor(ctx context.Context, args []string) error {
 	}
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	builtinState, stateErr := installation.LoadState(nil, options.stateDir)
+	builtin := stateErr == nil && builtinState.ServiceManager == installation.ServiceManagerBuiltin
+	var builtinOwner *os.File
+	if builtin {
+		builtinOwner, err = acquireBuiltinOwner(options.stateDir)
+		if err != nil {
+			return err
+		}
+		defer builtinOwner.Close()
+	}
+	launcher := supervisor.ExecLauncher{}
+	var logFile *rotatingLog
+	if builtin {
+		logFile, err = openRotatingLog(filepath.Join(options.stateDir, "supervisor.log"), 4*1024*1024, 3)
+		if err != nil {
+			return err
+		}
+		defer logFile.Close()
+		writer := &synchronizedLog{log: logFile}
+		launcher.Stdout, launcher.Stderr = writer, writer
+	}
+	var successor string
 	configuration := supervisor.Config{
 		StateDir: options.stateDir, ServiceOwner: options.owner,
 		Node:     supervisor.WorkerConfig{Args: []string{"node-worker", "--config", filepath.Join(options.stateDir, "node.json")}},
-		Launcher: supervisor.ExecLauncher{}, Stager: supervisor.GitHubStager{},
+		Launcher: launcher, Stager: supervisor.GitHubStager{},
 		Validator: supervisor.CandidateValidator{SelfCheckArgs: append([]string{
 			"supervisor-check", "--state-dir", options.stateDir, "--service-owner", string(options.owner),
 		}, func() []string {
@@ -183,8 +205,9 @@ func RunSupervisor(ctx context.Context, args []string) error {
 		if err := installation.RecordCurrentVersion(handoffContext, options.stateDir, options.owner, candidate.Version); err != nil {
 			return fmt.Errorf("record activated Mira version: %w", err)
 		}
-		// current already points at the validated release. Exiting now lets the
-		// owning service manager restart the Supervisor from that stable path.
+		// current already points at the validated release. The service manager
+		// restarts it, or builtin exec preserves the detached process identity.
+		successor = candidate.Executable
 		cancel()
 		return nil
 	}
@@ -198,7 +221,11 @@ func RunSupervisor(ctx context.Context, args []string) error {
 	if err := manager.Start(runContext); err != nil {
 		return err
 	}
-	control, err := supervisorapi.Start(supervisorapi.Config{StateDir: options.stateDir, Manager: manager})
+	apiConfig := supervisorapi.Config{StateDir: options.stateDir, Manager: manager, RuntimeStatus: func() any { return supervisorRuntimeView(options.stateDir, builtinState.ServiceManager) }}
+	if builtin {
+		apiConfig.Stop = cancel
+	}
+	control, err := supervisorapi.Start(apiConfig)
 	if err != nil {
 		stopContext, stopCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		stopErr := manager.Stop(stopContext)
@@ -216,7 +243,28 @@ func RunSupervisor(ctx context.Context, args []string) error {
 		closeCancel()
 	}()
 	err = manager.Run(runContext)
-	if err == context.Canceled && ctx.Err() == nil {
+	if err == context.Canceled && ctx.Err() == nil && successor != "" {
+		if builtin {
+			closeContext, done := context.WithTimeout(context.Background(), 35*time.Second)
+			closeErr := control.Close(closeContext)
+			done()
+			if closeErr != nil {
+				return closeErr
+			}
+			if logFile != nil {
+				_ = logFile.Close()
+			}
+			if execErr := replaceSupervisor(successor, append([]string{"supervisor"}, args...), builtinOwner); execErr != nil {
+				// A syscall failure leaves this process alive. Restore its old executable
+				// so it can still supervise the committed workers and accept another update.
+				previous, pathErr := os.Executable()
+				if pathErr != nil {
+					return errors.Join(execErr, pathErr)
+				}
+				return errors.Join(execErr, replaceSupervisor(previous, append([]string{"supervisor"}, args...), builtinOwner))
+			}
+			return nil
+		}
 		// Exit unsuccessfully so on-failure service managers (notably Windows
 		// Service recovery) start the successor selected by current.
 		return ErrSupervisorHandoff

@@ -67,8 +67,10 @@ func NewRolledBackError(err error) error {
 }
 
 type Config struct {
-	StateDir string
-	Manager  Manager
+	StateDir      string
+	Manager       Manager
+	RuntimeStatus func() any
+	Stop          func()
 
 	Listen          func(network, address string) (net.Listener, error)
 	Random          io.Reader

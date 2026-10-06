@@ -25,18 +25,25 @@ Mira 1.0 支持单机 Supervisor 管理 Node，以及 Server 主机上的 Node +
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | \
-  sh -s -- --role node --server https://mira.example.com --version 1.0.80
+  sh -s -- --role node --server https://mira.example.com --version 1.0.81
 ```
 
-支持 Linux amd64/arm64。普通 Linux 默认使用 systemd，WSL 需要启用 user systemd；OpenWrt 和
-FriendlyWrt Node 会自动识别已有的 procd，并以 root 写入、启用和启动 `/etc/init.d/mira`。
-procd 安装只支持 Mira 管理的 Node system service，并要求可执行的 `/etc/rc.common` 与
-`/sbin/procd`；其他 NAS 服务管理器仍不会被猜测。可用
-`--service-manager auto|systemd|procd` 明确覆盖检测结果。
+支持 Linux amd64/arm64。`--service-manager auto|systemd|procd|builtin` 默认为 auto：
+OpenWrt/FriendlyWrt 的 Mira-owned system Node 安装优先识别 procd；其他环境检测指定 scope 的
+systemd 是否可连接；两者不可用时选择 builtin。procd 要求可执行的 `/etc/rc.common` 与
+`/sbin/procd`，以 root 写入、启用并启动 `/etc/init.d/mira`。
+
+已有开发容器无需 PID 1/systemd。builtin 安装会在后台启动同一 Mira Supervisor；使用
+`mira start`、`mira stop`、`mira restart`、`mira status` 管理它，必要时传 `--state-dir`。
+Supervisor 管理 worker 重启及更新，通过 exec 交接自身，没有额外守护父进程。
+日志在状态目录的 `supervisor.log`，每份 4 MiB、保留三份旧日志；首启错误见 `builtin-startup.log`。
+容器停止、重建或 Supervisor 被杀后，需要从容器启动流程再次执行 `mira start`；builtin 不提供
+开机自启或 Supervisor 自身崩溃恢复。数据目录应持久保存，实例的 OS 用户和身份保持一致。
+
 
 脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用 `mira install` 安装 Supervisor。
 默认状态目录是 `~/.local/share/mira`，命令入口位于 `~/.local/bin`，身份配置位于
-`~/.config/mira`。可用 `--version 1.0.80` 固定首次安装版本，或用
+`~/.config/mira`。可用 `--version 1.0.81` 固定首次安装版本，或用
 `--state-dir /absolute/path` 选择状态目录。
 
 安装器不再接受 `--update`。首次安装后统一使用 `mira update`。
@@ -113,7 +120,7 @@ Node 只用于隔离测试，不能代表宿主机文件和进程权限。
 在管理员 PowerShell 中运行（Windows x64）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.80'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.81'"
 ```
 
 Windows 使用系统服务运行 Supervisor。默认状态目录为 `%USERPROFILE%\.mira`；`-StateDirectory`
@@ -156,6 +163,33 @@ mira doctor
 bootstrap 脚本更新，也不要并发执行两个更新。`mira repair` 只修复已记录且所有权一致的服务定义；
 `mira uninstall` 删除 Mira 管理的服务但保留版本、身份和配置。Nix 所有权下的修复和移除仍通过
 审查过的 Nix 配置完成。
+
+SSH 服务端及客户端都链接在正式 Mira 镜像中。手动只复制 `mira` 文件时，1.0.81 会在身份目录下
+的私有版本缓存自动创建所需 OpenSSH 角色链接，并验证它们指向当前镜像；无需安装系统 sshd。
+
+## 出站代理与 HTTPS 降级
+
+外部 Node 控制、App Server 客户端、SSH/SCP/SFTP 和文件流默认先尝试 WebSocket，握手失败时
+降级为普通 HTTPS GET 长轮询和 POST。Node 的短时 WebSocket 断连连续发生两次后，后续连接
+选择 HTTPS。HTTPS 始终重新校验相同身份；认证拒绝不会被绕过。断开的 RPC 不自动重新提交。Server 与客户端都需 1.0.81 或更新版本；
+旧客户端继续使用原 WebSocket 协议。Node 内部 loopback Codex App Server 仍使用原生 WebSocket。
+
+`MIRA_NODE_TRANSPORT=auto|websocket|https` 控制 Node 与 CLI；Node 配置文件也可写
+`"transport": "https"`。网页可通过 `?miraTransport=https` 强制 HTTPS（标签页内也可设置
+`sessionStorage["mira.transport"]`），默认自动降级。协议及重试边界见 [HTTPS transport v1](protocol/https-transport-v1.md)。
+
+Mira 出站请求使用标准 `HTTPS_PROXY`/`HTTP_PROXY` 和 `NO_PROXY`。例如 builtin 安装：
+
+```sh
+HTTPS_PROXY=http://proxy.example.test:7890 \
+NO_PROXY=localhost,127.0.0.1,::1 \
+MIRA_NODE_TRANSPORT=https \
+mira restart --state-dir /data/mira
+```
+
+代理地址按当前容器的网络视角填写。Supervisor 启动时继承变量并传给 worker，exec 更新保持环境；
+已运行的服务需要重启。systemd/procd/Nix 管理的实例通过其现有服务配置传入变量。
+变量作用于进程的全部网络请求（包括可选 runtime 下载）；如需不同路由，应配置代理或 NO_PROXY。
 
 ## 发布
 

@@ -57,6 +57,7 @@ jobs:
           diff -qr --exclude vendor server/public node/internal/webassets/web
           for file in server/public/*.js tests/*.mjs; do node --check "$file"; done
           node --test \
+            tests/mira_socket_test.mjs \
             tests/admin_session_ui_test.mjs \
             tests/account_status_test.mjs \
             tests/claude_conversations_test.mjs \
@@ -127,7 +128,8 @@ jobs:
             sleep 0.5
           done
           node tests/web_console_e2e.mjs
-          MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs
+          MIRA_NODE_TRANSPORT=https node tests/web_console_e2e.mjs
+          MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs
           npm ci --ignore-scripts
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium

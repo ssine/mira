@@ -33,6 +33,11 @@ var (
 )
 
 func ProtocolToken(request *http.Request) (string, bool) {
+	if request.URL.Query().Get("transport") == "https" {
+		if value, ok := strings.CutPrefix(request.Header.Get("Authorization"), "Bearer "); ok && value != "" {
+			return value, true
+		}
+	}
 	for _, protocol := range websocketProtocols(request) {
 		if !strings.HasPrefix(protocol, "auth.") {
 			continue
@@ -63,6 +68,9 @@ func websocketProtocols(request *http.Request) []string {
 }
 
 func hasWebSocketProtocol(request *http.Request, expected string) bool {
+	if request.URL.Query().Get("transport") == "https" {
+		return request.Header.Get("X-Mira-Protocol") == expected
+	}
 	for _, protocol := range websocketProtocols(request) {
 		if protocol == expected {
 			return true

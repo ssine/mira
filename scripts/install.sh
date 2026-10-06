@@ -27,7 +27,7 @@ while [ "$#" -gt 0 ]; do
       printf '%s\n' 'Installer-driven updates were removed. Run: mira update' >&2
       exit 2 ;;
     --help)
-      printf '%s\n' 'Usage: install.sh [--server URL] [--version VERSION] [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd] [--service-scope user|system] [--state-dir DIR] [--release-directory DIR]'
+      printf '%s\n' 'Usage: install.sh [--server URL] [--version VERSION] [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd|builtin] [--service-scope user|system] [--state-dir DIR] [--release-directory DIR]'
       exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
@@ -41,7 +41,7 @@ case "$(uname -m)" in
 esac
 case "$role" in node|server) ;; *) printf '%s\n' '--role must be node or server' >&2; exit 2 ;; esac
 case "$service_owner" in ""|nix|mira) ;; *) printf '%s\n' '--service-owner must be nix or mira' >&2; exit 2 ;; esac
-case "$service_manager" in ""|auto|systemd|procd) ;; *) printf '%s\n' '--service-manager must be auto, systemd, or procd' >&2; exit 2 ;; esac
+case "$service_manager" in ""|auto|systemd|procd|builtin) ;; *) printf '%s\n' '--service-manager must be auto, systemd, procd, or builtin' >&2; exit 2 ;; esac
 case "$service_scope" in ""|user|system) ;; *) printf '%s\n' '--service-scope must be user or system' >&2; exit 2 ;; esac
 case "$state_dir" in /*) ;; *) printf '%s\n' '--state-dir must be absolute' >&2; exit 2 ;; esac
 

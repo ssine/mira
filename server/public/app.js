@@ -1,3 +1,4 @@
+import { MiraSocket, configureMiraTransport } from "./mira-socket.js";
 import { FileReader, FileWorkspace, workspaceURL } from "/file-preview.js";
 import { ClaudeRuntime, claudeHistoryAcknowledgementRequired } from "/claude.js";
 import { conversationPageReader } from "/conversation-pages.js";
@@ -38,6 +39,7 @@ let composerDraftRemoveKey = null;
 
 let completionNotifications;
 let csrfToken = null;
+configureMiraTransport({ csrf: () => csrfToken });
 let csrfRefreshPromise = null;
 let dashboardNodes = new Map();
 let nodeMetadataTarget = null;
@@ -4833,7 +4835,7 @@ async function connectAgentSocket(nodeId, bindingId = $("#conversationAccount").
   clearTimeout(agent.reconnectTimer);
   setAgentRuntimeState("正在建立 App Server 通道…", "offline");
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal${accountQuery(bindingId)}`, ["mira-client-v1"]);
+  const socket = new MiraSocket(`${scheme}//${window.location.host}/v1/nodes/${nodeId}/app-server?storeId=personal${accountQuery(bindingId)}`, ["mira-client-v1"]);
   agent.socket = socket;
   agent.socketNodeId = nodeId;
   agent.socketAccountId = bindingId;
@@ -5678,7 +5680,7 @@ async function forkWithNode(node, params, onProgress = () => {}) {
   }
   // A separate connection keeps the current conversation and its live stream intact.
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${node.nodeId}/app-server?storeId=personal${accountQuery(bindingId)}`, ["mira-client-v1"]);
+  const socket = new MiraSocket(`${scheme}//${location.host}/v1/nodes/${node.nodeId}/app-server?storeId=personal${accountQuery(bindingId)}`, ["mira-client-v1"]);
   const pending = new Map();
   let next = 0;
   socket.addEventListener("message", (event) => {

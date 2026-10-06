@@ -60,7 +60,7 @@ func validateState(state InstallState) error {
 	if state.Platform != "linux" && state.Platform != "windows" {
 		return fmt.Errorf("invalid install state platform %q", state.Platform)
 	}
-	if state.Platform == "linux" && state.ServiceManager != ServiceManagerSystemd && state.ServiceManager != ServiceManagerProcd {
+	if state.Platform == "linux" && state.ServiceManager != ServiceManagerSystemd && state.ServiceManager != ServiceManagerProcd && state.ServiceManager != ServiceManagerBuiltin {
 		return fmt.Errorf("invalid Linux install state service manager %q", state.ServiceManager)
 	}
 	if state.Platform == "windows" && state.ServiceManager != "" {

@@ -37,6 +37,18 @@ func openSSHProgram(role string) (string, error) {
 	}
 	if dir == "" {
 		dir = filepath.Dir(self)
+		filename := role
+		if runtime.GOOS == "windows" {
+			filename += ".exe"
+		}
+		info, statErr := os.Stat(filepath.Join(dir, filename))
+		selfInfo, selfErr := os.Stat(self)
+		if statErr != nil || selfErr != nil || !os.SameFile(info, selfInfo) {
+			dir, err = singleImageOpenSSHRoles(self)
+			if err != nil {
+				return "", err
+			}
+		}
 	}
 	if !filepath.IsAbs(dir) {
 		return "", fmt.Errorf("MIRA_NODE_OPENSSH_DIR must be an absolute path")

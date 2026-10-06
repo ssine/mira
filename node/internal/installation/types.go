@@ -21,6 +21,7 @@ type ServiceManager string
 
 const (
 	ServiceManagerAuto    ServiceManager = "auto"
+	ServiceManagerBuiltin ServiceManager = "builtin"
 	ServiceManagerSystemd ServiceManager = "systemd"
 	ServiceManagerProcd   ServiceManager = "procd"
 )
@@ -55,6 +56,7 @@ type PlanOptions struct {
 	ServiceManager ServiceManager
 	Role           string
 	ServiceScope   string
+	ManagerProbe   Runner // read-only manager availability probe; nil uses the OS runner
 
 	SystemdUnitPath    string
 	ProcdInitPath      string

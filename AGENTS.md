@@ -55,6 +55,14 @@ Local service ownership
   -> Device Supervisor      -> Node worker
 ```
 
+Linux auto installation probes usable systemd/procd and otherwise selects the builtin background
+Supervisor. Builtin has no guardian parent or boot integration. Its lifetime lock survives exec;
+worker recovery and transactional updates remain owned by that Supervisor. Container restart or
+Supervisor death requires an external start. HTTPS fallback uses bounded, ephemeral sequenced frames
+for control, App Server, file streams and SSH, preserving the existing application protocols. Retry
+only identical frames inside one live session; never replay an operation after session loss. See
+`protocol/https-transport-v1.md`.
+
 Server, Node, CLI, Supervisor and embedded Web assets ship as one native Mira image and one version.
 The `server` install role runs both Server and Node workers under one Supervisor. PostgreSQL remains
 external: Mira may migrate its schema but never installs, upgrades or rolls back the database service.
@@ -69,7 +77,7 @@ otherwise in user-facing documentation or release notes.
 
 Mira Server does not mount devices or initiate network connections into them. Mira Nodes maintain
 outbound control connections. SSH v1 is an additional end-to-end SSH byte transport over dedicated
-outbound WSS streams, not a replacement for the JSON control/App Server protocols. The Server
+outbound binary WebSocket/HTTPS streams, not a replacement for the JSON control/App Server protocols. The Server
 coordinates connections and relays encrypted bytes; it does not log in through system sshd.
 See `protocol/ssh-v1.md` for identity, wire protocol, bounds and current feature limits.
 
@@ -250,6 +258,8 @@ tree from durable metadata even if parent and child ran on different nodes.
 `node/` is one Go module. Release builds link it with OpenSSH into one canonical `mira` executable;
 Node, Server, Supervisor and SSH worker are explicit subcommands. Only private OpenSSH role names are
 aliases of that image. Android packages it in one APK.
+When a linked image is copied without its archive aliases, create verified role links in a private,
+versioned cache below the identity directory. Never replace adjacent system SSH programs.
 Keep shared Go sources directly in `node/internal/` and Android application sources directly in
 `node/android/src/main/`. The Android root project applies the application plugin itself; do not
 add redundant implementation or application-module directory layers.

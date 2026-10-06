@@ -1,3 +1,4 @@
+import { MiraSocket } from "./mira-socket.js";
 import { accountQuery, accountNode, accountGroups, recentAccountKeys } from "./codex-accounts.js";
 import { weeklyQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
@@ -217,7 +218,7 @@ export class AccountSidebar {
   connect() {
     if (this.session) return this.session;
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${scheme}//${location.host}/v1/nodes/${this.node.nodeId}/app-server?storeId=personal${accountQuery(this.node.nodeAccountId)}`, ["mira-client-v1"]);
+    const socket = new MiraSocket(`${scheme}//${location.host}/v1/nodes/${this.node.nodeId}/app-server?storeId=personal${accountQuery(this.node.nodeAccountId)}`, ["mira-client-v1"]);
     const pending = new Map();
     let id = 0, rejectOpen;
     const session = { socket, close: () => {
