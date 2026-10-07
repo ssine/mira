@@ -50,6 +50,15 @@ Chat Completions renderer: Recipe has already rendered the complete prompt.
 EOS token IDs from vLLM count toward usage but are not emitted as answer text.
 No model request is automatically retried by this application.
 
+Codex v2 subagent tasks, follow-ups, messages and completion reports arrive as
+`agent_message` input items. Recipe 0.1.1 does not recognize that type and would
+silently discard it. The frontend converts plaintext agent items into ordinary
+user messages before Recipe conversion, preserving sender, recipient, content
+blocks and their position in history. These messages consume the normal context
+budget. Empty, malformed or encrypted agent content returns 400 before inference;
+the frontend never drops a task or partially forwards a mixed encrypted message.
+This is a model-input projection; Codex's native history remains unchanged.
+
 ### Image backend
 
 For images, install the small `vllm-backend/` endpoint plugin in the **vLLM**
@@ -164,6 +173,9 @@ tool output round trips, SSE ordering, context limits, missing/wrong/correct
 keys, cancellation, cold account restart and resume, and a read/edit/test task.
 Include image OCR/color recognition, ordered multiple images, image-bearing
 tool results, text regression, and cancellation of an image inference request.
+Also verify a fresh Codex subagent with no inherited history, an idle follow-up,
+queued messages and child completion reports using distinct task markers. A
+successful collaboration tool receipt alone does not prove model visibility.
 Use a disposable workspace for edits. Compare native vLLM and Recipe on model
 host loopback before attributing domain failures to either protocol adapter.
 

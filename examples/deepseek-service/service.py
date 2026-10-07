@@ -120,6 +120,39 @@ class Prepared:
     started_at: float = field(default_factory=perf_counter)
 
 
+def normalize_agent_messages(items):
+    """Project Codex plaintext agent input into Recipe's ordinary user messages.
+
+    Recipe 0.1.1 silently ignores the agent_message item type. Keep this
+    provider-specific projection outside Codex and its canonical history.
+    """
+    if not isinstance(items, list):
+        return items
+    normalized = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict) or item.get("type") != "agent_message":
+            normalized.append(item)
+            continue
+        author, recipient, content = item.get("author"), item.get("recipient"), item.get("content")
+        if not all(isinstance(value, str) and value.strip() for value in (author, recipient)):
+            raise RequestError(f"input[{index}]: agent_message requires an author and recipient.")
+        if not isinstance(content, list) or not content:
+            raise RequestError(f"input[{index}]: agent_message requires plaintext content.")
+        blocks = []
+        for block in content:
+            if (not isinstance(block, dict) or block.get("type") != "input_text"
+                    or not isinstance(block.get("text"), str)):
+                raise RequestError(f"input[{index}]: only plaintext input_text agent content is supported.")
+            blocks.append({"type": "input_text", "text": block["text"]})
+        if not any(block["text"].strip() for block in blocks):
+            raise RequestError(f"input[{index}]: agent_message content must not be empty.")
+        normalized.append({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": f"Agent message from {author} to {recipient}:"},
+            *blocks,
+        ]})
+    return normalized
+
+
 def prepare(protocol: str, body: bytes, settings: Settings, tokenizer: Tokenizer) -> Prepared:
     try:
         payload = json.loads(body)
@@ -134,6 +167,8 @@ def prepare(protocol: str, body: bytes, settings: Settings, tokenizer: Tokenizer
     # Keep the existing deployment's default strength 100, while explicit
     # low/high/max use Recipe's official V4.1 mapping (50/75/100).
     if protocol == "responses":
+        if "input" in payload:
+            payload["input"] = normalize_agent_messages(payload["input"])
         reasoning = payload.get("reasoning")
         if reasoning is None:
             payload["reasoning"] = {"effort": settings.default_effort}
