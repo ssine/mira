@@ -618,7 +618,7 @@ progress { width: 100%; accent-color: var(--accent); }
 .claude-persistence input { flex: none; width: 15px; height: 15px; min-height: 0; margin: 2px 0 0; padding: 0; accent-color: var(--warning); }
 .claude-persistence [hidden] { display: none; }
 .conversation-composer { position: relative; z-index: 4; width: min(100%, 808px); margin: 0 auto; padding: 4px 0 max(8px, env(safe-area-inset-bottom)); border: 0; background: var(--canvas); }
-.conversation-progress { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 2px 6px; color: var(--muted); font-size: 10px; }
+.conversation-progress { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 0 2px 6px; color: var(--muted); font-size: 12px; }
 #conversationActivityText { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reply-spinner { width: 11px; height: 11px; flex: none; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: reply-spin 1s linear infinite; }
 .activity-unknown .reply-spinner { animation: none; border-color: var(--muted); border-style: dotted; }

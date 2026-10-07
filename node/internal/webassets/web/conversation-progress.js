@@ -1,5 +1,20 @@
 // Ephemeral UI state, never part of the persisted transcript. Entries are tied
 // to a submission and then a thread/turn so late events cannot affect another chat.
+export function turnActivityPhase(method, params = {}) {
+  if (method === "turn/started" || method === "item/completed") return "working";
+  const hasDelta = typeof params.delta === "string" && params.delta.length > 0;
+  // An empty reasoning item can precede model generation. Only a real delta
+  // proves that the model has begun emitting reasoning (including raw content).
+  if (["item/reasoning/textDelta", "item/reasoning/summaryTextDelta"].includes(method) && hasDelta) return "thinking";
+  if (method === "item/agentMessage/delta" && hasDelta) return "replying";
+  if (method === "item/started") {
+    const type = String(params.item?.type ?? "").replaceAll("_", "").toLowerCase();
+    return ["commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "websearch", "collabagenttoolcall"].includes(type) ? "tool" : "working";
+  }
+  if (method === "error") return params.willRetry === true ? "working" : "failed";
+  return null;
+}
+
 export class ReplyProgress {
   entries = new Set();
 

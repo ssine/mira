@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ReplyProgress } from "../server/public/conversation-progress.js";
+import { ReplyProgress, turnActivityPhase } from "../server/public/conversation-progress.js";
+
+test("thinking starts on the first raw or summary delta, never on an empty item", () => {
+  assert.equal(turnActivityPhase("item/started", { item: { type: "reasoning", summary: [], content: [] } }), "working");
+  for (const method of ["item/reasoning/textDelta", "item/reasoning/summaryTextDelta"]) {
+    assert.equal(turnActivityPhase(method, { delta: "" }), null);
+    assert.equal(turnActivityPhase(method, { delta: "First token" }), "thinking");
+  }
+  assert.equal(turnActivityPhase("item/agentMessage/delta", { delta: "Answer" }), "replying");
+  assert.equal(turnActivityPhase("item/started", { item: { type: "dynamicToolCall" } }), "tool");
+  assert.equal(turnActivityPhase("item/completed", {}), "working");
+  assert.equal(turnActivityPhase("error", { willRetry: true }), "working");
+  assert.equal(turnActivityPhase("error", { willRetry: false }), "failed");
+});
 
 test("reply hint starts synchronously, survives empty reasoning/tools, ends at first prose", () => {
   const progress = new ReplyProgress();

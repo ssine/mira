@@ -11,7 +11,7 @@ import { decorateTraceDiagrams } from "/trace-diagrams.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ClientCache } from "/client-cache.js";
-import { ReplyProgress } from "/conversation-progress.js";
+import { ReplyProgress, turnActivityPhase } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute, createCompletionNotifications } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { interruptThread } from "/thread-interrupt.js";
@@ -735,9 +735,9 @@ function formatElapsed(ms) {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
-// Run status stays out of the layout: a highlight on the composer edge, a ring
-// on the stop button and the input placeholder. Only states that need the
-// user's attention (a pending question, an unconfirmed run) keep a text row.
+// Real reasoning deltas get a visible label independent of collapsed thoughts
+// and composer drafts. General running state stays on the composer edge; an
+// empty reasoning item is not evidence that model generation has started.
 function renderTurnActivity(entry) {
   const activity = threadActivity(agent.threadId);
   const turnId = entry?.turnId ?? activity.turnId ?? agent.activeTurns.get(agent.threadId);
@@ -748,7 +748,8 @@ function renderTurnActivity(entry) {
   const engine = engineOf(agent.threadId) === "claude" ? "Claude" : "Codex";
   const waiting = !entry && engine === "Claude" && agent.transcriptThreadId === agent.threadId &&
     agent.transcriptItems.some(item => item.turnId === turnId && item.questionState === "pending");
-  const text = entry ? (agent.uploadState ? "正在上传附件…" : entry.phase)
+  const thinking = visible && !unknown && phase === "thinking";
+  const text = thinking ? `${engine} 正在思考…` : entry ? (agent.uploadState ? "正在上传附件…" : entry.phase)
     : unknown ? activityLabel(activity, agent.threadId) : waiting ? "Claude 等待你的回答"
       : phase === "replying" ? `${engine} 正在回复…` : phase === "tool" ? `${engine} 正在调用工具…` : `${engine} 仍在处理中…`;
   const startedAt = entry?.startedAt ?? agent.turnTimings.get(turnId)?.startedAt;
@@ -768,12 +769,12 @@ function renderTurnActivity(entry) {
   if (live.textContent !== (visible ? text : "")) live.textContent = visible ? text : "";
 
   const notice = $("#conversationActivity");
-  const actionable = visible && (unknown || waiting);
+  const showNotice = visible && (unknown || waiting || thinking);
   notice.classList.toggle("activity-unknown", unknown);
   $("#conversationActivityText").textContent = visible ? text : "";
-  if (notice.classList.contains("hidden") === actionable) {
+  if (notice.classList.contains("hidden") === showNotice) {
     const follow = traceNearBottom();
-    notice.classList.toggle("hidden", !actionable);
+    notice.classList.toggle("hidden", !showNotice);
     if (follow) scrollTraceToBottom();
   }
 
@@ -1182,13 +1183,7 @@ function observeTurnActivity(method, params) {
   if (!turnId) return;
   if (method === "turn/completed") { agent.turnActivity.delete(turnId); return; }
   if (agent.turnTimings.get(turnId)?.completedAt) return;
-  let phase;
-  if (method === "turn/started" || method === "item/completed") phase = "working";
-  else if (method === "item/agentMessage/delta" && params.delta) phase = "replying";
-  else if (method === "item/started") {
-    const type = String(params.item?.type ?? "").replaceAll("_", "").toLowerCase();
-    phase = ["commandexecution", "filechange", "mcptoolcall", "dynamictoolcall", "websearch", "collabagenttoolcall"].includes(type) ? "tool" : "working";
-  } else if (method === "error" && !params.willRetry) phase = "failed";
+  const phase = turnActivityPhase(method, params);
   if (phase) agent.turnActivity.set(turnId, phase);
   if (phase === "failed") {
     recordLiveActivity(notificationThreadId(params), turnId, "failed");
@@ -3293,6 +3288,9 @@ async function loadConversationModels({ refresh = false } = {}) {
 
 function closeAgentSocket({ preserveSubmission = false, resetTurnState = false } = {}) {
   replyProgress.clear(preserveSubmission ? agent.replySubmission : null);
+  // The turn may still be running, but its last streaming phase is no longer
+  // known after disconnect. Do not present stale thinking as live activity.
+  agent.turnActivity.clear();
   agent.runtimeStartEpoch++;
   const socket = agent.socket;
   agent.socket = null;
@@ -3321,7 +3319,6 @@ function closeAgentSocket({ preserveSubmission = false, resetTurnState = false }
     agent.activeTurns.clear();
     agent.turnThreads.clear();
     agent.turnTimings.clear();
-    agent.turnActivity.clear();
   }
   syncActiveTurnUi();
   if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, "client closed");
