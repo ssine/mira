@@ -24,6 +24,12 @@ For OpenAI-compatible services append `/v1` to the returned URL. Model name and
 API key are upstream configuration; Mira does not understand or change them.
 SSE and WebSocket traffic stream through the same route.
 
+Upstream HTTP connections reuse the Node's existing data stream for subsequent
+requests, avoiding repeated TLS/WebSocket handshakes. Concurrent requests open
+separate bounded connections. Idle connections expire after 30 seconds; active
+SSE/WebSocket streams have no such idle limit. An interrupted request fails
+without automatic replay. A later independent request can open a fresh stream.
+
 ```sh
 mira site update my-service --expected-revision 1 --enabled=false --json
 mira site update my-service --expected-revision 2 --enabled=true --json

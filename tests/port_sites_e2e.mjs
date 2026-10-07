@@ -11,15 +11,16 @@ const base=process.env.MIRA_SERVER_URL||'http://127.0.0.1:8787';
 const binary=process.env.MIRA_TEST_BINARY;
 assert.ok(binary,'MIRA_TEST_BINARY is required');
 const root=await fs.mkdtemp(path.join(os.tmpdir(),'mira-port-site-'));
-let stopped=false, disconnectedRequests=0;
+let stopped=false, disconnectedRequests=0, upstreamConnections=0;
 const backend=http.createServer(async(req,res)=>{
  if(req.url==='/disconnect'){disconnectedRequests++;req.socket.destroy();return;}
  if(req.url==='/stream') {res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: first\n\n');const timer=setInterval(()=>res.write('data: next\n\n'),1000);res.on('close',()=>{clearInterval(timer);stopped=true});return;}
  if(req.url==='/delayed'){setTimeout(()=>res.end('after idle'),Number(process.env.MIRA_SITE_IDLE_TEST_MS||200));return;}
  const chunks=[];for await(const chunk of req) chunks.push(chunk);
  res.writeHead(207,{'Content-Type':'application/json','Set-Cookie':'upstream=session; Path=/','X-Upstream':'yes'});
- res.end(JSON.stringify({method:req.method,url:req.url,headers:req.headers,bytes:Buffer.concat(chunks).length}));
+ res.end(JSON.stringify({method:req.method,url:req.url,headers:req.headers,bytes:Buffer.concat(chunks).length,connection:req.socket.siteConnectionID}));
 });
+backend.on('connection',socket=>{socket.siteConnectionID=++upstreamConnections});
 const wss=new WebSocketServer({server:backend});wss.on('connection',ws=>ws.on('message',(data,binary)=>ws.send(data,{binary})));
 backend.listen(0,'127.0.0.1');await once(backend,'listening');const port=backend.address().port;
 const login=await fetch(base+'/v1/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:'admin',password:process.env.MIRA_TEST_ADMIN_PASSWORD||'mira-local-admin-password'})});assert.equal(login.status,200);const auth=await login.json();const cookie=login.headers.get('set-cookie').split(';')[0];
@@ -43,6 +44,8 @@ try {
  assert.equal((await fetch(base+'/v1/sites')).status,401);
  assert.equal((await fetch(base+'/v1/sites',{method:'POST',headers:{cookie,'Content-Type':'application/json'},body:JSON.stringify(body)})).status,403);
  let r=await siteFetch('/path%20encoded?q=a%2Fb',{method:'POST',headers:{Authorization:'Bearer application-only',cookie:'backend=only','Content-Type':'application/octet-stream'},body:Buffer.alloc(5*1024*1024,42)});assert.equal(r.status,207);let echo=JSON.parse(r.text);assert.equal(echo.bytes,5*1024*1024);assert.equal(echo.headers.authorization,'Bearer application-only');assert.equal(echo.headers.cookie,'backend=only');assert.equal(echo.headers.host,host);assert.equal(echo.url,'/path%20encoded?q=a%2Fb');assert.equal(r.headers['set-cookie'][0],'upstream=session; Path=/');
+ const firstConnection=echo.connection;
+ for(let i=0;i<3;i++){r=await siteFetch('/reuse');assert.equal(r.status,207);assert.equal(JSON.parse(r.text).connection,firstConnection,'upstream connection was not reused');}
  r=await siteFetch('/disconnect');assert.equal(r.status,502);assert.equal(disconnectedRequests,1,'a lost response replayed the request');
  r=await siteFetch('/v1/admin/session');assert.equal(r.status,207);assert.equal(JSON.parse(r.text).url,'/v1/admin/session');
  console.error('HTTP passthrough complete');
@@ -63,5 +66,5 @@ try {
  const cli=spawn(binary,['site','get',site.name,'--json'],{env:{...process.env,MIRA_IDENTITY_FILE:path.join(root,'identity.json')},stdio:['ignore','pipe','pipe']});let output='';cli.stdout.on('data',c=>output+=c);const [code]=await once(cli,'exit');assert.equal(code,0);assert.ok(output.includes(site.siteId));
  console.error('reconnect/CLI complete');
  result=await api('/v1/sites/'+site.name,'DELETE',{expectedRevision:site.revision});assert.equal(result.r.status,200);assert.equal((await siteFetch('/')).status,404);assert.equal((await api('/v1/sites','POST',body)).r.status,409);
- console.log(JSON.stringify({ok:true,transport:process.env.MIRA_NODE_TRANSPORT||'websocket',largeBody:true,SSE:true,websocket:true,cancellation:true,revision:true,stop:true,reconnect:true,cli:true,retiredName:true}));
+ console.log(JSON.stringify({ok:true,transport:process.env.MIRA_NODE_TRANSPORT||'websocket',connectionReuse:true,noReplay:true,largeBody:true,SSE:true,websocket:true,cancellation:true,revision:true,stop:true,reconnect:true,cli:true,retiredName:true}));
 } finally {await stop();wss.close();backend.closeAllConnections();backend.close();await fs.rm(root,{recursive:true,force:true});}
