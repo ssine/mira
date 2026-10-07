@@ -89,6 +89,15 @@ the requested page. The final assistant message in each completed turn shows tha
 estimated cost beside its total elapsed time. Zero, partial and unavailable estimates remain distinct;
 the tooltip states that the value uses Standard API prices rather than ChatGPT plan deductions.
 
+DeepSeek `DeepSeek-V4.1-Flash` and `deepseek-flash` use the official **standard peak**
+USD rates verified on 2026-10-08: $0.30 per million uncached input tokens, $0.006
+per million cached input tokens, and $1.20 per million output tokens, including
+reasoning. These self-hosted API-equivalent estimates deliberately do not switch
+to off-peak rates with the clock. Their source is
+https://api-docs.deepseek.com/quick_start/pricing/ and their basis is
+`standard-peak`; mixed-model totals preserve all pricing sources. Unknown or
+historically missing cache counts are not reconstructed from global hit ratios.
+
 The estimate uses the dated Standard USD prices in `node/internal/miraserver/views/cost.go`, sourced from
 https://developers.openai.com/api/docs/pricing and the corresponding model pages. It prices each new
 `last_token_usage` snapshot against its recorded model context/settings, deduplicating repeated

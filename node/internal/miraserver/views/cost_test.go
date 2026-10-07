@@ -38,6 +38,26 @@ func closeFloat(left, right float64) bool {
 	return delta < 1e-12
 }
 
+func TestDeepSeekPeakPriceIncludesCacheAndReasoningOutput(t *testing.T) {
+	for _, model := range []string{"DeepSeek-V4.1-Flash", "deepseek-flash"} {
+		state := NewCostProjection(false, nil)
+		ApplyCostRecord(state, contextRecord(model, "deepseek"), "")
+		counts := usage(1_000_000, 800_000, 100_000)
+		counts["reasoning_output_tokens"] = int64(60_000) // Already included in output.
+		ApplyCostRecord(state, usageRecord(counts, counts, ""), "")
+		value := CostEstimate(state, Thread{})
+		if !closeFloat(value["amount"].(float64), .1848) || value["basis"] != "standard-peak" || value["pricingSource"] != DeepSeekPricingSource || value["longRequests"] != int64(0) {
+			t.Fatalf("DeepSeek peak estimate: %#v", value)
+		}
+		ApplyCostRecord(state, contextRecord("gpt-6.1-sol", "other"), "")
+		ApplyCostRecord(state, usageRecord(usage(1_001_000, 800_000, 100_100), usage(1000, 0, 100), ""), "")
+		mixed := CostEstimate(state, Thread{})
+		if mixed["basis"] != "mixed-standard" || len(mixed["pricingSources"].([]string)) != 2 {
+			t.Fatalf("mixed provider sources: %#v", mixed)
+		}
+	}
+}
+
 func TestCostClonesKeepEveryRequestDeltaIndependent(t *testing.T) {
 	state := NewCostProjection(false, nil)
 	ApplyCostRecord(state, contextRecord("gpt-6-astra", "turn"), "")

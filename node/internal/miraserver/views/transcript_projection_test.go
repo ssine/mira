@@ -9,6 +9,25 @@ func record(recordType string, payload map[string]any) map[string]any {
 	return map[string]any{"type": recordType, "payload": payload}
 }
 
+func TestTranscriptReasoningContentWithoutSummary(t *testing.T) {
+	content := []any{map[string]any{"type": "reasoning_text", "text": "Consider the request."}}
+	item := map[string]any{"type": "reasoning", "id": "rs", "summary": []any{}, "content": content}
+	trace := ProjectCodexTranscript([]map[string]any{record("response_item", item)}, ProjectionOptions{})
+	if len(trace) != 1 || trace[0]["kind"] != "reasoning" || trace[0]["body"] != "Consider the request." {
+		t.Fatalf("readable content lost: %#v", trace)
+	}
+	item["summary"] = []any{map[string]any{"type": "summary_text", "text": "Short summary."}}
+	if reasoningText(item) != "Short summary." {
+		t.Fatal("summary must take precedence")
+	}
+	if reasoningText(map[string]any{"summary": []any{}, "encrypted_content": "opaque"}) != "" {
+		t.Fatal("opaque content must stay hidden")
+	}
+	if !reflect.DeepEqual(item["content"], content) {
+		t.Fatal("canonical content changed")
+	}
+}
+
 func TestProjectTranscriptSeparatesImageSnapshot(t *testing.T) {
 	dataURL := "data:image/png;base64,iVBORw0KGgo="
 	records := []map[string]any{

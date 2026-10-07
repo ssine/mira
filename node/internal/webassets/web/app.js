@@ -3988,21 +3988,22 @@ function liveTraceKey(params, itemId) {
     Object.hasOwn(params, "turnId") ? params.turnId : agent.turnId, itemId])}`;
 }
 
-function appendReasoningSummary(params) {
+function appendReasoningSummary(params, content = false) {
   if (!params.delta) return;
-  const index = params.summaryIndex ?? 0;
+  const index = (content ? params.contentIndex : params.summaryIndex) ?? 0;
   if (!Number.isSafeInteger(index) || index < 0 || index > 1000) return;
   const key = liveTraceKey(params, params.itemId ?? "reasoning");
   const existing = $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
-  const initial = existing?.querySelector(".trace-body")?._miraSource;
-  const parts = existing?._miraSummaryParts ?? (initial ? [initial] : []);
+  const field = content ? "_miraReasoningContentParts" : "_miraSummaryParts";
+  const parts = existing?.[field] ?? [];
   parts[index] = `${parts[index] ?? ""}${params.delta}`;
-  const body = parts.filter(Boolean).join("\n\n");
+  const summaries = content ? existing?._miraSummaryParts ?? [] : parts;
+  const body = (summaries.some(part => part?.trim()) ? summaries : parts).filter(Boolean).join("\n\n");
   if (!body.trim()) return;
   const trace = $("#conversationTrace");
   const follow = traceNearBottom(trace);
-  const card = upsertTrace(key, "reasoning", "推理摘要", undefined, "", { autoScroll: false, turnId: params.turnId });
-  card._miraSummaryParts = parts;
+  const card = upsertTrace(key, "reasoning", "思考", undefined, "", { autoScroll: false, turnId: params.turnId });
+  card[field] = parts;
   queueTraceStreamRender(card, body, "reasoning", follow);
 }
 
@@ -4801,6 +4802,10 @@ function handleAgentNotification(message) {
     appendReasoningSummary(params);
     return;
   }
+  if (method === "item/reasoning/textDelta") {
+    appendReasoningSummary(params, true);
+    return;
+  }
   if (method === "item/plan/delta") {
     appendTraceText(liveTraceKey(params, params.itemId ?? "plan"), "reasoning", "计划", params.delta ?? "");
     return;
@@ -5263,7 +5268,9 @@ function renderConversationCost(estimate, placeholder = "正在计算…") {
       ? `${scope}部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。`
       : `${scope}按历史请求模型估算 Token 费用；服务端临时重路由可能不同，非套餐实际扣费。`;
   $("#conversationCostPricing").href = estimate?.basis === "claude_sdk" ? "https://code.claude.com/docs/en/agent-sdk/cost-tracking" : "https://developers.openai.com/api/docs/pricing";
-  $("#conversationCostPricing").textContent = estimate?.basis === "claude_sdk" ? "Claude SDK 价格估算" : `Standard 公开价${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
+  const priceBasis = estimate?.basis === "standard-peak" ? "DeepSeek 标准高峰价估算"
+    : estimate?.basis === "mixed-standard" ? "各模型标准价估算（DeepSeek 按高峰价）" : "Standard 公开价";
+  $("#conversationCostPricing").textContent = estimate?.basis === "claude_sdk" ? "Claude SDK 价格估算" : `${priceBasis}${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
   if (estimate?.basis === "claude_sdk") $("#conversationCostNote").textContent = `${estimate.note} ${estimate.status === "partial" ? "部分记录缺失或累计用量重置，仅显示可确认的费用。" : ""}`;
 }
 
