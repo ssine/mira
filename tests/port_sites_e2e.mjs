@@ -11,8 +11,9 @@ const base=process.env.MIRA_SERVER_URL||'http://127.0.0.1:8787';
 const binary=process.env.MIRA_TEST_BINARY;
 assert.ok(binary,'MIRA_TEST_BINARY is required');
 const root=await fs.mkdtemp(path.join(os.tmpdir(),'mira-port-site-'));
-let stopped=false;
+let stopped=false, disconnectedRequests=0;
 const backend=http.createServer(async(req,res)=>{
+ if(req.url==='/disconnect'){disconnectedRequests++;req.socket.destroy();return;}
  if(req.url==='/stream') {res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: first\n\n');const timer=setInterval(()=>res.write('data: next\n\n'),1000);res.on('close',()=>{clearInterval(timer);stopped=true});return;}
  if(req.url==='/delayed'){setTimeout(()=>res.end('after idle'),Number(process.env.MIRA_SITE_IDLE_TEST_MS||200));return;}
  const chunks=[];for await(const chunk of req) chunks.push(chunk);
@@ -42,6 +43,7 @@ try {
  assert.equal((await fetch(base+'/v1/sites')).status,401);
  assert.equal((await fetch(base+'/v1/sites',{method:'POST',headers:{cookie,'Content-Type':'application/json'},body:JSON.stringify(body)})).status,403);
  let r=await siteFetch('/path%20encoded?q=a%2Fb',{method:'POST',headers:{Authorization:'Bearer application-only',cookie:'backend=only','Content-Type':'application/octet-stream'},body:Buffer.alloc(5*1024*1024,42)});assert.equal(r.status,207);let echo=JSON.parse(r.text);assert.equal(echo.bytes,5*1024*1024);assert.equal(echo.headers.authorization,'Bearer application-only');assert.equal(echo.headers.cookie,'backend=only');assert.equal(echo.headers.host,host);assert.equal(echo.url,'/path%20encoded?q=a%2Fb');assert.equal(r.headers['set-cookie'][0],'upstream=session; Path=/');
+ r=await siteFetch('/disconnect');assert.equal(r.status,502);assert.equal(disconnectedRequests,1,'a lost response replayed the request');
  r=await siteFetch('/v1/admin/session');assert.equal(r.status,207);assert.equal(JSON.parse(r.text).url,'/v1/admin/session');
  console.error('HTTP passthrough complete');
  r=await siteFetch('/delayed');assert.equal(r.text,'after idle');

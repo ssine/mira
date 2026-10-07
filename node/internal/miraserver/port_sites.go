@@ -479,6 +479,10 @@ func (server *Server) portSiteProxy(s *portSite) *httputil.ReverseProxy {
 	tr.MaxConnsPerHost = 32
 	tr.IdleConnTimeout = 30 * time.Second
 	tr.ResponseHeaderTimeout = 0
+	// A fresh upstream stream per request prevents net/http from replaying an
+	// idempotent request after a reused transport loses its Node session. The
+	// browser/client connection to Mira may still use keep-alive.
+	tr.DisableKeepAlives = true
 	tr.DisableCompression = true
 	tr.ForceAttemptHTTP2 = false
 	proxy := &httputil.ReverseProxy{Transport: tr, FlushInterval: -1,
