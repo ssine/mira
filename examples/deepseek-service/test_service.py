@@ -1,5 +1,6 @@
 """Run with DEEPSEEK_TEST_TOKENIZER=/path/to/model/tokenizer.json python -m unittest -v."""
 from dataclasses import replace
+import asyncio
 import base64
 import json
 import os
@@ -17,6 +18,105 @@ from service import Settings, create_app, prepare, RequestError
 
 
 TOKENIZER = os.environ.get("DEEPSEEK_TEST_TOKENIZER")
+
+
+@unittest.skipUnless(TOKENIZER, "Set DEEPSEEK_TEST_TOKENIZER to a V4.1 tokenizer.json")
+class QueueHttpTest(unittest.IsolatedAsyncioTestCase):
+    async def test_readiness_file_holds_inference_and_resumes_queued_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "key"
+            key_path.write_text("test-only-" + "x" * 48)
+            key_path.chmod(0o600)
+            ready_path = Path(directory) / "ready"
+            settings = Settings(TOKENIZER, str(key_path), backend_ready_file=str(ready_path))
+            tokenizer = Tokenizer.from_file(TOKENIZER)
+            calls = []
+
+            async def backend(request):
+                if request.url.path == "/health":
+                    return httpx.Response(200, json={"status": "ok"})
+                calls.append(json.loads(request.content))
+                ids = tokenizer.encode("</think>391<｜end▁of▁sentence｜>")
+                event = {"choices": [{"index": 0, "token_ids": ids, "finish_reason": "stop"}],
+                         "usage": {"prompt_tokens": len(calls[-1]["prompt"]), "completion_tokens": len(ids)}}
+                return httpx.Response(200, text="data: " + json.dumps(event) + "\n\ndata: [DONE]\n\n")
+
+            app = create_app(settings, transport=httpx.MockTransport(backend))
+            async with app.router.lifespan_context(app), httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test",
+                headers={"Authorization": "Bearer " + key_path.read_text()},
+            ) as client:
+                pending = asyncio.create_task(client.post("/v1/responses", json={
+                    "model": settings.model, "input": "17*23", "max_output_tokens": 100, "stream": True,
+                }))
+                for _ in range(100):
+                    if app.state.admission.waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual([], calls)
+                health = await client.get("/health")
+                self.assertEqual(200, health.status_code)
+                self.assertFalse(health.json()["admission"]["ready"])
+                ready_path.touch()
+                response = await asyncio.wait_for(pending, 2)
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertIn("response.completed", response.text)
+                self.assertEqual(1, len(calls))
+                self.assertEqual((0, 0), (app.state.admission.active, len(app.state.admission.waiting)))
+
+    async def test_active_and_queued_cancellation_release_slots_without_inference_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            key_path = Path(directory) / "key"
+            key_path.write_text("test-only-" + "x" * 48)
+            key_path.chmod(0o600)
+            settings = Settings(TOKENIZER, str(key_path), max_inflight=1, max_queued=2)
+            entered = asyncio.Queue()
+            unblock = asyncio.Event()
+            calls = []
+            tokenizer = Tokenizer.from_file(TOKENIZER)
+
+            async def backend(request):
+                if request.url.path == "/health":
+                    return httpx.Response(200, json={"status": "ok"})
+                calls.append(json.loads(request.content))
+                entered.put_nowait(len(calls))
+                await unblock.wait()
+                ids = tokenizer.encode("</think>391<｜end▁of▁sentence｜>")
+                frames = [{"choices": [{"index": 0, "token_ids": ids, "finish_reason": "stop"}],
+                           "usage": {"prompt_tokens": len(calls[-1]["prompt"]), "completion_tokens": len(ids)}}]
+                return httpx.Response(200, text="".join("data: " + json.dumps(c) + "\n\n" for c in frames) + "data: [DONE]\n\n")
+
+            app = create_app(settings, transport=httpx.MockTransport(backend))
+            headers = {"Authorization": "Bearer " + key_path.read_text()}
+            async with app.router.lifespan_context(app), httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test", headers=headers,
+            ) as client:
+                payload = {"model": settings.model, "input": "17*23", "max_output_tokens": 100}
+                active = asyncio.create_task(client.post("/v1/responses", json=payload))
+                self.assertEqual(1, await asyncio.wait_for(entered.get(), 2))
+                queued = asyncio.create_task(client.post("/v1/responses", json=payload))
+                survivor = asyncio.create_task(client.post("/v1/responses", json=payload))
+                for _ in range(100):
+                    if len(app.state.admission.waiting) == 2:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(2, len(app.state.admission.waiting))
+                self.assertEqual(200, (await client.get("/health")).status_code)
+                self.assertEqual(200, (await client.get("/v1/models")).status_code)
+                self.assertEqual(429, (await client.post("/v1/responses", json=payload)).status_code)
+                queued.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await queued
+                self.assertEqual(1, len(calls))
+                active.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await active
+                self.assertEqual(2, await asyncio.wait_for(entered.get(), 2))
+                unblock.set()
+                response = await asyncio.wait_for(survivor, 2)
+                self.assertEqual(200, response.status_code, response.text)
+                self.assertEqual(2, len(calls))
+                self.assertEqual((0, 0), (app.state.admission.active, len(app.state.admission.waiting)))
 
 
 def image_url(color=(255, 0, 0), width=64, height=48):
@@ -50,6 +150,8 @@ class ContractTest(unittest.TestCase):
         self.final_cached_tokens = None
 
     def backend(self, request):
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"status": "ok"})
         self.paths.append(request.url.path)
         self.requests.append(json.loads(request.content))
         if self.backend_status != 200:
@@ -80,6 +182,35 @@ class ContractTest(unittest.TestCase):
         self.assertEqual([], self.requests)
         self.assertEqual(200, client.get("/v1/models", headers=self.headers).status_code)
         self.assertEqual(404, client.get("/v1/completions", headers=self.headers).status_code)
+
+    def test_full_queue_preserves_health_models_and_rejects_before_body(self):
+        self.settings = replace(self.settings, max_inflight=1, max_queued=0)
+        client = self.client()
+        # Reserve on TestClient's owning event loop, as real requests do.
+        ticket = client.portal.call(client.app.state.admission.reserve)
+        try:
+            self.assertEqual(200, client.get("/v1/models", headers=self.headers).status_code)
+            self.assertEqual(200, client.get("/health", headers=self.headers).status_code)
+            response = client.post("/v1/responses", content=b"invalid", headers=self.headers)
+            self.assertEqual(429, response.status_code)
+            self.assertEqual("5", response.headers["Retry-After"])
+            self.assertEqual(401, client.post("/v1/responses", content=b"invalid").status_code)
+            self.assertEqual([], self.requests)
+        finally:
+            client.portal.call(ticket.release)
+
+    def test_queue_wait_timeout_returns_retry_advice_without_inference(self):
+        self.settings = replace(self.settings, max_inflight=1, max_queued=1, queue_timeout=0.02)
+        client = self.client()
+        ticket = client.portal.call(client.app.state.admission.reserve)
+        try:
+            response = client.post("/v1/responses", json=self.payload(), headers=self.headers)
+            self.assertEqual(429, response.status_code, response.text)
+            self.assertEqual("5", response.headers["Retry-After"])
+            self.assertEqual([], self.requests)
+            self.assertEqual(0, len(client.app.state.admission.waiting))
+        finally:
+            client.portal.call(ticket.release)
 
     def test_text_usage_and_raw_token_backend(self):
         result = self.client().post("/v1/responses", json=self.payload(), headers=self.headers)

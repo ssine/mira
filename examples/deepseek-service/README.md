@@ -34,7 +34,8 @@ tokenizer belonging to the actual checkpoint. The model must be served as
   --tokenizer /path/to/DeepSeek-V4.1-Flash/tokenizer.json \
   --key-file /private/deepseek/api.key \
   --backend http://127.0.0.1:8000 \
-  --port 8001
+  --port 8001 \
+  --max-inflight 8 --max-queued 32 --queue-timeout 300
 ```
 
 Run this under the model host's existing process supervisor, independently of
@@ -111,8 +112,27 @@ they are never silently dropped. The same stream parser handles text and images.
 The entrypoint authenticates **all** HTTP paths before reading a request body.
 It serves `/v1/responses`, `/v1/chat/completions`, `/v1/models`, and `/health`.
 Raw completions, metrics, tokenizer APIs, API documentation and other engine
-routes are not exposed. At most four authenticated requests are active, with a
-32 MiB request-body limit and a 600-second backend read-idle timeout. Streaming
+routes are not exposed. By default, eight inference requests can be active and
+32 can wait in a FIFO queue, with a 300-second maximum queue wait. Configure
+these separately with `--max-inflight`, `--max-queued` and `--queue-timeout`;
+the frontend does not change the vLLM scheduler's execution concurrency.
+Admission is reserved before body reads, so the total accepted inference set
+remains bounded. Each admitted request has a 32 MiB body limit. Queued requests
+retain their bounded input and can be cancelled without starting inference.
+Queue-full and queue-timeout errors carry `rate_limit_error` and HTTP 429 with
+`Retry-After: 5` before streaming starts; an already-started SSE response carries
+the typed error event instead. Queued streams send comments every 15 seconds
+until the first protocol event, keeping connections alive without fabricating
+model output. Disconnection releases the ticket, including when cancellation
+races with promotion to an execution slot. No request or tool is replayed.
+
+`/health` and `/v1/models` require authentication but bypass inference admission;
+health uses a separate bounded backend connection pool. Its response includes
+the current admission counts and readiness. The queue belongs to one Uvicorn
+event loop; run one frontend worker. Do not multiply worker counts to bypass
+its bounds.
+
+The backend read-idle timeout is 600 seconds. Streaming
 uses bounded HTTP buffers; disconnects close the upstream inference request,
 including non-streaming calls. An interrupted backend stream emits an error,
 never a fabricated successful completion.
@@ -199,7 +219,24 @@ strictness or constrained-output JSON Schema. Refer to its upstream supported
 scope before adding clients or advertising capabilities.
 
 Deploy by starting and testing the frontend on a new loopback port, then update
-the existing Mira site's target using its expected revision. Preserve the
-engine's model and inference settings. Roll back the frontend code/configuration
+the existing Mira site's target using its expected revision. Active site
+responses retain their original connection during that port update. Send
+SIGTERM to the old frontend only after cutover: Uvicorn stops accepting new
+connections and waits for existing responses to finish. Do not force-kill it
+while requests remain active.
+
+For an engine replacement, start the candidate frontend with
+`--backend-ready-file /private/deepseek/backend.ready` while that file is absent.
+New inference requests stay queued; active requests continue if the file is
+removed later. After cutover, wait for the old frontend to exit and the old
+engine's running and waiting counts to reach zero before stopping the engine.
+Do not impose a timeout that kills an active request. Retain the old launch
+command for rollback. Create the readiness file only after the replacement
+engine passes health and inference validation; queued requests then resume in
+order. Allow sufficient `--queue-timeout` for the planned model reload. This
+readiness file is local deployment control, not a public management endpoint.
+Preserve the engine's model and sampling settings when tuning concurrency.
+
+Roll back the frontend code/configuration
 to a known authenticated version; pointing a public site back to an
 unauthenticated raw engine would remove application authentication.
