@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ssine/mira/node/internal/sitewire"
 )
 
 type config struct {
@@ -31,6 +33,7 @@ type config struct {
 	AppServerCodexHome string
 	ConfigOverrides    []string
 	CodexMemoryBudget  codexMemoryBudget
+	SiteStreamBudget   int
 }
 
 type fileConfig struct {
@@ -52,6 +55,7 @@ type fileConfig struct {
 	AppServerCodexHome string   `json:"appServerCodexHome"`
 	ConfigOverrides    []string `json:"appServerConfigOverrides"`
 	CodexMemoryBudget  string   `json:"codexMemoryBudget"`
+	SiteStreamBudget   int      `json:"siteStreamBudget"`
 }
 
 func firstEnv(names ...string) string {
@@ -292,6 +296,17 @@ func loadConfigArgs(args []string) (config, error) {
 	if err != nil {
 		return config{}, err
 	}
+	streamBudget := ""
+	if stored.SiteStreamBudget != 0 {
+		streamBudget = strconv.Itoa(stored.SiteStreamBudget)
+	}
+	if value := os.Getenv("MIRA_NODE_SITE_STREAM_BUDGET"); value != "" {
+		streamBudget = value
+	}
+	parsedStreamBudget, err := sitewire.ParseStreamBudget(streamBudget)
+	if err != nil {
+		return config{}, fmt.Errorf("MIRA_NODE_SITE_STREAM_BUDGET: %w", err)
+	}
 	transportMode := stored.Transport
 	if value := os.Getenv("MIRA_NODE_TRANSPORT"); value != "" {
 		transportMode = value
@@ -310,6 +325,7 @@ func loadConfigArgs(args []string) (config, error) {
 		AppServerAutoStart: autoStart, AppServerListenURL: listenURL,
 		AppServerCodexHome: codexHome, ConfigOverrides: overrides,
 		CodexMemoryBudget: parsedBudget,
+		SiteStreamBudget:  parsedStreamBudget,
 	}, nil
 }
 

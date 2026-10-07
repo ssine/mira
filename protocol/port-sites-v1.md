@@ -49,11 +49,19 @@ stop, delete, revocation and shutdown close sockets and unblock stalled writers.
 SetWriteDeadline interrupts blocked writes by closing that transport; a failed
 write is never replayed. No application body-size, total-duration or idle-time
 limit is imposed. Transport handshakes/local dials and idle connection pools are
-bounded. Defaults: 128 streams per Server, 32 per Node, 32 upstream connections
-per site; Node also enforces 32 workers. Exhausted capacity fails new connections.
+bounded. From 1.0.84, `MIRA_NODE_SITE_STREAM_BUDGET` configures the resource budget
+(default 128, range 1–65536). Server admission shares it across all Nodes and sites,
+without independent 32-stream Node/site quotas; Node applies it to local workers.
+Before rejecting an exhausted Server budget, reclaim idle HTTP pools from least
+recently used sites until capacity is available. Active requests and upgrades
+are never reclaimed. An all-active budget fails new connections. Retiring a
+cached proxy prevents late response completion from retaining invisible idle
+streams. Closing a connection releases its Server reservation synchronously;
+the Node close is sent before the free slot is published, and Node worker close
+waits boundedly for socket cleanup before the next open is handled.
 Server proxy configuration cache: 64 sites. HTTP/1 connections reuse their
 dedicated Node transport between sequential requests, with at most four idle
-connections per site and a 30-second idle pool timeout. Concurrent requests use
+connections per site and a 30-minute idle pool timeout. Concurrent requests use
 separate connections; SSE and upgrades hold their connection for their lifetime.
 The HTTP transport permits one connection assignment per request. An attempted
 automatic retry cancels the request and fences any replacement socket before

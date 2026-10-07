@@ -18,6 +18,11 @@ import (
 
 var siteSessionID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+type siteWorker struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
 func (client *controlClient) startSiteStream(ctx context.Context, message controlMessage) {
 	var params struct {
 		Port int `json:"port"`
@@ -27,16 +32,22 @@ func (client *controlClient) startSiteStream(ctx context.Context, message contro
 	}
 	client.siteMu.Lock()
 	if client.siteWorkers == nil {
-		client.siteWorkers = map[string]context.CancelFunc{}
+		client.siteWorkers = map[string]*siteWorker{}
 	}
-	if len(client.siteWorkers) >= 32 || client.siteWorkers[message.SessionID] != nil {
+	budget := client.configuration.SiteStreamBudget
+	if budget == 0 {
+		budget = sitewire.DefaultStreamBudget
+	}
+	if len(client.siteWorkers) >= budget || client.siteWorkers[message.SessionID] != nil {
 		client.siteMu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	client.siteWorkers[message.SessionID] = cancel
+	worker := &siteWorker{cancel: cancel, done: make(chan struct{})}
+	client.siteWorkers[message.SessionID] = worker
 	client.siteMu.Unlock()
 	go func() {
+		defer close(worker.done)
 		defer cancel()
 		defer func() { client.siteMu.Lock(); delete(client.siteWorkers, message.SessionID); client.siteMu.Unlock() }()
 		u, err := url.Parse(client.endpoints.endpoint(ctx))
@@ -77,9 +88,17 @@ func (client *controlClient) startSiteStream(ctx context.Context, message contro
 
 func (client *controlClient) stopSiteStream(id string) {
 	client.siteMu.Lock()
-	cancel := client.siteWorkers[id]
+	worker := client.siteWorkers[id]
 	client.siteMu.Unlock()
-	if cancel != nil {
-		cancel()
+	if worker != nil {
+		worker.cancel()
+		// A reclaimed stream must release its local sockets/worker slot before
+		// the following site.open is handled. Keep control shutdown bounded.
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-worker.done:
+		case <-timer.C:
+		}
 	}
 }

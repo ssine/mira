@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +39,126 @@ func siteTestRead(t *testing.T, tr *siteTransport, req *http.Request) string {
 		t.Fatal(err)
 	}
 	return string(body)
+}
+
+type siteCountedConn struct {
+	net.Conn
+	open *atomic.Int32
+	once sync.Once
+}
+
+func (conn *siteCountedConn) Close() error {
+	err := conn.Conn.Close()
+	conn.once.Do(func() { conn.open.Add(-1) })
+	return err
+}
+
+func TestSitePoolReclaimsOldestIdleWithoutClosingActiveResponse(t *testing.T) {
+	var open atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/hold" {
+			io.WriteString(w, "first\n")
+			w.(http.Flusher).Flush()
+			<-release
+		}
+		io.WriteString(w, "complete")
+	}))
+	defer server.Close()
+	defer close(release)
+	makeTransport := func() (*siteTransport, *atomic.Int32) {
+		dials := &atomic.Int32{}
+		tr := newSiteTransport(func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			dials.Add(1)
+			open.Add(1)
+			return &siteCountedConn{Conn: conn, open: &open}, nil
+		})
+		deferClose := tr.CloseIdleConnections
+		t.Cleanup(deferClose)
+		return tr, dials
+	}
+	old, oldDials := makeTransport()
+	recent, recentDials := makeTransport()
+	active, _ := makeTransport()
+	req, _ := http.NewRequest("GET", server.URL, nil)
+	siteTestRead(t, old, req)
+	siteTestRead(t, recent, req)
+	req, _ = http.NewRequest("GET", server.URL+"/hold", nil)
+	resp, err := active.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	store := siteProxyStore{items: map[string]*siteProxy{
+		"active": {transport: active, used: time.Now().Add(-3 * time.Hour)},
+		"old":    {transport: old, used: time.Now().Add(-2 * time.Hour)},
+		"recent": {transport: recent, used: time.Now()},
+	}}
+	store.reclaimIdle(func() bool { return open.Load() < 3 })
+	if open.Load() != 2 {
+		t.Fatalf("capacity was not released synchronously: %d", open.Load())
+	}
+	req, _ = http.NewRequest("GET", server.URL, nil)
+	siteTestRead(t, recent, req)
+	if recentDials.Load() != 1 {
+		t.Fatal("recent idle connection was unnecessarily evicted")
+	}
+	siteTestRead(t, old, req)
+	if oldDials.Load() != 2 {
+		t.Fatal("oldest idle connection was not evicted")
+	}
+	first := make([]byte, 6)
+	if _, err := io.ReadFull(resp.Body, first); err != nil || string(first) != "first\n" {
+		t.Fatalf("reclamation interrupted the active response: %q, %v", first, err)
+	}
+}
+
+func TestRetiredSiteTransportCannotRetainLateIdleConnection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "complete") }))
+	defer server.Close()
+	var open, dials atomic.Int32
+	tr := newSiteTransport(func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		open.Add(1)
+		dials.Add(1)
+		return &siteCountedConn{Conn: conn, open: &open}, nil
+	})
+	defer tr.CloseIdleConnections()
+	entered, resume := make(chan struct{}), make(chan struct{})
+	ctx := httptrace.WithClientTrace(context.Background(), &httptrace.ClientTrace{GetConn: func(string) { close(entered); <-resume }})
+	req, _ := http.NewRequestWithContext(ctx, "GET", server.URL, nil)
+	done := make(chan error, 1)
+	go func() {
+		resp, err := tr.RoundTrip(req)
+		if err == nil {
+			_, err = io.ReadAll(resp.Body)
+			closeErr := resp.Body.Close()
+			if err == nil {
+				err = closeErr
+			}
+		}
+		done <- err
+	}()
+	<-entered
+	tr.Retire()
+	close(resume)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if open.Load() != 0 {
+		t.Fatalf("retired transport left %d late idle streams", open.Load())
+	}
+	req, _ = http.NewRequest("GET", server.URL, nil)
+	if _, err := tr.RoundTrip(req); !errors.Is(err, net.ErrClosed) || dials.Load() != 1 {
+		t.Fatalf("retired proxy opened another stream: %v, %d", err, dials.Load())
+	}
 }
 
 func TestSiteTransportReusesHTTPAndHTTPSConnections(t *testing.T) {

@@ -26,6 +26,67 @@ type siteStream struct {
 	attached       bool // guarded by channel.mu, including the upgrade reservation
 }
 
+func (channel *Channel) SetSiteIdleReclaimer(reclaim func()) {
+	channel.mu.Lock()
+	channel.siteIdleReclaimer = reclaim
+	channel.mu.Unlock()
+}
+
+func (channel *Channel) siteBudgetLocked() int {
+	if channel.siteStreamBudget == 0 {
+		return sitewire.DefaultStreamBudget
+	}
+	return channel.siteStreamBudget
+}
+
+func (channel *Channel) HasSiteCapacity() bool {
+	channel.mu.Lock()
+	defer channel.mu.Unlock()
+	return !channel.closed && !channel.siteStreamsClosed && len(channel.siteStreams) < channel.siteBudgetLocked()
+}
+
+func (channel *Channel) reserveSiteStream(ctx context.Context, id, siteID, nodeID string) (*siteStream, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		channel.mu.Lock()
+		epoch := channel.nodeSockets[nodeID]
+		if channel.closed || channel.siteStreamsClosed || epoch == nil {
+			channel.mu.Unlock()
+			return nil, channelError("Node is offline", 503, "node_offline")
+		}
+		if len(channel.siteStreams) >= channel.siteBudgetLocked() {
+			reclaim := channel.siteIdleReclaimer
+			channel.mu.Unlock()
+			if attempt == 0 && reclaim != nil {
+				reclaim()
+				continue
+			}
+			return nil, channelError("site stream capacity exhausted", 429, "site_busy")
+		}
+		if channel.siteStreams == nil {
+			channel.siteStreams = map[string]*siteStream{}
+		}
+		s := &siteStream{nodeID: nodeID, siteID: siteID, epoch: epoch, ready: make(chan transport.Conn, 1), done: make(chan struct{})}
+		channel.siteStreams[id] = s
+		channel.mu.Unlock()
+		return s, nil
+	}
+	panic("unreachable site reservation")
+}
+
+type siteStreamConn struct {
+	*sitewire.Conn
+	cleanup func()
+}
+
+func (conn *siteStreamConn) Close() error {
+	err := conn.Conn.Close()
+	conn.cleanup()
+	return err
+}
+
 func (s *siteStream) close() {
 	s.once.Do(func() {
 		s.mu.Lock()
@@ -104,36 +165,23 @@ func (channel *Channel) DialSite(ctx context.Context, siteID, nodeID string, por
 	if err != nil {
 		return nil, err
 	}
-	channel.mu.Lock()
-	epoch := channel.nodeSockets[nodeID]
-	if channel.closed || channel.siteStreamsClosed || epoch == nil {
-		channel.mu.Unlock()
-		return nil, channelError("Node is offline", 503, "node_offline")
+	s, err := channel.reserveSiteStream(ctx, id, siteID, nodeID)
+	if err != nil {
+		return nil, err
 	}
-	count := 0
-	for _, s := range channel.siteStreams {
-		if s.nodeID == nodeID {
-			count++
-		}
-	}
-	if len(channel.siteStreams) >= 128 || count >= 32 {
-		channel.mu.Unlock()
-		return nil, channelError("site stream capacity exhausted", 429, "site_busy")
-	}
-	if channel.siteStreams == nil {
-		channel.siteStreams = map[string]*siteStream{}
-	}
-	s := &siteStream{nodeID: nodeID, siteID: siteID, epoch: epoch, ready: make(chan transport.Conn, 1), done: make(chan struct{})}
-	channel.siteStreams[id] = s
-	channel.mu.Unlock()
+	var cleanupOnce sync.Once
 	cleanup := func() {
-		channel.mu.Lock()
-		if channel.siteStreams[id] == s {
-			delete(channel.siteStreams, id)
-		}
-		channel.mu.Unlock()
-		s.close()
-		channel.TrySendToNode(nodeID, map[string]any{"type": "site.close", "sessionId": id})
+		cleanupOnce.Do(func() {
+			s.close()
+			// Send close before publishing the free slot: a competing dial must
+			// not enqueue site.open ahead of the Node's worker reclamation.
+			channel.TrySendToNode(nodeID, map[string]any{"type": "site.close", "sessionId": id})
+			channel.mu.Lock()
+			if channel.siteStreams[id] == s {
+				delete(channel.siteStreams, id)
+			}
+			channel.mu.Unlock()
+		})
 	}
 	ok := false
 	defer func() {
@@ -141,7 +189,7 @@ func (channel *Channel) DialSite(ctx context.Context, siteID, nodeID string, por
 			cleanup()
 		}
 	}()
-	if err = epoch.writeJSON(map[string]any{"type": "site.open", "sessionId": id, "params": map[string]any{"port": port}}); err != nil {
+	if err = s.epoch.writeJSON(map[string]any{"type": "site.open", "sessionId": id, "params": map[string]any{"port": port}}); err != nil {
 		return nil, err
 	}
 	timer := time.NewTimer(20 * time.Second)
@@ -187,7 +235,7 @@ func (channel *Channel) DialSite(ctx context.Context, siteID, nodeID string, por
 		cleanup()
 	}()
 	ok = true
-	return stream, nil
+	return &siteStreamConn{Conn: stream, cleanup: cleanup}, nil
 }
 
 func (channel *Channel) ShutdownSiteStreams() {

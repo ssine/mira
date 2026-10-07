@@ -114,6 +114,7 @@ jobs:
           MIRA_SECURE_COOKIES: "false"
           LISTEN_HOST: 127.0.0.1
           MIRA_NODE_PREVIEW_DOMAIN: preview.localhost
+          MIRA_NODE_SITE_STREAM_BUDGET: "3"
           MIRA_NODE_PREVIEW_INGRESSES: '[{"consoleOrigin":"http://127.0.0.1:8787","previewOrigin":"http://preview.localhost:8787"},{"consoleOrigin":"http://direct.console.example.test:24443","previewOrigin":"http://preview.direct.localhost:34443"}]'
         run: |
           docker compose -f compose.yaml up -d --wait postgres
@@ -131,8 +132,18 @@ jobs:
           MIRA_NODE_TRANSPORT=https node tests/web_console_e2e.mjs
           MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs
           npm ci --ignore-scripts
-          MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
-          MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+          MIRA_SITE_RECLAIM_TEST=true MIRA_SITE_POOL_WAIT_MS=35000 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+          MIRA_NODE_TRANSPORT=https MIRA_SITE_RECLAIM_TEST=true MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+          kill "$server_pid"
+          wait "$server_pid" || true
+          MIRA_NODE_SITE_STREAM_BUDGET=128 "$RUNNER_TEMP/mira" server-worker >"$RUNNER_TEMP/mira-server-capacity.log" 2>&1 &
+          server_pid=$!
+          for attempt in $(seq 1 40); do
+            if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
+            if [ "$attempt" -eq 40 ]; then cat "$RUNNER_TEMP/mira-server-capacity.log"; exit 1; fi
+            sleep 0.5
+          done
+          MIRA_NODE_SITE_STREAM_BUDGET=128 MIRA_SITE_PARALLEL_STREAMS=40 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium
           browser_status=0

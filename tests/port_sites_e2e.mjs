@@ -11,8 +11,9 @@ const base=process.env.MIRA_SERVER_URL||'http://127.0.0.1:8787';
 const binary=process.env.MIRA_TEST_BINARY;
 assert.ok(binary,'MIRA_TEST_BINARY is required');
 const root=await fs.mkdtemp(path.join(os.tmpdir(),'mira-port-site-'));
-let stopped=false, disconnectedRequests=0, upstreamConnections=0;
+let stopped=false, disconnectedRequests=0, upstreamConnections=0, rejectedReachedBackend=0;
 const backend=http.createServer(async(req,res)=>{
+ if(req.url==='/capacity-rejected')rejectedReachedBackend++;
  if(req.url==='/disconnect'){disconnectedRequests++;req.socket.destroy();return;}
  if(req.url==='/stream') {res.writeHead(200,{'Content-Type':'text/event-stream'});res.write('data: first\n\n');const timer=setInterval(()=>res.write('data: next\n\n'),1000);res.on('close',()=>{clearInterval(timer);stopped=true});return;}
  if(req.url==='/delayed'){setTimeout(()=>res.end('after idle'),Number(process.env.MIRA_SITE_IDLE_TEST_MS||200));return;}
@@ -20,6 +21,7 @@ const backend=http.createServer(async(req,res)=>{
  res.writeHead(207,{'Content-Type':'application/json','Set-Cookie':'upstream=session; Path=/','X-Upstream':'yes'});
  res.end(JSON.stringify({method:req.method,url:req.url,headers:req.headers,bytes:Buffer.concat(chunks).length,connection:req.socket.siteConnectionID}));
 });
+backend.keepAliveTimeout=31*60*1000;
 backend.on('connection',socket=>{socket.siteConnectionID=++upstreamConnections});
 const wss=new WebSocketServer({server:backend});wss.on('connection',ws=>ws.on('message',(data,binary)=>ws.send(data,{binary})));
 backend.listen(0,'127.0.0.1');await once(backend,'listening');const port=backend.address().port;
@@ -32,6 +34,10 @@ async function wait(fn){const end=Date.now()+30000;while(Date.now()<end){const v
 let nodeID,site,host;
 function request(route,options={}){return http.request(base+route,{...options,headers:{Host:host,...options.headers}});}
 async function siteFetch(route,options={}){return await new Promise((resolve,reject)=>{const req=request(route,options);req.on('error',reject);req.on('response',res=>{const chunks=[];res.on('error',reject);res.on('data',c=>chunks.push(c));res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,text:Buffer.concat(chunks).toString()}));});req.end(options.body);});}
+async function closeHeld(held){
+ const closed=held.map(({res})=>{res.on('error',()=>{});return res.destroyed?Promise.resolve():new Promise(resolve=>res.once('close',resolve));});
+ for(const {req} of held)req.destroy();await Promise.all(closed);
+}
 try {
  start();const pending=await wait(async()=>{const {b}=await api('/v1/admin/enrollments?status=pending');return b.data?.find(n=>n.nodeKey===key)});const approved=await api(`/v1/admin/enrollments/${pending.enrollmentId}/approve`,'POST',{});assert.equal(approved.r.status,200);nodeID=approved.b.nodeId;
  await wait(async()=>{const {b}=await api('/v1/nodes/'+nodeID);return b.channelStatus?.connected});
@@ -46,6 +52,7 @@ try {
  let r=await siteFetch('/path%20encoded?q=a%2Fb',{method:'POST',headers:{Authorization:'Bearer application-only',cookie:'backend=only','Content-Type':'application/octet-stream'},body:Buffer.alloc(5*1024*1024,42)});assert.equal(r.status,207);let echo=JSON.parse(r.text);assert.equal(echo.bytes,5*1024*1024);assert.equal(echo.headers.authorization,'Bearer application-only');assert.equal(echo.headers.cookie,'backend=only');assert.equal(echo.headers.host,host);assert.equal(echo.url,'/path%20encoded?q=a%2Fb');assert.equal(r.headers['set-cookie'][0],'upstream=session; Path=/');
  const firstConnection=echo.connection;
  for(let i=0;i<3;i++){r=await siteFetch('/reuse');assert.equal(r.status,207);assert.equal(JSON.parse(r.text).connection,firstConnection,'upstream connection was not reused');}
+ if(Number(process.env.MIRA_SITE_POOL_WAIT_MS)>0){await new Promise(resolve=>setTimeout(resolve,Number(process.env.MIRA_SITE_POOL_WAIT_MS)));r=await siteFetch('/reuse-after-idle');assert.equal(JSON.parse(r.text).connection,firstConnection,'idle pool expired before the configured 30 minutes');}
  r=await siteFetch('/disconnect');assert.equal(r.status,502);assert.equal(disconnectedRequests,1,'a lost response replayed the request');
  r=await siteFetch('/v1/admin/session');assert.equal(r.status,207);assert.equal(JSON.parse(r.text).url,'/v1/admin/session');
  console.error('HTTP passthrough complete');
@@ -57,6 +64,30 @@ try {
  assert.equal((await api('/v1/sites/'+site.siteId,'PATCH',{expectedRevision:site.revision+1,enabled:false})).r.status,409);
  // A stop closes an active public stream, including through HTTPS fallback.
  console.error('SSE cancellation complete');
+ if(process.env.MIRA_SITE_RECLAIM_TEST==='true'){
+  assert.equal(Number(process.env.MIRA_NODE_SITE_STREAM_BUDGET),3,'reclamation acceptance requires a three-stream Server/Node budget');
+  const originalHost=host, extras=[], held=[];
+  async function hold(){const req=request('/stream');req.end();const [res]=await once(req,'response');assert.equal(res.statusCode,200);await once(res,'data');held.push({req,res});return res;}
+  try{
+   const protectedResponse=await hold();
+   for(let i=0;i<3;i++){const created=await api('/v1/sites','POST',{name:`capacity-${process.pid}-${i}`,nodeId:nodeID,port});assert.equal(created.r.status,200);extras.push(created.b);host=new URL(created.b.url).host;assert.equal((await siteFetch('/warm')).status,207);}
+   await once(protectedResponse,'data'); // Pressure reclaimed idle slots, preserving active SSE.
+   for(const entry of extras.slice(1)){host=new URL(entry.url).host;await hold();}
+   host=new URL(extras[0].url).host;assert.equal((await siteFetch('/capacity-rejected')).status,502);assert.equal(rejectedReachedBackend,0,'an exhausted budget submitted application bytes');
+   await once(protectedResponse,'data'); // An all-active budget fails new work without eviction.
+  }finally{
+   host=originalHost;
+   await closeHeld(held);
+   for(const entry of extras){assert.equal((await api('/v1/sites/'+entry.siteId,'DELETE',{expectedRevision:entry.revision})).r.status,200);}
+  }
+  console.error('shared budget reclamation complete');
+ }
+ const parallel=Number(process.env.MIRA_SITE_PARALLEL_STREAMS||0);
+ if(parallel>0){
+  const held=await Promise.all(Array.from({length:parallel},async()=>{const req=request('/stream');req.end();const [res]=await once(req,'response');assert.equal(res.statusCode,200);await once(res,'data');return {req,res};}));
+  await closeHeld(held);
+  console.error(`single Node/site ${parallel} active streams complete`);
+ }
  const active=request('/stream');active.end();const [activeResponse]=await once(active,'response');await once(activeResponse,'data');const closed=new Promise(resolve=>activeResponse.once('close',resolve));
  result=await api('/v1/sites/'+site.siteId,'PATCH',{expectedRevision:site.revision,enabled:false});assert.equal(result.r.status,200);site=result.b;await Promise.race([closed,new Promise((_,reject)=>setTimeout(()=>reject(Error('stop did not close stream')),5000))]);assert.equal((await siteFetch('/')).status,404);
  result=await api('/v1/sites/'+site.name,'PATCH',{expectedRevision:site.revision,enabled:true});site=result.b;assert.equal((await siteFetch('/')).status,207);
