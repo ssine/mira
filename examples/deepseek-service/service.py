@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import hmac
 import json
+import math
 import os
 import stat
 from time import time, perf_counter
@@ -33,6 +34,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 import httpx
 from starlette.concurrency import run_in_threadpool
 
+from admission import Admission, QueueFull, QueueTimeout
+
 
 PROTOCOLS = {
     "responses": (ResponsesRequest, ResponsesResponse),
@@ -50,8 +53,19 @@ class Settings:
     default_output_tokens: int = 32768
     default_effort: str = "max"
     max_request_bytes: int = 32 * 1024 * 1024
-    max_inflight: int = 4
+    max_inflight: int = 8
+    max_queued: int = 32
+    queue_timeout: float = 300
+    backend_ready_file: str | None = None
     recipe_backend: bool = False
+
+    def __post_init__(self):
+        if self.max_inflight < 1 or self.max_queued < 0:
+            raise ValueError("max_inflight must be positive and max_queued non-negative")
+        if not math.isfinite(self.queue_timeout) or self.queue_timeout <= 0:
+            raise ValueError("queue_timeout must be finite and positive")
+        if self.backend_ready_file and not os.path.isabs(self.backend_ready_file):
+            raise ValueError("backend_ready_file must be an absolute local path")
 
 
 class RequestError(Exception):
@@ -75,9 +89,9 @@ def read_key(path: str) -> bytes:
 
 
 class AuthAndCapacity:
-    """Authenticate every path before reading a body, with a bounded live set."""
-    def __init__(self, app, key: bytes, limit: int):
-        self.app, self.key, self.limit, self.active = app, key, limit, 0
+    """Authenticate before body reads; reserve bounded inference tickets only."""
+    def __init__(self, app, key: bytes, admission):
+        self.app, self.key, self.admission = app, key, admission
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -93,15 +107,21 @@ class AuthAndCapacity:
             response.headers["WWW-Authenticate"] = "Bearer"
             await response(scope, receive, send)
             return
-        # No await between checking and incrementing: one Uvicorn event loop.
-        if self.active >= self.limit:
-            await error_response("Service is busy; retry later.", 429, "rate_limit_error")(scope, receive, send)
-            return
-        self.active += 1
+        ticket = None
+        if scope["method"] == "POST" and scope["path"] in ("/v1/responses", "/v1/chat/completions"):
+            try:
+                ticket = self.admission.reserve()
+            except QueueFull:
+                response = error_response("Inference queue is full; retry later.", 429, "rate_limit_error")
+                response.headers["Retry-After"] = "5"
+                await response(scope, receive, send)
+                return
+            scope["deepseek.admission"] = ticket
         try:
             await self.app(scope, receive, send)
         finally:
-            self.active -= 1
+            if ticket is not None:
+                ticket.release()
 
 
 @dataclass
@@ -394,6 +414,40 @@ async def stream_after_first(first, output):
             await output.aclose()
 
 
+async def stream_while_waiting(output, interval=15):
+    """Keep a queued SSE request alive without inventing protocol events."""
+    pending = asyncio.create_task(anext(output))
+    try:
+        while not pending.done():
+            done, _ = await asyncio.wait({pending}, timeout=interval)
+            if not done:
+                yield ": waiting\n\n"
+        first = pending.result()
+        async for part in stream_after_first(first, output):
+            yield part
+    except RequestError as exc:
+        yield sse("error", json.dumps({"type": "error", "code": exc.code, "message": exc.message}))
+    finally:
+        pending.cancel()
+        with CancelScope(shield=True):
+            await asyncio.gather(pending, return_exceptions=True)
+            await output.aclose()
+
+
+async def admitted_body(ticket, prepared, client, settings, tokenizer):
+    try:
+        prepared.timings["queue_wait_ms"] = round(await ticket.wait(settings.queue_timeout), 2)
+    except QueueTimeout as exc:
+        raise RequestError("Inference queue wait timed out; retry later.", 429, "rate_limit_error") from exc
+    output = response_body(prepared, client, settings, tokenizer)
+    try:
+        async for part in output:
+            yield part
+    finally:
+        with CancelScope(shield=True):
+            await output.aclose()
+
+
 async def first_or_disconnect(request: Request, output):
     """Cancel inference when a non-streaming caller closes its connection too."""
     async def disconnected():
@@ -417,6 +471,14 @@ async def first_or_disconnect(request: Request, output):
 def create_app(settings: Settings, *, transport=None) -> FastAPI:
     key = read_key(settings.key_file)
     tokenizer = Tokenizer.from_file(settings.tokenizer)
+    def backend_ready():
+        return settings.backend_ready_file is None or os.path.isfile(settings.backend_ready_file)
+    admission = Admission(settings.max_inflight, settings.max_queued, ready=backend_ready())
+
+    async def watch_readiness():
+        while True:
+            admission.set_ready(backend_ready())
+            await asyncio.sleep(0.1)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -424,16 +486,30 @@ def create_app(settings: Settings, *, transport=None) -> FastAPI:
             base_url=settings.backend, trust_env=False, transport=transport,
             timeout=httpx.Timeout(connect=5, read=600, write=30, pool=5),
             limits=httpx.Limits(max_connections=settings.max_inflight, max_keepalive_connections=settings.max_inflight),
-        ) as client:
+        ) as client, httpx.AsyncClient(
+            base_url=settings.backend, trust_env=False, transport=transport,
+            timeout=5, limits=httpx.Limits(max_connections=1, max_keepalive_connections=1),
+        ) as health_client:
             app.state.client = client
-            yield
+            app.state.health_client = health_client
+            watcher = asyncio.create_task(watch_readiness()) if settings.backend_ready_file else None
+            try:
+                yield
+            finally:
+                if watcher is not None:
+                    watcher.cancel()
+                    await asyncio.gather(watcher, return_exceptions=True)
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(AuthAndCapacity, key=key, limit=settings.max_inflight)
+    app.state.admission = admission
+    app.add_middleware(AuthAndCapacity, key=key, admission=admission)
 
     @app.exception_handler(RequestError)
     async def request_error(_request, exc):
-        return error_response(exc.message, exc.status, exc.code)
+        response = error_response(exc.message, exc.status, exc.code)
+        if exc.status == 429:
+            response.headers["Retry-After"] = "5"
+        return response
 
     @app.exception_handler(ConversionError)
     async def conversion_error(_request, exc):
@@ -442,9 +518,9 @@ def create_app(settings: Settings, *, transport=None) -> FastAPI:
     @app.get("/health")
     async def health(request: Request):
         try:
-            response = await request.app.state.client.get("/health", timeout=5)
+            response = await request.app.state.health_client.get("/health")
             if response.status_code == 200:
-                return {"status": "ok"}
+                return {"status": "ok", "admission": admission.snapshot()}
         except httpx.HTTPError:
             pass
         raise RequestError("Inference backend unavailable.", 503, "backend_unavailable")
@@ -464,7 +540,11 @@ def create_app(settings: Settings, *, transport=None) -> FastAPI:
             prepared = await run_in_threadpool(prepare, protocol, bytes(body), settings, tokenizer)
             prepared.started_at = started_at
             prepared.timings["prepare_ms"] = round((perf_counter() - started_at) * 1000, 2)
-            output = response_body(prepared, request.app.state.client, settings, tokenizer)
+            ticket = request.scope["deepseek.admission"]
+            output = admitted_body(ticket, prepared, request.app.state.client, settings, tokenizer)
+            if prepared.converted.stream and not ticket.ready.done():
+                return ClosingStreamingResponse(stream_while_waiting(output), media_type="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
             try:
                 first = await first_or_disconnect(request, output)
             except BaseException:
@@ -492,9 +572,15 @@ def main():
     parser.add_argument("--backend", default="http://127.0.0.1:8000")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--recipe-backend", action="store_true", help="Use the Recipe backend plugin for text too, including final cache usage")
+    parser.add_argument("--max-inflight", type=int, default=8, help="Concurrent inference requests")
+    parser.add_argument("--max-queued", type=int, default=32, help="Waiting inference requests; 0 disables queuing")
+    parser.add_argument("--queue-timeout", type=float, default=300, help="Maximum queue wait in seconds")
+    parser.add_argument("--backend-ready-file", help="Pause new inference while this absolute local file is absent; active requests continue")
     args = parser.parse_args()
     import uvicorn
-    app = create_app(Settings(tokenizer=args.tokenizer, key_file=args.key_file, backend=args.backend, recipe_backend=args.recipe_backend))
+    app = create_app(Settings(tokenizer=args.tokenizer, key_file=args.key_file, backend=args.backend,
+        recipe_backend=args.recipe_backend, max_inflight=args.max_inflight, max_queued=args.max_queued,
+        queue_timeout=args.queue_timeout, backend_ready_file=args.backend_ready_file))
     uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, server_header=False, timeout_keep_alive=1800)
 
 
