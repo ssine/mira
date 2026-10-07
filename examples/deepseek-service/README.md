@@ -121,9 +121,11 @@ remains bounded. Each admitted request has a 32 MiB body limit. Queued requests
 retain their bounded input and can be cancelled without starting inference.
 Queue-full and queue-timeout errors carry `rate_limit_error` and HTTP 429 with
 `Retry-After: 5` before streaming starts; an already-started SSE response carries
-the typed error event instead. Queued streams send comments every 15 seconds
-until the first protocol event, keeping connections alive without fabricating
-model output. Disconnection releases the ticket, including when cancellation
+the typed error event instead. Streams send transport `ping` events every 15
+seconds while queued or waiting for the first backend event. Codex ignores
+these events while resetting its SSE event wait; comment-only keepalives do
+not reset that wait. Pings contain no model progress or successful completion.
+Disconnection releases the ticket, including when cancellation
 races with promotion to an execution slot. No request or tool is replayed.
 
 `/health` and `/v1/models` require authentication but bypass inference admission;
@@ -160,8 +162,12 @@ python3 prepare_codex.py \
 The destination must not already exist. The generated home has the actual model
 name, text and image input, the 294,912 context, a 240,000 auto-compaction threshold,
 the official freeform `apply_patch` tool, SSE Responses and low/high/max effort
-choices. It defaults to max, preserving strength 100. Both HTTP and stream
-retries are disabled so failures remain visible during validation.
+choices. It defaults to max, preserving strength 100. HTTP transport retries
+are disabled; native Codex sampling can retry a failed stream twice, rebuilding
+the request from current history with completed tool results retained. The
+frontend never replays an interrupted request. Use `--stream-max-retries 0`
+when validating deliberate failures. Existing Codex sessions retain their
+provider settings; reload them only after their conversation trees are idle.
 
 Put `DEEPSEEK_API_KEY=<application key>` in a private mode-0600 environment file.
 When a system proxy is present, set `NO_PROXY` and `no_proxy` for the exact model
