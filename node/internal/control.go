@@ -46,7 +46,7 @@ type controlClient struct {
 	fileMu            sync.Mutex
 	fileWorkers       map[string]context.CancelFunc
 	siteMu            sync.Mutex
-	siteWorkers       map[string]context.CancelFunc
+	siteWorkers       map[string]*siteWorker
 	sshMu             sync.Mutex
 	sshWorkers        map[string]context.CancelFunc
 }

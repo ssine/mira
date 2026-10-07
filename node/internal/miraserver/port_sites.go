@@ -11,6 +11,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +53,30 @@ type siteProxy struct {
 type siteProxyStore struct {
 	sync.Mutex
 	items map[string]*siteProxy
+}
+
+// Reclaim only idle connections, oldest used site first. net/http owns socket
+// assignment, so CloseIdleConnections cannot close a concurrently claimed or
+// active HTTP/SSE/WebSocket connection. Closing releases channel capacity
+// synchronously before a replacement stream is admitted.
+func (store *siteProxyStore) reclaimIdle(hasCapacity func() bool) {
+	store.Lock()
+	entries := make([]siteProxy, 0, len(store.items))
+	for _, entry := range store.items {
+		entries = append(entries, *entry)
+	}
+	store.Unlock()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].used.Before(entries[j].used) })
+	for _, entry := range entries {
+		if hasCapacity() {
+			return
+		}
+		entry.transport.CloseIdleConnections()
+	}
+}
+
+func (server *Server) reclaimIdleSiteConnections() {
+	server.siteProxies.reclaimIdle(server.channel.HasSiteCapacity)
 }
 
 const portSiteColumns = `s.site_id::text,s.name,s.node_id::text,s.port,s.scheme,s.enabled,s.revision,s.created_at,s.updated_at,
@@ -431,7 +456,7 @@ func (server *Server) invalidateSiteProxy(id string) {
 	delete(server.siteProxies.items, id)
 	server.siteProxies.Unlock()
 	if entry != nil {
-		entry.transport.CloseIdleConnections()
+		entry.transport.Retire()
 	}
 }
 
@@ -446,7 +471,7 @@ func (server *Server) portSiteProxy(s *portSite) *httputil.ReverseProxy {
 		server.siteProxies.items = map[string]*siteProxy{}
 	}
 	if old := server.siteProxies.items[s.ID]; old != nil {
-		old.transport.CloseIdleConnections()
+		old.transport.Retire()
 	}
 	if len(server.siteProxies.items) >= 64 {
 		var key string
@@ -457,7 +482,7 @@ func (server *Server) portSiteProxy(s *portSite) *httputil.ReverseProxy {
 				oldest = entry.used
 			}
 		}
-		server.siteProxies.items[key].transport.CloseIdleConnections()
+		server.siteProxies.items[key].transport.Retire()
 		delete(server.siteProxies.items, key)
 	}
 	tr := newSiteTransport(func(ctx context.Context, network, address string) (net.Conn, error) {

@@ -26,9 +26,20 @@ SSE and WebSocket traffic stream through the same route.
 
 Upstream HTTP connections reuse the Node's existing data stream for subsequent
 requests, avoiding repeated TLS/WebSocket handshakes. Concurrent requests open
-separate bounded connections. Idle connections expire after 30 seconds; active
-SSE/WebSocket streams have no such idle limit. An interrupted request fails
+separate bounded connections. From Mira 1.0.84, idle connections expire after
+30 minutes; active SSE/WebSocket streams have no such idle limit. An interrupted request fails
 without automatic replay. A later independent request can open a fresh stream.
+
+Connection admission uses a shared Server resource budget rather than separate
+32-connection quotas per Node or site. When full, Mira first closes idle pools
+from the least recently used sites, stopping once space is available. Active
+HTTP/SSE/WebSocket connections remain open. New connections fail if all budgeted
+streams are active. `MIRA_NODE_SITE_STREAM_BUDGET` configures the budget (default
+128, range 1–65536): on Server it covers all sites and Nodes, and on Node it bounds
+local stream workers. Node also accepts local `siteStreamBudget` configuration.
+Raise the Node worker budget alongside the Server budget when needed. Pool
+retirement prevents removed proxies from retaining newly idle streams.
+Upstream services and ingress proxies may close keep-alive connections earlier.
 
 ```sh
 mira site update my-service --expected-revision 1 --enabled=false --json

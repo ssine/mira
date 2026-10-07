@@ -14,6 +14,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
+	"github.com/ssine/mira/node/internal/sitewire"
 	"github.com/ssine/mira/node/internal/transport"
 )
 
@@ -82,6 +83,8 @@ type Channel struct {
 	fileStreams       map[string]*fileStream
 	siteStreamsClosed bool
 	siteStreams       map[string]*siteStream
+	siteStreamBudget  int
+	siteIdleReclaimer func()
 	executionQueue    executionQueue
 	db                Database
 	nodes             NodeRegistry
@@ -106,6 +109,9 @@ type Channel struct {
 }
 
 func New(options Options) (*Channel, error) {
+	if options.SiteStreamBudget < 0 || options.SiteStreamBudget > sitewire.MaxStreamBudget {
+		return nil, fmt.Errorf("invalid site stream budget")
+	}
 	if options.Database == nil || options.Nodes == nil || options.Auth == nil {
 		return nil, fmt.Errorf("channel database, Node registry, and authenticator are required")
 	}
@@ -126,7 +132,8 @@ func New(options Options) (*Channel, error) {
 	channel := &Channel{
 		db: options.Database, nodes: options.Nodes, auth: options.Auth, audit: audit,
 		logger: logger, detachGrace: detachGrace, trustProxy: options.TrustProxyHeaders,
-		nodeSockets: map[string]*socket{}, pending: map[string]pendingCall{}, proxies: map[string]*proxy{},
+		siteStreamBudget: options.SiteStreamBudget,
+		nodeSockets:      map[string]*socket{}, pending: map[string]pendingCall{}, proxies: map[string]*proxy{},
 		threadStarts: map[string]*activeThreadStart{}, statusWrites: map[string]chan struct{}{},
 		upgrader: websocket.Upgrader{ReadBufferSize: 4096, WriteBufferSize: 4096,
 			EnableCompression: false, CheckOrigin: func(*http.Request) bool { return true }},
