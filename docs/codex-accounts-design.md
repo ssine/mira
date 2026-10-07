@@ -5,6 +5,10 @@ PostgreSQL 仍是所有账号共享的唯一权威对话库。SQLite 不保存�
 默认最多同时运行或准备四个账号，通过 `MIRA_NODE_MAX_CODEX_RUNTIMES` 可调整为 1–128。
 每个 Node 最多保存 128 个账号配置。
 
+本地 DeepSeek/vLLM 的 Responses 接入可参考独立的
+[DeepSeek Recipe 服务示例](../examples/deepseek-service/README.md)：模型协议与 API key
+校验属于模型应用，Mira 继续使用通用端口站点和独立 Codex 账号。
+
 ## 使用与凭据
 
 在 Web 的「账号」页或 Node 账号列表新增账号。创建和继续对话时分别选择执行 Node 和账号；
