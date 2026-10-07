@@ -8,7 +8,7 @@ import (
 
 func TestCatalogIsolationAndBounds(t *testing.T) {
 	tools := Catalog()
-	if len(tools) != 5 || tools[0].Name != "status" {
+	if len(tools) != 6 || tools[0].Name != "status" {
 		t.Fatalf("unexpected tool catalog: %#v", tools)
 	}
 	file := tools[1].InputSchema["properties"].(map[string]any)

@@ -276,7 +276,7 @@ const namespace = toolCatalog.body.dynamicTools?.find((item) => item.name === "h
 assert(namespace?.type === "namespace" && Array.isArray(namespace.tools), "home_nodes dynamic tool namespace is missing");
 const tools = new Map(namespace.tools.map((tool) => [tool.name, tool]));
 assert(
-  JSON.stringify([...tools.keys()].sort()) === JSON.stringify(["file", "process", "pty", "screen", "status"]),
+  JSON.stringify([...tools.keys()].sort()) === JSON.stringify(["file", "process", "pty", "screen", "site", "status"]),
   `dynamic tool catalog differs from the final tool list: ${JSON.stringify([...tools.keys()])}`,
 );
 for (const [name, tool] of tools) {

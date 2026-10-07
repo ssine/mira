@@ -1122,3 +1122,11 @@ progress { width: 100%; accent-color: var(--accent); }
 
 .thread-engine { color: var(--muted); font-size: 9px; }
 #claudePersistence[hidden], #claudeReconcile[hidden] { display: none; }
+
+/* Persistent Node port sites */
+#sitesPanel form { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(160px, 2fr) 90px 90px auto; align-items: end; gap: 10px; margin-bottom: 14px; }
+#sitesPanel form label { display: grid; gap: 4px; min-width: 0; }
+#sitesPanel form input, #sitesPanel form select { width: 100%; }
+#sitesPanel td:last-child { white-space: nowrap; }
+#sitesPanel td:last-child button + button { margin-left: 6px; }
+@media (max-width: 680px) { #sitesPanel form { grid-template-columns: 1fr 1fr; } #sitesPanel form button { grid-column: 1 / -1; } }

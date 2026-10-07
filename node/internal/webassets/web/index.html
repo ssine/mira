@@ -103,6 +103,13 @@
           <div data-accounts-list class="codex-accounts-list"></div>
         </section>
 
+        <section id="sitesPanel" class="panel" aria-label="端口站点管理">
+          <div class="panel-head"><div><p class="eyebrow">SITES</p><h2>端口站点</h2></div></div>
+          <p class="muted">将域名长期转发到节点的本地服务。站点公开访问，访问鉴权由服务自行负责。</p>
+          <form class="actions"><label>名称<input name="name" required pattern="[a-z][a-z0-9-]{0,59}" maxlength="60" placeholder="my-service"></label><label>节点<select name="nodeId" required></select></label><label>端口<input name="port" type="number" min="1" max="65535" required placeholder="8000"></label><label>上游协议<select name="scheme"><option value="http">HTTP</option><option value="https">HTTPS</option></select></label><button class="approve" type="submit">注册站点</button></form>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>访问地址</th><th>目标</th><th>状态</th><th>操作</th></tr></thead><tbody data-sites-list></tbody></table></div><button data-sites-more class="secondary" type="button" hidden>加载更多</button>
+        </section>
+
         <section class="panel audit-panel">
           <div class="panel-head"><div><p class="eyebrow">AUDIT</p><h2>最近活动</h2></div><span class="hint">敏感内容不会进入审计 metadata</span></div>
           <div class="table-wrap"><table><thead><tr><th>时间</th><th>动作</th><th>身份</th><th>目标</th><th>结果</th></tr></thead><tbody id="auditRows"></tbody></table></div>

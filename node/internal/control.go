@@ -45,6 +45,8 @@ type controlClient struct {
 	tunnelAccounts    map[string]appServerTunnelAccount
 	fileMu            sync.Mutex
 	fileWorkers       map[string]context.CancelFunc
+	siteMu            sync.Mutex
+	siteWorkers       map[string]context.CancelFunc
 	sshMu             sync.Mutex
 	sshWorkers        map[string]context.CancelFunc
 }
@@ -541,6 +543,10 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 		client.startFileStream(ctx, message)
 	case "file.close":
 		client.stopFileStream(message.SessionID)
+	case "site.open":
+		client.startSiteStream(ctx, message)
+	case "site.close":
+		client.stopSiteStream(message.SessionID)
 	case "ssh.open":
 		client.startSSH(ctx, message)
 	case "ssh.close":

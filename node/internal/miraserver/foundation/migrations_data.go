@@ -846,4 +846,5 @@ CREATE INDEX codex_thread_events_provider_idx
 	{Version: 37, Name: "account-cost-source-scalar", SQL: accountCostSourceSQL, Checksum: "28a9bc48e31e052a7149f1cbec98ae859d84a9d92397894b4c1c654f3881073c"},
 	{Version: 38, Name: "claude-live-turn-cost", SQL: claudeLiveCostSQL, Checksum: "1da0fbf06cc1bd7f0adf7133fc92a1aeac0b75ea5c51a9d1ce59113c7f19e1ec"},
 	{Version: 39, Name: "claude-read-state", SQL: claudeReadStateSQL, Checksum: "18e172d6d55fa5e3cda351a990af0c0ff104b19024858917fab2a51e93848a8c"},
+	{Version: 40, Name: "persistent-port-sites", SQL: portSitesSQL, Checksum: "3a8a7dba50a1f61deb6f4c15472e0f74a148b644d70ec5e4a5c3393540ace61b"},
 }
