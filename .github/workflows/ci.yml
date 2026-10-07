@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - ".github/workflows/ci.yml"
+      - "scripts/configure-ci-apt.sh"
       - "VERSION"
       - "compose*.yaml"
       - "scripts/check-version.mjs"
@@ -20,6 +21,7 @@ on:
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
+      - "scripts/configure-ci-apt.sh"
       - "VERSION"
       - "compose*.yaml"
       - "scripts/check-version.mjs"
@@ -146,6 +148,7 @@ jobs:
           done
           MIRA_NODE_SITE_STREAM_BUDGET=128 MIRA_SITE_PARALLEL_STREAMS=40 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
+          bash scripts/configure-ci-apt.sh
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium
           browser_status=0
           for test in client_cache web_shell thread_list thread_pages thread_menu thread_activity thinking_activity thread_models codex_accounts claude_accounts claude_questions claude_cache account_overview sidebar_layout sidebar_swipe thread_token_usage composer_drafts transcript_images trace_diagrams recovery_notices; do
