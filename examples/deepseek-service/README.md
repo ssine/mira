@@ -121,9 +121,11 @@ remains bounded. Each admitted request has a 32 MiB body limit. Queued requests
 retain their bounded input and can be cancelled without starting inference.
 Queue-full and queue-timeout errors carry `rate_limit_error` and HTTP 429 with
 `Retry-After: 5` before streaming starts; an already-started SSE response carries
-the typed error event instead. Queued streams send comments every 15 seconds
-until the first protocol event, keeping connections alive without fabricating
-model output. Disconnection releases the ticket, including when cancellation
+the typed error event instead. Streams send transport `ping` events every 15
+seconds while queued or waiting for the first backend event. Codex ignores
+these events while resetting its SSE event wait; comment-only keepalives do
+not reset that wait. Pings contain no model progress or successful completion.
+Disconnection releases the ticket, including when cancellation
 races with promotion to an execution slot. No request or tool is replayed.
 
 `/health` and `/v1/models` require authentication but bypass inference admission;

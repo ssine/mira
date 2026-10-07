@@ -82,7 +82,7 @@ class AdmissionTest(unittest.IsolatedAsyncioTestCase):
                 closed.set()
 
         stream = stream_while_waiting(blocked(), interval=0.01)
-        self.assertEqual(": waiting\n\n", await anext(stream))
+        self.assertEqual('event: ping\ndata: {"type":"ping"}\n\n', await anext(stream))
         await stream.aclose()
         self.assertTrue(closed.is_set())
 

@@ -414,18 +414,24 @@ async def stream_after_first(first, output):
             await output.aclose()
 
 
-async def stream_while_waiting(output, interval=15):
-    """Keep a queued SSE request alive without inventing protocol events."""
+async def stream_while_waiting(output, interval=15, *, errors_as_events=True):
+    """Keep the first-event wait alive without inventing model progress."""
     pending = asyncio.create_task(anext(output))
     try:
         while not pending.done():
             done, _ = await asyncio.wait({pending}, timeout=interval)
             if not done:
-                yield ": waiting\n\n"
+                # Codex times out parsed SSE events, not raw incoming bytes.
+                # Comments therefore do not reset its event wait. Unknown ping
+                # events are ignored by the Responses consumer without becoming
+                # model output or successful completions.
+                yield sse("ping", '{"type":"ping"}')
         first = pending.result()
         async for part in stream_after_first(first, output):
             yield part
     except RequestError as exc:
+        if not errors_as_events:
+            raise
         yield sse("error", json.dumps({"type": "error", "code": exc.code, "message": exc.message}))
     finally:
         pending.cancel()
@@ -545,6 +551,8 @@ def create_app(settings: Settings, *, transport=None) -> FastAPI:
             if prepared.converted.stream and not ticket.ready.done():
                 return ClosingStreamingResponse(stream_while_waiting(output), media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+            if prepared.converted.stream:
+                output = stream_while_waiting(output, errors_as_events=False)
             try:
                 first = await first_or_disconnect(request, output)
             except BaseException:
