@@ -1,3 +1,4 @@
+import { SitesPanel } from "/sites.js";
 import { MiraSocket, configureMiraTransport } from "./mira-socket.js";
 import { FileReader, FileWorkspace, workspaceURL } from "/file-preview.js";
 import { ClaudeRuntime, claudeHistoryAcknowledgementRequired } from "/claude.js";
@@ -1646,6 +1647,8 @@ function renderAudit(events) {
   }
 }
 
+const sitesPanel = new SitesPanel(document.querySelector("#sitesPanel"), api, toast);
+
 async function loadDashboard() {
   const includeRevoked = $("#showRevoked").checked;
   const [enrollments, nodes, audit] = await Promise.all([
@@ -1663,6 +1666,7 @@ async function loadDashboard() {
   renderNodes(allNodes);
   codexAccounts.setNodes(allNodes);
   renderAudit(audit.data ?? []);
+  await sitesPanel.refresh(allNodes);
 }
 
 async function refreshNodeModels(nodeId) {

@@ -35,9 +35,16 @@ type CapabilityInvoker interface {
 }
 
 type CapabilityService struct {
-	nodes   NodeRegistry
-	channel CapabilityInvoker
-	audit   AuditFunc
+	nodes       NodeRegistry
+	channel     CapabilityInvoker
+	audit       AuditFunc
+	siteHandler func(context.Context, *foundation.Principal, map[string]any, InvokeContext) (any, error)
+}
+
+// SetSiteHandler installs the Server-owned persistent route manager before
+// clients are accepted. It is shared by Codex and Claude device-tool adapters.
+func (service *CapabilityService) SetSiteHandler(handler func(context.Context, *foundation.Principal, map[string]any, InvokeContext) (any, error)) {
+	service.siteHandler = handler
 }
 
 type InvokeContext struct {
@@ -177,6 +184,15 @@ func (service *CapabilityService) Invoke(ctx context.Context, actor *foundation.
 // CallTool is shared by runtime adapters and HTTP clients. Tool schemas and
 // content encoding do not bypass the capability service's identity/root checks.
 func (service *CapabilityService) CallTool(ctx context.Context, actor *foundation.Principal, tool string, args map[string]any, options InvokeContext) (any, error) {
+	if tool == "site" {
+		if err := service.validateActor(ctx, actor); err != nil {
+			return nil, err
+		}
+		if service.siteHandler == nil {
+			return nil, channelError("site management is unavailable", 409, "site_unavailable")
+		}
+		return service.siteHandler(ctx, actor, args, options)
+	}
 	if tool == "status" && stringValue(args["action"]) == "list" {
 		nodeList, err := service.List(ctx, actor)
 		if err != nil {

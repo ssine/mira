@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,8 @@ type Config struct {
 
 type Server struct {
 	previews              previewStore
+	siteProxies           siteProxyStore
+	siteLifecycle         sync.RWMutex
 	stopClaudeExecution   func()
 	claudeExecutionMu     sync.Mutex
 	claudeExecution       map[string]claudeExecutionObservation
@@ -114,6 +117,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 			return viewService.LoadAccountCostSnapshot(ctx, zone)
 		}),
 	}
+	broker.Capabilities().SetSiteHandler(server.callSiteTool)
 	// A dispatched retry may have reached Codex before the previous Server
 	// stopped. Surface uncertainty without ever submitting it again.
 	if _, err := pool.Exec(ctx, `UPDATE mira_codex_recovery_attempts SET status='stopped',reason='服务已重启，自动重试结果待确认；请检查对话后继续。',updated_at=now() WHERE status IN ('applying','dispatching')`); err != nil {
@@ -185,6 +189,13 @@ func (server *Server) Shutdown(ctx context.Context) error {
 		server.previews.sessions = nil
 		server.previews.Unlock()
 		server.channel.ShutdownFileStreams()
+		server.channel.ShutdownSiteStreams()
+		server.siteProxies.Lock()
+		for _, entry := range server.siteProxies.items {
+			entry.transport.CloseIdleConnections()
+		}
+		server.siteProxies.items = nil
+		server.siteProxies.Unlock()
 		result = server.http.Shutdown(ctx)
 		if result != nil {
 			// Shutdown waits for active HTTP handlers. Once its deadline is
@@ -206,6 +217,10 @@ func (server *Server) Shutdown(ctx context.Context) error {
 
 func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Request) {
 	if id, ok := server.previewHost(request.Host); ok {
+		if strings.HasPrefix(id, "p-") {
+			server.servePortSite(response, request, id)
+			return
+		}
 		server.servePreviewHost(response, request, id)
 		return
 	}

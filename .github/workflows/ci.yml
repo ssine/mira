@@ -131,6 +131,8 @@ jobs:
           MIRA_NODE_TRANSPORT=https node tests/web_console_e2e.mjs
           MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs
           npm ci --ignore-scripts
+          MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+          MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium
           browser_status=0

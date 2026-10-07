@@ -116,6 +116,13 @@ Codex remains a native process on the selected execution node. Mira does not rei
 turn model execution into a central monolith. The central service coordinates nodes and persists
 threads while execution stays close to the selected workspace.
 
+Persistent public port sites reuse the preview wildcard ingress and route by Host to an
+approved Node loopback HTTP/HTTPS port. PostgreSQL owns registration independently of
+login and control epochs. Visitor authentication belongs to the upstream application;
+management retains Mira identities/CSRF. Dedicated bounded outbound binary WSS/HTTPS
+streams preserve request bodies, SSE and WebSocket without a Tailscale dependency.
+Static file previews retain their own transient grants. See `protocol/port-sites-v1.md`.
+
 ## Persistence decisions
 
 PostgreSQL is the sole durable source of truth for Codex thread state and history.

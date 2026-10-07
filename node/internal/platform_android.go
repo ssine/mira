@@ -129,6 +129,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 	return map[string]any{
 		"appServer": false, "shell": false, "files": true, "processes": true, "pty": false,
 		"filePreviewV1":    true,
+		"portSitesV1":      true,
 		"fileChunkedWrite": true,
 		"codexSessions":    false,
 		"ssh":              BundledOpenSSH == "true", "sshProtocolVersion": 1, "sshFeatures": []string{"exec", "shell", "pty", "sftp"},

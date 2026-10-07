@@ -67,7 +67,7 @@ func TestAgentToolsHTTPCompatibilityAndAuthorization(t *testing.T) {
 		}
 	}
 	status, catalog := call(http.MethodGet, "/v1/agent-tools", "", token, "", "")
-	if status != 200 || catalog["namespace"] != agenttools.Namespace || len(catalog["tools"].([]any)) != 5 {
+	if status != 200 || catalog["namespace"] != agenttools.Namespace || len(catalog["tools"].([]any)) != len(agenttools.Catalog()) {
 		t.Fatalf("catalog: %d %#v", status, catalog)
 	}
 	_, legacy := call(http.MethodGet, "/v1/dynamic-tools", "", token, "", "")

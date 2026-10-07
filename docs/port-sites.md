@@ -1,0 +1,45 @@
+# Persistent port sites
+
+Upgrade Mira Server and the serving Node to 1.0.82 or newer. Reuse the existing
+preview DNS/TLS and `MIRA_NODE_PREVIEW_DOMAIN` or `MIRA_NODE_PREVIEW_INGRESSES`.
+No additional domain level, certificate or Node networking dependency is needed.
+If preview ingress is already configured, there is no deployment configuration
+change. For a new ingress follow [preview deployment](file-preview-deployment.md).
+
+Register a local HTTP service:
+
+```sh
+mira site create --name my-service --node <Node-selector> --port 8000 --json
+mira site get my-service --json
+```
+
+The result supplies a complete URL such as
+`https://p-my-service.preview.mira.example.test`. Send requests directly to it;
+paths and queries reach the Node's loopback port. The Web homepage's “端口站点”
+panel and the shared `site` tool use the same durable routes. Mira's management
+identity authorizes registration; visitors use the application's own access
+policy. Configure application authentication on the service when needed.
+
+For OpenAI-compatible services append `/v1` to the returned URL. Model name and
+API key are upstream configuration; Mira does not understand or change them.
+SSE and WebSocket traffic stream through the same route.
+
+```sh
+mira site update my-service --expected-revision 1 --enabled=false --json
+mira site update my-service --expected-revision 2 --enabled=true --json
+mira site delete my-service --expected-revision 3 --json
+mira site list --limit 50 --json
+```
+
+Use the current revision from `get` when editing. A conflict means refresh before
+retrying; it never silently overwrites another edit. Delete reserves the name so
+an old browser origin cannot later refer to a different application. Stop/delete
+closes live streams. Restart, logout and Node reconnect do not remove a route;
+a worker update briefly interrupts active traffic. Availability means the Node
+channel is online, not that Mira has inspected the service.
+
+Only loopback HTTP/HTTPS ports are supported. This does not expose every Node
+port automatically. The Node uses its usual outbound WSS/HTTPS Mira connection,
+with no Tailscale requirement in the program. Existing ingress infrastructure is
+independent and need not change. Implementation and resource bounds are specified
+in [port-sites-v1](../protocol/port-sites-v1.md).

@@ -912,6 +912,7 @@ Commands:
   process        Count, list, start, poll or signal managed processes
   pty            Open and operate managed terminal sessions
   screen         Inspect or control an Android display
+  site           Register persistent public sites for Node loopback ports
   app-server     Inspect, start, stop or connect to Codex App Server
   codex          Run the Mira-managed Codex CLI
   codex-runtime  Inspect or prepare the pinned Codex runtime
@@ -930,6 +931,15 @@ Run "mira <command> --help" for command-specific help.`, true
 		key += " " + topic[1]
 	}
 	help := map[string]string{
+		"site": `Usage:
+  mira site list [--limit 50] [--after <name>]
+  mira site get <name|UUID>
+  mira site create --name <name> --node <selector> --port <port> [--scheme http|https]
+  mira site update <name|UUID> --expected-revision <revision> [--enabled=false] [--node <selector>] [--port <port>]
+  mira site delete <name|UUID> --expected-revision <revision>
+
+All commands accept --json. Sites are public; the upstream service owns authentication.
+Deleted names remain reserved to protect existing browser origins.`,
 		"nodes": `Discover trusted Nodes and use stable selectors.
 
 Usage:
@@ -1291,6 +1301,8 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	defer cancel()
 	var result any
 	switch remaining[0] {
+	case "site":
+		result, err = client.runSite(commandCtx, remaining[1:])
 	case "nodes":
 		result, err = client.runNodes(commandCtx, remaining[1:])
 	case "file":

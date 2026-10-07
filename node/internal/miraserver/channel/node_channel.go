@@ -80,6 +80,8 @@ type Channel struct {
 	transports        *transport.Server
 	fileStreamsClosed bool
 	fileStreams       map[string]*fileStream
+	siteStreamsClosed bool
+	siteStreams       map[string]*siteStream
 	executionQueue    executionQueue
 	db                Database
 	nodes             NodeRegistry
@@ -184,7 +186,7 @@ func (channel *Channel) Handles(request *http.Request) bool {
 		return false
 	}
 	path := request.URL.Path
-	return strings.HasPrefix(path, transport.Prefix) || fileStreamPattern.MatchString(path) || nodeConnectPattern.MatchString(path) || appServerPattern.MatchString(path) || sshSessionPattern.MatchString(path)
+	return strings.HasPrefix(path, transport.Prefix) || fileStreamPattern.MatchString(path) || siteStreamPattern.MatchString(path) || nodeConnectPattern.MatchString(path) || appServerPattern.MatchString(path) || sshSessionPattern.MatchString(path)
 }
 
 func (channel *Channel) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -194,6 +196,10 @@ func (channel *Channel) ServeHTTP(response http.ResponseWriter, request *http.Re
 	}
 	if match := fileStreamPattern.FindStringSubmatch(request.URL.Path); match != nil {
 		channel.serveFileUpgrade(response, request, match[1])
+		return
+	}
+	if match := siteStreamPattern.FindStringSubmatch(request.URL.Path); match != nil {
+		channel.serveSiteUpgrade(response, request, match[1])
 		return
 	}
 	if match := sshSessionPattern.FindStringSubmatch(request.URL.Path); match != nil {
@@ -541,6 +547,7 @@ func (channel *Channel) writeNodeStatus(nodeID string, status any) {
 }
 
 func (channel *Channel) rejectNodeWork(nodeID string) {
+	channel.CloseSiteStreams(nodeID, "")
 	channel.accounts.CloseNode(nodeID)
 	channel.ssh.DisconnectNode(nodeID)
 	channel.closeFileStreams(nodeID)
@@ -565,6 +572,7 @@ func (channel *Channel) rejectNodeWork(nodeID string) {
 }
 
 func (channel *Channel) DisconnectNode(nodeID, reason string) {
+	channel.CloseSiteStreams(nodeID, "")
 	if reason == "" {
 		reason = "revoked"
 	}
@@ -614,6 +622,7 @@ func (channel *Channel) Close() error {
 	channel.accounts.Close()
 	channel.ssh.Close()
 	channel.closeFileStreams("")
+	channel.ShutdownSiteStreams()
 	for _, connection := range nodes {
 		connection.close(websocket.CloseGoingAway, "server shutting down")
 	}
