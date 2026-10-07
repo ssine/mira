@@ -63,6 +63,7 @@ type Options struct {
 	AccountTimeout           time.Duration
 	SSHMaxSessions           int
 	SSHMaxSessionsPerNode    int
+	SiteStreamBudget         int
 }
 
 type Error struct {

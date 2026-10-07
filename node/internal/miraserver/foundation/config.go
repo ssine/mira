@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/ssine/mira/node/internal/sitewire"
 )
 
 const (
@@ -30,6 +32,7 @@ type Config struct {
 	TrustProxyHeaders  bool
 	MaxBodyBytes       int64
 	PoolSize           int32
+	SiteStreamBudget   int
 }
 
 func LoadConfig() (Config, error) {
@@ -61,6 +64,10 @@ func ConfigFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil || poolSize < 4 || poolSize > 128 {
 		return Config{}, fmt.Errorf("MIRA_NODE_DATABASE_POOL_SIZE must be an integer between 4 and 128")
 	}
+	streamBudget, err := sitewire.ParseStreamBudget(envOr(lookup, "MIRA_NODE_SITE_STREAM_BUDGET", ""))
+	if err != nil {
+		return Config{}, fmt.Errorf("MIRA_NODE_SITE_STREAM_BUDGET: %w", err)
+	}
 	previewDomain := strings.ToLower(strings.TrimSuffix(envOr(lookup, "MIRA_NODE_PREVIEW_DOMAIN", ""), "."))
 	validDomain := regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 	validPreview := len(previewDomain) <= 253 && strings.Contains(previewDomain, ".")
@@ -82,6 +89,7 @@ func ConfigFromLookup(lookup func(string) (string, bool)) (Config, error) {
 		SecureCookies:      secure,
 		TrustProxyHeaders:  trustProxy == "true",
 		MaxBodyBytes:       DefaultMaxBodyBytes, PoolSize: int32(poolSize),
+		SiteStreamBudget: streamBudget,
 	}, nil
 }
 
