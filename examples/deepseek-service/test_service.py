@@ -9,7 +9,7 @@ import unittest
 import struct
 import zlib
 
-from deepseek_recipe import Tokenizer
+from deepseek_recipe import DeepseekV41Encoding, Tokenizer
 from fastapi.testclient import TestClient
 import httpx
 
@@ -168,6 +168,78 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(200, result.status_code, result.text)
         self.assertEqual("Hello", result.json()["choices"][0]["message"]["content"])
         self.assertEqual("length", result.json()["choices"][0]["finish_reason"])
+
+    def test_agent_tasks_messages_and_answers_reach_the_model_in_order(self):
+        content = []
+        for kind, author, recipient, text in (
+            ("NEW_TASK", "/root", "/root/worker", "执行任务：写入任务标记。"),
+            ("MESSAGE", "/root", "/root/worker", "追加信息：保留先前结果。"),
+            ("FINAL_ANSWER", "/root/worker", "/root", "任务结果：已写入标记。"),
+        ):
+            blocks = [{"type": "input_text", "text": f"Message Type: {kind}\nPayload:\n{text}"},
+                      {"type": "input_text", "text": f"END_{kind}"}]
+            content.append({"type": "agent_message", "id": f"amsg_{kind}",
+                            "author": author, "recipient": recipient, "content": blocks})
+        history = [{"role": "user", "content": "Environment only."}, *content]
+        prepared = prepare("responses", json.dumps(self.payload(input=history)).encode(),
+                           self.settings, self.tokenizer)
+        prompt = DeepseekV41Encoding().render_conversation(prepared.converted.conversation).prompt
+        positions = []
+        for item in content:
+            for block in item["content"]:
+                self.assertIn(block["text"], prompt)
+                positions.append(prompt.index(block["text"]))
+        self.assertEqual(sorted(positions), positions)
+        self.assertIn("/root/worker", prompt)
+        self.assertIn("from /root/worker to /root", prompt)
+        client = self.client()
+        for stream in (False, True):
+            response = client.post("/v1/responses", json=self.payload(input=history, stream=stream),
+                                   headers=self.headers)
+            self.assertEqual(200, response.status_code, response.text)
+            self.assertEqual(prepared.tokens, self.requests[-1]["prompt"])
+
+    def test_agent_message_tool_history_and_context_budget(self):
+        history = [
+            {"role": "user", "content": "Run the check."},
+            {"type": "function_call", "call_id": "check", "name": "check", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "check", "output": "CHECK_COMPLETED"},
+            {"type": "agent_message", "author": "/root/worker", "recipient": "/root",
+             "content": [{"type": "input_text", "text": "FINAL_RESULT_391"}]},
+            {"type": "message", "role": "user", "content": "Continue after the result."},
+        ]
+        body = json.dumps(self.payload(input=history)).encode()
+        prepared = prepare("responses", body, self.settings, self.tokenizer)
+        prompt = DeepseekV41Encoding().render_conversation(prepared.converted.conversation).prompt
+        self.assertLess(prompt.index("CHECK_COMPLETED"), prompt.index("FINAL_RESULT_391"))
+        self.assertLess(prompt.index("FINAL_RESULT_391"), prompt.index("Continue after the result."))
+        large_message = {"type": "agent_message", "author": "/root", "recipient": "/root/worker",
+                         "content": [{"type": "input_text", "text": "TASK_TEXT_391 " * 1000}]}
+        with self.assertRaises(RequestError):
+            prepare("responses", json.dumps(self.payload(input=[large_message])).encode(),
+                    replace(self.settings, context_tokens=512), self.tokenizer)
+
+    def test_unreadable_agent_messages_fail_before_inference(self):
+        valid = {"type": "agent_message", "author": "/root", "recipient": "/root/worker",
+                 "content": [{"type": "input_text", "text": "TASK_PAYLOAD"}]}
+        invalid = [
+            {**valid, "content": []},
+            {**valid, "content": "TASK_PAYLOAD"},
+            {**valid, "content": [{"type": "encrypted_content", "encrypted_content": "opaque"}]},
+            {**valid, "content": [*valid["content"], {"type": "encrypted_content", "encrypted_content": "opaque"}]},
+            {**valid, "content": [{"type": "input_text", "text": 391}]},
+            {**valid, "content": [{"type": "input_text", "text": "  "}]},
+            {**valid, "content": [{"type": "input_image", "image_url": image_url()}]},
+            {**valid, "author": None},
+            {**valid, "recipient": ""},
+        ]
+        client = self.client()
+        for item in invalid:
+            with self.subTest(item=item):
+                response = client.post("/v1/responses", json=self.payload(input=[item]), headers=self.headers)
+                self.assertEqual(400, response.status_code, response.text)
+                self.assertNotIn("opaque", response.text)
+        self.assertEqual([], self.requests)
 
     def test_images_preserve_order_tokens_usage_and_context(self):
         content = [
