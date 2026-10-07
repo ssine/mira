@@ -5267,7 +5267,8 @@ function renderConversationCost(estimate, placeholder = "正在计算…") {
     ? "缺少请求用量、模型或对应价格。" : estimate.status === "partial"
       ? `${scope}部分请求的模型、用量或价格不完整，未计入。仅估算模型 Token 费用。`
       : `${scope}按历史请求模型估算 Token 费用；服务端临时重路由可能不同，非套餐实际扣费。`;
-  $("#conversationCostPricing").href = estimate?.basis === "claude_sdk" ? "https://code.claude.com/docs/en/agent-sdk/cost-tracking" : "https://developers.openai.com/api/docs/pricing";
+  $("#conversationCostPricing").href = estimate?.basis === "claude_sdk" ? "https://code.claude.com/docs/en/agent-sdk/cost-tracking"
+    : estimate?.pricingSource || "https://developers.openai.com/api/docs/pricing";
   const priceBasis = estimate?.basis === "standard-peak" ? "DeepSeek 标准高峰价估算"
     : estimate?.basis === "mixed-standard" ? "各模型标准价估算（DeepSeek 按高峰价）" : "Standard 公开价";
   $("#conversationCostPricing").textContent = estimate?.basis === "claude_sdk" ? "Claude SDK 价格估算" : `${priceBasis}${estimate?.pricingDate ? ` · ${estimate.pricingDate}` : ""}`;
