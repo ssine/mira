@@ -8,6 +8,7 @@ prompt rendering and protocol parsing; vLLM receives and returns raw token IDs.
 
 import argparse
 import asyncio
+import base64
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from deepseek_recipe import (
     ConversionOptions, DeepseekV41Encoding, InferenceChunk,
     InferenceFinishReason, PromptUsage, ResponsesRequest, ResponsesResponse,
     StreamProcessor, Tokenizer, WebSearchBehavior,
+    IMAGE_SPECIAL_TOKEN, ImageResolver, ImageQuota, ImageError, CalcResizeError,
+    OpenCvImagePreprocessor, ReqwestImageFetcher,
 )
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -108,6 +111,8 @@ class Prepared:
     max_tokens: int
     include_usage: bool
     custom_tools: frozenset[str]
+    images: list[str]
+    prompt_tokens: int
 
 
 def prepare(protocol: str, body: bytes, settings: Settings, tokenizer: Tokenizer) -> Prepared:
@@ -141,18 +146,41 @@ def prepare(protocol: str, body: bytes, settings: Settings, tokenizer: Tokenizer
             responses_web_search=WebSearchBehavior.Reject,
         ))
         rendered = DeepseekV41Encoding().render_conversation(converted.conversation)
+        images = []
+        adjustment = 0
+        prompt = rendered.prompt
         if rendered.image_sources:
-            raise RequestError("This deployment supports text input only.")
-        tokens = tokenizer.encode(rendered.prompt)
+            # Codex sends inline images. Do not turn application authentication
+            # into permission to fetch arbitrary URLs from the engine network.
+            if any(source.kind == "url" for source in rendered.image_sources):
+                raise RequestError("Supply images inline as data URLs; external image URLs are unsupported.")
+            multimodal = ImageResolver(ReqwestImageFetcher(), OpenCvImagePreprocessor()).resolve(
+                rendered.image_sources, ImageQuota()
+            )
+            images = [base64.b64encode(image.data).decode("ascii") for image in multimodal.images]
+            adjustment = multimodal.image_token_adjustment()
+            # The released checkpoint spells Recipe's image sentinel differently.
+            # Preserve every other token; vLLM expands each sentinel using the
+            # matching vision processor and out-of-band image embeddings.
+            checkpoint_marker = "<｜deepseek_image｜>"
+            if tokenizer.encode(checkpoint_marker) != [129264]:
+                raise RequestError("The checkpoint image token is incompatible.", 500, "configuration_error")
+            prompt = prompt.replace(IMAGE_SPECIAL_TOKEN, checkpoint_marker)
+        tokens = tokenizer.encode(prompt)
+        if tokens.count(129264) != len(images):
+            raise RequestError("Image placeholders must match the attached images.")
+    except (ImageError, CalcResizeError) as exc:
+        raise RequestError("Invalid image or image preprocessing limit exceeded.") from exc
     except ValueError as exc:
         raise RequestError(str(exc)) from exc
-    remaining = settings.context_tokens - len(tokens)
+    prompt_tokens = len(tokens) + adjustment
+    remaining = settings.context_tokens - prompt_tokens
     max_tokens = converted.inference_options.max_tokens
     if max_tokens is None:
         max_tokens = min(settings.default_output_tokens, remaining)
     if max_tokens < 1 or max_tokens > remaining:
         raise RequestError("Input and requested output exceed the model context window.", 400, "context_length_exceeded")
-    return Prepared(protocol, converted, tokens, max_tokens, include_usage, custom_tools)
+    return Prepared(protocol, converted, tokens, max_tokens, include_usage, custom_tools, images, prompt_tokens)
 
 
 async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Settings, eos_token_id: int) -> AsyncIterator[InferenceChunk]:
@@ -169,11 +197,15 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
     }
     if options.thinking_budget_tokens is not None:
         payload["thinking_token_budget"] = options.thinking_budget_tokens
+    path = "/v1/completions"
+    if prepared.images:
+        path = "/recipe/v1/completions"
+        payload.update(images=prepared.images, expected_prompt_tokens=prepared.prompt_tokens)
     response = None
     ready = False
     finished = False
     try:
-        request = client.build_request("POST", "/v1/completions", json=payload)
+        request = client.build_request("POST", path, json=payload)
         response = await client.send(request, stream=True)
         if response.status_code != 200:
             # Never forward engine internals, request bodies or credentials.
@@ -191,7 +223,7 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
                 usage = event.get("usage") or {}
                 details = usage.get("prompt_tokens_details") or {}
                 yield InferenceChunk.ready(prompt_usage=PromptUsage(
-                    prompt_tokens=usage.get("prompt_tokens", len(prepared.tokens)),
+                    prompt_tokens=usage.get("prompt_tokens", prepared.prompt_tokens),
                     prompt_cache_hit_tokens=details.get("cached_tokens", 0) or 0,
                 ))
                 ready = True

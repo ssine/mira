@@ -23,7 +23,7 @@ def main():
     model.update(
         slug="DeepSeek-V4.1-Flash", display_name="DeepSeek-V4.1-Flash (local)",
         description="Local DeepSeek V4.1 Flash with Recipe.",
-        input_modalities=["text"], supports_image_detail_original=False,
+        input_modalities=["text", "image"], supports_image_detail_original=False,
         context_window=294912, max_context_window=294912,
         auto_compact_token_limit=240000, default_reasoning_level="max",
         supports_search_tool=False, prefer_websockets=False,

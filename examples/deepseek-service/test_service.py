@@ -1,10 +1,13 @@
 """Run with DEEPSEEK_TEST_TOKENIZER=/path/to/model/tokenizer.json python -m unittest -v."""
 from dataclasses import replace
+import base64
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+import struct
+import zlib
 
 from deepseek_recipe import Tokenizer
 from fastapi.testclient import TestClient
@@ -14,6 +17,15 @@ from service import Settings, create_app, prepare, RequestError
 
 
 TOKENIZER = os.environ.get("DEEPSEEK_TEST_TOKENIZER")
+
+
+def image_url(color=(255, 0, 0), width=64, height=48):
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+    raw = (b"\0" + bytes(color) * width) * height
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    png += chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b"")
+    return "data:image/png;base64," + base64.b64encode(png).decode()
 
 
 @unittest.skipUnless(TOKENIZER, "Set DEEPSEEK_TEST_TOKENIZER to a V4.1 tokenizer.json")
@@ -31,17 +43,20 @@ class ContractTest(unittest.TestCase):
         self.settings = Settings(TOKENIZER, str(key_path))
         self.headers = {"Authorization": "Bearer " + key_path.read_text()}
         self.requests = []
+        self.paths = []
         self.output = "Compute.</think>391<｜end▁of▁sentence｜>"
         self.finish_reason = "stop"
         self.backend_status = 200
 
     def backend(self, request):
+        self.paths.append(request.url.path)
         self.requests.append(json.loads(request.content))
         if self.backend_status != 200:
             return httpx.Response(self.backend_status, json={"error": "engine private data"})
         ids = self.tokenizer.encode(self.output)
         # Token-by-token frames exercise special tokens and partial UTF-8.
-        chunks = [{"choices": [{"index": 0, "token_ids": [i], "finish_reason": None}], "usage": {"prompt_tokens": len(self.requests[-1]["prompt"]), "prompt_tokens_details": {"cached_tokens": 8}}} for i in ids]
+        prompt_tokens = self.requests[-1].get("expected_prompt_tokens", len(self.requests[-1]["prompt"]))
+        chunks = [{"choices": [{"index": 0, "token_ids": [i], "finish_reason": None}], "usage": {"prompt_tokens": prompt_tokens, "prompt_tokens_details": {"cached_tokens": 8}}} for i in ids]
         if self.finish_reason:
             chunks.append({"choices": [{"index": 0, "token_ids": [], "finish_reason": self.finish_reason}]})
         return httpx.Response(200, text="".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + "data: [DONE]\n\n")
@@ -134,6 +149,54 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(200, result.status_code, result.text)
         self.assertEqual("Hello", result.json()["choices"][0]["message"]["content"])
         self.assertEqual("length", result.json()["choices"][0]["finish_reason"])
+
+    def test_images_preserve_order_tokens_usage_and_context(self):
+        content = [
+            {"type": "input_text", "text": "Compare these images."},
+            {"type": "input_image", "image_url": image_url()},
+            {"type": "input_image", "image_url": image_url((0, 0, 255)), "detail": "low"},
+        ]
+        payload = self.payload(input=[{"role": "user", "content": content}])
+        result = self.client().post("/v1/responses", json=payload, headers=self.headers)
+        self.assertEqual(200, result.status_code, result.text)
+        sent = self.requests[-1]
+        self.assertEqual("/recipe/v1/completions", self.paths[-1])
+        self.assertEqual(2, sent["prompt"].count(129264))
+        self.assertEqual(2, len(sent["images"]))
+        self.assertNotEqual(sent["images"][0], sent["images"][1])
+        self.assertEqual(b"WEBP", base64.b64decode(sent["images"][0])[8:12])
+        self.assertGreater(sent["expected_prompt_tokens"], len(sent["prompt"]) + 300)
+        self.assertEqual(sent["expected_prompt_tokens"], result.json()["usage"]["input_tokens"])
+        with self.assertRaises(RequestError):
+            prepare("responses", json.dumps(payload).encode(),
+                    replace(self.settings, context_tokens=len(sent["prompt"]) + 300), self.tokenizer)
+
+    def test_chat_image_and_tool_image_history(self):
+        chat = {"model": self.settings.model, "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "Describe."},
+            {"type": "image_url", "image_url": {"url": image_url()}},
+        ]}]}
+        client = self.client()
+        self.assertEqual(200, client.post("/v1/chat/completions", json=chat, headers=self.headers).status_code)
+        payload = self.payload(input=[
+            {"role": "user", "content": "Inspect the screenshot."},
+            {"type": "function_call", "name": "screenshot", "arguments": "{}", "call_id": "call_test"},
+            {"type": "function_call_output", "call_id": "call_test", "output": [
+                {"type": "input_image", "image_url": image_url()},
+            ]},
+        ], tools=[{"type": "function", "name": "screenshot", "parameters": {"type": "object"}}])
+        result = client.post("/v1/responses", json=payload, headers=self.headers)
+        self.assertEqual(200, result.status_code, result.text)
+        self.assertEqual(1, self.requests[-1]["prompt"].count(129264))
+
+    def test_invalid_images_fail_before_inference(self):
+        client = self.client()
+        for url in ("data:image/png;base64,invalid!", "data:image/png;base64,aGVsbG8=",
+                    "http://127.0.0.1/private", "file:///etc/passwd", image_url(width=8193, height=1)):
+            payload = self.payload(input=[{"role": "user", "content": [{"type": "input_image", "image_url": url}]}])
+            result = client.post("/v1/responses", json=payload, headers=self.headers)
+            self.assertTrue(400 <= result.status_code < 500, result.text)
+        self.assertEqual([], self.requests)
 
 
 if __name__ == "__main__":

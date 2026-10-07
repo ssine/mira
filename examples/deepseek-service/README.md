@@ -10,7 +10,7 @@ authentication belongs here; Mira supplies its ordinary persistent port site.
 Mira-managed Codex on an execution Node
   -> HTTPS port site (generic Mira byte transport)
   -> this application on the model Node, loopback:8001 (API key + Recipe)
-  -> vLLM loopback:8000 /v1/completions (raw input/output token IDs)
+  -> vLLM loopback:8000 (raw token IDs; image extension for multimodal input)
   -> GPU inference
 ```
 
@@ -50,6 +50,40 @@ Chat Completions renderer: Recipe has already rendered the complete prompt.
 EOS token IDs from vLLM count toward usage but are not emitted as answer text.
 No model request is automatically retried by this application.
 
+### Image backend
+
+For images, install the small `vllm-backend/` endpoint plugin in the **vLLM**
+environment, then restart that engine using its existing launch parameters:
+
+```sh
+/path/to/vllm-env/bin/pip install --no-deps ./vllm-backend
+VLLM_PLUGINS=deepseek_recipe_images /path/to/vllm-env/bin/vllm serve ... --host 127.0.0.1
+```
+
+Preserve any other required plugin names in `VLLM_PLUGINS`. Endpoint plugins
+require explicit opt-in; this plugin refuses a non-loopback listener. It uses
+vLLM's endpoint-plugin and serving interfaces, verified with
+`0.30.1rc1.dev709+g21d93d0d8.cu129`. Other builds need compatibility validation.
+No installed vLLM source file is patched. Adding the plugin requires a planned
+engine restart/model reload; retain the prior launch command for rollback.
+
+The frontend accepts inline PNG, JPEG, WebP and GIF images as data URLs in
+Responses or Chat Completions, including images returned by client tools.
+External image URLs are rejected. Recipe performs image validation, alpha
+handling, resizing and WebP preprocessing using its official limits. GIF input
+uses a static frame; this is not video support. `detail=low` applies Recipe's
+512-pixel limit before token-budget fitting; other levels still undergo its
+normal resizing and the 1,024-token-per-image budget.
+
+The checkpoint spells Recipe's `<｜image｜>` placeholder as
+`<｜deepseek_image｜>`, both representing token 129264. The adapter checks this
+mapping and sends one sentinel per image, with the processed images in order,
+to private `/recipe/v1/completions`. The plugin calls vLLM's normal multimodal
+processor with those raw tokens, preserving Recipe's conversation/tool encoding.
+It checks that the expanded prompt length equals Recipe's image-aware count
+before inference. Image tokens therefore consume context and appear in usage;
+they are never silently dropped. The same stream parser handles text and images.
+
 The entrypoint authenticates **all** HTTP paths before reading a request body.
 It serves `/v1/responses`, `/v1/chat/completions`, `/v1/models`, and `/health`.
 Raw completions, metrics, tokenizer APIs, API documentation and other engine
@@ -80,7 +114,7 @@ python3 prepare_codex.py \
 ```
 
 The destination must not already exist. The generated home has the actual model
-name, text-only input, the 294,912 context, a 240,000 auto-compaction threshold,
+name, text and image input, the 294,912 context, a 240,000 auto-compaction threshold,
 the official freeform `apply_patch` tool, SSE Responses and low/high/max effort
 choices. It defaults to max, preserving strength 100. Both HTTP and stream
 retries are disabled so failures remain visible during validation.
@@ -105,12 +139,16 @@ Run the deterministic contract checks with the real model tokenizer:
 ```sh
 DEEPSEEK_TEST_TOKENIZER=/path/to/model/tokenizer.json \
   /path/to/recipe-env/bin/python -m unittest -v
+# In vllm-backend/, using the pinned engine environment (no GPU load):
+/path/to/vllm-env/bin/python -m unittest -v
 ```
 
 Then validate against actual inference and the managed Codex runtime: text,
 developer instructions, named and namespaced functions, custom `apply_patch`,
 tool output round trips, SSE ordering, context limits, missing/wrong/correct
 keys, cancellation, cold account restart and resume, and a read/edit/test task.
+Include image OCR/color recognition, ordered multiple images, image-bearing
+tool results, text regression, and cancellation of an image inference request.
 Use a disposable workspace for edits. Compare native vLLM and Recipe on model
 host loopback before attributing domain failures to either protocol adapter.
 
@@ -122,7 +160,8 @@ developer-message case completed without a final answer. Those observations
 justify using Recipe at the application boundary; they are not claims about
 all vLLM versions or all prompts.
 
-This deployment supports text only. It does not fetch images, execute tools,
+This deployment supports text and inline images. It does not fetch external
+image URLs, execute tools,
 store Responses conversations, implement `previous_response_id`, background
 jobs, remote compaction, encrypted reasoning, or built-in web search. Clients
 send full history; Codex executes tools and Mira persists its native history.
@@ -133,7 +172,7 @@ strictness or constrained-output JSON Schema. Refer to its upstream supported
 scope before adding clients or advertising capabilities.
 
 Deploy by starting and testing the frontend on a new loopback port, then update
-the existing Mira site's target using its expected revision. Keep the old
-engine process and settings intact. Roll back the frontend code/configuration
+the existing Mira site's target using its expected revision. Preserve the
+engine's model and inference settings. Roll back the frontend code/configuration
 to a known authenticated version; pointing a public site back to an
 unauthenticated raw engine would remove application authentication.
