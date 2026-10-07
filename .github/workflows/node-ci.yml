@@ -8,6 +8,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "scripts/build-release.sh"
+      - "scripts/configure-ci-apt.sh"
       - "scripts/install.ps1"
       - "scripts/install.sh"
       - "scripts/release-container.sh"
@@ -18,6 +19,7 @@ on:
       - "tests/android_accessibility_capture_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
+      - ".github/workflows/openssh.yml"
       - ".github/workflows/promote-release.yml"
       - ".github/workflows/release.yml"
   pull_request:
@@ -26,6 +28,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "scripts/build-release.sh"
+      - "scripts/configure-ci-apt.sh"
       - "scripts/install.ps1"
       - "scripts/install.sh"
       - "scripts/release-container.sh"
@@ -36,6 +39,7 @@ on:
       - "tests/android_accessibility_capture_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
+      - ".github/workflows/openssh.yml"
       - ".github/workflows/promote-release.yml"
       - ".github/workflows/release.yml"
 

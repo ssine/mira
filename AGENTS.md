@@ -502,6 +502,10 @@ default. Preserve these rules when adding UI:
   cards are for real objects such as one Node, not for every paragraph or metric;
 - treat conversation prose as a reading surface: an approximately 808 px measure, comfortable line
   height, restrained user bubbles, collapsible tool evidence and a composer anchored to the workspace;
+- show routine conversation activity, including thinking, through the composer's top-edge highlight
+  and input placeholder. Do not add a separate status text row; the edge opens the existing details.
+  Visible notices remain reserved for conditions that require attention, such as uncertain activity
+  or a pending question;
 - use list/detail or list/Inspector layouts for files and tools, and keep selection, hover, status and
   focus meanings consistent across views;
 - responsive layouts must preserve primary navigation, logout, progress/cancel and destructive-action
