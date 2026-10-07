@@ -162,8 +162,12 @@ python3 prepare_codex.py \
 The destination must not already exist. The generated home has the actual model
 name, text and image input, the 294,912 context, a 240,000 auto-compaction threshold,
 the official freeform `apply_patch` tool, SSE Responses and low/high/max effort
-choices. It defaults to max, preserving strength 100. Both HTTP and stream
-retries are disabled so failures remain visible during validation.
+choices. It defaults to max, preserving strength 100. HTTP transport retries
+are disabled; native Codex sampling can retry a failed stream twice, rebuilding
+the request from current history with completed tool results retained. The
+frontend never replays an interrupted request. Use `--stream-max-retries 0`
+when validating deliberate failures. Existing Codex sessions retain their
+provider settings; reload them only after their conversation trees are idle.
 
 Put `DEEPSEEK_API_KEY=<application key>` in a private mode-0600 environment file.
 When a system proxy is present, set `NO_PROXY` and `no_proxy` for the exact model

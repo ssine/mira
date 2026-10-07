@@ -11,6 +11,8 @@ def main():
     parser.add_argument("--official-catalog", type=Path, required=True)
     parser.add_argument("--codex-home", type=Path, required=True)
     parser.add_argument("--base-url", required=True)
+    parser.add_argument("--stream-max-retries", type=int, choices=range(6), default=2,
+                        help="Native Codex sampling retries; use 0 for failure-injection validation")
     args = parser.parse_args()
     url = urlsplit(args.base_url)
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password or url.query or url.fragment:
@@ -46,7 +48,7 @@ wire_api = "responses"
 env_key = "DEEPSEEK_API_KEY"
 supports_websockets = false
 request_max_retries = 0
-stream_max_retries = 0
+stream_max_retries = {args.stream_max_retries}
 stream_idle_timeout_ms = 600000
 
 [desktop]
