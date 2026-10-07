@@ -735,9 +735,9 @@ function formatElapsed(ms) {
   return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
 }
 
-// Real reasoning deltas get a visible label independent of collapsed thoughts
-// and composer drafts. General running state stays on the composer edge; an
-// empty reasoning item is not evidence that model generation has started.
+// Routine run phases use the composer edge and input placeholder, without an
+// extra status row. Real reasoning deltas switch the placeholder immediately;
+// an empty reasoning item is not evidence that model generation has started.
 function renderTurnActivity(entry) {
   const activity = threadActivity(agent.threadId);
   const turnId = entry?.turnId ?? activity.turnId ?? agent.activeTurns.get(agent.threadId);
@@ -769,7 +769,7 @@ function renderTurnActivity(entry) {
   if (live.textContent !== (visible ? text : "")) live.textContent = visible ? text : "";
 
   const notice = $("#conversationActivity");
-  const showNotice = visible && (unknown || waiting || thinking);
+  const showNotice = visible && (unknown || waiting);
   notice.classList.toggle("activity-unknown", unknown);
   $("#conversationActivityText").textContent = visible ? text : "";
   if (notice.classList.contains("hidden") === showNotice) {
