@@ -11,12 +11,12 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hmac
 import json
 import os
 import stat
-from time import time
+from time import time, perf_counter
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -51,6 +51,7 @@ class Settings:
     default_effort: str = "max"
     max_request_bytes: int = 32 * 1024 * 1024
     max_inflight: int = 4
+    recipe_backend: bool = False
 
 
 class RequestError(Exception):
@@ -113,6 +114,10 @@ class Prepared:
     custom_tools: frozenset[str]
     images: list[str]
     prompt_tokens: int
+    backend_usage: dict = field(default_factory=dict)
+    backend_metrics: dict = field(default_factory=dict)
+    timings: dict = field(default_factory=dict)
+    started_at: float = field(default_factory=perf_counter)
 
 
 def prepare(protocol: str, body: bytes, settings: Settings, tokenizer: Tokenizer) -> Prepared:
@@ -198,15 +203,16 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
     if options.thinking_budget_tokens is not None:
         payload["thinking_token_budget"] = options.thinking_budget_tokens
     path = "/v1/completions"
-    if prepared.images:
+    if prepared.images or settings.recipe_backend:
         path = "/recipe/v1/completions"
         payload.update(images=prepared.images, expected_prompt_tokens=prepared.prompt_tokens)
     response = None
     ready = False
-    finished = False
+    finish_reason = None
     try:
         request = client.build_request("POST", path, json=payload)
         response = await client.send(request, stream=True)
+        prepared.timings["backend_headers_ms"] = round((perf_counter() - prepared.started_at) * 1000, 2)
         if response.status_code != 200:
             # Never forward engine internals, request bodies or credentials.
             raise RequestError(f"Inference backend returned HTTP {response.status_code}.", 502, "backend_error")
@@ -219,6 +225,10 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
             event = json.loads(data)
             if event.get("error"):
                 raise RequestError("Inference backend reported a stream error.", 502, "backend_error")
+            if event.get("usage"):
+                prepared.backend_usage.update(event["usage"])
+            if isinstance(event.get("metrics"), dict):
+                prepared.backend_metrics.update(event["metrics"])
             if not ready:
                 usage = event.get("usage") or {}
                 details = usage.get("prompt_tokens_details") or {}
@@ -232,6 +242,7 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
                 if ids is None and choice.get("text"):
                     raise RequestError("Inference backend must return token IDs.", 502, "backend_error")
                 for token in ids or []:
+                    prepared.timings.setdefault("backend_first_token_ms", round((perf_counter() - prepared.started_at) * 1000, 2))
                     # vLLM includes the sampled EOS ID even when its text is
                     # suppressed. Recipe expects the backend finish signal;
                     # retain EOS in usage without leaking it into answer text.
@@ -240,13 +251,14 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
                 if reason:
                     if reason not in ("length", "stop"):
                         raise RequestError("Unsupported backend finish reason.", 502, "backend_error")
-                    finished = True
-                    yield InferenceChunk.finish(
-                        InferenceFinishReason.Length if reason == "length" else InferenceFinishReason.Stop
-                    )
-                    return
-        if not finished:
+                    finish_reason = reason
+        if finish_reason is None:
             raise RequestError("Inference stream ended before completion.", 502, "backend_error")
+        # vLLM sends cache details in a final usage-only frame after the choice
+        # finish. Consume it before completing Recipe and closing the stream.
+        yield InferenceChunk.finish(
+            InferenceFinishReason.Length if finish_reason == "length" else InferenceFinishReason.Stop
+        )
     except (httpx.HTTPError, ValueError) as exc:
         raise RequestError("Inference backend connection failed.", 502, "backend_error") from exc
     finally:
@@ -257,6 +269,27 @@ async def inference(client: httpx.AsyncClient, prepared: Prepared, settings: Set
 
 def sse(event: str | None, data: str) -> str:
     return (f"event: {event}\n" if event else "") + f"data: {data}\n\n"
+
+
+def final_usage_json(data: str, prepared: Prepared) -> str:
+    """Correct Recipe's start-time cache count using the backend's final usage."""
+    usage = prepared.backend_usage
+    details = usage.get("prompt_tokens_details") or {}
+    if "cached_tokens" not in details:
+        return data
+    value = json.loads(data)
+    response = value.get("response", value)
+    target = response.get("usage")
+    if isinstance(target, dict):
+        cached = details["cached_tokens"]
+        if type(cached) is not int or not 0 <= cached <= prepared.prompt_tokens:
+            raise RequestError("Invalid backend cache usage.", 502, "backend_error")
+        if prepared.protocol == "responses":
+            target.setdefault("input_tokens_details", {})["cached_tokens"] = cached
+        else:
+            target["prompt_cache_hit_tokens"] = cached
+            target["prompt_cache_miss_tokens"] = prepared.prompt_tokens - cached
+    return json.dumps(value, ensure_ascii=False)
 
 
 async def response_body(prepared: Prepared, client: httpx.AsyncClient, settings: Settings, tokenizer: Tokenizer):
@@ -273,25 +306,35 @@ async def response_body(prepared: Prepared, client: httpx.AsyncClient, settings:
     try:
         async for chunk in backend:
             for event in processor.push(chunk):
+                event_type = response_type.chunk_event_type(event)
+                if event_type in ("response.reasoning_text.delta", "response.output_text.delta"):
+                    key = "first_reasoning_ms" if event_type == "response.reasoning_text.delta" else "first_answer_ms"
+                    prepared.timings.setdefault(key, round((perf_counter() - prepared.started_at) * 1000, 2))
                 if prepared.converted.stream:
-                    yield sse(response_type.chunk_event_type(event), event.to_json())
+                    yield sse(event_type, final_usage_json(event.to_json(), prepared))
                 else:
                     accumulated.append(event)
             if processor.finished:
                 break
         for event in processor.finish():
             if prepared.converted.stream:
-                yield sse(response_type.chunk_event_type(event), event.to_json())
+                yield sse(response_type.chunk_event_type(event), final_usage_json(event.to_json(), prepared))
             else:
                 accumulated.append(event)
         if accumulated is not None:
-            yield accumulated.to_json()
+            yield final_usage_json(accumulated.to_json(), prepared)
         elif (done := response_type.done_message()) is not None:
             yield sse(None, done)
     finally:
         with CancelScope(shield=True):
             await backend.aclose()
         processor.close()
+        # Request diagnostics contain counts/timings only: no prompt, image,
+        # output text, headers or credentials.
+        print(json.dumps({"event": "inference_timing", "response_id": response_id,
+            "prompt_tokens": prepared.prompt_tokens, "images": len(prepared.images),
+            "elapsed_ms": round((perf_counter() - prepared.started_at) * 1000, 2),
+            **prepared.timings, "usage": prepared.backend_usage, "backend_metrics": prepared.backend_metrics}), flush=True)
 
 
 class ClosingStreamingResponse(StreamingResponse):
@@ -377,12 +420,15 @@ def create_app(settings: Settings, *, transport=None) -> FastAPI:
 
     def handler(protocol):
         async def endpoint(request: Request):
+            started_at = perf_counter()
             body = bytearray()
             async for chunk in request.stream():
                 if len(body) + len(chunk) > settings.max_request_bytes:
                     raise RequestError("Request body is too large.", 413, "request_too_large")
                 body.extend(chunk)
             prepared = await run_in_threadpool(prepare, protocol, bytes(body), settings, tokenizer)
+            prepared.started_at = started_at
+            prepared.timings["prepare_ms"] = round((perf_counter() - started_at) * 1000, 2)
             output = response_body(prepared, request.app.state.client, settings, tokenizer)
             try:
                 first = await first_or_disconnect(request, output)
@@ -410,10 +456,11 @@ def main():
     parser.add_argument("--key-file", required=True)
     parser.add_argument("--backend", default="http://127.0.0.1:8000")
     parser.add_argument("--port", type=int, default=8001)
+    parser.add_argument("--recipe-backend", action="store_true", help="Use the Recipe backend plugin for text too, including final cache usage")
     args = parser.parse_args()
     import uvicorn
-    app = create_app(Settings(tokenizer=args.tokenizer, key_file=args.key_file, backend=args.backend))
-    uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, server_header=False)
+    app = create_app(Settings(tokenizer=args.tokenizer, key_file=args.key_file, backend=args.backend, recipe_backend=args.recipe_backend))
+    uvicorn.run(app, host="127.0.0.1", port=args.port, access_log=False, server_header=False, timeout_keep_alive=1800)
 
 
 if __name__ == "__main__":

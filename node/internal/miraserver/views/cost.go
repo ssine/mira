@@ -7,28 +7,34 @@ import (
 )
 
 const (
-	PricingDate   = "2026-10-04"
-	PricingSource = "https://developers.openai.com/api/docs/pricing"
-	costPredicate = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(turn_context|thread_settings_applied|token_count)"'`
+	PricingDate           = "2026-10-08"
+	PricingSource         = "https://developers.openai.com/api/docs/pricing"
+	DeepSeekPricingSource = "https://api-docs.deepseek.com/quick_start/pricing/"
+	costPredicate         = `payload::text ~ '"type"[[:space:]]*:[[:space:]]*"(turn_context|thread_settings_applied|token_count)"'`
 )
 
 type modelPrice struct {
 	input, cached, write, output int64 // nanodollars per token
 	hasWrite                     bool
 	longContext                  int64
+	source, basis                string
 }
 
 var modelPrices = map[string]modelPrice{
-	"gpt-6.1-sol":   {input: 2_000, cached: 100, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
-	"gpt-6-astra":   {input: 10_000, cached: 1_000, write: 12_500, output: 50_000, hasWrite: true, longContext: 272_000},
-	"gpt-6-sol":     {input: 2_000, cached: 200, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
-	"gpt-6-luna":    {input: 100, cached: 10, write: 125, output: 500, hasWrite: true, longContext: 272_000},
-	"gpt-5.6-sol":   {input: 4_000, cached: 400, write: 5_000, output: 20_000, hasWrite: true, longContext: 272_000},
-	"gpt-5.6-terra": {input: 2_000, cached: 200, write: 2_500, output: 12_000, hasWrite: true, longContext: 272_000},
-	"gpt-5.6-luna":  {input: 200, cached: 20, write: 250, output: 1_200, hasWrite: true, longContext: 272_000},
-	"gpt-5.5":       {input: 5_000, cached: 500, output: 30_000, longContext: 272_000},
-	"gpt-5.4":       {input: 2_500, cached: 250, output: 15_000, longContext: 272_000},
-	"gpt-5.3-codex": {input: 1_750, cached: 175, output: 14_000},
+	// Standard peak USD rates, deliberately independent of request time for
+	// comparable self-hosted estimates. Output includes reasoning tokens.
+	"DeepSeek-V4.1-Flash": {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
+	"deepseek-flash":      {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
+	"gpt-6.1-sol":         {input: 2_000, cached: 100, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-astra":         {input: 10_000, cached: 1_000, write: 12_500, output: 50_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-sol":           {input: 2_000, cached: 200, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-luna":          {input: 100, cached: 10, write: 125, output: 500, hasWrite: true, longContext: 272_000},
+	"gpt-5.6-sol":         {input: 4_000, cached: 400, write: 5_000, output: 20_000, hasWrite: true, longContext: 272_000},
+	"gpt-5.6-terra":       {input: 2_000, cached: 200, write: 2_500, output: 12_000, hasWrite: true, longContext: 272_000},
+	"gpt-5.6-luna":        {input: 200, cached: 20, write: 250, output: 1_200, hasWrite: true, longContext: 272_000},
+	"gpt-5.5":             {input: 5_000, cached: 500, output: 30_000, longContext: 272_000},
+	"gpt-5.4":             {input: 2_500, cached: 250, output: 15_000, longContext: 272_000},
+	"gpt-5.3-codex":       {input: 1_750, cached: 175, output: 14_000},
 }
 
 type costTotals struct {
@@ -346,8 +352,30 @@ func totalDollars(total *costTotals) float64 {
 
 func pricedEstimate(total *costTotals) map[string]any {
 	available := total.priced > 0 || total.observed && total.unpriced == 0 && len(total.reasons) == 0
+	sources, bases := []string{}, []string{}
+	for _, model := range total.models {
+		rate := modelPrices[model]
+		source, basis := rate.source, rate.basis
+		if source == "" {
+			source = PricingSource
+		}
+		if basis == "" {
+			basis = "standard"
+		}
+		sources = appendUnique(sources, source)
+		bases = appendUnique(bases, basis)
+	}
+	source, basis := PricingSource, "standard"
+	if len(sources) > 0 {
+		source = sources[0]
+	}
+	if len(bases) == 1 {
+		basis = bases[0]
+	} else if len(bases) > 1 {
+		basis = "mixed-standard"
+	}
 	return map[string]any{
-		"currency": "USD", "basis": "standard", "pricingDate": PricingDate, "pricingSource": PricingSource,
+		"currency": "USD", "basis": basis, "pricingDate": PricingDate, "pricingSource": source, "pricingSources": sources,
 		"status": func() string {
 			if !available {
 				return "unavailable"

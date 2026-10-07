@@ -26,6 +26,24 @@ def payload(**overrides):
 
 
 class BackendTest(unittest.IsolatedAsyncioTestCase):
+    async def test_text_uses_raw_renderer_and_private_usage_options(self):
+        renderer = AsyncMock(return_value=[{"prompt_token_ids": [1, 2, 3]}])
+        original = SimpleNamespace(
+            _check_model=AsyncMock(return_value=None), _preflight=Mock(),
+            _extract_prompt_len=lambda prompt: len(prompt["prompt_token_ids"]),
+            online_renderer=SimpleNamespace(preprocess_cmpl=renderer),
+            enable_prompt_tokens_details=False, enable_per_request_metrics=False,
+        )
+        serving = ImageCompletions(original)
+        data = payload()
+        data.update(prompt=[1, 2, 3], images=[], expected_prompt_tokens=3)
+        request = ImageCompletionRequest.model_validate(data)
+        await serving.render_completion_request(request)
+        self.assertEqual([{"prompt_token_ids": [1, 2, 3]}], renderer.call_args.args[1])
+        self.assertTrue(serving.enable_prompt_tokens_details)
+        self.assertTrue(serving.enable_per_request_metrics)
+        self.assertFalse(original.enable_prompt_tokens_details)
+
     async def test_raw_tokens_and_images_reach_renderer_and_count_is_checked(self):
         seen = []
 

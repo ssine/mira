@@ -67,6 +67,21 @@ vLLM's endpoint-plugin and serving interfaces, verified with
 No installed vLLM source file is patched. Adding the plugin requires a planned
 engine restart/model reload; retain the prior launch command for rollback.
 
+With plugin 0.1.1, pass `--recipe-backend` to the frontend to use that same private
+endpoint for text. It enables per-request timing and cached-token details on its
+own serving instance. The frontend consumes vLLM's final usage-only frame before
+completion; cache counts are not inferred from process-wide metrics. Older
+conversations that recorded zero cached tokens cannot be corrected retroactively
+without per-request evidence. Plain text `/v1/completions` remains available when
+the flag is omitted.
+
+Each completed or interrupted call logs one `inference_timing` record with only
+counts, durations and backend metrics. `prepare_ms`, `backend_first_token_ms`,
+`first_reasoning_ms`, and `first_answer_ms` are measured from frontend request
+handling; they are not client round-trip timings. Prompts, images, outputs and
+credentials are excluded. The authenticated frontend keeps idle HTTP connections
+for 30 minutes to match Mira's connection reuse; no requests are replayed.
+
 The frontend accepts inline PNG, JPEG, WebP and GIF images as data URLs in
 Responses or Chat Completions, including images returned by client tools.
 External image URLs are rejected. Recipe performs image validation, alpha

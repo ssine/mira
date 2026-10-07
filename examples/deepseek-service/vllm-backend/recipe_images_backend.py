@@ -22,7 +22,7 @@ from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 
 
 class ImageCompletionRequest(CompletionRequest):
-    images: list[str] = Field(min_length=1, max_length=600)
+    images: list[str] = Field(default_factory=list, max_length=600)
     expected_prompt_tokens: int = Field(gt=0)
 
     @model_validator(mode="after")
@@ -55,17 +55,20 @@ class ImageCompletions(OpenAIServingCompletion):
         # Reuse initialized engine, renderer and immutable serving configuration.
         # Per-request images stay on the request, never on this shared instance.
         self.__dict__.update(vars(original))
+        # These are API-serving options, independent of engine/GPU settings.
+        self.enable_prompt_tokens_details = True
+        self.enable_per_request_metrics = True
 
     async def render_completion_request(self, request):
         error = await self._check_model(request)
         if error is not None:
             return error
         self._preflight(1)
-        images = await run_in_threadpool(decode_images, request.images)
-        inputs = await self.online_renderer.preprocess_cmpl(request, [{
-            "prompt_token_ids": request.prompt,
-            "multi_modal_data": {"image": images},
-        }])
+        prompt = {"prompt_token_ids": request.prompt}
+        if request.images:
+            images = await run_in_threadpool(decode_images, request.images)
+            prompt["multi_modal_data"] = {"image": images}
+        inputs = await self.online_renderer.preprocess_cmpl(request, [prompt])
         if len(inputs) != 1 or self._extract_prompt_len(inputs[0]) != request.expected_prompt_tokens:
             raise ValueError("Recipe and vLLM image token counts disagree.")
         return inputs

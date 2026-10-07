@@ -31,7 +31,6 @@ def main():
     # JSON basic strings are valid TOML basic strings for these paths/URLs.
     config = f'''model = "DeepSeek-V4.1-Flash"
 model_provider = "deepseek_local"
-preferred_auth_method = "apikey"
 forced_login_method = "api"
 model_reasoning_effort = "max"
 model_context_window = 294912

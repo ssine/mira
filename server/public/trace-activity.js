@@ -19,10 +19,13 @@ function compact(value, limit = 160) {
 }
 
 export function reasoningParts(item) {
-  // Raw model reasoning is not a readable summary. Older records may expose
-  // only summary_text; an absent summary must not create a placeholder card.
-  const parts = item.summary ?? item.summary_text ?? item.text;
-  return (Array.isArray(parts) ? parts : [parts]).map(text);
+  // Some providers (including DeepSeek Recipe) emit readable reasoning content
+  // with an empty summary. Prefer summaries, then use that explicit content.
+  for (const value of [item.summary, item.summary_text, item.text, item.content]) {
+    const parts = (Array.isArray(value) ? value : [value]).map(text);
+    if (parts.some(part => part.trim())) return parts;
+  }
+  return [];
 }
 
 export function reasoningText(item) {

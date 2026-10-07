@@ -64,16 +64,22 @@ func elapsedMilliseconds(startedAt, completedAt string) any {
 }
 
 func reasoningParts(item map[string]any) []string {
-	parts := first(item["summary"], item["summary_text"], item["text"])
-	values := array(parts)
-	if values == nil {
-		values = []any{parts}
+	for _, key := range []string{"summary", "summary_text", "text", "content"} {
+		values := array(item[key])
+		if values == nil {
+			values = []any{item[key]}
+		}
+		result := make([]string, len(values))
+		nonempty := false
+		for index, value := range values {
+			result[index] = valueText(value)
+			nonempty = nonempty || strings.TrimSpace(result[index]) != ""
+		}
+		if nonempty {
+			return result
+		}
 	}
-	result := make([]string, len(values))
-	for index, value := range values {
-		result[index] = valueText(value)
-	}
-	return result
+	return nil
 }
 
 func reasoningText(item map[string]any) string {

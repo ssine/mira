@@ -47,6 +47,7 @@ class ContractTest(unittest.TestCase):
         self.output = "Compute.</think>391<｜end▁of▁sentence｜>"
         self.finish_reason = "stop"
         self.backend_status = 200
+        self.final_cached_tokens = None
 
     def backend(self, request):
         self.paths.append(request.url.path)
@@ -59,6 +60,8 @@ class ContractTest(unittest.TestCase):
         chunks = [{"choices": [{"index": 0, "token_ids": [i], "finish_reason": None}], "usage": {"prompt_tokens": prompt_tokens, "prompt_tokens_details": {"cached_tokens": 8}}} for i in ids]
         if self.finish_reason:
             chunks.append({"choices": [{"index": 0, "token_ids": [], "finish_reason": self.finish_reason}]})
+            if self.final_cached_tokens is not None:
+                chunks.append({"choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": len(ids), "prompt_tokens_details": {"cached_tokens": self.final_cached_tokens}}})
         return httpx.Response(200, text="".join("data: " + json.dumps(c) + "\n\n" for c in chunks) + "data: [DONE]\n\n")
 
     def client(self):
@@ -109,6 +112,22 @@ class ContractTest(unittest.TestCase):
         history = [{"role": "user", "content": "Create result.txt"}] + first.json()["output"] + [{"type": "custom_tool_call_output", "call_id": calls[0]["call_id"], "output": "Success"}]
         second = client.post("/v1/responses", json=self.payload(tools=tools, input=history), headers=self.headers)
         self.assertEqual(200, second.status_code, second.text)
+
+    def test_final_usage_frame_overrides_initial_cache_count(self):
+        self.final_cached_tokens = 16
+        self.settings = replace(self.settings, recipe_backend=True)
+        client = self.client()
+        for stream in (False, True):
+            result = client.post("/v1/responses", json=self.payload(stream=stream), headers=self.headers)
+            self.assertEqual(200, result.status_code, result.text)
+            if stream:
+                events = [json.loads(line[6:]) for line in result.text.splitlines() if line.startswith("data: {")]
+                response = events[-1]["response"]
+            else:
+                response = result.json()
+            self.assertEqual(16, response["usage"]["input_tokens_details"]["cached_tokens"])
+            self.assertEqual("/recipe/v1/completions", self.paths[-1])
+            self.assertEqual([], self.requests[-1]["images"])
 
     def test_stream_unicode_and_terminal_event(self):
         self.output = "计算。</think>结果是391。<｜end▁of▁sentence｜>"
