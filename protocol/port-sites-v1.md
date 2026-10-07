@@ -51,9 +51,16 @@ write is never replayed. No application body-size, total-duration or idle-time
 limit is imposed. Transport handshakes/local dials and idle connection pools are
 bounded. Defaults: 128 streams per Server, 32 per Node, 32 upstream connections
 per site; Node also enforces 32 workers. Exhausted capacity fails new connections.
-Server proxy configuration cache: 64 sites. Each request opens a fresh upstream
-stream, preventing net/http from replaying an idempotent operation after session
-loss. Client-to-Mira HTTP keep-alive remains supported.
+Server proxy configuration cache: 64 sites. HTTP/1 connections reuse their
+dedicated Node transport between sequential requests, with at most four idle
+connections per site and a 30-second idle pool timeout. Concurrent requests use
+separate connections; SSE and upgrades hold their connection for their lifetime.
+The HTTP transport permits one connection assignment per request. An attempted
+automatic retry cancels the request and fences any replacement socket before
+writing application bytes, including when an idle connection races cancellation.
+No request is replayed after upstream or Node session loss. A later independent
+request can establish a new connection. Node epochs, stop/delete and route
+revisions invalidate the same pools. Client-to-Mira keep-alive remains supported.
 The limits bound resources, not the length of a request or a stream.
 
 Both WSS and the existing ephemeral sequenced HTTPS transport carry these binary

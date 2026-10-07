@@ -46,7 +46,7 @@ func (s portSite) label() string { return "p-" + s.Name }
 type siteProxy struct {
 	revision  int64
 	proxy     *httputil.ReverseProxy
-	transport *http.Transport
+	transport *siteTransport
 	used      time.Time
 }
 type siteProxyStore struct {
@@ -460,9 +460,7 @@ func (server *Server) portSiteProxy(s *portSite) *httputil.ReverseProxy {
 		server.siteProxies.items[key].transport.CloseIdleConnections()
 		delete(server.siteProxies.items, key)
 	}
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.Proxy = nil
-	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+	tr := newSiteTransport(func(ctx context.Context, network, address string) (net.Conn, error) {
 		server.siteLifecycle.RLock()
 		defer server.siteLifecycle.RUnlock()
 		current, err := server.getPortSite(ctx, s.ID)
@@ -473,18 +471,7 @@ func (server *Server) portSiteProxy(s *portSite) *httputil.ReverseProxy {
 			return nil, net.ErrClosed
 		}
 		return server.channel.DialSite(ctx, s.ID, s.NodeID, s.Port)
-	}
-	tr.MaxIdleConns = 4
-	tr.MaxIdleConnsPerHost = 4
-	tr.MaxConnsPerHost = 32
-	tr.IdleConnTimeout = 30 * time.Second
-	tr.ResponseHeaderTimeout = 0
-	// A fresh upstream stream per request prevents net/http from replaying an
-	// idempotent request after a reused transport loses its Node session. The
-	// browser/client connection to Mira may still use keep-alive.
-	tr.DisableKeepAlives = true
-	tr.DisableCompression = true
-	tr.ForceAttemptHTTP2 = false
+	})
 	proxy := &httputil.ReverseProxy{Transport: tr, FlushInterval: -1,
 		Rewrite: func(p *httputil.ProxyRequest) {
 			p.Out.URL.Scheme = s.Scheme
