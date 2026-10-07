@@ -25,7 +25,7 @@ export class SitesPanel {
     if (reset) this.sites.clear();
     for (const site of result.data || []) this.sites.set(site.siteId, site);
     this.cursor = result.nextCursor || "";
-    this.root.querySelector("[data-sites-more]").hidden = !result.hasMore;
+    this.root.querySelector("[data-sites-more]").classList.toggle("hidden", !result.hasMore);
     const rows = this.root.querySelector("[data-sites-list]"); rows.replaceChildren();
     for (const site of this.sites.values()) {
       const row = document.createElement("tr");
