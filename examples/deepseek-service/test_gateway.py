@@ -26,6 +26,9 @@ class RoutingTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual('http://replacement:8007',active.url);self.assertNotIn('thread',pool.hints)
             path.write_text('broken');transport.refresh_routes()
             self.assertTrue(all(r.draining for r in pool.replicas));self.assertFalse(transport.configuration_valid)
+            rows[0]['url']='http://invalid:port'
+            path.write_text(json.dumps({'replicas':rows}));transport.refresh_routes()
+            self.assertFalse(transport.configuration_valid)
             await transport.aclose()
 
     async def test_child_thread_header_takes_precedence_over_shared_session(self):

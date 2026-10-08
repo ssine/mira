@@ -201,7 +201,7 @@ class PoolTransport(httpx.AsyncBaseTransport):
                     for key in [k for k,v in self.pool.hints.items() if v[0] == r.name]: del self.pool.hints[key]
                 r.url, r.draining = url, draining
             self.configuration_valid = True
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, httpx.InvalidURL):
             self.configuration_valid = False
             for r in self.pool.replicas: r.draining = True
 
