@@ -637,7 +637,7 @@ function refreshAccountChoices(preferred) {
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   const engine = agent.threadId ? engineOf(agent.threadId) : null;
   const previous = preferred ?? agent.accountSelections.get(node?.nodeId) ?? "";
-  const codex = node?.capabilities?.appServer ? node.codexAccounts?.length ? node.codexAccounts : [{ name: "默认账号", nodeAccountId: "", enabled: true, isDefault: true }] : [];
+  const codex = node?.capabilities?.appServer ? node.codexAccounts?.length ? node.codexAccounts.filter(a => a.enabled !== false) : [{ name: "默认账号", nodeAccountId: "", enabled: true, isDefault: true }] : [];
   const claude = node?.capabilities?.claudeRuntimeV1 ? [...(node.claudeAccounts || []), { engine: "claude", name: "Node 默认配置", nodeAccountId: "claude-default", enabled: true, configured: true }] : [];
   for (const select of [$("#conversationAccount"), $("#agentRuntimeAccount"), $("#conversationDetailsAccount")]) {
     const accounts = select.id === "agentRuntimeAccount" ? codex : [...codex, ...claude].filter(a => !engine || (a.engine || "codex") === engine);

@@ -53,6 +53,9 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 		result := []map[string]any{}
 		for _, node := range listed {
 			for _, account := range node.CodexAccounts {
+				if !account.Enabled {
+					continue
+				}
 				result = append(result, map[string]any{
 					"account": account, "nodeName": node.Hostname, "nodeDisplayName": node.DisplayName, "nodeStatus": node.Status, "nodeMode": node.NodeMode,
 				})
@@ -66,6 +69,10 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 	}
 	if node == nil {
 		return true, foundation.WriteErrorJSON(response, 404, "Node not found", "not_found")
+	}
+	if request.Method == http.MethodDelete && match[2] != "" && match[3] == "" {
+		result, err := server.nodes.RemoveAccount(ctx, request, principal, node.NodeID, match[2])
+		return true, writeNodeResult(response, result, err)
 	}
 	if match[2] == "" {
 		if request.Method == http.MethodGet {

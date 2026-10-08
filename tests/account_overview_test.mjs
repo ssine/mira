@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { accountGroups, recentAccountKeys } from "../server/public/codex-accounts.js";
+
+test("removed Codex bindings disappear while disabled Claude accounts remain manageable", () => {
+  const groups = accountGroups([{
+    codexAccounts: [{ name: "Retired", enabled: false, provider: "custom", nodeAccountId: "retired" }, { name: "Live", enabled: true, provider: "custom", nodeAccountId: "live" }],
+    claudeAccounts: [{ engine: "claude", name: "Paused Claude", enabled: false, nodeAccountId: "claude" }],
+  }]);
+  assert.deepEqual(groups.map(group => group.name).sort(), ["Live", "Paused Claude"]);
+});
 import { spendingSeries, spendProjectionStatus, spendCacheLifetime } from "../server/public/account-spend.js";
 import { AccountSidebar } from "../server/public/account-status.js";
 
