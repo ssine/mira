@@ -90,8 +90,10 @@ def read_key(path: str) -> bytes:
 
 class AuthAndCapacity:
     """Authenticate before body reads; reserve bounded inference tickets only."""
-    def __init__(self, app, key: bytes, admission):
+    def __init__(self, app, key: bytes, admission,
+                 inference_paths=("/v1/responses", "/v1/chat/completions")):
         self.app, self.key, self.admission = app, key, admission
+        self.inference_paths = frozenset(inference_paths)
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
@@ -108,7 +110,7 @@ class AuthAndCapacity:
             await response(scope, receive, send)
             return
         ticket = None
-        if scope["method"] == "POST" and scope["path"] in ("/v1/responses", "/v1/chat/completions"):
+        if scope["method"] == "POST" and scope["path"] in self.inference_paths:
             try:
                 ticket = self.admission.reserve()
             except QueueFull:
