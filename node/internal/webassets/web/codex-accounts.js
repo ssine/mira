@@ -20,6 +20,7 @@ export function accountGroups(nodes) {
   for (const node of nodes) {
     if (node.approvalStatus && node.approvalStatus !== "approved") continue;
     for (const account of [...(node.codexAccounts ?? []), ...(node.claudeAccounts ?? [])]) {
+      if (account.engine !== "claude" && account.enabled === false) continue;
       const name = account.name?.trim();
       if (!name) continue;
       const provider = account.reportedAppServer?.provider;
@@ -98,6 +99,7 @@ export class CodexAccounts {
     for (const node of this.nodes) {
       if (this.filter.value && this.filter.value !== node.nodeId) continue;
       for (const account of [...(node.codexAccounts ?? []), ...(node.claudeAccounts ?? [])]) {
+        if (account.engine !== "claude" && account.enabled === false) continue;
         const row = el("button", "", "codex-account-row"); row.type = "button";
         const identity = el("span"); identity.append(el("strong", account.name), el("small", `${node.displayName || node.hostname} · ${account.engine === "claude" ? "Claude · " : "Codex · "}${account.reportedAppServer?.provider?.name || account.reportedAppServer?.provider?.id || account.provider || "待配置"}`));
         const snapshot = account.snapshot, quota = weeklyQuota(snapshot?.limits);

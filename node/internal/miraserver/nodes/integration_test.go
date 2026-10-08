@@ -129,6 +129,66 @@ func TestPostgresLifecycle(t *testing.T) {
 		}
 		wantResidency = map[string]any{"effectiveMemoryBytes": json.Number("4294967296")}
 	}
+	removed, err := service.RemoveAccount(ctx, request, principal, nodeID, bindingID)
+	if err != nil || removed.Status != 409 {
+		t.Fatalf("remove running account = %#v, %v", removed, err)
+	}
+	if err := service.ReportAccounts(ctx, nodeID, []any{map[string]any{
+		"nodeAccountId": bindingID, "reportedAppServer": map[string]any{"status": "stopped"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SetAccountDesired(ctx, nodeID, bindingID, map[string]any{"running": true}); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = service.RemoveAccount(ctx, request, principal, nodeID, bindingID)
+	if err != nil || removed.Status != 409 {
+		t.Fatalf("remove starting account = %#v, %v", removed, err)
+	}
+	if _, err := service.SetAccountDesired(ctx, nodeID, bindingID, map[string]any{"running": false}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO mira_codex_execution_events
+ (operation_id,store_id,thread_id,generation,node_account_id,runtime_id,revision,kind)
+ VALUES(gen_random_uuid(),'test','preserved-history',1,$1::uuid,'test',1,'completed')`, bindingID); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		removed, err = service.RemoveAccount(ctx, request, principal, nodeID, bindingID)
+		if err != nil || removed.Status != 200 {
+			t.Fatalf("remove stopped account attempt %d = %#v, %v", attempt, removed, err)
+		}
+	}
+	var enabled bool
+	var historyCount, removalAuditCount int
+	if err := pool.QueryRow(ctx, `SELECT enabled FROM mira_node_codex_accounts WHERE node_account_id=$1::uuid`, bindingID).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM mira_codex_execution_events WHERE node_account_id=$1::uuid`, bindingID).Scan(&historyCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT COUNT(*) FROM mira_audit_events WHERE action='codex_account.removed' AND metadata->>'nodeAccountId'=$1`, bindingID).Scan(&removalAuditCount); err != nil {
+		t.Fatal(err)
+	}
+	if enabled || historyCount != 1 || removalAuditCount != 1 {
+		t.Fatalf("removed account enabled=%v history=%d audit=%d", enabled, historyCount, removalAuditCount)
+	}
+	node, err = service.GetNode(ctx, nodeID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SelectAccount(node, bindingID); err == nil {
+		t.Fatal("removed account remained selectable")
+	}
+	for _, existing := range node.CodexAccounts {
+		if existing.IsDefault {
+			removed, err = service.RemoveAccount(ctx, request, principal, nodeID, existing.NodeAccountID)
+			if err != nil || removed.Status != 409 {
+				t.Fatalf("remove default account = %#v, %v", removed, err)
+			}
+		}
+	}
+
 	revoked, err := service.RevokeNode(ctx, request, principal, nodeID, nil)
 	if err != nil || revoked.Status != 200 {
 		t.Fatalf("revoke Node = %#v, %v", revoked, err)

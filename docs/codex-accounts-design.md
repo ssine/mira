@@ -156,6 +156,7 @@ Schema 29 将 Codex AgentGraphStore 的父子关系及 open/closed 状态保存�
 
 - GET /v1/codex/accounts：全局列表。
 - GET/POST /v1/nodes/:nodeId/codex-accounts：列出/创建；单个绑定可 PATCH 名称。
+- DELETE /v1/nodes/:nodeId/codex-accounts/:bindingId：删除已由节点确认停止的非默认本地账号。删除停用绑定并从可用账号与网页列表移除，保留历史执行记录、费用归属和 canonical 对话；不删除节点原始配置文件。重复删除返回成功，默认账号与运行中账号拒绝删除。
 - 绑定下的 quota、quota-history、configure、login、login-status、login-cancel、logout：额度和凭据管理。
 - 既有 runtime start/stop 请求及 App Server WebSocket 接受 nodeAccountId；省略用默认账号，显式无效值不回退。
 - GET/PUT /v1/codex/threads/:threadId/automatic-input-recovery：读取/更新自动恢复偏好与最近尝试状态；PUT 校验 generation，要求管理员与 CSRF。
