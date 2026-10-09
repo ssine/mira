@@ -18,7 +18,8 @@ test("live content streams immediately, keeps part order, and yields to summarie
   let card, body;
   const context = vm.createContext({
     liveTraceKey: () => "key", CSS: { escape: x => x },
-    $: () => ({ querySelector: () => card }), traceNearBottom: () => false,
+    $: () => ({ querySelector: () => card }), traceCard: () => card,
+    traceNearBottom: () => false,
     upsertTrace: () => card ??= {},
     queueTraceStreamRender: (_card, value) => { body = value; },
   });
