@@ -37,6 +37,7 @@ try {
   const recovery = page.locator('.trace-card.recovery[data-turn-id="failed"]');
   await recovery.locator(".compaction-label").filter({ hasText: "已自动重试 3 次" }).waitFor();
   assert.equal(await recovery.locator(".trace-body").isVisible(), false);
+  assert.equal(await recovery.locator(".trace-body").textContent(), "", "folded raw errors are not rendered");
   assert.equal(await recovery.locator(".trace-detail").getAttribute("open"), null);
   assert.equal(await page.locator(".trace-card.error").count(), 1);
   assert.match(await page.locator(".trace-card.error").textContent(), /Permission denied/);
@@ -48,6 +49,7 @@ try {
   await live.locator(".compaction-label").filter({ hasText: "已自动重试 3 次" }).waitFor();
   assert.equal(await page.locator(".trace-card.error").count(), 1, "live and persisted encrypted errors share the neutral renderer");
   await recovery.locator("summary").click();
+  await page.waitForFunction(() => document.querySelector('.trace-card.recovery[data-turn-id="failed"] .trace-body').textContent.includes("request id: example"));
   assert.match(await recovery.locator(".trace-body").textContent(), /request id: example/);
   notice = { retryCount: 19, status: "stopped", reason: "同一份上下文已连续失败 20 次" };
   await recovery.locator(".compaction-label").filter({ hasText: "自动重试已停止" }).waitFor();

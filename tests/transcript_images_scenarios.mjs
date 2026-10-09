@@ -39,11 +39,13 @@ export async function runTranscriptScenarios() {
   await verifyImages();
   const compaction = $('[data-trace-key="compaction"]'), compactionDetails = compaction.querySelector("details");
   compaction.querySelector("summary").click();
-  check(compactionDetails.open && compaction.querySelector(".trace-body h2")?.textContent === "压缩摘要", "expanding the notice reveals formatted summary");
+  await until(() => compactionDetails.open && compaction.querySelector(".trace-body h2")?.textContent === "压缩摘要", "expanding the notice reveals formatted summary");
   const imageNodes = [...document.querySelectorAll(".trace-card.image img")];
   const initialReads = (await state()).imageRequests;
+  $(".tool-group").open = true;
+  $("#conversationScroll").scrollTop = 0;
+  await until(() => $(".trace-card.tool"), "nearby tool row mounts after opening its group");
   const tool = $(".trace-card.tool"), details = tool.querySelector(".trace-detail");
-  tool.closest(".tool-group").open = true;
   details.open = true;
   await until(() => tool.querySelector(".trace-body").textContent.includes("revision 1"), "first detail load");
   const scroll = $("#conversationScroll");
@@ -90,6 +92,7 @@ export async function runTranscriptScenarios() {
   await window.transcriptRegression.loadAgentTranscript(new URL(location.href).searchParams.get("thread"), null,
     { preserveLoaded: true, anchorBottom: true });
   check(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 2, "tail reconciliation stays at bottom before the next paint");
+  await until(() => $('[data-trace-key="normal-reply"] .trace-body').textContent.trim() === "继续正常回复。", "viewport prose mounts after tail reconciliation");
   verifyCompactions();
   return { scrollBefore: before, scrollAfter: scroll.scrollTop, imageReads: initialReads, keys: keys() };
 }

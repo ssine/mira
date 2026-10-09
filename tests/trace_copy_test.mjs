@@ -34,11 +34,13 @@ function fixture(clipboard) {
   });
   vm.runInContext(app.slice(start, end), context);
   function card(kind, text) {
-    const body = { classList: { toggle() {} }, querySelectorAll: () => [] };
+    const body = { style: {}, classList: { toggle() {} }, querySelectorAll: () => [] };
     const card = {
       dataset: { traceKind: kind },
+      _miraViewportVisible: true,
       classList: { toggle() {} },
-      querySelector: (selector) => selector === ".trace-body" ? body : button,
+      querySelector: (selector) => selector === ".trace-body" ? body
+        : selector === ".trace-detail" ? { open: true } : button,
     };
     const button = context.createTraceCopyButton(card);
     const update = (text) => context.setTraceBody(card, text);

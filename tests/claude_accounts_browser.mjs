@@ -123,6 +123,9 @@ try {
   emit({ type: "assistant", uuid: "thinking", message: { id: "live-tool", content: [{ type: "thinking", thinking: "Consider the question" }] } });
   await group.locator(".tool-group-total").filter({ hasText: /^思考$/ }).waitFor();
   assert.equal(await group.locator(".tool-group-latest").textContent(), "Consider the question");
+  assert.equal(await group.locator(".tool-group-items > *").count(), 0, "folded thoughts have no child DOM");
+  await group.locator(".tool-group-summary").click();
+  await group.locator(".trace-card.reasoning").waitFor();
   await page.evaluate(() => { window.miraFirstThought = document.querySelector("#conversationTrace .trace-card.reasoning"); });
   emit({ type: "assistant", uuid: "run", message: { id: "live-tool", content: [{ type: "tool_use", id: "run-tests", name: "Bash", input: { command: "go test ./..." } }] } });
   emit({ type: "stream_event", event: { type: "message_stop" } });
@@ -132,8 +135,9 @@ try {
   emit({ type: "stream_event", event: { type: "message_start", message: { id: "live-reply" } } });
   emit({ type: "assistant", uuid: "thinking-2", message: { id: "live-reply", content: [{ type: "thinking", thinking: "Check the output" }] } });
   await page.waitForFunction(() => document.querySelectorAll("#conversationTrace .tool-group .trace-card.reasoning").length === 2);
-  assert.deepEqual([await group.count(), await group.locator(".tool-group-total").textContent(), await group.getAttribute("open")],
-    [1, "工具调用 · 1 次", null], "thinking and tool calls between replies fold into one row");
+  assert.deepEqual([await group.count(), await group.locator(".tool-group-total").textContent()],
+    [1, "工具调用 · 1 次"], "thinking and tool calls between replies share one group");
+  assert.notEqual(await group.getAttribute("open"), null, "polls preserve the user's expanded group");
   emit({ type: "stream_event", event: { type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "One live answer" } } });
   await view.locator("#conversationTrace .trace-card.assistant").filter({ hasText: "One live answer" }).waitFor();
   emit({ type: "assistant", uuid: "answer", timestamp: "2026-09-30T01:02:03.456Z", message: { id: "live-reply", content: [{ type: "text", text: "One live answer" }] } });
