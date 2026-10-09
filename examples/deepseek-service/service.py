@@ -349,6 +349,27 @@ def final_usage_json(data: str, prepared: Prepared) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def request_diagnostics(prepared, response_id):
+    """Only fixed numeric fields may enter diagnostics, never backend payloads."""
+    def numbers(source, names):
+        return {name: source[name] for name in names if name in source
+                and type(source[name]) in (int, float) and math.isfinite(source[name])}
+    usage = numbers(prepared.backend_usage, ("prompt_tokens", "completion_tokens", "total_tokens"))
+    for name, fields in (("prompt_tokens_details", ("cached_tokens",)),
+                         ("completion_tokens_details", ("reasoning_tokens",))):
+        if isinstance(prepared.backend_usage.get(name), dict):
+            usage[name] = numbers(prepared.backend_usage[name], fields)
+    return {"event": "inference_timing", "response_id": response_id,
+        "prompt_tokens": prepared.prompt_tokens, "images": len(prepared.images),
+        "elapsed_ms": round((perf_counter() - prepared.started_at) * 1000, 2),
+        **numbers(prepared.timings, ("prepare_ms", "queue_wait_ms", "backend_headers_ms",
+            "backend_first_token_ms", "first_reasoning_ms", "first_answer_ms")),
+        "usage": usage,
+        "backend_metrics": numbers(prepared.backend_metrics, ("arrival_time", "first_scheduled_time",
+            "first_token_time", "last_token_time", "finished_time", "time_in_queue",
+            "scheduler_time", "model_forward_time", "model_execute_time"))}
+
+
 async def response_body(prepared: Prepared, client: httpx.AsyncClient, settings: Settings, tokenizer: Tokenizer):
     request_type, response_type = PROTOCOLS[prepared.protocol]
     response_id = "resp_" + uuid4().hex
@@ -388,10 +409,7 @@ async def response_body(prepared: Prepared, client: httpx.AsyncClient, settings:
         processor.close()
         # Request diagnostics contain counts/timings only: no prompt, image,
         # output text, headers or credentials.
-        print(json.dumps({"event": "inference_timing", "response_id": response_id,
-            "prompt_tokens": prepared.prompt_tokens, "images": len(prepared.images),
-            "elapsed_ms": round((perf_counter() - prepared.started_at) * 1000, 2),
-            **prepared.timings, "usage": prepared.backend_usage, "backend_metrics": prepared.backend_metrics}), flush=True)
+        print(json.dumps(request_diagnostics(prepared, response_id)), flush=True)
 
 
 class ClosingStreamingResponse(StreamingResponse):

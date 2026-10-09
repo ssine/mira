@@ -290,6 +290,7 @@ def main():
     for r in config['replicas']:
         replicas.append(Replica(r['name'],replica_url(r['url']),read_key(r['key_file']),r.get('capacity',8),r['context_tokens']))
     settings=Settings(tokenizer=config['tokenizer'],key_file=config['key_file'],context_tokens=config['context_tokens'],
+        model=config.get('model','DeepSeek-V4.1-Flash'),backend_ready_file=config.get('backend_ready_file'),
         recipe_backend=True,max_inflight=sum(r.capacity for r in replicas),max_queued=config.get('max_queued',64),queue_timeout=1800)
     app=gateway_app(settings,replicas,[read_key(p) for p in config.get('alias_key_files',[])],routing_config=args.config)
     import uvicorn

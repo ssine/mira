@@ -100,6 +100,40 @@ Image requests use load distribution without text-only prefix hints, and context
 eligibility includes their expanded prompt-token count. Gateway restart loses
 only these disposable hints; Codex history remains in Mira's PostgreSQL store.
 
+## Request privacy
+
+Run every engine, relay and gateway through `private_runtime.py` from the
+container platform, rather than a short-lived Mira SSH session:
+
+```sh
+python private_runtime.py --cwd /private/runtime --pid-file /private/runtime/gateway.pid -- \
+  /path/to/recipe-env/bin/python /path/to/gateway.py --config /private/gateway.json
+```
+
+The launcher discards stdout and stderr in the entire child process tree,
+disables Linux/CUDA core dumps, function tracing, debug dump environment settings
+and usage telemetry, and supplies a null vLLM logging configuration. Keep vLLM
+request/output logging disabled, omit disk KV connectors and explicitly use
+`--profiler-config '{"profiler":null}'`. Prefix/KV caches remain volatile memory;
+no prompt, completion, image, tool argument, credential or decodable token-ID
+sequence is written to inference logs or request storage. Compilation caches
+contain code, rather than request tensors. Health endpoints and aggregate metrics
+remain available, as does usage in the response sent to the caller. Application
+timing diagnostics accept only fixed numeric fields and server-generated IDs;
+unknown backend usage/metric extensions cannot enter them.
+
+Disable core dumps on already-running processes before a rollout. Drain active
+and queued gateway work before stopping its old process, and drain each replica
+before restarting it. Remove old inference log files after their writers stop.
+These settings concern inference instances; Mira's authoritative conversation
+history and the caller's storage are separate.
+
+An independent checkpoint uses a separate gateway process, client/relay key and
+Mira site on the same CPU host. Set the optional `model` field in its JSON config;
+never mix different weights in one replica pool. `backend_ready_file` is an
+optional absolute admission gate: while absent, new work waits with SSE keepalive
+and active streams continue. It can hold a new gateway during a graceful cutover.
+
 ## Cutover and verification
 
 Start and authenticate both relays, then the CPU gateway. Verify actual
