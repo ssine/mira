@@ -32,8 +32,14 @@ private browsing) only lose copies.
   still an unconfirmed copy reads its metadata (account, Node, title) first and
   falls back to the copy only when that read fails.
 - **Transcripts.** A Codex transcript is saved only when it has no history gap and a
-  known tail version; on reopen it is shown and then synchronized incrementally
-  from the cached cursor. A generation change or an item gap larger than 600
+  known tail version; on reopen it is synchronized incrementally from the cached
+  cursor. Prose contents render within the reading viewport plus half a screen
+  on either side; offscreen bodies retain source data and measured height without
+  Markdown DOM. Folded tool/thinking groups retain complete summaries and no child
+  DOM. Expanded groups use height placeholders and create only nearby tool cards;
+  individual folded details do not parse or mount their bodies. This follows
+  viewport size and actual content heights, rather than a fixed message count.
+  A generation change or an item gap larger than 600
   discards the copy. A Claude transcript is saved as recorded history changes,
   including while a turn is running, and before switching conversations. On reopen
   the cached rows are shown at the latest reply, and the first latest-page read
@@ -61,6 +67,9 @@ private browsing) only lose copies.
 
 `tests/client_cache_browser.mjs` checks version isolation, lazy writes, oversized
 entries, LRU eviction, removal and clearing against Chromium's IndexedDB.
+`tests/transcript_cache_browser.py` checks viewport rendering of a large
+Codex cache, lazy grouped tools, viewport retention, tail synchronization and
+generation replacement through Camoufox.
 `tests/claude_cache_browser.mjs` checks active-turn snapshots in a portrait viewport,
 reopening at the latest reply before the history request returns, and updating the
 copy after revalidation.

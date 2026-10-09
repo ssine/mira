@@ -10,6 +10,7 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll("#conversationTrace .trace-card.image img")]
     .filter(img => !img.hidden && img.naturalWidth === 1 && img.getBoundingClientRect().height > 0).length === 2, null, { timeout: 30000 });
   const order = await page.$$eval("#conversationTrace .trace-card", cards => cards.map(card => card.dataset.traceKind));
-  assert.deepEqual(order.filter(kind => kind !== "reasoning"), ["user", "image", "tool", "image", "assistant"]);
+  assert.deepEqual(order, ["user", "image", "image", "assistant"]);
+  assert.equal(await page.locator(".tool-group-items > *").count(), 0, "folded tool groups have no child DOM");
   console.log("passed:", order.join(","));
 } finally { await browser.close(); await fixture.close(); }
