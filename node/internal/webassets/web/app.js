@@ -3820,13 +3820,24 @@ function mountToolGroup(group) {
   }
 }
 
-function attachToolCard(group, key, card) {
+function attachToolCard(group, key, card, before = null) {
   const entry = group._miraEntries.get(key) ?? {};
   entry.card = card;
   group._miraEntries.set(key, entry);
+  if (before && before.dataset.traceKey !== key && group._miraEntries.has(before.dataset.traceKey)) {
+    const ordered = new Map();
+    for (const [entryKey, value] of group._miraEntries) {
+      if (entryKey === key) continue;
+      if (entryKey === before.dataset.traceKey) ordered.set(key, entry);
+      ordered.set(entryKey, value);
+    }
+    group._miraEntries = ordered;
+  }
   card._miraToolGroup = group;
   if (group.open) {
     mountToolGroup(group);
+    const nextRow = before && group._miraEntries.get(before.dataset.traceKey)?.row;
+    if (entry.row && nextRow?.parentNode === entry.row.parentNode) entry.row.parentNode.insertBefore(entry.row, nextRow);
     // An observed row may already be visible when streaming adds a card.
     if (entry.row?.isConnected && traceViewport().rows.get(entry.row)?.visible) {
       entry.row.append(card);
@@ -4470,14 +4481,21 @@ function transcriptTraceOptions(item) {
   };
 }
 
+// Folded groups own detached cards. Keep them at the group's position among
+// replies so each reconciliation uses conversation order, not DOM visibility.
+function traceCardsInOrder(trace) {
+  return [...trace.children].flatMap(row => row.classList.contains("tool-group")
+    ? [...row._miraEntries.values()].map(entry => entry.card).filter(Boolean)
+    : row.classList.contains("trace-card") ? [row] : [...row.querySelectorAll(".trace-card")]);
+}
+
 function renderTranscript(fallbackThread, options = {}) {
   const existingTrace = $("#conversationTrace");
   const visibleItems = agent.transcriptItems;
   const summaryKeys = compactionSummaryKeys(visibleItems);
   const hiddenSummaries = new Set(visibleItems.filter(item => summaryKeys.has(item.key))
     .map(item => JSON.stringify([item.turnId ?? "", item.body?.trim()])));
-  const previousCards = [...new Set([...existingTrace.querySelectorAll(".trace-card"),
-    ...[...existingTrace.querySelectorAll(".tool-group")].flatMap(group => [...group._miraEntries.values()].map(entry => entry.card).filter(Boolean))])];
+  const previousCards = traceCardsInOrder(existingTrace);
   const previousGroupEntries = new Map([...existingTrace.querySelectorAll(".tool-group")]
     .flatMap(group => [...group._miraEntries].map(([key, entry]) => [key, {
       ...entry, height: entry.row?.getBoundingClientRect().height || entry.height,
@@ -4545,8 +4563,7 @@ function renderTranscript(fallbackThread, options = {}) {
   }
   for (const group of trace.querySelectorAll(".tool-group[open]")) mountToolGroup(group);
   // Older pages must not replace prose or tool output still arriving at the tail.
-  const renderedCards = liveCards.length ? [...trace.querySelectorAll(".trace-card"),
-    ...[...trace.querySelectorAll(".tool-group")].flatMap(group => [...group._miraEntries.values()].map(entry => entry.card).filter(Boolean))] : [];
+  const renderedCards = liveCards.length ? traceCardsInOrder(trace) : [];
   const narrativeKey = (card) => JSON.stringify([card.dataset.turnId, card.dataset.traceKind, card.querySelector(".trace-body")._miraSource]);
   const renderedByKey = new Map(renderedCards.map((card) => [card.dataset.traceKey, card]));
   const renderedByBody = new Map(renderedCards.map((card) => [narrativeKey(card), card]));
@@ -4569,7 +4586,7 @@ function renderTranscript(fallbackThread, options = {}) {
       if (groupedTrace(card.dataset.traceKind, card.dataset.traceTitle)) {
         const sameGroup = anchorGroup?.dataset.turnId === (card.dataset.turnId ?? "");
         const group = sameGroup ? anchorGroup : ensureToolGroup(trace, card.dataset.turnId ?? "", before);
-        attachToolCard(group, card.dataset.traceKey, card);
+        attachToolCard(group, card.dataset.traceKey, card, sameGroup ? nextLiveAnchor : null);
       } else trace.insertBefore(card, before);
       nextLiveAnchor = card;
     }

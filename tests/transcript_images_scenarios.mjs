@@ -35,6 +35,65 @@ export async function verifyImages() {
   verifyCompactions();
   return { keys: keys(), nodeReads: counters.nodeReads };
 }
+export async function verifyToolOrdering() {
+  const { agent, renderTranscript, upsertTrace, liveTraceKey, traceViewport } = window.transcriptRegression;
+  const saved = agent.transcriptItems, trace = $("#conversationTrace");
+  const order = () => [...trace.children].flatMap(row => row.classList.contains("tool-group")
+    ? [...row._miraEntries.keys()] : row.dataset.traceKey ? [row.dataset.traceKey] : []);
+  const nestedIds = [], canonical = [], expected = [];
+  try {
+    traceViewport().clear(); trace.replaceChildren();
+    for (let segment = 0; segment < 30; segment++) {
+      const turnId = `order-turn-${Math.floor(segment / 5)}`;
+      for (const suffix of ["outer", "nested-a", "nested-b", "nested-c"]) {
+        const id = `${segment}-${suffix}`, key = liveTraceKey({ turnId }, id);
+        const card = upsertTrace(key, "tool", id, `result for ${id}`, "完成", { turnId, autoScroll: false });
+        expected.push(key);
+        if (suffix === "outer") canonical.push({ key: `stored-${id}`, itemId: id, turnId, kind: "tool", title: id,
+          body: `result for ${id}`, status: "完成", sourceItemSeq: segment * 5 + 1 });
+        else nestedIds.push(key);
+        // Some cards remain mounted in open groups; others are detached. Both
+        // must occupy the same position when canonical history replaces prose.
+        if (segment % 3 === 0) card._miraToolGroup.open = true;
+      }
+      const key = `order-reply-${segment}`, body = `Reply for segment ${segment}`;
+      upsertTrace(key, "assistant", "Codex", body, "完成", { turnId, autoScroll: false });
+      expected.push(key);
+      canonical.push({ key, turnId, kind: "assistant", title: "Codex", body, sourceItemSeq: segment * 5 + 5 });
+    }
+    await delay(80);
+    check(order().join() === expected.join(), "initial tools follow their own conversation segments");
+    agent.transcriptItems = canonical;
+    for (let iteration = 0; iteration < 30; iteration++) {
+      renderTranscript(null, { preserveLive: true, anchorBottom: false });
+      check(order().join() === expected.join(), `reconciliation ${iteration + 1} retains tool positions and group order`);
+      check(trace.querySelectorAll(".tool-group").length === 30, "unpersisted nested tools never form an extra tail group");
+      check([...trace.querySelectorAll(".tool-group")].every(group => group._miraEntries.size === 4), "all 120 tools stay in their original groups");
+    }
+    // Canonical counterparts can appear later; consume each live tool once.
+    agent.transcriptItems = mergeOrderedTools(canonical, nestedIds);
+    renderTranscript(null, { preserveLive: true, anchorBottom: false });
+    check(order().join() === expected.join(), "late canonical tools reconcile without duplication or movement");
+    renderTranscript(null, { anchorBottom: false });
+    check(order().join() === expected.join(), "history-only rebuilding has the same order as live rendering");
+    return { turns: 6, tools: 120, reconciliations: 30 };
+  } finally {
+    agent.transcriptItems = saved;
+    renderTranscript(null, { anchorBottom: true });
+  }
+}
+
+function mergeOrderedTools(canonical, nestedIds) {
+  const nested = nestedIds.map(key => {
+    const [, turnId, itemId] = JSON.parse(key.slice("item-".length));
+    const segment = Number(itemId.split("-")[0]);
+    const offset = { "nested-a": 1, "nested-b": 2, "nested-c": 3 }[itemId.slice(itemId.indexOf("-") + 1)];
+    return { key: `stored-${itemId}`, itemId, turnId, kind: "tool", title: itemId, body: `result for ${itemId}`,
+      status: "完成", sourceItemSeq: segment * 5 + 1 + offset };
+  });
+  return [...canonical, ...nested].sort((left, right) => left.sourceItemSeq - right.sourceItemSeq);
+}
+
 export async function runTranscriptScenarios() {
   await verifyImages();
   const compaction = $('[data-trace-key="compaction"]'), compactionDetails = compaction.querySelector("details");
@@ -94,5 +153,7 @@ export async function runTranscriptScenarios() {
   check(scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop < 2, "tail reconciliation stays at bottom before the next paint");
   await until(() => $('[data-trace-key="normal-reply"] .trace-body').textContent.trim() === "继续正常回复。", "viewport prose mounts after tail reconciliation");
   verifyCompactions();
-  return { scrollBefore: before, scrollAfter: scroll.scrollTop, imageReads: initialReads, keys: keys() };
+  const scrollAfter = scroll.scrollTop;
+  const ordering = await verifyToolOrdering();
+  return { scrollBefore: before, scrollAfter, imageReads: initialReads, keys: keys(), ordering };
 }

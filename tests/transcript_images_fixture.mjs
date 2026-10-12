@@ -67,7 +67,7 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
       response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:");
       let content = await fs.readFile(file);
       if (resource === "app.js") content = content.toString().replace("void bootstrap();",
-        "window.transcriptRegression = { loadAgentTranscript, compactionSummaryKeys, mergeTranscriptItems }; void bootstrap();");
+        "window.transcriptRegression = { loadAgentTranscript, compactionSummaryKeys, mergeTranscriptItems, renderTranscript, upsertTrace, liveTraceKey, traceViewport, agent }; void bootstrap();");
       response.end(content);
     } catch { response.statusCode = 404; response.end(); }
   });

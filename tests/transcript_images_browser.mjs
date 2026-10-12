@@ -19,7 +19,7 @@ try {
   await page.reload();
   await page.evaluate(async () => (await import("/__test/scenarios.mjs")).verifyImages());
   assert.deepEqual(errors, []);
-  console.log("PASS: history-only images, stable order, reload/second window, detail updates and reading position", result);
+  console.log("PASS: history-only images, tool order across repeated reconciliation, reload/second window, detail updates and reading position", result);
 } finally {
   await browser?.close();
   await fixture.close();
