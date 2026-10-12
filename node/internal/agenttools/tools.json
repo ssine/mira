@@ -53,7 +53,8 @@
           "type": "string"
         },
         "content": {
-          "type": "string"
+          "type": "string",
+          "description": "One file chunk, at most 4 MiB decoded. For large local files, an updated mira file write --input or --stdin streams automatically."
         },
         "encoding": {
           "type": "string",

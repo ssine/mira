@@ -223,6 +223,11 @@ func TestDeveloperAndDynamicToolInjection(t *testing.T) {
 	if !ok || strings.Count(merged, miraCLIInstructionsBegin) != 1 || !strings.Contains(merged, "before\n\nafter") || !strings.Contains(merged, "/opt/mira/mira") {
 		t.Fatalf("unexpected merged instructions: %q", merged)
 	}
+	for _, expected := range []string{"file write --node", "--input <local-path>", "file read --node", "--output <local-path>", "--execution-context", "no total size limit"} {
+		if !strings.Contains(merged, expected) {
+			t.Fatalf("large-file guidance missing %q", expected)
+		}
+	}
 	tools := mergeDynamicTools([]any{map[string]any{"name": DynamicToolNamespace}, map[string]any{"name": "kept"}})
 	if len(tools) != 2 || stringValue(tools[0].(map[string]any)["name"]) != "kept" {
 		t.Fatalf("unexpected tools: %#v", tools)

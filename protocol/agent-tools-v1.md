@@ -77,3 +77,14 @@ WebSocket, thread store, account routes and session lifecycle are unchanged.
 Read-only ZIP fields, directory pagination and the binary Web preview data plane
 are specified in [file-preview-v1](file-preview-v1.md). Binary payloads are not
 Agent tool results or JSON control-message bodies.
+
+File capability calls remain bounded to 4 MiB per read/write. The local
+`mira file write --input/--stdin` and `mira file read --output` adapters stream
+complete files through sequential calls without a total byte ceiling. Uploads
+use offset-checked append after the first chunk and require the existing
+`fileChunkedWrite` advertisement for multi-chunk inputs; they never retry lost
+write responses. Downloads publish their local output only after all chunks
+succeed. Explicit CLI read lengths select a total byte range across chunks.
+Transfer timeouts apply per request, and caller cancellation stops subsequent
+chunks. Managed-runtime instructions direct Agents to these adapters for large
+files instead of exposing chunk management to the user.

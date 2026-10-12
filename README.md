@@ -5,6 +5,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.94 让 `mira file write --input/--stdin` 和 `mira file read --output` 自动分块传输完整文件，去掉 CLI 的 4 MiB 文件大小限制，支持进度、取消和范围下载。需升级调用端 CLI；Agent 使用说明需升级 Server，目标 Node 需支持 `fileChunkedWrite`。
+
 1.0.93 修复 Android root 模式中文等 Unicode 文本输入，并改用应用可访问的 API 采集电量、前台应用和数据卷容量，避免 app 模式状态误报。需升级 Android APK；Unicode 输入需启用 Mira 无障碍服务，并设置当前输入框的完整内容。
 
 1.0.88 为端口站点增加上游连接复用，减少重复握手；断线请求仍不自动重放。
@@ -200,13 +202,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.93
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.94
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.93'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.94'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
@@ -385,6 +387,7 @@ mira nodes list --summary --json   # 面向 Agent 的精简、稳定 JSON
 mira nodes get --node 软路由 --json
 mira codex                         # 本机 Mira Codex；personal PostgreSQL store，默认 YOLO
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
+mira file write --node nas --path /data/report.zip --input /tmp/report.zip
 mira process count --node homeserver --json
 mira process run --node homeserver -- /usr/bin/git status --short
 mira process run --node windows --execution-context user -- cmd.exe /d /c whoami
@@ -400,6 +403,11 @@ Web 设备卡中设置显示名称、最多 8 个全局唯一 aliases，以及�
 CLI、SSH/SCP/SFTP 和动态工具；labels 不会隐式选择单台设备。使用 `--label role=router`、
 `--capability ssh`、`--online` 和 `--summary` 可进一步限制 Agent 的发现结果。进程命令始终使用
 executable + argv，不拼 shell 字符串。截图与大文件通过本地绝对路径/stdin 传输，避免进入 argv。
+`mira file write --input/--stdin` 与 `mira file read --output` 自动按最多 4 MiB 的块传输，
+没有文件总大小上限；`--timeout` 限制每次请求，普通输出显示进度，`--json` 保留机器可读结果。
+下载可用 `--offset`/`--length` 选定字节范围，失败或取消时保留原有本地文件。上传失败会报告已确认
+写入的字节数，远端可能留下部分文件；不会自动重放写入。旧 Node 未声明 `fileChunkedWrite` 时，
+大文件上传会在首次写入前要求升级。未指定 `--output` 的读取及底层文件工具仍保留单块边界。
 SSH relay 默认允许全局 128 路、每个相关 Node 32 路并发连接；可用
 `MIRA_SSH_MAX_SESSIONS` 和 `MIRA_SSH_MAX_SESSIONS_PER_NODE` 调整，但始终保留有界保护。
 

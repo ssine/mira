@@ -431,7 +431,7 @@ func (client *cliClient) runNodes(ctx context.Context, args []string) (any, erro
 	return nil, fmt.Errorf("usage: mira nodes [list] [--summary|--full] [--capability <name>] [--label key=value] [--online] | mira nodes get --node <selector>")
 }
 
-func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Reader) (any, error) {
+func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Reader, progress io.Writer) (any, error) {
 	if len(args) < 1 {
 		return nil, fmt.Errorf("file action is required")
 	}
@@ -440,8 +440,8 @@ func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Re
 	node := set.String("node", "", "target Node")
 	filePath := set.String("path", "", "remote path")
 	destination := set.String("destination", "", "remote destination")
-	offset := set.Int64("offset", 0, "read offset")
-	length := set.Int64("length", 0, "read length")
+	offset := set.Int64("offset", 0, "read offset in bytes")
+	length := set.Int64("length", 0, "total bytes to read; default reads to EOF with --output")
 	output := set.String("output", "", "local output")
 	input := set.String("input", "", "local input")
 	useStdin := set.Bool("stdin", false, "read stdin")
@@ -451,6 +451,12 @@ func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Re
 	userSessionID := set.Uint("user-session-id", 0, "specific active Windows user session")
 	if err := set.Parse(args[1:]); err != nil {
 		return nil, err
+	}
+	if set.NArg() != 0 || *offset < 0 || *length < 0 {
+		return nil, fmt.Errorf("file accepts named options with non-negative --offset and --length")
+	}
+	if client.options.JSON {
+		progress = nil
 	}
 	params := map[string]any{"action": action}
 	if *executionContext != "" {
@@ -477,51 +483,36 @@ func (client *cliClient) runFile(ctx context.Context, args []string, stdin io.Re
 	if *overwrite {
 		params["overwrite"] = true
 	}
-	if action == "read" && *output != "" {
-		params["encoding"] = "base64"
-	}
 	if action == "write" {
 		if (*input == "") == !*useStdin {
 			return nil, fmt.Errorf("file write requires exactly one of --input or --stdin")
 		}
-		var content []byte
-		var err error
-		if *useStdin {
-			content, err = io.ReadAll(io.LimitReader(stdin, 4*1024*1024+1))
-		} else {
-			content, err = os.ReadFile(*input)
+		source := stdin
+		if !*useStdin {
+			file, err := os.Open(*input)
+			if err != nil {
+				return nil, err
+			}
+			defer file.Close()
+			source = file
 		}
-		if err != nil {
-			return nil, err
+		if source == nil {
+			return nil, fmt.Errorf("stdin is unavailable")
 		}
-		if len(content) > 4*1024*1024 {
-			return nil, fmt.Errorf("input exceeds 4 MiB")
+		if closer, ok := source.(io.ReadCloser); ok {
+			// SIGINT must also release a read blocked on a pipe or stdin.
+			stop := context.AfterFunc(ctx, func() { _ = closer.Close() })
+			defer stop()
 		}
-		params["encoding"], params["content"], params["overwrite"] = "base64", base64.StdEncoding.EncodeToString(content), *overwrite
-	}
-	result, selected, err := client.invoke(ctx, *node, "file", params)
-	if err != nil {
-		return nil, err
+		params["overwrite"] = *overwrite
+		return client.writeFileChunks(ctx, *node, params, source, progress)
 	}
 	if action == "read" && *output != "" {
-		view, ok := result.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("unexpected file response")
-		}
-		content, err := base64.StdEncoding.DecodeString(selectorValue(view, "content"))
-		if err != nil {
-			return nil, err
-		}
-		absolute, err := filepath.Abs(*output)
-		if err != nil {
-			return nil, err
-		}
-		if err := os.WriteFile(absolute, content, 0600); err != nil {
-			return nil, err
-		}
-		delete(view, "content")
-		view["localPath"] = absolute
-		view["sourceNodeId"] = selectorValue(selected, "nodeId")
+		return client.readFileChunks(ctx, *node, params, *output, *offset, *length, progress)
+	}
+	result, _, err := client.invoke(ctx, *node, "file", params)
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -965,6 +956,9 @@ The selector may be a Node UUID, exact nodeKey, user-defined alias, or a unique 
 
 Common options: --path, --destination, --offset, --length, --recursive, --overwrite.
 Use --output for local file reads. Writes require exactly one of --input or --stdin.
+Uploads and --output downloads stream automatically in bounded chunks, with no total size limit.
+--offset and --length select a byte range; without --output, reads return one bounded chunk.
+--timeout bounds each request during file transfers, not the total transfer duration.
 Windows defaults to --execution-context user; pass system for the LocalSystem service identity.`,
 		"process": `Usage: mira process <count|list|start|run|poll|signal> --node <selector> [options] [-- executable args...]
 
@@ -1306,7 +1300,9 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	case "nodes":
 		result, err = client.runNodes(commandCtx, remaining[1:])
 	case "file":
-		result, err = client.runFile(commandCtx, remaining[1:], stdin)
+		// Transfers have no total size or duration ceiling. The HTTP client and
+		// capability timeout bound each chunk; caller cancellation still applies.
+		result, err = client.runFile(ctx, remaining[1:], stdin, stderr)
 	case "process":
 		result, err = client.runProcess(commandCtx, remaining[1:], stdout)
 	case "pty":
