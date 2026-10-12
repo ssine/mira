@@ -328,9 +328,16 @@ func TestCLIFileUploadCancellationAndWindowsSession(t *testing.T) {
 
 func TestCLIFileTransferTimeoutIsPerRequest(t *testing.T) {
 	peer := newCLIFileTestPeer(t)
-	peer.delay = 150 * time.Millisecond
+	// Keep the response tiny and leave plenty of per-request headroom under
+	// race instrumentation. The three delays still exceed the command timeout.
+	peer.delay = 1500 * time.Millisecond
+	peer.hook = func(params fileParams, index int, result map[string]any) error {
+		result["content"] = base64.StdEncoding.EncodeToString([]byte{byte(params.Offset)})
+		result["bytesRead"], result["eof"] = 1, params.Offset == 2
+		return nil
+	}
 	remote := filepath.Join(peer.dir, "source.bin")
-	if err := os.WriteFile(remote, fileTransferTestBytes(2*maxFileBytes+1), 0600); err != nil {
+	if err := os.WriteFile(remote, []byte{0, 1, 2}, 0600); err != nil {
 		t.Fatal(err)
 	}
 	// Run the public CLI entrypoint to catch accidental whole-command deadlines.
@@ -366,15 +373,15 @@ func TestCLIFileTransferTimeoutIsPerRequest(t *testing.T) {
 	output := filepath.Join(t.TempDir(), "download.bin")
 	var stdout, stderr bytes.Buffer
 	start := time.Now()
-	exit := RunCLI(context.Background(), []string{"file", "read", "--node", "file-test-node", "--path", remote, "--output", output, "--timeout", "400ms", "--json"}, nil, &stdout, &stderr)
-	if exit != 0 || stderr.Len() != 0 || time.Since(start) <= 400*time.Millisecond {
+	exit := RunCLI(context.Background(), []string{"file", "read", "--node", "file-test-node", "--path", remote, "--output", output, "--timeout", "4s", "--json"}, nil, &stdout, &stderr)
+	if exit != 0 || stderr.Len() != 0 || time.Since(start) <= 4*time.Second {
 		t.Fatalf("transfer timeout should apply per request: exit=%d stderr=%q duration=%v", exit, stderr.String(), time.Since(start))
 	}
 	var response map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
 		t.Fatalf("invalid CLI JSON: %v", err)
 	}
-	if response["data"].(map[string]any)["bytesRead"] != float64(2*maxFileBytes+1) {
+	if response["data"].(map[string]any)["bytesRead"] != float64(3) {
 		t.Fatal("CLI reported a truncated download")
 	}
 }
