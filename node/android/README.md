@@ -39,7 +39,20 @@ Java app layer
 ```
 
 In root mode, the Java service launches the same Go executable through `su`. File, process and
-system screen operations then execute directly under the granted root identity.
+system screen operations then execute directly under the granted root identity. Both modes retain
+the token-protected app bridge for Android APIs and Unicode text input.
+
+`screen text` sets the focused editable field through accessibility in app mode and for
+Unicode, control characters or literal `%s` in root mode. Enable Mira's **non-root UI control**
+accessibility service for those text requests, including when running as root. This sets the
+field's whole value; printable ASCII in root mode uses system key input at the current cursor.
+Missing grants, a missing focused editable field and rejected text actions return an error.
+Mira cannot repair Android's `/system/bin/input text` implementation when invoked as a raw process.
+
+Battery status uses the app-accessible battery broadcast, and foreground package status uses
+the granted accessibility service. Unavailable fields are omitted and reported under
+`telemetryErrors`. Storage telemetry reports the volume containing app data rather than the
+read-only `/` system image. These telemetry paths do not require root.
 
 The file browser starts at `/` in both modes. Android's application UID still receives permission
 errors outside files made visible by Android grants; root mode can traverse the complete filesystem.
@@ -128,6 +141,7 @@ Run the deterministic ownership/lifecycle regression with a JDK:
 ```sh
 python3 tests/android_capture_regression.py
 python3 tests/android_accessibility_capture_regression.py
+python3 tests/android_input_status_regression.py
 ```
 
 These run the real capture classes against Android API test doubles, not real

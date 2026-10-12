@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const maxScreenshotBytes = 10 * 1024 * 1024
@@ -63,7 +64,10 @@ func coordinate(value *int, name string, maximum int) (int, error) {
 }
 
 func (runtime *capabilityRuntime) screen(ctx context.Context, params screenParams) (any, error) {
-	if runtime.bridge != nil {
+	if params.Action == "text" {
+		return runtime.screenText(ctx, params)
+	}
+	if runtime.bridge != nil && os.Geteuid() != 0 {
 		return runtime.bridge.screen(ctx, params)
 	}
 	switch params.Action {
@@ -110,20 +114,38 @@ func (runtime *capabilityRuntime) screen(ctx context.Context, params screenParam
 			return nil, err
 		}
 		return map[string]any{"action": "key", "keyCode": keyCode, "accepted": true}, nil
-	case "text":
-		if params.Text == "" || len(params.Text) > 4096 || strings.ContainsRune(params.Text, 0) {
-			return nil, fmt.Errorf("text must contain between 1 and 4096 bytes")
-		}
-		encoded := strings.ReplaceAll(params.Text, " ", "%s")
-		if _, err := commandOutput(ctx, "input", "text", encoded); err != nil {
-			return nil, err
-		}
-		return map[string]any{
-			"action": "text", "characters": len([]rune(params.Text)), "accepted": true,
-		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported screen action: %s", params.Action)
 	}
+}
+
+func (runtime *capabilityRuntime) screenText(ctx context.Context, params screenParams) (any, error) {
+	if params.Text == "" || len(params.Text) > 4096 || strings.ContainsRune(params.Text, 0) || !utf8.ValidString(params.Text) {
+		return nil, fmt.Errorf("text must contain between 1 and 4096 UTF-8 bytes without NUL")
+	}
+	// Android input text generates hardware key events and cannot encode
+	// Unicode. It also treats literal %s as a space. Never send these strings
+	// to it, even as root: use the APK's granted accessibility service.
+	needsAccessibility := strings.Contains(params.Text, "%s")
+	for _, character := range params.Text {
+		if character < 0x20 || character > 0x7e {
+			needsAccessibility = true
+			break
+		}
+	}
+	if os.Geteuid() != 0 || needsAccessibility {
+		if runtime.bridge == nil {
+			return nil, fmt.Errorf("Unicode or literal text input requires the Mira Android app bridge and accessibility permission")
+		}
+		return runtime.bridge.screen(ctx, params)
+	}
+	encoded := strings.ReplaceAll(params.Text, " ", "%s")
+	if _, err := commandOutput(ctx, "input", "text", encoded); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"action": "text", "characters": utf8.RuneCountInString(params.Text), "accepted": true,
+	}, nil
 }
 
 func (runtime *capabilityRuntime) screenshot(ctx context.Context) (any, error) {

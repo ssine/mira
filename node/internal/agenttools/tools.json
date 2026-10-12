@@ -337,7 +337,8 @@
         "text": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 4096
+          "maxLength": 4096,
+          "description": "Up to 4096 UTF-8 bytes. Unicode and app-mode text set the focused editable field's whole value through Mira's granted Android accessibility service; printable ASCII in root mode uses key input at the cursor."
         }
       },
       "required": [

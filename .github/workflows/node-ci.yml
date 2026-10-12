@@ -17,6 +17,7 @@ on:
       - "tests/release_publication_test.mjs"
       - "tests/android_capture_regression.py"
       - "tests/android_accessibility_capture_regression.py"
+      - "tests/android_input_status_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
       - ".github/workflows/openssh.yml"
@@ -37,6 +38,7 @@ on:
       - "tests/release_publication_test.mjs"
       - "tests/android_capture_regression.py"
       - "tests/android_accessibility_capture_regression.py"
+      - "tests/android_input_status_regression.py"
       - "node/openssh/tests/e2e.mjs"
       - ".github/workflows/node-ci.yml"
       - ".github/workflows/openssh.yml"
@@ -55,10 +57,14 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
       - name: Verify non-root screen frame ownership and session cleanup
         run: |
           python3 tests/android_capture_regression.py
           python3 tests/android_accessibility_capture_regression.py
+          python3 tests/android_input_status_regression.py
 
   embedded-openssh:
     uses: ./.github/workflows/openssh.yml

@@ -73,6 +73,8 @@ export default async function(ctx){
       r=await good(source.identity,['ssh',key,'--',`${command} ssh ${nodes[1].key} -- printf APK_TO_LINUX_OK`]);assert(r.stdout.includes('APK_TO_LINUX_OK'));
       assert.equal(app('stat -c "%a" no_backup').trim(),'771','SSH and transfer operations must preserve the Android home mode');
       const status=await invoke('status',{});assert.equal(status.rootEnabled,mode==='root');assert(status.memory.totalBytes>0);
+      assert(!JSON.stringify(status).includes("Can't find service"),'inaccessible services must not become telemetry values');
+      assert(status.disk.every(d=>d.path!=='/'),'Android storage telemetry must not measure the read-only system root');
       assert((await invoke('process',{action:'count'})).processCount>0);
       assert((await invoke('file',{action:'roots'})).roots.some(r=>r.configured==='/'));
       if(mode==='app')assert.notEqual((await cli(source.identity,['ssh',key,'--','ls /data/system'])).code,0);

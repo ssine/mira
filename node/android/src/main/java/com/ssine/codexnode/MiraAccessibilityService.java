@@ -13,6 +13,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class MiraAccessibilityService extends AccessibilityService {
     private static volatile MiraAccessibilityService connected;
@@ -117,25 +118,58 @@ public final class MiraAccessibilityService extends AccessibilityService {
     boolean setText(String text) throws Exception {
         CountDownLatch completed = new CountDownLatch(1);
         AtomicBoolean accepted = new AtomicBoolean(false);
+        AtomicReference<Exception> failure = new AtomicReference<>();
         mainHandler.post(() -> {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
-            AccessibilityNodeInfo focused = root == null ? null
-                    : root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-            if (focused != null) {
+            AccessibilityNodeInfo root = null;
+            AccessibilityNodeInfo focused = null;
+            try {
+                if (completed.getCount() == 0) return;
+                root = getRootInActiveWindow();
+                focused = root == null ? null : root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                if (focused == null || !focused.isEditable() || !focused.isEnabled()) {
+                    throw new Exception("focused_editable_field_required");
+                }
                 Bundle arguments = new Bundle();
                 arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
                 accepted.set(focused.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments));
-                focused.recycle();
+                if (!accepted.get()) throw new Exception("focused_field_rejected_text");
+            } catch (Exception error) {
+                failure.set(error);
+            } finally {
+                if (focused != null && focused != root) focused.recycle();
+                if (root != null) root.recycle();
+                completed.countDown();
             }
-            if (root != null) {
-                root.recycle();
-            }
-            completed.countDown();
         });
         if (!completed.await(5, TimeUnit.SECONDS)) {
+            completed.countDown();
             throw new Exception("text action timed out");
         }
+        if (failure.get() != null) throw failure.get();
         return accepted.get();
+    }
+
+    String focusedApp() throws Exception {
+        CountDownLatch completed = new CountDownLatch(1);
+        AtomicReference<String> result = new AtomicReference<>("");
+        AtomicReference<Exception> failure = new AtomicReference<>();
+        mainHandler.post(() -> {
+            AccessibilityNodeInfo root = null;
+            try {
+                root = getRootInActiveWindow();
+                if (root != null && root.getPackageName() != null) {
+                    result.set(root.getPackageName().toString());
+                } else throw new Exception("focused_app_unavailable");
+            } catch (Exception error) {
+                failure.set(error);
+            } finally {
+                if (root != null) root.recycle();
+                completed.countDown();
+            }
+        });
+        if (!completed.await(5, TimeUnit.SECONDS)) throw new Exception("focus status timed out");
+        if (failure.get() != null) throw failure.get();
+        return result.get();
     }
 
     String hierarchyXml() throws Exception {

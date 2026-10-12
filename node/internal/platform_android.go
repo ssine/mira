@@ -5,6 +5,7 @@ package node
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -94,10 +95,7 @@ func (runtimeValue *capabilityRuntime) machineStatus(ctx context.Context) (map[s
 	uptime := platformUptimeSeconds()
 	memory := platformMemoryStatus()
 	display, _ := runtimeValue.displayInfo(ctx)
-	battery, _ := commandOutput(ctx, "dumpsys", "battery")
-	focus, _ := commandOutput(ctx, "sh", "-c", "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -4")
 	networks, _ := commandOutput(ctx, "sh", "-c", "ip -brief address 2>/dev/null || ip address")
-	disks := diskStatus(runtimeValue.realRoots)
 	runtimeValue.processMu.Lock()
 	managedProcessCount := len(runtimeValue.processes)
 	runtimeValue.processMu.Unlock()
@@ -108,19 +106,68 @@ func (runtimeValue *capabilityRuntime) machineStatus(ctx context.Context) (map[s
 		"uptimeSeconds": uptime, "cpuCount": runtime.NumCPU(), "cpu": runtimeValue.cpuStatus(), "memory": memory,
 		"ssh":    openSSHRuntime(),
 		"native": map[string]any{"pid": os.Getpid(), "uid": os.Getuid(), "gid": os.Getgid(), "transport": "native", "privilegeMode": runtimeValue.configuration.PrivilegeMode, "androidBridge": runtimeValue.bridge != nil},
-		"device": device, "display": display, "disk": disks, "battery": strings.TrimSpace(battery),
-		"focus": strings.TrimSpace(focus), "networks": strings.TrimSpace(networks), "allowedRoots": runtimeValue.roots,
+		"device": device, "display": display,
+		"networks": strings.TrimSpace(networks), "allowedRoots": runtimeValue.roots,
 		"rootEnabled": os.Geteuid() == 0, "processCount": processCount, "managedProcesses": managedProcessCount, "processLimit": maxProcessCount,
 	}
+	// Use the APK's app-accessible APIs in both modes. An unprivileged Node
+	// must not probe inaccessible battery/window Binder services, even when
+	// dumpsys exits successfully with an error message in stdout.
 	if runtimeValue.bridge != nil {
+		telemetry, err := runtimeValue.bridge.call(ctx, "/v1/status", map[string]any{})
+		if err != nil {
+			status["telemetryErrors"] = map[string]any{"androidBridge": err.Error()}
+		} else if fields, ok := telemetry.(map[string]any); ok {
+			for _, field := range []string{"battery", "focus", "disk", "telemetryErrors"} {
+				if value, exists := fields[field]; exists {
+					status[field] = value
+				}
+			}
+		}
 		permissions, err := runtimeValue.bridge.screen(ctx, screenParams{Action: "permissions"})
 		if err != nil {
 			status["androidPermissions"] = map[string]any{"error": err.Error()}
 		} else {
+			if fields, ok := permissions.(map[string]any); ok {
+				fields["root"] = os.Geteuid() == 0
+				if os.Geteuid() == 0 {
+					fields["screenCapture"] = "ready"
+				}
+			}
 			status["androidPermissions"] = permissions
 		}
+	} else if os.Geteuid() == 0 {
+		if battery, err := commandOutputLimitedStatus(ctx, "dumpsys", "battery"); err == nil {
+			status["battery"] = battery
+		}
+		if windows, err := commandOutputLimitedStatus(ctx, "dumpsys", "window"); err == nil {
+			var focus []string
+			for _, line := range strings.Split(windows, "\n") {
+				if strings.Contains(line, "mCurrentFocus") || strings.Contains(line, "mFocusedApp") {
+					focus = append(focus, strings.TrimSpace(line))
+					if len(focus) == 4 {
+						break
+					}
+				}
+			}
+			status["focus"] = strings.Join(focus, "\n")
+		}
+	} else {
+		status["telemetryErrors"] = map[string]any{"battery": "Android app bridge unavailable", "focus": "Android app bridge unavailable"}
+	}
+	if _, exists := status["disk"]; !exists {
+		storage := "/data"
+		if filepath.IsAbs(runtimeValue.configuration.IdentityFile) {
+			storage = filepath.Dir(runtimeValue.configuration.IdentityFile)
+		}
+		status["disk"] = diskStatus([]string{storage})
 	}
 	return status, nil
+}
+
+func commandOutputLimitedStatus(ctx context.Context, name string, args ...string) (string, error) {
+	output, _, err := commandOutputLimited(ctx, 64*1024, name, args...)
+	return strings.TrimSpace(output), err
 }
 
 func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) map[string]any {
@@ -136,8 +183,8 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 		"screen": rootEnabled || bridgeEnabled, "input": rootEnabled || bridgeEnabled,
 		"reverseChannel": true, "nativePaths": true, "rootAvailable": rootEnabled,
 		"nodeMode": "android", "transport": "native", "privilegeMode": runtimeValue.configuration.PrivilegeMode,
-		"screenBackend":   map[bool]string{true: "android-api", false: "system"}[bridgeEnabled],
-		"permissionModel": map[bool]string{true: "android-user-grants", false: "root-provider"}[bridgeEnabled],
+		"screenBackend":   map[bool]string{true: "android-api", false: "system"}[bridgeEnabled && !rootEnabled],
+		"permissionModel": map[bool]string{true: "android-user-grants", false: "root-provider"}[!rootEnabled],
 	}
 }
 

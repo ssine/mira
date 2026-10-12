@@ -36,6 +36,9 @@ jobs:
         with:
           gradle-version: "8.13"
 
+      - name: Check Android input and telemetry regressions
+        run: python3 tests/android_input_status_regression.py
+
       - name: Build signed APK
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.MIRA_ANDROID_KEYSTORE_BASE64 }}

@@ -97,7 +97,8 @@ final class AndroidBridgeServer {
                 }
             }
             if (requestParts.length < 2 || !requestParts[0].equals("POST")
-                    || (!requestParts[1].equals("/v1/screen") && !requestParts[1].equals("/v1/notification"))) {
+                    || (!requestParts[1].equals("/v1/screen") && !requestParts[1].equals("/v1/notification")
+                        && !requestParts[1].equals("/v1/status"))) {
                 respond(output, 404, error("not_found"));
                 return;
             }
@@ -113,8 +114,14 @@ final class AndroidBridgeServer {
             byte[] body = readBytes(input, contentLength);
             try {
                 JSONObject params = new JSONObject(new String(body, StandardCharsets.UTF_8));
-                JSONObject result = requestParts[1].equals("/v1/notification")
-                        ? CompletionNotifications.deliver(context, params) : screen(params);
+                JSONObject result;
+                if (requestParts[1].equals("/v1/notification")) {
+                    result = CompletionNotifications.deliver(context, params);
+                } else if (requestParts[1].equals("/v1/status")) {
+                    result = AndroidStatusReader.read(context);
+                } else {
+                    result = screen(params);
+                }
                 respond(output, 200, result);
             } catch (PermissionException error) {
                 respond(output, 409, error(error.getMessage()));
@@ -127,7 +134,6 @@ final class AndroidBridgeServer {
 
     private JSONObject screen(JSONObject params) throws Exception {
         String action = params.optString("action", "");
-        DisplayMetrics display = displayMetrics();
         switch (action) {
             case "permissions":
                 return new JSONObject().put("accessibility",
@@ -137,11 +143,13 @@ final class AndroidBridgeServer {
                         .put("sharedFiles", Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager()
                                 ? "all_files" : "app_sandbox")
                         .put("root", false);
-            case "display":
+            case "display": {
+                DisplayMetrics display = displayMetrics();
                 return new JSONObject().put("action", "display")
                         .put("width", display.widthPixels).put("height", display.heightPixels)
                         .put("sizeOutput", "Android API: " + display.widthPixels + "x" + display.heightPixels)
                         .put("densityOutput", "Android API: " + display.densityDpi);
+            }
             case "screenshot": {
                 final byte[] png;
                 final int width;
@@ -173,6 +181,7 @@ final class AndroidBridgeServer {
                         .put("format", "accessibility-xml").put("content", service.hierarchyXml());
             }
             case "tap": {
+                DisplayMetrics display = displayMetrics();
                 int x = coordinate(params, "x", display.widthPixels);
                 int y = coordinate(params, "y", display.heightPixels);
                 boolean accepted = requireAccessibility().tap(x, y);
@@ -180,6 +189,7 @@ final class AndroidBridgeServer {
                         .put("accepted", accepted);
             }
             case "swipe": {
+                DisplayMetrics display = displayMetrics();
                 int startX = coordinate(params, "startX", display.widthPixels);
                 int startY = coordinate(params, "startY", display.heightPixels);
                 int endX = coordinate(params, "endX", display.widthPixels);
@@ -205,12 +215,14 @@ final class AndroidBridgeServer {
             }
             case "text": {
                 String text = params.optString("text", "");
-                if (text.isEmpty() || text.length() > 4096) {
-                    throw new Exception("text must contain between 1 and 4096 characters");
+                if (text.isEmpty() || text.getBytes(StandardCharsets.UTF_8).length > 4096
+                        || text.indexOf('\0') >= 0) {
+                    throw new Exception("text must contain between 1 and 4096 UTF-8 bytes without NUL");
                 }
                 boolean accepted = requireAccessibility().setText(text);
-                return new JSONObject().put("action", "text").put("characters", text.length())
-                        .put("accepted", accepted);
+                return new JSONObject().put("action", "text")
+                        .put("characters", text.codePointCount(0, text.length()))
+                        .put("accepted", accepted).put("backend", "accessibility");
             }
             default:
                 throw new Exception("unsupported screen action: " + action);

@@ -97,10 +97,10 @@ final class NodeConfig {
         value.put("heartbeatSeconds", 3);
         value.put("privilegeMode", effectiveMode);
         value.put("exitWithParent", true);
-        if (effectiveMode.equals("app")) {
-            value.put("bridgeUrl", "http://127.0.0.1:" + bridgePort);
-            value.put("bridgeToken", bridgeToken);
-        }
+        // Root still needs app APIs for Unicode input and permission-safe
+        // telemetry. The bridge retains its per-launch token in both modes.
+        value.put("bridgeUrl", "http://127.0.0.1:" + bridgePort);
+        value.put("bridgeToken", bridgeToken);
 
         File destination = new File(context.getNoBackupFilesDir(), "node-config.json");
         File temporary = new File(context.getNoBackupFilesDir(), "node-config.json.tmp");
