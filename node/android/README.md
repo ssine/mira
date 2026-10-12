@@ -158,7 +158,9 @@ Unexpected regular files/directories are rejected rather than overwritten. The
 Service enables the native backend explicitly for both ordinary and authorized
 root launches; it does not use a system sshd or install a root module.
 
-Both modes keep `no_backup/identity.json` app-owned and 0600. Root SSH uses a
+Both modes keep `no_backup/identity.json` app-owned and 0600. App SSH accepts
+Android's `no_backup` home permissions (including 0771) without changing them;
+home ownership/mode heuristics do not gate authentication. Root SSH uses a
 separate root-owned 0700 `no_backup/openssh-root-home`, with ephemeral session
 keys/config. Public-key-only authentication, the approved per-session caller key,
 the pinned host key and `AllowUsers` for the Node process account remain enforced.

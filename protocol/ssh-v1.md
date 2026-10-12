@@ -41,9 +41,10 @@ Mira generates owner-private temporary keys/config per invocation/session (0700
 directories and 0600 files on Unix, protected ACLs on Windows). Its generated
 sshd configuration uses `StrictModes no`: authentication trusts the exact approved
 caller key rather than applying OpenSSH's ownership/mode heuristic to the state
-directory's ancestors. This does not alter system SSH configuration, host-key
-pinning or caller-key verification. The
-durable source of those keys remains the protected Node identity. Temporary files
+directory's ancestors. Android's home override likewise imposes no home ownership
+or mode check; an app-owned `no_backup` with mode 0771 must work without chmod.
+This does not alter system SSH configuration, host-key pinning or caller-key
+verification. The durable source of those keys remains the protected Node identity. Temporary files
 are removed on orderly completion, but a hard crash can leave private session state;
 do not describe this as secret-free disk storage. Secrets never enter argv, URLs,
 Server audit records or the public-key registry.

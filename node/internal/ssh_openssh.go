@@ -132,7 +132,7 @@ func openSSHSameIdentityEnvironment(name, state string) ([]string, error) {
 		"MIRA_OPENSSH_SHELL":         filepath.Clean(shell),
 	}
 	if runtime.GOOS == "android" {
-		// Retain compatibility with the Android pwcopy hardening used by other
+		// Retain compatibility with the Android pwcopy home override used by other
 		// OpenSSH code paths; target-user authentication uses the values above.
 		overrides["MIRA_OPENSSH_APP_HOME"] = filepath.Clean(home)
 	}

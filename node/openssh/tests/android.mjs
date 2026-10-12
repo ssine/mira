@@ -30,7 +30,9 @@ export default async function(ctx){
   try {
     adb(['shell','am','force-stop',pkg]);
     // Only the isolated package's test identity, never the production identity.
-    app('mkdir -p no_backup');app('chmod 700 no_backup');app('rm -f no_backup/identity.json');
+    // Android may create no_backup as 0771. Do not hide a home-mode auth
+    // regression by preparing it as 0700 before starting the real APK.
+    app('mkdir -p no_backup');app('chmod 771 no_backup');app('rm -f no_backup/identity.json');
     start('app');
     await approvePendingNode(url,admin,key);
     device=await wait(async()=>{const list=await adminRequest(url,admin,'/v1/nodes');return list.data.find(n=>n.nodeKey===key&&n.channelStatus?.connected)},'real APK app-mode Node');
@@ -45,6 +47,7 @@ export default async function(ctx){
       assert.equal(currentIdentity.nodeId,originalIdentity.nodeId);
       const identityStat=app('stat -c "%u %a" no_backup/identity.json').trim();
       assert.equal(identityStat,`${uid} 600`,'root mode must not take ownership of the app identity');
+      assert.equal(app('stat -c "%a" no_backup').trim(),'771','SSH must preserve the Android home mode');
       if(mode==='app'&&!upgraded&&process.env.MIRA_TEST_ANDROID_REINSTALL_APK){
         const apk=path.resolve(process.env.MIRA_TEST_ANDROID_REINSTALL_APK);
         assert(apk.endsWith('/node/android/build/outputs/apk/debug/mira-node-debug.apk'),'use the real-source isolated debug APK');
@@ -68,6 +71,7 @@ export default async function(ctx){
       await Promise.all(Array.from({length:4},()=>good(source.identity,['ssh',key,'--','true'])));
       const command=`env MIRA_IDENTITY_FILE=${base}/identity.json MIRA_NODE_OPENSSH_DIR=${base}/openssh-bin MIRA_NODE_OPENSSH_ANDROID_ROOT=1 ${base}/openssh-bin/mira`;
       r=await good(source.identity,['ssh',key,'--',`${command} ssh ${nodes[1].key} -- printf APK_TO_LINUX_OK`]);assert(r.stdout.includes('APK_TO_LINUX_OK'));
+      assert.equal(app('stat -c "%a" no_backup').trim(),'771','SSH and transfer operations must preserve the Android home mode');
       const status=await invoke('status',{});assert.equal(status.rootEnabled,mode==='root');assert(status.memory.totalBytes>0);
       assert((await invoke('process',{action:'count'})).processCount>0);
       assert((await invoke('file',{action:'roots'})).roots.some(r=>r.configured==='/'));
