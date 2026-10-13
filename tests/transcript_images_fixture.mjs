@@ -59,7 +59,8 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
     try {
       const resource = path === "/" ? "index.html" : path.slice(1);
       if (resource.includes("..")) throw Error("Invalid path");
-      const file = path === "/__test/scenarios.mjs" ? new URL("./transcript_images_scenarios.mjs", import.meta.url)
+      const file = path === "/__test/scroll-scenarios.mjs" ? new URL("./conversation_scroll_scenarios.mjs", import.meta.url)
+        : path === "/__test/scenarios.mjs" ? new URL("./transcript_images_scenarios.mjs", import.meta.url)
         : new URL(resource.startsWith("vendor/") ? `../node/internal/webassets/web/${resource}` : `../server/public/${resource}`, import.meta.url);
       const type = resource.endsWith(".css") ? "text/css" : /\.(?:js|mjs)$/.test(resource) ? "text/javascript" : resource.endsWith(".html") ? "text/html" : "application/octet-stream";
       response.setHeader("Content-Type", type);
@@ -67,7 +68,13 @@ export async function startTranscriptFixture({ port = 0 } = {}) {
       response.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:");
       let content = await fs.readFile(file);
       if (resource === "app.js") content = content.toString().replace("void bootstrap();",
-        "window.transcriptRegression = { loadAgentTranscript, compactionSummaryKeys, mergeTranscriptItems, renderTranscript, upsertTrace, liveTraceKey, traceViewport, agent }; void bootstrap();");
+        `window.transcriptRegression = { loadAgentTranscript, compactionSummaryKeys, mergeTranscriptItems, renderTranscript, upsertTrace, liveTraceKey, traceViewport, queueTraceStreamRender, agent };
+        void bootstrap();
+        if (new URL(location.href).searchParams.has("scrollTest")) {
+          import("/__test/scroll-scenarios.mjs").then(m => m.runScrollChecks()).then(
+            result => document.documentElement.dataset.scrollTest = result,
+            error => document.documentElement.dataset.scrollTest = error.message);
+        }`);
       response.end(content);
     } catch { response.statusCode = 404; response.end(); }
   });

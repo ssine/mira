@@ -1,8 +1,11 @@
+import { conversationScroll } from "./conversation-scroll.js";
+
 // Keep expensive content within the reading viewport and half a screen on
 // either side. Offscreen rows retain their measured height and source data.
 export class ViewportRenderer {
   constructor(root) {
     this.root = root;
+    this.scroll = conversationScroll(root);
     this.rows = new Map();
     this.resize = new ResizeObserver(() => this.connect());
     this.resize.observe(root);
@@ -17,7 +20,7 @@ export class ViewportRenderer {
     this.observer = new IntersectionObserver(entries => {
       // Capture intent before changing any row. Measured placeholders preserve
       // readers above the tail; the latest reply continues following the bottom.
-      const follow = this.root.scrollHeight - this.root.clientHeight - this.root.scrollTop <= 96;
+      const follow = this.scroll.nearBottom();
       const top = this.root.scrollTop;
       const edge = this.root.getBoundingClientRect().top;
       let anchor;
@@ -31,6 +34,7 @@ export class ViewportRenderer {
       // geometry so an old notification cannot leave content far offscreen.
       const targets = new Set(entries.map(entry => entry.target));
       for (const [element, row] of this.rows) if (row.visible) targets.add(element);
+      let changed = false;
       for (const element of targets) {
         const row = this.rows.get(element);
         if (!row || !element.isConnected) continue;
@@ -38,10 +42,12 @@ export class ViewportRenderer {
         const visible = rect.height > 0 && rect.bottom > edge - this.margin &&
           rect.top < edge + this.root.clientHeight + this.margin;
         if (row.visible === visible) continue;
+        changed = true;
         row.visible = visible;
         if (visible) row.show(); else row.hide();
       }
-      if (follow) this.root.scrollTop = this.root.scrollHeight;
+      if (!changed) return;
+      if (follow) this.scroll.toBottom();
       else this.root.scrollTop = anchor?.element.isConnected
         ? top + anchor.element.getBoundingClientRect().top - anchor.top : top;
     }, { root: this.root, rootMargin: `${margin}px 0px` });

@@ -12,6 +12,7 @@ import { toolItemView, activitySummary, summarizeActivities, activityStatus, for
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ClientCache } from "/client-cache.js";
 import { ViewportRenderer } from "/viewport-renderer.js";
+import { conversationScroll } from "/conversation-scroll.js";
 import { ReplyProgress, turnActivityPhase } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute, createCompletionNotifications } from "/pwa.js";
 import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
@@ -3716,13 +3717,11 @@ function watchTraceBody(card) {
 }
 
 function traceNearBottom(_trace, threshold = 96) {
-  const scroll = traceScroller();
-  return scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop <= threshold;
+  return conversationScroll(traceScroller()).nearBottom(threshold);
 }
 
 function scrollTraceToBottom() {
-  const scroll = traceScroller();
-  scroll.scrollTop = scroll.scrollHeight;
+  conversationScroll(traceScroller()).toBottom();
 }
 
 function updateToolGroup(group) {
@@ -4174,6 +4173,7 @@ function renderThread(thread) {
 }
 
 function resetAgentTranscript(threadId = null) {
+  conversationScroll(traceScroller()).reset();
   recoveryNotices.reset();
   clearTimeout(agent.readTimer);
   agent.readTimer = null;

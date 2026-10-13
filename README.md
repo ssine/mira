@@ -5,6 +5,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
+1.0.95 修复长对话向上滚动时被拉回底部：向上滚动立即暂停自动跟随，回到底部后恢复；流式回复、可见区域更新和移动端视口变化都保留这一选择。只需升级 Server 并重新加载页面。
+
 1.0.94 让 `mira file write --input/--stdin` 和 `mira file read --output` 自动分块传输完整文件，去掉 CLI 的 4 MiB 文件大小限制，支持进度、取消和范围下载。需升级调用端 CLI；Agent 使用说明需升级 Server，目标 Node 需支持 `fileChunkedWrite`。
 
 1.0.93 修复 Android root 模式中文等 Unicode 文本输入，并改用应用可访问的 API 采集电量、前台应用和数据卷容量，避免 app 模式状态误报。需升级 Android APK；Unicode 输入需启用 Mira 无障碍服务，并设置当前输入框的完整内容。
@@ -202,13 +204,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.94
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.95
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.94'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.95'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
