@@ -1,4 +1,5 @@
 import { nativeAndroid, installAndroidShell, installAndroidNavigation, createAndroidNotifications } from "./android.js";
+import { conversationScroll } from "./conversation-scroll.js";
 
 const routeKey = "mira.app.route";
 const standalone = window.matchMedia("(display-mode: standalone)");
@@ -95,11 +96,12 @@ function mobileViewport() {
     frame = null;
     if (!touch.matches || Math.abs(viewport.scale - 1) > .05) return;
     const trace = document.querySelector("#conversationScroll");
-    const follow = trace && trace.scrollHeight - trace.scrollTop - trace.clientHeight < 96;
+    const scroll = trace && conversationScroll(trace);
+    const follow = scroll?.nearBottom();
     document.documentElement.style.setProperty("--app-viewport-height", `${viewport.height}px`);
     document.documentElement.style.setProperty("--app-viewport-top", `${viewport.offsetTop}px`);
     // Preserve a reader's position; follow the bottom only if already there.
-    if (follow) trace.scrollTop = trace.scrollHeight;
+    if (follow) scroll.toBottom();
   };
   const schedule = () => { frame ??= requestAnimationFrame(update); };
   viewport.addEventListener("resize", schedule);
