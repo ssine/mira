@@ -227,6 +227,38 @@ async function run() {
   console.log("Initial account turn completed");
   assert.equal(requests.at(-1).key, "Bearer synthetic-A");
   await waitFor(async () => JSON.stringify((await history(threadId)).items).includes("old-account-A"), "encrypted reasoning persisted");
+  // A count checkpoint must reach PostgreSQL, retain fresh images, and restore
+  // through the other account without rewriting the canonical image records.
+  const image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
+  const imagePath = path.join(temporary, "image.png");
+  await fs.writeFile(imagePath, Buffer.from(image.split(",")[1], "base64"));
+  const imageThread = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex",
+    config: { mira_auto_compact_image_limit: 3 }, approvalPolicy: "never", sandbox: "danger-full-access" })).thread.id;
+  const imageTurn = async (client, count, text) => {
+    const started = (await client.call("turn/start", { threadId: imageThread, input: [
+      ...Array.from({ length: count }, () => ({ type: "localImage", path: imagePath })), { type: "text", text },
+    ] })).turn;
+    const completed = await waitFor(() => client.events.find(event => event.method === "turn/completed" && event.params.turn.id === started.id), "image turn");
+    assert.equal(completed.params.turn.status, "completed", JSON.stringify(completed));
+  };
+  await imageTurn(first, 2, "OLD_IMAGE_HISTORY");
+  const originalImages = (await history(imageThread)).items;
+  const beforeImages = requests.length;
+  await imageTurn(first, 1, "FRESH_IMAGE_INPUT");
+  const imageRequests = requests.slice(beforeImages).map(request => request.body);
+  assert.equal(imageRequests.length, 2);
+  assert.deepEqual(imageRequests[0].tools, []);
+  assert(!JSON.stringify(imageRequests[0].input).includes("FRESH_IMAGE_INPUT"));
+  const savedImages = (await history(imageThread)).items;
+  assert.deepEqual(savedImages.slice(0, originalImages.length), originalImages);
+  assert.equal(savedImages.filter(record => record.type === "compacted").length, 1);
+  const imageReader = await connect(b);
+  await imageReader.call("thread/resume", { threadId: imageThread, config: { mira_auto_compact_image_limit: 3 } });
+  await imageTurn(imageReader, 0, "COLD_IMAGE_CONTINUE");
+  const restoredImages = requests.at(-1).body.input.flatMap(item => item.content ?? []).filter(part => part.type === "input_image");
+  assert.equal(restoredImages.length, 1);
+  assert.deepEqual((await history(imageThread)).items.slice(0, savedImages.length), savedImages);
+  console.log("Image checkpoint passed: PostgreSQL append-only history, fresh images and cold account resume");
   // An unrelated live turn in A must survive another conversation's handoff.
   const companionId = (await first.call("thread/start", { cwd: temporary, model: "gpt-5.1-codex" })).thread.id;
   holdNextResponse = true;

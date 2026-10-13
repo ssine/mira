@@ -1,8 +1,8 @@
-From 6cde59106b48197a074ae135294175b8b1cb1a93 Mon Sep 17 00:00:00 2001
+From 4b4b548c2e6162cc8173b6d2cd2784bdd8109bfd Mon Sep 17 00:00:00 2001
 From: ssine <liu.siyao@qq.com>
-Date: Fri, 2 Oct 2026 04:19:22 +0800
-Subject: [PATCH] feat(thread-store): port Mira persistence and provider
- compatibility to Codex 0.159.3
+Date: Tue, 13 Oct 2026 18:24:39 +0800
+Subject: [PATCH] feat(thread-store): add Mira persistence and input
+ compatibility adapters
 
 ---
  codex-rs/Cargo.lock                           |  319 ++---
@@ -46,17 +46,24 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  codex-rs/codex-api/src/sse/responses_error.rs |    4 +
  .../tests/encrypted_context_retry.rs          |   97 ++
  codex-rs/codex-client/src/retry.rs            |    8 +
- codex-rs/config/src/config_toml.rs            |    9 +
+ codex-rs/config/src/config_toml.rs            |   14 +
+ codex-rs/config/src/profile_toml.rs           |    2 +
  codex-rs/config/src/thread_config.rs          |    1 +
  codex-rs/config/src/thread_config/remote.rs   |    4 +
- codex-rs/core/config.schema.json              |   39 +
+ codex-rs/core/config.schema.json              |   51 +
  codex-rs/core/src/agent/control_tests.rs      |    1 +
  codex-rs/core/src/codex_delegate.rs           |    2 +-
  codex-rs/core/src/codex_thread.rs             |   25 +
- codex-rs/core/src/compact.rs                  |   49 +-
+ codex-rs/core/src/compact.rs                  |   68 +-
+ .../core/src/compact_remote_v2_attempt.rs     |    8 +
  codex-rs/core/src/compaction_mode.rs          |   29 +
- codex-rs/core/src/config/mod.rs               |   20 +
- codex-rs/core/src/lib.rs                      |    1 +
+ codex-rs/core/src/config/config_tests.rs      |   51 +
+ codex-rs/core/src/config/mod.rs               |   24 +
+ codex-rs/core/src/context_manager/history.rs  |    2 +-
+ codex-rs/core/src/context_manager/mod.rs      |    1 +
+ codex-rs/core/src/image_compaction.rs         |  155 +++
+ codex-rs/core/src/image_compaction_tests.rs   |  117 ++
+ codex-rs/core/src/lib.rs                      |    2 +
  codex-rs/core/src/responses_retry.rs          |   57 +-
  codex-rs/core/src/session/handlers.rs         |   15 +
  codex-rs/core/src/session/input_recovery.rs   |   79 ++
@@ -66,7 +73,7 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  .../src/session/reasoning_recovery_tests.rs   |  105 ++
  codex-rs/core/src/session/session.rs          |   19 +
  codex-rs/core/src/session/tests.rs            |   12 +
- codex-rs/core/src/session/turn.rs             |   54 +-
+ codex-rs/core/src/session/turn.rs             |   87 +-
  codex-rs/core/src/tasks/compact.rs            |   18 +-
  codex-rs/core/src/tasks/failure_tests.rs      |   61 +
  codex-rs/core/src/tasks/mod.rs                |   47 +-
@@ -85,8 +92,9 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  codex-rs/core/tests/suite/client.rs           |    4 +
  .../core/tests/suite/client_websockets.rs     |    1 +
  codex-rs/core/tests/suite/guardian_history.rs |    3 +
+ .../core/tests/suite/mira_image_compaction.rs |  298 +++++
  .../tests/suite/mira_reasoning_recovery.rs    |  239 ++++
- codex-rs/core/tests/suite/mod.rs              |    4 +
+ codex-rs/core/tests/suite/mod.rs              |    5 +
  .../tests/suite/plaintext_agent_messages.rs   |  228 ++++
  .../core/tests/suite/plaintext_compaction.rs  |   92 ++
  codex-rs/core/tests/suite/rate_limit_retry.rs |  257 ++++
@@ -105,6 +113,7 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  codex-rs/protocol/src/error_tests.rs          |    2 +-
  codex-rs/protocol/src/protocol.rs             |   21 +
  codex-rs/state/src/extract.rs                 |    1 +
+ codex-rs/thread-manager-sample/src/main.rs    |    1 +
  codex-rs/thread-store/Cargo.toml              |    1 +
  codex-rs/thread-store/src/in_memory.rs        |   94 +-
  codex-rs/thread-store/src/lib.rs              |    4 +
@@ -128,7 +137,7 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  codex-rs/tui/src/chatwidget/protocol.rs       |    1 +
  .../generated/notification_registry.py        |    3 +
  .../src/openai_codex/generated/v2_all.py      |   41 +
- 123 files changed, 8003 insertions(+), 549 deletions(-)
+ 132 files changed, 8711 insertions(+), 551 deletions(-)
  create mode 100644 codex-rs/app-server-protocol/schema/json/v2/MiraThreadForkProgressNotification.json
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadForkProgressNotification.ts
  create mode 100644 codex-rs/app-server-protocol/schema/typescript/v2/MiraThreadResidencyCandidate.ts
@@ -140,6 +149,8 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  create mode 100644 codex-rs/app-server/tests/suite/v2/thread_residency.rs
  create mode 100644 codex-rs/codex-api/tests/encrypted_context_retry.rs
  create mode 100644 codex-rs/core/src/compaction_mode.rs
+ create mode 100644 codex-rs/core/src/image_compaction.rs
+ create mode 100644 codex-rs/core/src/image_compaction_tests.rs
  create mode 100644 codex-rs/core/src/session/input_recovery.rs
  create mode 100644 codex-rs/core/src/session/input_recovery_tests.rs
  create mode 100644 codex-rs/core/src/session/reasoning_recovery.rs
@@ -147,6 +158,7 @@ Subject: [PATCH] feat(thread-store): port Mira persistence and provider
  create mode 100644 codex-rs/core/src/tasks/failure_tests.rs
  create mode 100644 codex-rs/core/src/thread_manager/remote_agent_graph.rs
  create mode 100644 codex-rs/core/src/tools/plaintext_agent_messages.rs
+ create mode 100644 codex-rs/core/tests/suite/mira_image_compaction.rs
  create mode 100644 codex-rs/core/tests/suite/mira_reasoning_recovery.rs
  create mode 100644 codex-rs/core/tests/suite/plaintext_agent_messages.rs
  create mode 100644 codex-rs/core/tests/suite/plaintext_compaction.rs
@@ -17177,7 +17189,7 @@ index b10fa5079..da494f928 100644
              TransportError::Http { status, .. } => {
                  (self.retry_429 && status.as_u16() == 429)
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 84b532177..ce2d5b060 100644
+index 84b532177..f2d6f4770 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
 @@ -163,6 +163,10 @@ pub struct FeatureToggleToml {
@@ -17191,7 +17203,19 @@ index 84b532177..ce2d5b060 100644
      /// Optional override of model selection.
      pub model: Option<String>,
      /// Review model override used by the `/review` feature.
-@@ -561,6 +565,11 @@ pub struct ConfigToml {
+@@ -177,6 +181,11 @@ pub struct ConfigToml {
+     /// Token usage threshold triggering auto-compaction of conversation history.
+     pub model_auto_compact_token_limit: Option<i64>,
+ 
++    /// Active image count that triggers Mira automatic plaintext compaction.
++    /// Omitted or zero disables it. Fresh input is retained even above this
++    /// threshold; the setting also bounds images in compaction requests.
++    pub mira_auto_compact_image_limit: Option<usize>,
++
+     /// Controls whether the auto-compaction limit applies to the full context or
+     /// only to tokens after the carried prefix in the current compaction window.
+     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
+@@ -561,6 +570,11 @@ pub struct ConfigToml {
  #[serde(tag = "type", rename_all = "snake_case")]
  pub enum ThreadStoreToml {
      Local {},
@@ -17203,6 +17227,19 @@ index 84b532177..ce2d5b060 100644
      #[schemars(skip)]
      InMemory {
          id: String,
+diff --git a/codex-rs/config/src/profile_toml.rs b/codex-rs/config/src/profile_toml.rs
+index 501647034..28f0f0bbe 100644
+--- a/codex-rs/config/src/profile_toml.rs
++++ b/codex-rs/config/src/profile_toml.rs
+@@ -23,6 +23,8 @@ use codex_protocol::protocol::AskForApproval;
+ #[schemars(deny_unknown_fields)]
+ pub struct ConfigProfile {
+     pub model: Option<String>,
++    /// Active image threshold for Mira automatic plaintext compaction; zero disables it.
++    pub mira_auto_compact_image_limit: Option<usize>,
+     /// Optional explicit service tier request id for new turns (for example
+     /// `default`, `priority`, or `flex`; legacy `fast` also works).
+     pub service_tier: Option<String>,
 diff --git a/codex-rs/config/src/thread_config.rs b/codex-rs/config/src/thread_config.rs
 index 0c1012f09..914d93805 100644
 --- a/codex-rs/config/src/thread_config.rs
@@ -17252,7 +17289,7 @@ index 1e16cc482..0d318ccf6 100644
              include_internal_metadata: false,
          }
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index af8f05ee5..95ee06e9c 100644
+index af8f05ee5..85f0d1931 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -953,6 +953,9 @@
@@ -17265,7 +17302,20 @@ index af8f05ee5..95ee06e9c 100644
              "multi_agent": {
                "type": "boolean"
              },
-@@ -2683,6 +2686,10 @@
+@@ -1211,6 +1214,12 @@
+         "include_permissions_instructions": {
+           "type": "boolean"
+         },
++        "mira_auto_compact_image_limit": {
++          "description": "Active image threshold for Mira automatic plaintext compaction; zero disables it.",
++          "format": "uint",
++          "minimum": 0.0,
++          "type": "integer"
++        },
+         "model": {
+           "type": "string"
+         },
+@@ -2683,6 +2692,10 @@
            "description": "Friendly display name.",
            "type": "string"
          },
@@ -17276,7 +17326,7 @@ index af8f05ee5..95ee06e9c 100644
          "query_params": {
            "additionalProperties": {
              "type": "string"
-@@ -4174,6 +4181,31 @@
+@@ -4174,6 +4187,31 @@
              "type"
            ],
            "type": "object"
@@ -17308,7 +17358,7 @@ index af8f05ee5..95ee06e9c 100644
          }
        ]
      },
-@@ -6983,6 +7015,9 @@
+@@ -6983,6 +7021,9 @@
          "mentions_v2": {
            "type": "boolean"
          },
@@ -17318,10 +17368,16 @@ index af8f05ee5..95ee06e9c 100644
          "multi_agent": {
            "type": "boolean"
          },
-@@ -7391,6 +7426,10 @@
+@@ -7391,6 +7432,16 @@
        ],
        "description": "Memories subsystem settings."
      },
++    "mira_auto_compact_image_limit": {
++      "description": "Active image count that triggers Mira automatic plaintext compaction. Omitted or zero disables it. Fresh input is retained even above this threshold; the setting also bounds images in compaction requests.",
++      "format": "uint",
++      "minimum": 0.0,
++      "type": "integer"
++    },
 +    "mira_auto_reasoning_recovery": {
 +      "description": "Recover a rejected reasoning item after an explicit encrypted-input error. Omitted values preserve the conversation's saved setting; new threads default to false.",
 +      "type": "boolean"
@@ -17398,11 +17454,15 @@ index 316af05c0..77d1887d1 100644
      /// TurnComplete, so another worker can recover its original turn ID.
      ///
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index a937b39db..6676f8593 100644
+index a937b39db..756f05262 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -13,13 +13,15 @@ use crate::hook_runtime::run_post_compact_hooks;
+@@ -11,15 +11,19 @@ use crate::hook_runtime::PostCompactHookOutcome;
+ use crate::hook_runtime::PreCompactHookOutcome;
+ use crate::hook_runtime::run_post_compact_hooks;
  use crate::hook_runtime::run_pre_compact_hooks;
++use crate::image_compaction::PendingImageCompaction;
++use crate::image_compaction::limit_compaction_images;
  use crate::responses_metadata::CodexResponsesMetadata;
  use crate::responses_metadata::CompactionTurnMetadata;
 +use crate::responses_retry::ResponsesStreamRequest;
@@ -17418,7 +17478,17 @@ index a937b39db..6676f8593 100644
  use codex_analytics::CodexCompactionEvent;
  use codex_analytics::CompactionImplementation;
  use codex_analytics::CompactionPhase;
-@@ -261,7 +263,9 @@ async fn run_compact_task_inner_impl(
+@@ -255,13 +259,19 @@ async fn run_compact_task_inner_impl(
+     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+ 
+     let mut history = sess.clone_history().await;
++    let image_compaction = turn_context.extension_data.get::<PendingImageCompaction>();
++    if let Some(pending) = &image_compaction {
++        history.replace_annotated(pending.prefix.clone());
++    }
+     history.record_items(
+         &[initial_input_for_turn.into()],
+         turn_context.model_info().truncation_policy.into(),
      );
  
      let max_retries = turn_context.provider.info().stream_max_retries();
@@ -17429,7 +17499,7 @@ index a937b39db..6676f8593 100644
      // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
      // request tracking) survives retries within this compact turn.
      let mut client_session = sess.services.model_client.new_session();
-@@ -270,6 +274,7 @@ async fn run_compact_task_inner_impl(
+@@ -270,9 +280,17 @@ async fn run_compact_task_inner_impl(
          let mut turn_input = history
              .clone()
              .for_prompt(&turn_context.model_info().input_modalities);
@@ -17437,7 +17507,17 @@ index a937b39db..6676f8593 100644
          sess.services
              .executed_tool_calls
              .attach_to_compaction_prompt(&mut turn_input);
-@@ -315,27 +320,41 @@ async fn run_compact_task_inner_impl(
++        if let Some(limit) = turn_context
++            .config
++            .mira_auto_compact_image_limit
++            .filter(|limit| *limit > 0)
++        {
++            limit_compaction_images(&mut turn_input, limit);
++        }
+         let turn_input_len = turn_input.len();
+         let prompt = Prompt {
+             input: turn_input,
+@@ -315,33 +333,50 @@ async fn run_compact_task_inner_impl(
                          "Context window exceeded while compacting; removing oldest history item. Error: {e}"
                      );
                      history.remove_first_item();
@@ -17492,6 +17572,51 @@ index a937b39db..6676f8593 100644
              }
          }
      };
+ 
+     let history_snapshot = sess.clone_history().await;
+     let history_items = history_snapshot.annotated_items();
++    let history_items = image_compaction
++        .as_ref()
++        .map_or(history_items, |pending| pending.prefix.as_slice());
+     let summary_suffix = if matches!(compaction_metadata.phase(), CompactionPhase::PostTurn) {
+         get_last_assistant_message_from_turn(compaction_response.output.iter())
+             .filter(|summary| !summary.trim().is_empty())
+@@ -370,6 +405,9 @@ async fn run_compact_task_inner_impl(
+         new_history =
+             insert_initial_context_before_last_real_user_or_summary(new_history, initial_context);
+     }
++    if let Some(pending) = image_compaction {
++        new_history.extend(pending.pending.clone());
++    }
+     let reference_context_item = match initial_context_injection {
+         InitialContextInjection::DoNotInject => None,
+         InitialContextInjection::BeforeLastUserMessage { step_context, .. } => {
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 60b5b1b77..31dbaf074 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -6,6 +6,7 @@ use crate::Prompt;
+ use crate::client::ModelClientSession;
+ use crate::compact::CompactionAnalyticsDetails;
+ use crate::compact_remote_history::trim_function_call_history_to_fit_context_window;
++use crate::image_compaction::limit_compaction_images;
+ use crate::responses_metadata::CompactionTurnMetadata;
+ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+@@ -74,6 +75,13 @@ pub(super) async fn run_remote_compact_v2_attempt(
+     sess.services
+         .executed_tool_calls
+         .attach_to_compaction_prompt(&mut input);
++    if let Some(limit) = turn_context
++        .config
++        .mira_auto_compact_image_limit
++        .filter(|limit| *limit > 0)
++    {
++        limit_compaction_images(&mut input, limit);
++    }
+     let tool_router = &step_context.tool_router;
+     input.push(ResponseItem::CompactionTrigger {});
+     let prompt = Prompt {
 diff --git a/codex-rs/core/src/compaction_mode.rs b/codex-rs/core/src/compaction_mode.rs
 new file mode 100644
 index 000000000..75adaa561
@@ -17527,8 +17652,70 @@ index 000000000..75adaa561
 +        }
 +    }
 +}
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index fca03ece4..87cd1b729 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -631,6 +631,57 @@ async fn load_config_resolves_update_plan_enabled() -> std::io::Result<()> {
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn load_config_resolves_mira_image_limit() -> std::io::Result<()> {
++    for (contents, expected) in [
++        ("", None),
++        ("mira_auto_compact_image_limit=40", Some(40)),
++        ("mira_auto_compact_image_limit=0", Some(0)),
++    ] {
++        let codex_home = tempdir()?;
++        let config = Config::load_from_base_config_with_overrides(
++            toml::from_str(contents).unwrap(),
++            ConfigOverrides::default(),
++            codex_home.abs(),
++        )
++        .await?;
++        assert_eq!(config.mira_auto_compact_image_limit, expected);
++    }
++    let codex_home = tempdir()?;
++    std::fs::write(
++        codex_home.path().join(CONFIG_TOML_FILE),
++        "mira_auto_compact_image_limit=40",
++    )?;
++    std::fs::write(
++        codex_home.path().join("images.config.toml"),
++        "mira_auto_compact_image_limit=30",
++    )?;
++    for (overrides, expected) in [
++        (vec![], Some(30)),
++        (
++            vec![(
++                "mira_auto_compact_image_limit".into(),
++                toml::Value::Integer(20),
++            )],
++            Some(20),
++        ),
++    ] {
++        let config = ConfigBuilder::without_managed_config_for_tests()
++            .codex_home(codex_home.path().to_path_buf())
++            .loader_overrides(LoaderOverrides {
++                user_config_profile: Some("images".parse().unwrap()),
++                user_config_path: Some(codex_home.abs().join("images.config.toml")),
++                ..LoaderOverrides::without_managed_config_for_tests()
++            })
++            .cli_overrides(overrides)
++            .build()
++            .await?;
++        assert_eq!(config.mira_auto_compact_image_limit, expected);
++    }
++    assert!(toml::from_str::<ConfigToml>("mira_auto_compact_image_limit=-1").is_err());
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn load_config_resolves_code_mode_config() -> std::io::Result<()> {
+     let codex_home = tempdir()?;
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index 571fc2d81..fe584ddbe 100644
+index 571fc2d81..e3f75b42d 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -600,6 +600,12 @@ pub enum ThreadStoreConfig {
@@ -17553,7 +17740,17 @@ index 571fc2d81..fe584ddbe 100644
      /// Provenance for how this [`Config`] was derived (merged layers + enforced
      /// requirements).
      pub config_layer_stack: ConfigLayerStack,
-@@ -2511,6 +2519,17 @@ fn resolve_tool_suggest_config_from_config(
+@@ -634,6 +642,9 @@ pub struct Config {
+     /// Token usage threshold triggering auto-compaction of conversation history.
+     pub model_auto_compact_token_limit: Option<i64>,
+ 
++    /// Active image threshold for automatic plaintext compaction; zero disables it.
++    pub mira_auto_compact_image_limit: Option<usize>,
++
+     /// Controls whether `model_auto_compact_token_limit` applies to the full
+     /// active context or only tokens after the carried compaction-window prefix.
+     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
+@@ -2511,6 +2522,17 @@ fn resolve_tool_suggest_config_from_config(
  fn thread_store_config(thread_store: Option<ThreadStoreToml>) -> ThreadStoreConfig {
      match thread_store {
          Some(ThreadStoreToml::Local {}) => ThreadStoreConfig::Local,
@@ -17571,7 +17768,15 @@ index 571fc2d81..fe584ddbe 100644
          Some(ThreadStoreToml::InMemory { id }) => ThreadStoreConfig::InMemory { id },
          None => ThreadStoreConfig::Local,
      }
-@@ -4447,6 +4466,7 @@ impl Config {
+@@ -4262,6 +4284,7 @@ impl Config {
+             review_model,
+             model_context_window: cfg.model_context_window,
+             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
++            mira_auto_compact_image_limit: cfg.mira_auto_compact_image_limit,
+             model_auto_compact_token_limit_scope: cfg
+                 .model_auto_compact_token_limit_scope
+                 .unwrap_or_default(),
+@@ -4447,6 +4470,7 @@ impl Config {
              current_time_reminder,
              sleep_tool_mode,
              features,
@@ -17579,15 +17784,323 @@ index 571fc2d81..fe584ddbe 100644
              suppress_unstable_features_warning: cfg
                  .suppress_unstable_features_warning
                  .unwrap_or(false),
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 2475e685e..3553a3861 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1309,7 +1309,7 @@ fn estimate_function_output_bytes(output: &FunctionCallOutputBody) -> i64 {
+     }
+ }
+ 
+-fn is_model_generated_item(item: &ResponseItem) -> bool {
++pub(crate) fn is_model_generated_item(item: &ResponseItem) -> bool {
+     match item {
+         ResponseItem::Message { role, .. } => role == "assistant",
+         ResponseItem::Reasoning { .. }
+diff --git a/codex-rs/core/src/context_manager/mod.rs b/codex-rs/core/src/context_manager/mod.rs
+index 8f3a347d2..b60b71da6 100644
+--- a/codex-rs/core/src/context_manager/mod.rs
++++ b/codex-rs/core/src/context_manager/mod.rs
+@@ -6,4 +6,5 @@ pub(crate) use history::ContextManager;
+ pub(crate) use history::HistoryReplacement;
+ pub(crate) use history::estimate_image_reference_bytes;
+ pub(crate) use history::estimate_item_token_count;
++pub(crate) use history::is_model_generated_item;
+ pub(crate) use history::is_user_turn_boundary;
+diff --git a/codex-rs/core/src/image_compaction.rs b/codex-rs/core/src/image_compaction.rs
+new file mode 100644
+index 000000000..0391976f0
+--- /dev/null
++++ b/codex-rs/core/src/image_compaction.rs
+@@ -0,0 +1,155 @@
++//! Count images at request boundaries and preserve unconsumed input across one
++//! native summary checkpoint. Ordinary sampling never rewrites a cached prefix.
++
++use crate::context_manager::is_model_generated_item;
++use crate::context_manager::is_user_turn_boundary;
++use codex_context_fragments::AnnotatedContent;
++use codex_context_fragments::set_annotated_content;
++use codex_context_fragments::to_annotated_content;
++use codex_extension_api::ExtensionData;
++use codex_history::ResponseItemEnvelope;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ContentItemKind;
++use codex_protocol::models::FunctionCallOutputContentItem;
++use codex_protocol::models::ResponseItem;
++use std::sync::Arc;
++
++const OMITTED_IMAGE: &str = "[Earlier image omitted from this compaction request to fit the configured compaction image budget. Original image remains in conversation history.]";
++
++/// Turn-local snapshot consumed by plaintext compaction. These items have not
++/// been read by normal sampling, so retain them verbatim after the summary.
++#[derive(Clone)]
++pub(crate) struct PendingImageCompaction {
++    pub(crate) pending: Vec<ResponseItemEnvelope>,
++    pub(crate) prefix: Vec<ResponseItemEnvelope>,
++}
++
++pub(crate) struct ImageCompactionGuard(pub(crate) Arc<ExtensionData>);
++
++impl Drop for ImageCompactionGuard {
++    fn drop(&mut self) {
++        self.0.remove::<PendingImageCompaction>();
++    }
++}
++
++pub(crate) fn image_count<'a>(items: impl IntoIterator<Item = &'a ResponseItem>) -> usize {
++    items
++        .into_iter()
++        .map(|item| match item {
++            ResponseItem::Message { content, .. } => content
++                .iter()
++                .filter(|part| matches!(part, ContentItem::InputImage { .. }))
++                .count(),
++            ResponseItem::FunctionCallOutput { output, .. }
++            | ResponseItem::CustomToolCallOutput { output, .. } => {
++                output.content_items().map_or(0, |parts| {
++                    parts
++                        .iter()
++                        .filter(|part| {
++                            matches!(part, FunctionCallOutputContentItem::InputImage { .. })
++                        })
++                        .count()
++                })
++            }
++            _ => 0,
++        })
++        .sum()
++}
++
++pub(crate) fn prepare_image_compaction(
++    items: &[ResponseItemEnvelope],
++    limit: usize,
++) -> Option<PendingImageCompaction> {
++    if limit == 0 || image_count(items.iter().map(|entry| &entry.item)) < limit {
++        return None;
++    }
++    let mut prefix_len = items
++        .iter()
++        .rposition(|entry| {
++            is_model_generated_item(&entry.item)
++                && !is_user_turn_boundary(&entry.item)
++                && !entry
++                    .metadata
++                    .as_ref()
++                    .is_some_and(|metadata| metadata.compaction_output)
++        })
++        .map_or(0, |index| index + 1);
++    // Keep the calls paired with newly returned tool outputs; normalization must
++    // not synthesize an aborted result or drop an orphan output after compaction.
++    for (position, entry) in items.iter().enumerate().rev() {
++        if position < prefix_len {
++            break;
++        }
++        let call_id = match &entry.item {
++            ResponseItem::FunctionCallOutput {
++                call_id: Some(call_id),
++                ..
++            }
++            | ResponseItem::CustomToolCallOutput { call_id, .. }
++            | ResponseItem::ToolSearchOutput {
++                call_id: Some(call_id),
++                ..
++            } => call_id,
++            _ => continue,
++        };
++        if let Some(index) = items[..prefix_len].iter().position(|entry| matches!(&entry.item,
++            ResponseItem::FunctionCall { call_id: id, .. } | ResponseItem::CustomToolCall { call_id: id, .. } | ResponseItem::ToolSearchCall { call_id: Some(id), .. } if id == call_id)) {
++            prefix_len = prefix_len.min(index);
++        }
++    }
++    if image_count(items[..prefix_len].iter().map(|entry| &entry.item)) == 0 {
++        return None;
++    }
++    Some(PendingImageCompaction {
++        pending: items[prefix_len..].to_vec(),
++        prefix: items[..prefix_len].to_vec(),
++    })
++}
++
++#[cfg(test)]
++#[path = "image_compaction_tests.rs"]
++mod tests;
++
++/// Only compaction requests need a safety projection for already oversized
++/// restored history. Count actual typed media, preserving all text and call IDs.
++pub(crate) fn limit_compaction_images(items: &mut [ResponseItem], limit: usize) {
++    let mut omitted = image_count(items.iter()).saturating_sub(limit);
++    for item in items {
++        if omitted == 0 {
++            break;
++        }
++        match item {
++            ResponseItem::Message { .. } => {
++                let Some(mut content) = to_annotated_content(item) else {
++                    continue;
++                };
++                for part in &mut content {
++                    if omitted > 0 && matches!(part.content(), ContentItem::InputImage { .. }) {
++                        *part = AnnotatedContent::input_text(
++                            OMITTED_IMAGE,
++                            ContentItemKind("images.compaction_omitted".to_string()),
++                        );
++                        omitted -= 1;
++                    }
++                }
++                set_annotated_content(item, content);
++            }
++            ResponseItem::FunctionCallOutput { output, .. }
++            | ResponseItem::CustomToolCallOutput { output, .. } => {
++                if let Some(parts) = output.content_items_mut() {
++                    for part in parts {
++                        if omitted > 0
++                            && matches!(part, FunctionCallOutputContentItem::InputImage { .. })
++                        {
++                            *part = FunctionCallOutputContentItem::InputText {
++                                text: OMITTED_IMAGE.to_string(),
++                            };
++                            omitted -= 1;
++                        }
++                    }
++                }
++            }
++            _ => {}
++        }
++    }
++}
+diff --git a/codex-rs/core/src/image_compaction_tests.rs b/codex-rs/core/src/image_compaction_tests.rs
+new file mode 100644
+index 000000000..ef404d465
+--- /dev/null
++++ b/codex-rs/core/src/image_compaction_tests.rs
+@@ -0,0 +1,117 @@
++use super::*;
++use codex_protocol::models::FunctionCallOutputPayload;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++fn item(value: serde_json::Value) -> ResponseItem {
++    serde_json::from_value(value).unwrap()
++}
++
++fn image() -> serde_json::Value {
++    json!({"type":"input_image","image_url":"data:image/png;base64,fixture"})
++}
++
++#[test]
++fn retains_new_tool_outputs_and_their_calls_verbatim() {
++    let items: Vec<_> = vec![
++        item(json!({"type":"message","role":"user","content":[image(),image()]})),
++        item(json!({"type":"function_call","call_id":"a","name":"screen","arguments":"{}"})),
++        item(json!({"type":"function_call","call_id":"b","name":"screen","arguments":"{}"})),
++        item(json!({"type":"function_call_output","call_id":"a","output":[image(),{"type":"input_text","text":"result a"}]})),
++        item(json!({"type":"function_call_output","call_id":"b","output":[image()]})),
++    ].into_iter().map(ResponseItemEnvelope::new).collect();
++    let pending = prepare_image_compaction(&items, 3).unwrap();
++    assert_eq!(
++        (pending.prefix, pending.pending),
++        (items[..1].to_vec(), items[1..].to_vec())
++    );
++    assert!(prepare_image_compaction(&items, 0).is_none());
++    assert!(prepare_image_compaction(&items, 5).is_none());
++}
++
++#[test]
++fn oversized_fresh_input_is_not_discarded_and_does_not_loop() {
++    let original = vec![ResponseItemEnvelope::new(item(
++        json!({"type":"message","role":"user","content":[image(),image(),image()]}),
++    ))];
++    let items = original.clone();
++    assert!(prepare_image_compaction(&items, 2).is_none());
++    assert!(prepare_image_compaction(&items, 3).is_none());
++    assert_eq!(items, original);
++}
++
++#[test]
++fn safety_projection_counts_message_and_custom_tool_images_preserving_text_and_metadata() {
++    let mut items = vec![
++        item(
++            json!({"type":"message","id":"old","role":"user","content":[{"type":"input_text","text":"unchanged"},image(),image()],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text","user.image","user.image"]}}),
++        ),
++        item(
++            json!({"type":"custom_tool_call_output","id":"output","call_id":"call","output":[{"type":"input_text","text":"tool text"},image(),image()]}),
++        ),
++    ];
++    let original = items.clone();
++    limit_compaction_images(&mut items, 2);
++    assert_eq!(image_count(items.iter()), 2);
++    assert_eq!(items[1], original[1]);
++    let ResponseItem::Message {
++        content,
++        internal_chat_message_metadata_passthrough,
++        ..
++    } = &items[0]
++    else {
++        panic!("message")
++    };
++    assert_eq!(
++        content,
++        &vec![
++            ContentItem::InputText {
++                text: "unchanged".into()
++            },
++            ContentItem::InputText {
++                text: OMITTED_IMAGE.into()
++            },
++            ContentItem::InputText {
++                text: OMITTED_IMAGE.into()
++            }
++        ]
++    );
++    assert_eq!(
++        internal_chat_message_metadata_passthrough
++            .as_ref()
++            .unwrap()
++            .content_item_kinds
++            .as_ref()
++            .unwrap(),
++        &vec![
++            ContentItemKind("user.text".into()),
++            ContentItemKind("images.compaction_omitted".into()),
++            ContentItemKind("images.compaction_omitted".into())
++        ]
++    );
++    limit_compaction_images(&mut items, 1);
++    let ResponseItem::CustomToolCallOutput { output, .. } = &items[1] else {
++        panic!("tool")
++    };
++    let expected: FunctionCallOutputPayload = serde_json::from_value(json!([{"type":"input_text","text":"tool text"},{"type":"input_text","text":OMITTED_IMAGE},image()])).unwrap();
++    assert_eq!(output, &expected);
++}
++
++#[test]
++fn partial_failed_summary_does_not_mark_fresh_images_as_consumed() {
++    let mut items: Vec<_> = vec![
++        item(json!({"type":"message","role":"user","content":[image(),image()]})),
++        item(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"old read"}]})),
++        item(json!({"type":"message","role":"user","content":[image()]})),
++        item(json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial summary"}]})),
++    ].into_iter().map(ResponseItemEnvelope::new).collect();
++    items[3].metadata = Some(codex_history::CodexHarnessMetadata {
++        compaction_output: true,
++        ..Default::default()
++    });
++    let plan = prepare_image_compaction(&items, 3).unwrap();
++    assert_eq!(
++        (plan.prefix, plan.pending),
++        (items[..2].to_vec(), items[2..].to_vec())
++    );
++}
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 2595ce5bb..556cc7007 100644
+index 2595ce5bb..8146b6b41 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
-@@ -35,6 +35,7 @@ mod compact_model_fallback;
+@@ -35,6 +35,8 @@ mod compact_model_fallback;
  mod compact_remote_history;
  mod compact_remote_v2;
  mod compact_token_budget;
 +mod compaction_mode;
++mod image_compaction;
  mod thread_startup_metadata;
  pub use codex_network_proxy::EnvironmentNetworkPolicy;
  pub use codex_network_proxy::NetworkDomainPermission;
@@ -18347,7 +18860,7 @@ index 156225736..043adb974 100644
          provider: create_model_provider(
              config.model_provider.clone(),
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index b88b343c1..9c038192a 100644
+index b88b343c1..79f266607 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -10,6 +10,7 @@ use crate::client_common::ResponseEvent;
@@ -18358,7 +18871,17 @@ index b88b343c1..9c038192a 100644
  use crate::connectors;
  use crate::context::ContextualUserFragment;
  use crate::context::UserVerificationNotice;
-@@ -78,7 +79,6 @@ use codex_features::Feature;
+@@ -22,6 +23,9 @@ use crate::hook_runtime::record_pending_input;
+ use crate::hook_runtime::run_legacy_after_agent_hook;
+ use crate::hook_runtime::run_pending_session_start_hooks;
+ use crate::hook_runtime::run_turn_stop_hooks;
++use crate::image_compaction::ImageCompactionGuard;
++use crate::image_compaction::image_count;
++use crate::image_compaction::prepare_image_compaction;
+ use crate::mcp_skill_dependencies::maybe_prompt_and_install_mcp_dependencies;
+ use crate::mentions::build_connector_slug_counts;
+ use crate::mentions::collect_explicit_app_ids;
+@@ -78,7 +82,6 @@ use codex_features::Feature;
  use codex_file_system::FindUpErrorPolicy;
  use codex_file_system::find_nearest_ancestor_with_markers;
  use codex_login::CodexAuth;
@@ -18366,7 +18889,7 @@ index b88b343c1..9c038192a 100644
  use codex_protocol::ResponseItemId;
  use codex_protocol::config_types::AutoCompactTokenLimitScope;
  use codex_protocol::config_types::ModeKind;
-@@ -208,9 +208,9 @@ pub(crate) async fn run_turn(
+@@ -208,9 +211,9 @@ pub(crate) async fn run_turn(
              .await;
          // Publish the failure only after prompt hooks finish, so clients cannot react to
          // an error by steering follow-up input into a turn still preserving its prompt.
@@ -18379,7 +18902,7 @@ index b88b343c1..9c038192a 100644
          };
          sess.send_event(
              turn_context.as_ref(),
-@@ -509,6 +509,12 @@ pub(crate) async fn run_turn(
+@@ -509,9 +512,15 @@ pub(crate) async fn run_turn(
              // Keep the override after accepted input so history truncation removes them together.
              sess.record_reasoning_effort_override(step_context.as_ref())
                  .await;
@@ -18391,8 +18914,47 @@ index b88b343c1..9c038192a 100644
 +            })?;
  
              // Construct the input that we will send to the model.
-             let sampling_request_input: Vec<ResponseItem> = async {
-@@ -1459,20 +1465,18 @@ async fn run_auto_compact(
+-            let sampling_request_input: Vec<ResponseItem> = async {
++            let mut sampling_request_input: Vec<ResponseItem> = async {
+                 sess.clone_history()
+                     .await
+                     .for_prompt(&step_context.settings.model_info.input_modalities)
+@@ -519,6 +528,34 @@ pub(crate) async fn run_turn(
+             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
+             .await;
+ 
++            if let Some(limit) = turn_context.config.mira_auto_compact_image_limit.filter(|limit| *limit > 0)
++                && image_count(sampling_request_input.iter()) >= limit
++            {
++                let history = sess.clone_history().await.for_prompt_annotated(&step_context.settings.model_info.input_modalities);
++                if let Some(pending) = prepare_image_compaction(&history, limit) {
++                    tracing::info!(turn_id = %turn_context.sub_id, limit, "automatic image-count compaction");
++                    turn_context.extension_data.insert(pending);
++                    let guard = ImageCompactionGuard(Arc::clone(&turn_context.extension_data));
++                    // Summarization retains prior work; a token-budget reset can
++                    // discard evidence, and opaque compaction may retain images.
++                    let result = run_inline_auto_compact_task(
++                        Arc::clone(&sess), Arc::clone(&turn_context),
++                        InitialContextInjection::BeforeLastUserMessage {
++                            world_state: Arc::clone(&world_state),
++                            step_context: Arc::clone(&step_context),
++                        },
++                        CompactionReason::ContextLimit,
++                        CompactionPhase::MidTurn,
++                    ).await;
++                    drop(guard);
++                    result?;
++                    sampling_request_input = sess.clone_history().await.for_prompt(&step_context.settings.model_info.input_modalities);
++                    // The checkpoint and preserved tool outputs must be durable
++                    // before continuing the same model step.
++                    sess.flush_rollout().await.map_err(|err| CodexErr::Fatal(format!("Failed to save image compaction before contacting the model: {err}")))?;
++                }
++            }
++
+             run_sampling_request(
+                 Arc::clone(&sess),
+                 Arc::clone(&step_context),
+@@ -1459,20 +1496,18 @@ async fn run_auto_compact(
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
      let _profile_guard = turn_context.turn_timing_state.begin_compaction();
@@ -18425,7 +18987,7 @@ index b88b343c1..9c038192a 100644
              emit_compact_metric(
                  &sess.services.session_telemetry,
                  "remote_v2",
-@@ -1489,7 +1493,7 @@ async fn run_auto_compact(
+@@ -1489,7 +1524,7 @@ async fn run_auto_compact(
              )
              .await?;
          }
@@ -18434,7 +18996,7 @@ index b88b343c1..9c038192a 100644
              emit_compact_metric(
                  &sess.services.session_telemetry,
                  "local",
-@@ -1624,6 +1628,7 @@ async fn run_sampling_request(
+@@ -1624,6 +1659,7 @@ async fn run_sampling_request(
      let mut initial_input = Some(input);
      let mut original_input = None;
      let mut executed_tool_calls_by_output = HashMap::new();
@@ -18442,7 +19004,7 @@ index b88b343c1..9c038192a 100644
      loop {
          // Running code-mode cells can request review while this response is in flight.
          // Keep the latest received ID until response.created replaces it.
-@@ -1635,6 +1640,7 @@ async fn run_sampling_request(
+@@ -1635,6 +1671,7 @@ async fn run_sampling_request(
                  .for_prompt(&step_context.settings.model_info.input_modalities)
          };
          let mut prompt_input = prompt_input;
@@ -18450,7 +19012,7 @@ index b88b343c1..9c038192a 100644
          sess.services
              .executed_tool_calls
              .attach_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output);
-@@ -1687,6 +1693,16 @@ async fn run_sampling_request(
+@@ -1687,6 +1724,16 @@ async fn run_sampling_request(
              },
          };
  
@@ -19357,6 +19919,310 @@ index 6500826ba..fd14bdb27 100644
      };
      let mut builder = test_codex()
          .with_history_mode(history_mode)
+diff --git a/codex-rs/core/tests/suite/mira_image_compaction.rs b/codex-rs/core/tests/suite/mira_image_compaction.rs
+new file mode 100644
+index 000000000..47ebef476
+--- /dev/null
++++ b/codex-rs/core/tests/suite/mira_image_compaction.rs
+@@ -0,0 +1,298 @@
++use anyhow::Result;
++use codex_core::StartThreadOptions;
++use codex_core::TurnInputRequest;
++use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
++use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
++use codex_protocol::dynamic_tools::DynamicToolNamespaceSpec;
++use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
++use codex_protocol::dynamic_tools::DynamicToolResponse;
++use codex_protocol::dynamic_tools::DynamicToolSpec;
++use codex_protocol::models::ImageReference;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::Op;
++use codex_protocol::user_input::UserInput;
++use core_test_support::responses::*;
++use core_test_support::test_codex::test_codex;
++use core_test_support::wait_for_event;
++use pretty_assertions::assert_eq;
++use serde_json::json;
++
++const IMAGE: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
++
++fn input(count: usize, text: &str) -> TurnInputRequest {
++    let mut images: Vec<_> = (0..count)
++        .map(|_| UserInput::Image {
++            image: ImageReference::Inline {
++                image_url: IMAGE.into(),
++            },
++            detail: None,
++        })
++        .collect();
++    images.push(UserInput::Text {
++        text: text.into(),
++        text_elements: vec![],
++    });
++    TurnInputRequest::user_input(images)
++}
++
++fn reply(id: &str, text: &str) -> String {
++    sse(vec![ev_assistant_message(id, text), ev_completed(id)])
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn threshold_compacts_once_preserving_fresh_images_and_append_only_prefix() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            reply("a", "old work"),
++            reply("summary", "summarized old screenshots"),
++            reply("b", "fresh screenshot read"),
++            reply("c", "continue"),
++            reply("d", "restored"),
++        ],
++    )
++    .await;
++    let test = test_codex()
++        .with_config(|config| config.mira_auto_compact_image_limit = Some(3))
++        .build_with_auto_env(&server)
++        .await?;
++    test.codex
++        .start_or_steer_turn(input(2, "OLD_INPUT"))
++        .await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let path = test.session_configured.rollout_path.as_ref().unwrap();
++    let original = std::fs::read(path)?;
++    test.codex
++        .start_or_steer_turn(input(1, "FRESH_INPUT"))
++        .await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    test.submit_turn("Continue without more images").await?;
++    let recorded = requests.requests();
++    assert_eq!(recorded.len(), 4);
++    assert_eq!(recorded[1].body_json()["tools"], json!([]));
++    assert_eq!(recorded[1].message_input_image_urls("user").len(), 2);
++    assert!(
++        !recorded[1]
++            .message_input_texts("user")
++            .iter()
++            .any(|text| text.contains("FRESH_INPUT"))
++    );
++    assert_eq!(recorded[2].message_input_image_urls("user").len(), 1);
++    assert!(
++        recorded[2]
++            .message_input_texts("user")
++            .iter()
++            .any(|text| text.contains("FRESH_INPUT"))
++    );
++    let prefix = recorded[2].input();
++    assert_eq!(&recorded[3].input()[..prefix.len()], prefix.as_slice());
++    let saved = std::fs::read(path)?;
++    assert!(saved.starts_with(&original));
++    assert_eq!(
++        String::from_utf8(saved.clone())?
++            .lines()
++            .filter(
++                |line| serde_json::from_str::<serde_json::Value>(line).unwrap()["type"]
++                    == "compacted"
++            )
++            .count(),
++        1
++    );
++    let resumed = test_codex()
++        .with_config(|config| config.mira_auto_compact_image_limit = Some(3))
++        .restart(&server, &test)
++        .await?;
++    resumed.submit_turn("Continue after cold resume").await?;
++    assert_eq!(
++        requests.requests()[4]
++            .message_input_image_urls("user")
++            .len(),
++        1
++    );
++    assert!(std::fs::read(path)?.starts_with(&saved));
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn new_tool_images_survive_compaction_without_reexecuting_tools() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            sse(vec![
++                ev_response_created("a"),
++                ev_function_call_with_namespace("screen_once", "codex_app", "screen", "{}"),
++                ev_completed("a"),
++            ]),
++            reply("summary", "prior task summarized"),
++            reply("done", "tool screenshot read"),
++        ],
++    )
++    .await;
++    let base = test_codex()
++        .with_config(|config| config.mira_auto_compact_image_limit = Some(3))
++        .build_with_auto_env(&server)
++        .await?;
++    let tool = DynamicToolSpec::Namespace(DynamicToolNamespaceSpec {
++        name: "codex_app".into(),
++        description: "screen tools".into(),
++        tools: vec![DynamicToolNamespaceTool::Function(
++            DynamicToolFunctionSpec {
++                name: "screen".into(),
++                description: "returns screenshots".into(),
++                input_schema: json!({"type":"object","properties":{}}),
++                defer_loading: false,
++            },
++        )],
++    });
++    let new = base
++        .thread_manager
++        .start_thread(StartThreadOptions {
++            dynamic_tools: vec![tool],
++            ..StartThreadOptions::new(base.config.clone())
++        })
++        .await?;
++    new.thread
++        .start_or_steer_turn(input(2, "Inspect these and take one more screenshot"))
++        .await?;
++    let call = wait_for_event(&new.thread, |event| {
++        matches!(event, EventMsg::DynamicToolCallRequest(_))
++    })
++    .await;
++    let EventMsg::DynamicToolCallRequest(call) = call else {
++        panic!("tool")
++    };
++    new.thread
++        .submit(Op::DynamicToolResponse {
++            id: call.call_id,
++            response: DynamicToolResponse {
++                content_items: vec![DynamicToolCallOutputContentItem::InputImage {
++                    image_url: IMAGE.into(),
++                }],
++                success: true,
++            },
++        })
++        .await?;
++    wait_for_event(&new.thread, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let recorded = requests.requests();
++    assert_eq!(recorded.len(), 3);
++    assert_eq!(recorded[1].body_json()["tools"], json!([]));
++    assert_eq!(recorded[2].inputs_of_type("function_call").len(), 1);
++    let output = recorded[2].function_call_output("screen_once");
++    assert_eq!(output["output"][0]["type"], "input_image");
++    assert_eq!(recorded[2].message_input_image_urls("user").len(), 0);
++    let rollout = std::fs::read_to_string(new.session_configured.rollout_path.unwrap())?;
++    assert_eq!(
++        rollout
++            .lines()
++            .filter(|line| {
++                let line: serde_json::Value = serde_json::from_str(line).unwrap();
++                line["type"] == "response_item" && line["payload"]["type"] == "function_call"
++            })
++            .count(),
++        1
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn fresh_batch_above_threshold_is_sampled_without_silent_image_loss() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_once(&server, reply("fresh", "all images read")).await;
++    let test = test_codex()
++        .with_config(|config| config.mira_auto_compact_image_limit = Some(2))
++        .build_with_auto_env(&server)
++        .await?;
++    test.codex
++        .start_or_steer_turn(input(3, "TOO_MANY_NEW"))
++        .await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    assert_eq!(
++        requests
++            .single_request()
++            .message_input_image_urls("user")
++            .len(),
++        3
++    );
++    let rollout = std::fs::read_to_string(test.session_configured.rollout_path.as_ref().unwrap())?;
++    let user: serde_json::Value = rollout
++        .lines()
++        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
++        .find(|line| {
++            line["type"] == "response_item"
++                && line["payload"]["role"] == "user"
++                && line["payload"]["content"]
++                    .as_array()
++                    .unwrap()
++                    .iter()
++                    .any(|part| part["type"] == "input_image")
++        })
++        .unwrap();
++    assert_eq!(
++        user["payload"]["content"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .filter(|part| part["type"] == "input_image")
++            .count(),
++        3
++    );
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn cold_oversized_history_compacts_with_a_bounded_summary_request() -> Result<()> {
++    let server = start_mock_server().await;
++    let requests = mount_sse_sequence(
++        &server,
++        vec![
++            reply("old", "all old images read"),
++            reply("summary", "old images summarized"),
++            reply("new", "fresh input read"),
++        ],
++    )
++    .await;
++    let test = test_codex().build_with_auto_env(&server).await?;
++    test.codex
++        .start_or_steer_turn(input(52, "OVERSIZED_OLD"))
++        .await?;
++    wait_for_event(&test.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let path = test.session_configured.rollout_path.as_ref().unwrap();
++    let original = std::fs::read(path)?;
++    let resumed = test_codex()
++        .with_config(|config| config.mira_auto_compact_image_limit = Some(40))
++        .restart(&server, &test)
++        .await?;
++    resumed
++        .codex
++        .start_or_steer_turn(input(1, "FRESH_AFTER_RESTORE"))
++        .await?;
++    wait_for_event(&resumed.codex, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    let recorded = requests.requests();
++    assert_eq!(recorded.len(), 3);
++    assert_eq!(recorded[0].message_input_image_urls("user").len(), 52);
++    assert_eq!(recorded[1].message_input_image_urls("user").len(), 40);
++    assert_eq!(recorded[1].body_json()["tools"], json!([]));
++    assert_eq!(recorded[2].message_input_image_urls("user").len(), 1);
++    assert!(std::fs::read(path)?.starts_with(&original));
++    Ok(())
++}
 diff --git a/codex-rs/core/tests/suite/mira_reasoning_recovery.rs b/codex-rs/core/tests/suite/mira_reasoning_recovery.rs
 new file mode 100644
 index 000000000..c78a5b225
@@ -19603,18 +20469,19 @@ index 000000000..c78a5b225
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 54e98b75c..df35bd9c3 100644
+index 54e98b75c..93e42ca09 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
-@@ -131,6 +131,7 @@ mod mcp_tool_cache;
+@@ -131,6 +131,8 @@ mod mcp_tool_cache;
  mod mcp_tool_exposure;
  mod mcp_turn_metadata;
  mod mcp_user_verification;
++mod mira_image_compaction;
 +mod mira_reasoning_recovery;
  mod model_overrides;
  #[path = "model_provider_requirements_tests.rs"]
  mod model_provider_requirements;
-@@ -154,11 +155,14 @@ mod pending_input;
+@@ -154,11 +156,14 @@ mod pending_input;
  mod pending_input_persistence;
  mod permissions_messages;
  mod personality;
@@ -21038,6 +21905,18 @@ index b76194006..feaa326a4 100644
                      disabled_plugin_ids: Vec::new(),
                      model: "gpt-5.2-codex".to_string(),
                      model_provider_id: "updated-provider".to_string(),
+diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
+index 29e08651f..1ddfdee38 100644
+--- a/codex-rs/thread-manager-sample/src/main.rs
++++ b/codex-rs/thread-manager-sample/src/main.rs
+@@ -246,6 +246,7 @@ async fn new_config(
+         review_model: None,
+         model_context_window: None,
+         model_auto_compact_token_limit: None,
++        mira_auto_compact_image_limit: None,
+         model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope::Total,
+         model_post_turn_compact_threshold_percent: 0,
+         model_provider_id,
 diff --git a/codex-rs/thread-store/Cargo.toml b/codex-rs/thread-store/Cargo.toml
 index 31e16dd72..1c11cd6f1 100644
 --- a/codex-rs/thread-store/Cargo.toml
