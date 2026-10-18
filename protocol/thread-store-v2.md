@@ -49,6 +49,12 @@ Authorization: Bearer <token>
 传入 `?threadId=<id>` 可只读取一个会话的状态和 manifest，常规追加和元数据操作使用此路径。
 响应还包含 `historyFloor`：一次性迁移清理旧快照后最早可读取的版本。
 
+head 与 history 的 HTTP 响应可流式发送，不保证 `Content-Length`。每个响应在同一个
+PostgreSQL 只读快照内读取；客户端必须等完整 JSON 和传输成功后才能采用结果。发送中途
+发生数据库错误、取消或断连时终止传输，不补发第二个 JSON，也不把部分历史标记为成功。
+此兼容传输不改变分页语义或减少返回字节；实现与容量验证见
+[读取流式输出](../docs/thread-store-read-streaming.md)。
+
 ## 3. 按版本读取 thread 历史
 
 ```http

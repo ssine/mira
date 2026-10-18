@@ -45,12 +45,16 @@ func (server *Server) observeAccountProtocol(ctx context.Context, request *http.
 }
 
 func (server *Server) addInputRecovery(ctx context.Context, request *http.Request, storeID, threadID string, result *operationResponse) error {
+	return addInputRecovery(ctx, server.pool, request, storeID, threadID, result)
+}
+
+func addInputRecovery(ctx context.Context, query dbtx, request *http.Request, storeID, threadID string, result *operationResponse) error {
 	if result.Status != 200 || request.Header.Get("X-Mira-Codex-Account") == "" {
 		return nil
 	}
 	var raw []byte
 	var policy string
-	err := server.pool.QueryRow(ctx, `SELECT d.item_refs,d.policy FROM mira_codex_input_compatibility d
+	err := query.QueryRow(ctx, `SELECT d.item_refs,d.policy FROM mira_codex_input_compatibility d
 	 JOIN mira_node_codex_accounts b USING(node_account_id)
 	 WHERE d.store_id=$1 AND d.thread_id=$2 AND d.generation=$3 AND d.node_account_id=$4::uuid AND d.credential_revision=b.credential_revision
 	 ORDER BY d.created_at DESC LIMIT 1`, storeID, threadID, result.Body["generation"], request.Header.Get("X-Mira-Codex-Account")).Scan(&raw, &policy)

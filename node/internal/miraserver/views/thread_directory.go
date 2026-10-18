@@ -149,11 +149,10 @@ func (service *Service) threadDirectory(ctx context.Context, storeID string, arc
 	rows, err := service.pool.Query(ctx, `SELECT p.thread_id,COALESCE(p.parent_thread_id,''),COALESCE(p.cwd,''),
   COALESCE(r.node_id::text,imports.source_node_id::text,''),COALESCE(n.platform='windows',false),activity.updated_at
  FROM codex_thread_projections p
- CROSS JOIN LATERAL jsonb_to_record(p.state) s(metadata jsonb,"createdThread" jsonb)
  LEFT JOIN LATERAL (SELECT action FROM mira_thread_actions WHERE store_id=p.store_id AND thread_id=p.thread_id ORDER BY action_seq DESC LIMIT 1) a ON TRUE
  LEFT JOIN LATERAL (
   SELECT value::timestamptz updated_at FROM (VALUES
-   (1,s.metadata->>'updated_at'),(2,s.metadata->>'advance_recency_at'),(3,s.metadata->>'created_at'),(4,s."createdThread"#>>'{metadata,timestamp}')
+   (1,p.directory_timestamps[1]),(2,p.directory_timestamps[2]),(3,p.directory_timestamps[3]),(4,p.directory_timestamps[4])
   ) stamps(priority,value)
   WHERE value~'^[0-9]{4}-[0-9]{2}-[0-9]{2}T' AND pg_input_is_valid(value,'timestamp with time zone') ORDER BY priority LIMIT 1
  ) activity ON TRUE

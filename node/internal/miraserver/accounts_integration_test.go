@@ -153,6 +153,14 @@ func TestAccountHistoryIsolationAndRecoveryProjection(t *testing.T) {
 	if projected.Body["inputRecovery"] == nil || !reflect.DeepEqual(before.Body["items"], projected.Body["items"]) {
 		t.Fatal("recovery must add policy without filtering canonical history")
 	}
+	streamed := httptest.NewRecorder()
+	if err := server.streamThreadHistory(ctx, streamed, request, storeID, threadID, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var streamedBody map[string]any
+	if err := json.Unmarshal(streamed.Body.Bytes(), &streamedBody); err != nil || !reflect.DeepEqual(streamedBody["inputRecovery"], projected.Body["inputRecovery"]) || !reflect.DeepEqual(streamedBody["items"], projected.Body["items"]) {
+		t.Fatalf("stream lost canonical history or account recovery policy: %v", err)
+	}
 	request.Header.Set("X-Mira-Codex-Account", bindingB)
 	other, err := GetThreadHistory(ctx, pool, storeID, threadID, nil, nil)
 	if err != nil {
