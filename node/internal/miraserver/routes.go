@@ -187,11 +187,7 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 				}
 				ids = threadID
 			}
-			value, err := GetStoreHead(ctx, server.pool, storeID, ids)
-			if err != nil {
-				return err
-			}
-			return writeJSON(response, 200, value)
+			return streamStoreHead(ctx, server.pool, response, storeID, ids)
 		}
 	}
 	if request.Method == http.MethodGet {
@@ -216,14 +212,7 @@ func (server *Server) route(ctx context.Context, response http.ResponseWriter, r
 			if !validGeneration || !validThrough {
 				return &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid store, thread id, generation, or version"}
 			}
-			result, err := GetThreadHistory(ctx, server.pool, storeID, threadID, generation, through)
-			if err != nil {
-				return err
-			}
-			if err := server.addInputRecovery(ctx, request, storeID, threadID, &result); err != nil {
-				return err
-			}
-			return writeJSON(response, result.Status, result.Body)
+			return server.streamThreadHistory(ctx, response, request, storeID, threadID, generation, through)
 		}
 	}
 	if request.Method == http.MethodPost {

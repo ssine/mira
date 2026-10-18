@@ -11,32 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func GetThreadHistory(ctx context.Context, pool *pgxpool.Pool, storeID, threadID string, generation, throughVersion *int64) (operationResponse, error) {
+func prepareThreadHistory(ctx context.Context, query dbtx, storeID, threadID string, generation, throughVersion *int64) (operationResponse, int64, error) {
 	var currentVersion, historyFloor int64
-	err := pool.QueryRow(ctx, "SELECT version,history_floor FROM codex_store_heads WHERE store_id=$1", storeID).Scan(&currentVersion, &historyFloor)
+	err := query.QueryRow(ctx, "SELECT version,history_floor FROM codex_store_heads WHERE store_id=$1", storeID).Scan(&currentVersion, &historyFloor)
 	if err == pgx.ErrNoRows {
 		currentVersion, historyFloor = 0, 0
 	} else if err != nil {
-		return operationResponse{}, err
+		return operationResponse{}, 0, err
 	}
 	version := currentVersion
 	if throughVersion != nil {
 		version = *throughVersion
 	}
 	if version < historyFloor {
-		return operationResponse{Status: http.StatusGone, Body: map[string]any{"error": "requested version predates the storage migration", "code": "store_version_retired"}}, nil
+		return operationResponse{Status: http.StatusGone, Body: map[string]any{"error": "requested version predates the storage migration", "code": "store_version_retired"}}, 0, nil
 	}
 	var deleted int
-	err = pool.QueryRow(ctx, "SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$2 AND action='delete'", storeID, threadID).Scan(&deleted)
+	err = query.QueryRow(ctx, "SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$2 AND action='delete'", storeID, threadID).Scan(&deleted)
 	if err != nil && err != pgx.ErrNoRows {
-		return operationResponse{}, err
+		return operationResponse{}, 0, err
 	}
 	if err == nil {
-		return operationResponse{Status: 404, Body: map[string]any{"error": "thread history was permanently deleted", "code": "thread_deleted"}}, nil
+		return operationResponse{Status: 404, Body: map[string]any{"error": "thread history was permanently deleted", "code": "thread_deleted"}}, 0, nil
 	}
-	manifest, err := historicalManifest(ctx, pool, storeID, version, []string{threadID})
+	manifest, err := historicalManifest(ctx, query, storeID, version, []string{threadID})
 	if err != nil {
-		return operationResponse{}, err
+		return operationResponse{}, 0, err
 	}
 	entry, active := manifest[threadID]
 	selected := int64(0)
@@ -46,10 +46,39 @@ func GetThreadHistory(ctx context.Context, pool *pgxpool.Pool, storeID, threadID
 		selected = entry.Generation
 	}
 	if selected == 0 || (throughVersion != nil && (!active || entry.Generation != selected)) {
-		return operationResponse{Status: 404, Body: map[string]any{"error": "thread history not found"}}, nil
+		return operationResponse{Status: 404, Body: map[string]any{"error": "thread history not found"}}, 0, nil
 	}
-	rows, err := pool.Query(ctx, `SELECT payload FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3
-      AND store_event_seq<=$4 ORDER BY item_seq`, storeID, threadID, selected, version)
+	var count int64
+	err = query.QueryRow(ctx, `SELECT count(*) FROM codex_thread_events_versioned
+	 WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND store_event_seq<=$4`, storeID, threadID, selected, version).Scan(&count)
+	if err != nil {
+		return operationResponse{}, 0, err
+	}
+	if active && entry.Generation == selected && count != entry.ItemCount {
+		return operationResponse{Status: 409, Body: map[string]any{"error": "thread history is incomplete"}}, 0, nil
+	}
+	if count == 0 && (!active || entry.Generation != selected) {
+		return operationResponse{Status: 404, Body: map[string]any{"error": "thread history not found"}}, 0, nil
+	}
+	return operationResponse{Status: 200, Body: map[string]any{"threadId": threadID, "generation": selected, "itemCount": count}}, version, nil
+}
+
+const threadHistoryItemsSQL = `SELECT payload FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3
+ AND store_event_seq<=$4 ORDER BY item_seq`
+
+// Compatibility helper for in-process consumers. HTTP uses streamThreadHistory
+// so a long conversation never needs to be materialized in the Server heap.
+func GetThreadHistory(ctx context.Context, pool *pgxpool.Pool, storeID, threadID string, generation, throughVersion *int64) (operationResponse, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return operationResponse{}, err
+	}
+	defer tx.Rollback(ctx)
+	result, version, err := prepareThreadHistory(ctx, tx, storeID, threadID, generation, throughVersion)
+	if err != nil || result.Status != 200 {
+		return result, err
+	}
+	rows, err := tx.Query(ctx, threadHistoryItemsSQL, storeID, threadID, result.Body["generation"], version)
 	if err != nil {
 		return operationResponse{}, err
 	}
@@ -69,13 +98,9 @@ func GetThreadHistory(ctx context.Context, pool *pgxpool.Pool, storeID, threadID
 	if err := rows.Err(); err != nil {
 		return operationResponse{}, err
 	}
-	if active && entry.Generation == selected && int64(len(items)) != entry.ItemCount {
-		return operationResponse{Status: 409, Body: map[string]any{"error": "thread history is incomplete"}}, nil
-	}
-	if len(items) == 0 && (!active || entry.Generation != selected) {
-		return operationResponse{Status: 404, Body: map[string]any{"error": "thread history not found"}}, nil
-	}
-	return operationResponse{Status: 200, Body: map[string]any{"threadId": threadID, "generation": selected, "itemCount": len(items), "items": items}}, nil
+	result.Body["items"] = items
+	result.Body["itemCount"] = len(items)
+	return result, tx.Commit(ctx)
 }
 
 func ListStoreEvents(ctx context.Context, pool *pgxpool.Pool, storeID string, after int64, limit int) ([]map[string]any, error) {

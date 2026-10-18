@@ -73,6 +73,47 @@ func TestThreadPageSnapshot(t *testing.T) {
 	}
 }
 
+func TestDirectoryTimestampPrecedence(t *testing.T) {
+	endpoint := os.Getenv("MIRA_VIEWS_TEST_DATABASE_URL")
+	if endpoint == "" {
+		t.Skip("MIRA_VIEWS_TEST_DATABASE_URL is not set")
+	}
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := foundation.InitializeDatabase(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	store := fmt.Sprintf("directory-stamps-%d", time.Now().UnixNano())
+	defer pool.Exec(ctx, `DELETE FROM codex_thread_projections WHERE store_id=$1`, store)
+	cases := []struct{ state, want string }{
+		{`{"metadata":{"updated_at":"2026-09-03T00:00:00Z","advance_recency_at":"2026-09-04T00:00:00Z"}}`, "2026-09-03T00:00:00Z"},
+		{`{"metadata":{"updated_at":"2026-13-01T00:00:00Z","advance_recency_at":"2026-09-04T00:00:00Z"}}`, "2026-09-04T00:00:00Z"},
+		{`{"metadata":{"updated_at":"infinity","created_at":"2026-09-02T00:00:00Z"}}`, "2026-09-02T00:00:00Z"},
+		{`{"metadata":{"updated_at":null},"createdThread":{"metadata":{"timestamp":"2026-09-01T08:00:00+08:00"}}}`, "2026-09-01T00:00:00Z"},
+		{`{}`, "0001-01-01T00:00:00Z"},
+	}
+	for _, test := range cases {
+		// The previous Server writes only state; the generated projection must
+		// reflect each overwrite, including removal of every date candidate.
+		_, err := pool.Exec(ctx, `INSERT INTO codex_thread_projections(store_id,thread_id,active_generation,item_count,state,through_event_seq)
+		 VALUES($1,'thread',1,0,$2::jsonb,1) ON CONFLICT(store_id,thread_id) DO UPDATE SET state=EXCLUDED.state`, store, test.state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		directory, err := New(pool).threadDirectory(ctx, store, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := directory.byID["thread"].updated.UTC().Format(time.RFC3339); got != test.want {
+			t.Fatalf("state %s: date %s, want %s", test.state, got, test.want)
+		}
+	}
+}
+
 func TestThreadPagesIntegration(t *testing.T) {
 	endpoint := os.Getenv("MIRA_VIEWS_TEST_DATABASE_URL")
 	if endpoint == "" {

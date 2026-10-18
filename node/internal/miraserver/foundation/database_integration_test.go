@@ -3,6 +3,7 @@ package foundation
 import (
 	"context"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -35,7 +36,7 @@ func TestInitializeDatabaseIntegration(t *testing.T) {
 		}
 	}()
 	if _, err := pool.Exec(ctx, `INSERT INTO codex_thread_projections(store_id,thread_id,active_generation,item_count,state,through_event_seq)
- VALUES($1,'fork',1,0,'{"createdThread":{"forked_from_id":"parent"}}',1)`, store); err != nil {
+ VALUES($1,'fork',1,0,'{"createdThread":{"forked_from_id":"parent","metadata":{"timestamp":"2026-09-01T00:00:00Z"}},"metadata":{"updated_at":"invalid","created_at":"2026-09-02T00:00:00Z"}}',1)`, store); err != nil {
 		t.Fatal(err)
 	}
 	if err := InitializeDatabase(ctx, pool); err != nil {
@@ -49,9 +50,20 @@ func TestInitializeDatabaseIntegration(t *testing.T) {
 		}
 	}
 	checkFork("parent")
+	var stamps []*string
+	if err := pool.QueryRow(ctx, `SELECT directory_timestamps FROM codex_thread_projections WHERE store_id=$1`, store).Scan(&stamps); err != nil {
+		t.Fatal(err)
+	}
+	invalid, created, original := "invalid", "2026-09-02T00:00:00Z", "2026-09-01T00:00:00Z"
+	if !reflect.DeepEqual(stamps, []*string{&invalid, nil, &created, &original}) {
+		t.Fatal("directory timestamp backfill changed source values")
+	}
 	for _, state := range []string{`{"createdThread":{"forked_from_id":"replacement"}}`, `{}`} {
 		if _, err := pool.Exec(ctx, `UPDATE codex_thread_projections SET state=$2::jsonb WHERE store_id=$1`, store, state); err != nil {
 			t.Fatal(err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT directory_timestamps FROM codex_thread_projections WHERE store_id=$1`, store).Scan(&stamps); err != nil || !reflect.DeepEqual(stamps, []*string{nil, nil, nil, nil}) {
+			t.Fatalf("old Server writes did not update derived timestamps: %v", err)
 		}
 		if state == "{}" {
 			checkFork("")
