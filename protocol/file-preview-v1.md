@@ -20,6 +20,11 @@ Administrator APIs:
   origin, one-use bootstrap grant in its fragment, ID and expiry.
 - GET/POST/DELETE `/v1/file-previews/<id>` reads owner controls, renews or stops.
 
+Creation and renewal set preview expiry to 90 days (three months) from the
+request. The claimed preview cookie lasts 90 days. Previews still require a live
+administrator session and the original Node control connection, and Server
+restarts discard their transient state.
+
 For content, Server allocates a bounded transient stream UUID bound to the exact
 Node control connection. It sends `file.open` with sessionId and params, including
 method, selected Range/conditional headers and resource/execution context.

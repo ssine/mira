@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.96 降低大目录与长历史读取时的内存峰值：v2 head/history 按一致数据库快照流式输出，目录通过派生时间字段减少重复解压。原始历史、账号恢复规则与旧客户端协议保持兼容。升级 Server 生效；首次启动会迁移可重建投影到 schema41，详见[读取优化](docs/thread-store-read-streaming.md)。
+1.0.97 降低大目录与长历史读取时的内存峰值：v2 head/history 按一致数据库快照流式输出，目录通过派生时间字段减少重复解压。原始历史、账号恢复规则与旧客户端协议保持兼容。升级 Server 生效；首次启动会迁移可重建投影到 schema41，详见[读取优化](docs/thread-store-read-streaming.md)。
 
 1.0.95 修复长对话向上滚动时被拉回底部：向上滚动立即暂停自动跟随，回到底部后恢复；流式回复、可见区域更新和移动端视口变化都保留这一选择。只需升级 Server 并重新加载页面。
 
@@ -206,13 +206,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.96
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.97
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.96'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.97'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
