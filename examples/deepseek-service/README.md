@@ -6,6 +6,11 @@ encoding and protocol parsing, and an existing vLLM engine for inference. Mira
 does not import this application or interpret model requests. Visitor Bearer
 authentication belongs here; Mira supplies its ordinary persistent port site.
 
+For a separate CPU gateway and multiple GPU replicas, use
+[the replica gateway guide](GATEWAY.md). It retains Recipe's text/image path,
+adds bounded per-replica admission and per-thread prefix hints, and preserves
+existing client keys during a site cutover.
+
 ```text
 Mira-managed Codex on an execution Node
   -> HTTPS port site (generic Mira byte transport)
