@@ -6,7 +6,7 @@ import { conversationPageReader } from "/conversation-pages.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
-import { marked } from "/vendor/marked.js";
+import { marked } from "/markdown.js";
 import { decorateTraceDiagrams } from "/trace-diagrams.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ComposerDrafts } from "/composer-drafts.js";
@@ -27,8 +27,6 @@ import { TraceImages } from "/trace-images.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
 import { buildThreadTree, splitProjectThreads } from "/thread-list.js";
 import { ThreadPager, mergeThreadPages } from "/thread-pages.js";
-
-marked.setOptions({ gfm: true, breaks: false });
 
 const $ = (selector) => document.querySelector(selector);
 const composerDrafts = new ComposerDrafts();

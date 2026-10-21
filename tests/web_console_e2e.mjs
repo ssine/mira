@@ -115,6 +115,8 @@ for (const [pathname, contentType] of [
   ["/vendor/xterm-addon-fit.js", "text/javascript"],
   ["/vendor/xterm.css", "text/css"],
   ["/vendor/marked.js", "text/javascript"],
+  ["/vendor/marked-cjk-friendly.js", "text/javascript"],
+  ["/markdown.js", "text/javascript"],
   ["/vendor/dompurify.js", "text/javascript"],
 ]) {
   const result = await fetchBody(pathname, {}, "text");
@@ -136,7 +138,7 @@ assert(contentSecurityPolicy.includes("img-src 'self' data: blob:") &&
   contentSecurityPolicy.includes("frame-src 'self' blob:"),
 "website CSP does not permit locally constructed Node file previews");
 assert(assets["/app.js"].includes('from "/vendor/xterm.js"'), "website does not load the xterm terminal emulator");
-assert(assets["/app.js"].includes('from "/vendor/marked.js"'), "website does not load the Markdown renderer");
+assert(assets["/app.js"].includes('from "/markdown.js"'), "website does not load the Markdown renderer");
 assert(assets["/app.js"].includes('from "/vendor/dompurify.js"'), "website does not sanitize rendered Markdown");
 assert(assets["/"].includes("loginForm"), "website does not expose the administrator login view");
 for (const control of ["globalNav", "globalNodes", "globalAgent", "globalRuntime", "themeToggle"]) {

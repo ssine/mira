@@ -145,6 +145,7 @@ jobs:
           cmp node_modules/@xterm/xterm/css/xterm.css node/internal/webassets/web/vendor/xterm.css
           cmp node_modules/@xterm/addon-fit/lib/addon-fit.mjs node/internal/webassets/web/vendor/xterm-addon-fit.js
           cmp node_modules/marked/lib/marked.esm.js node/internal/webassets/web/vendor/marked.js
+          cmp node_modules/marked-cjk-friendly/dist/index.js node/internal/webassets/web/vendor/marked-cjk-friendly.js
           cmp node_modules/dompurify/dist/purify.es.mjs node/internal/webassets/web/vendor/dompurify.js
           node --test tests/release_publication_test.mjs
           go -C node test ./...

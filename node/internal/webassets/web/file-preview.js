@@ -1,5 +1,5 @@
 import DOMPurify from '/vendor/dompurify.js';
-import { marked } from '/vendor/marked.js';
+import { marked } from '/markdown.js';
 
 const chunkBytes = 128 * 1024;
 export const fileName = ref => (ref.archive ? ref.archiveEntry : ref.path).replace(/[\\/]+$/, '').split(/[\\/]/).at(-1) || ref.path;
