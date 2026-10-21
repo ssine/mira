@@ -32,6 +32,9 @@ type asset struct {
 }
 
 var specs = map[string]assetSpec{
+	"/markdown.js":                   {"web/markdown.js", "text/javascript; charset=utf-8"},
+	"/vendor/marked-cjk-friendly.js": {"web/vendor/marked-cjk-friendly.js", "text/javascript; charset=utf-8"},
+
 	"/file-preview.js":           {"web/file-preview.js", "text/javascript; charset=utf-8"},
 	"/file-preview.css":          {"web/file-preview.css", "text/css; charset=utf-8"},
 	"/files.html":                {"web/files.html", "text/html; charset=utf-8"},
