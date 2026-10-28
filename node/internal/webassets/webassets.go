@@ -44,6 +44,7 @@ var specs = map[string]assetSpec{
 	"/trace-diagrams.js":         {"web/trace-diagrams.js", "text/javascript; charset=utf-8"},
 	"/vendor/mermaid.js":         {"web/vendor/mermaid.js", "text/javascript; charset=utf-8"},
 	"/":                          {"web/index.html", "text/html; charset=utf-8"},
+	"/schedules.js":              {"web/schedules.js", "text/javascript; charset=utf-8"},
 	"/sites.js":                  {"web/sites.js", "text/javascript; charset=utf-8"},
 	"/app.js":                    {"web/app.js", "text/javascript; charset=utf-8"},
 	"/mira-socket.js":            {"web/mira-socket.js", "text/javascript; charset=utf-8"},

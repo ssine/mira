@@ -40,6 +40,7 @@ type Server struct {
 	claudeExecutionMu     sync.Mutex
 	claudeExecution       map[string]claudeExecutionObservation
 	stopRecovery          func()
+	stopSchedules         func()
 	config                Config
 	pool                  *pgxpool.Pool
 	auth                  *foundation.AuthService
@@ -128,6 +129,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 		pool.Close()
 		return nil, err
 	}
+	server.stopSchedules = server.startScriptScheduler(ctx)
 	server.stopRecovery = server.startAutomaticRecovery(ctx)
 	server.stopClaudeExecution = server.startClaudeExecutionReconciliation(ctx)
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
@@ -171,6 +173,9 @@ func (server *Server) ListenAndServe() error {
 func (server *Server) Shutdown(ctx context.Context) error {
 	var result error
 	server.closeOnce.Do(func() {
+		if server.stopSchedules != nil {
+			server.stopSchedules()
+		}
 		if server.stopClaudeExecution != nil {
 			server.stopClaudeExecution()
 		}

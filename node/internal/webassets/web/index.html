@@ -103,6 +103,28 @@
           <div data-accounts-list class="codex-accounts-list"></div>
         </section>
 
+        <section id="schedulesPanel" class="panel" aria-label="定时任务管理">
+          <div class="panel-head"><div><p class="eyebrow">SCHEDULES</p><h2>定时任务</h2></div><button class="secondary" type="button" data-schedule-action="refresh">刷新</button></div>
+          <p class="muted">按计划在指定节点执行脚本。离线后补执行一次，同一任务不会重叠执行。暂停只影响后续定时触发。失败不启动 AI。</p>
+          <details data-schedule-editor><summary>新建或编辑任务</summary>
+            <form class="schedule-form">
+              <label>名称<input name="name" required maxlength="120"></label>
+              <label>执行节点<select name="nodeId" required></select></label>
+              <label>Cron（分 时 日 月 周）<input name="cron" required value="30 6 * * *" placeholder="30 6 * * *"></label>
+              <label>时区<input name="timezone" required value="Asia/Shanghai"></label>
+              <label>可执行文件<input name="command" required placeholder="/usr/bin/python3"></label>
+              <label>工作目录<input name="cwd" required placeholder="/home/user/jobs"></label>
+              <label class="schedule-wide">参数（JSON 数组）<textarea name="args" rows="2" spellcheck="false">[]</textarea></label>
+              <label>Windows 执行身份<select name="executionContext"><option value="">默认用户</option><option value="user">交互用户</option><option value="system">LocalSystem</option></select></label>
+              <label><input type="checkbox" name="enabled" checked> 启用定时触发</label>
+              <div class="actions schedule-wide"><button class="approve" type="submit">保存任务</button><button class="secondary" type="button" data-schedule-action="cancel">取消编辑</button></div>
+            </form>
+          </details>
+          <div class="table-wrap"><table><thead><tr><th>名称</th><th>节点</th><th>计划</th><th>下次触发（本地时间）</th><th>状态</th><th>操作</th></tr></thead><tbody data-schedule-list></tbody></table></div>
+          <button class="secondary hidden" type="button" data-schedule-action="more">加载更多</button>
+          <div data-schedule-history aria-live="polite"></div>
+        </section>
+
         <section id="sitesPanel" class="panel" aria-label="端口站点管理">
           <div class="panel-head"><div><p class="eyebrow">SITES</p><h2>端口站点</h2></div></div>
           <p class="muted">将域名长期转发到节点的本地服务。站点公开访问，访问鉴权由服务自行负责。</p>

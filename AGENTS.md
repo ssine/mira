@@ -517,8 +517,8 @@ API behavior, CSP compatibility and the real-browser shell/activity regressions.
 
 ## Known gaps
 
-The intended architecture records the most recent runtime Node for each thread, but still needs durable scheduled
-task-to-node assignment, a task queue and scheduler,
+The architecture records the most recent runtime Node for each thread and supports persistent
+scheduled scripts (see `docs/scheduled-scripts.md`). It still needs scheduled Agent tasks,
 writer leases with fencing for network partitions, a multi-version Codex compatibility matrix,
 server-orchestrated fleet upgrades, scheduled credential rotation and hardware-backed key storage,
 distributed login limits for multi-Server deployments, backup/restore tooling,

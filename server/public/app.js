@@ -1,3 +1,4 @@
+import { SchedulesPanel } from "/schedules.js";
 import { SitesPanel } from "/sites.js";
 import { MiraSocket, configureMiraTransport } from "./mira-socket.js";
 import { FileReader, FileWorkspace, workspaceURL } from "/file-preview.js";
@@ -1660,6 +1661,7 @@ function renderAudit(events) {
   }
 }
 
+const schedulesPanel = new SchedulesPanel(document.querySelector("#schedulesPanel"), api, toast);
 const sitesPanel = new SitesPanel(document.querySelector("#sitesPanel"), api, toast);
 
 async function loadDashboard() {
@@ -1679,7 +1681,7 @@ async function loadDashboard() {
   renderNodes(allNodes);
   codexAccounts.setNodes(allNodes);
   renderAudit(audit.data ?? []);
-  await sitesPanel.refresh(allNodes);
+  await Promise.all([sitesPanel.refresh(allNodes), schedulesPanel.refresh(allNodes)]);
 }
 
 async function refreshNodeModels(nodeId) {
