@@ -132,6 +132,8 @@ jobs:
             if [ "$attempt" -eq 40 ]; then cat "$RUNNER_TEMP/mira-server.log"; exit 1; fi
             sleep 0.5
           done
+          MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/schedules_e2e.mjs
+          MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/schedules_e2e.mjs
           node tests/web_console_e2e.mjs
           MIRA_NODE_TRANSPORT=https node tests/web_console_e2e.mjs
           MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs

@@ -1131,3 +1131,11 @@ progress { width: 100%; accent-color: var(--accent); }
 #sitesPanel td:last-child { white-space: nowrap; }
 #sitesPanel td:last-child button + button { margin-left: 6px; }
 @media (max-width: 680px) { #sitesPanel form { grid-template-columns: 1fr 1fr; } #sitesPanel form button { grid-column: 1 / -1; } }
+
+.schedule-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap: 12px; margin: 16px 0; }
+.schedule-form label { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.schedule-wide { grid-column: 1 / -1; }
+.schedule-actions { min-width: 230px; }
+.schedule-actions button { margin: 2px; }
+.schedule-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
+#schedulesPanel details { margin: 10px 0; }

@@ -903,6 +903,7 @@ Commands:
   process        Count, list, start, poll or signal managed processes
   pty            Open and operate managed terminal sessions
   screen         Inspect or control an Android display
+  schedule       Manage scheduled scripts and execution history
   site           Register persistent public sites for Node loopback ports
   app-server     Inspect, start, stop or connect to Codex App Server
   codex          Run the Mira-managed Codex CLI
@@ -922,6 +923,21 @@ Run "mira <command> --help" for command-specific help.`, true
 		key += " " + topic[1]
 	}
 	help := map[string]string{
+		"schedule": `Usage:
+  mira schedule list [--limit 50] [--after UUID]
+  mira schedule create --file task.json
+  mira schedule get <UUID>
+  mira schedule update <UUID> --file task.json --expected-revision N
+  mira schedule run <UUID> [--request-id UUID]
+  mira schedule runs <UUID> [--limit 50] [--before run-UUID]
+  mira schedule pause|resume|delete <UUID> --expected-revision N
+  mira schedule acknowledge <UUID> --run-id UUID --confirm-stopped
+
+Task JSON: {"name":"Daily job","nodeId":"node alias or UUID","cron":"30 6 * * *",
+"timezone":"Asia/Shanghai","command":"/usr/bin/python3","args":["job.py"],"cwd":"/home/user/jobs","enabled":true}
+Credentials belong in files on the target Node. Use a stable taskId/request-id
+when retrying after a lost response. Pausing leaves existing executions running.
+Uncertain execution blocks future runs until the operator confirms it stopped.`,
 		"site": `Usage:
   mira site list [--limit 50] [--after <name>]
   mira site get <name|UUID>
@@ -1295,6 +1311,8 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	defer cancel()
 	var result any
 	switch remaining[0] {
+	case "schedule":
+		result, err = client.runSchedule(commandCtx, remaining[1:])
 	case "site":
 		result, err = client.runSite(commandCtx, remaining[1:])
 	case "nodes":

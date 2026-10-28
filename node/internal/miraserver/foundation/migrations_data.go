@@ -848,4 +848,5 @@ CREATE INDEX codex_thread_events_provider_idx
 	{Version: 39, Name: "claude-read-state", SQL: claudeReadStateSQL, Checksum: "18e172d6d55fa5e3cda351a990af0c0ff104b19024858917fab2a51e93848a8c"},
 	{Version: 40, Name: "persistent-port-sites", SQL: portSitesSQL, Checksum: "3a8a7dba50a1f61deb6f4c15472e0f74a148b644d70ec5e4a5c3393540ace61b"},
 	{Version: 41, Name: "directory-timestamp-projection", SQL: directoryTimestampsSQL, Checksum: "b5b38e5331454edc9b571d9c49bfd0c2d0193071733d5d163f742540562adb3d"},
+	{Version: 42, Name: "scheduled-scripts", SQL: scheduledScriptsSQL, Checksum: "1c313431c6a0239b7d4d79aaeb017f5baca3b07c2af4eff963a7100777b6f3d2"},
 }
