@@ -39,7 +39,7 @@ func closeFloat(left, right float64) bool {
 }
 
 func TestDeepSeekPeakPriceIncludesCacheAndReasoningOutput(t *testing.T) {
-	for _, model := range []string{"DeepSeek-V4.1-Flash", "deepseek-flash"} {
+	for _, model := range []string{"DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash-Alt", "deepseek-flash"} {
 		state := NewCostProjection(false, nil)
 		ApplyCostRecord(state, contextRecord(model, "deepseek"), "")
 		counts := usage(1_000_000, 800_000, 100_000)

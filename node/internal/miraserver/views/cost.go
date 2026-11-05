@@ -23,18 +23,19 @@ type modelPrice struct {
 var modelPrices = map[string]modelPrice{
 	// Standard peak USD rates, deliberately independent of request time for
 	// comparable self-hosted estimates. Output includes reasoning tokens.
-	"DeepSeek-V4.1-Flash": {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
-	"deepseek-flash":      {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
-	"gpt-6.1-sol":         {input: 2_000, cached: 100, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
-	"gpt-6-astra":         {input: 10_000, cached: 1_000, write: 12_500, output: 50_000, hasWrite: true, longContext: 272_000},
-	"gpt-6-sol":           {input: 2_000, cached: 200, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
-	"gpt-6-luna":          {input: 100, cached: 10, write: 125, output: 500, hasWrite: true, longContext: 272_000},
-	"gpt-5.6-sol":         {input: 4_000, cached: 400, write: 5_000, output: 20_000, hasWrite: true, longContext: 272_000},
-	"gpt-5.6-terra":       {input: 2_000, cached: 200, write: 2_500, output: 12_000, hasWrite: true, longContext: 272_000},
-	"gpt-5.6-luna":        {input: 200, cached: 20, write: 250, output: 1_200, hasWrite: true, longContext: 272_000},
-	"gpt-5.5":             {input: 5_000, cached: 500, output: 30_000, longContext: 272_000},
-	"gpt-5.4":             {input: 2_500, cached: 250, output: 15_000, longContext: 272_000},
-	"gpt-5.3-codex":       {input: 1_750, cached: 175, output: 14_000},
+	"DeepSeek-V4.1-Flash":     {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
+	"DeepSeek-V4.1-Flash-Alt": {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
+	"deepseek-flash":          {input: 300, cached: 6, output: 1_200, source: DeepSeekPricingSource, basis: "standard-peak"},
+	"gpt-6.1-sol":             {input: 2_000, cached: 100, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-astra":             {input: 10_000, cached: 1_000, write: 12_500, output: 50_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-sol":               {input: 2_000, cached: 200, write: 2_500, output: 10_000, hasWrite: true, longContext: 272_000},
+	"gpt-6-luna":              {input: 100, cached: 10, write: 125, output: 500, hasWrite: true, longContext: 272_000},
+	"gpt-5.6-sol":             {input: 4_000, cached: 400, write: 5_000, output: 20_000, hasWrite: true, longContext: 272_000},
+	"gpt-5.6-terra":           {input: 2_000, cached: 200, write: 2_500, output: 12_000, hasWrite: true, longContext: 272_000},
+	"gpt-5.6-luna":            {input: 200, cached: 20, write: 250, output: 1_200, hasWrite: true, longContext: 272_000},
+	"gpt-5.5":                 {input: 5_000, cached: 500, output: 30_000, longContext: 272_000},
+	"gpt-5.4":                 {input: 2_500, cached: 250, output: 15_000, longContext: 272_000},
+	"gpt-5.3-codex":           {input: 1_750, cached: 175, output: 14_000},
 }
 
 type costTotals struct {
