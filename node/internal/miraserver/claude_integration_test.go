@@ -675,6 +675,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var child atomic.Bool
 	var background, backgroundPhase, backgroundDone atomic.Bool
 	var backgroundAPIError, recoveryHold, recoverySteerSeen atomic.Bool
+	var backgroundErrorsSent atomic.Int32
 	recoveryHeld, recoveryRelease := make(chan struct{}, 1), make(chan struct{}, 1)
 	backgroundStarted := make(chan struct{}, 1)
 	backgroundRelease := make(chan struct{})
@@ -792,6 +793,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 					time.Sleep(10 * time.Millisecond)
 				}
 				w.Header().Set("Content-Type", "application/json")
+				backgroundErrorsSent.Add(1)
 				w.WriteHeader(400) // Same native error-result path without minutes of 429 backoff.
 				fmt.Fprint(w, `{"type":"error","error":{"type":"invalid_request_error","message":"BACKGROUND_API_ERROR"}}`)
 				return
@@ -1126,15 +1128,15 @@ func TestClaudeManagedSDK(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("timeout: background continuation after the API error")
 	}
-	var errorsSeen int
-	// The next model request can arrive before the previous event's separate
-	// Server write is acknowledged. Wait for that write, not model scheduling.
-	wait("intermediate error persisted", 5*time.Second, func() bool {
-		_ = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' AND payload->>'is_error'='true'`, recoveryTurn).Scan(&errorsSeen)
-		return errorsSeen == 1
+	// The pinned SDK can absorb the foreground API failure when a background
+	// continuation is already queued, without emitting an intermediate error
+	// result. Verify the injected failure and the still-live turn, then require
+	// the queued input and successful final response below.
+	wait("foreground API failure injected", 5*time.Second, func() bool {
+		return backgroundErrorsSent.Load() == 1
 	})
-	if err = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' AND payload->>'is_error'='true'`, recoveryTurn).Scan(&errorsSeen); err != nil || errorsSeen != 1 {
-		t.Fatalf("expected one intermediate API error: %d %v", errorsSeen, err)
+	if f.call("GET", route, nil)["activeTurn"] != recoveryTurn {
+		t.Fatal("API failure released the turn before its background continuation")
 	}
 	f.call("POST", route+"/steer", map[string]any{"requestId": uuidClaude(), "expectedTurnId": recoveryTurn, "text": "STEER_AFTER_ERROR_MARKER"})
 	recoveryRelease <- struct{}{}
