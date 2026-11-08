@@ -7,7 +7,7 @@ const account = (id, name, isDefault, provider) => ({ nodeAccountId: id, account
   enabled: true, revision: 1, credentialRevision: 1, provider: provider.id, authType: isDefault ? "chatgpt" : "providerConfig",
   desiredAppServer: { running: false }, reportedAppServer: { status: "stopped", provider } });
 const node = { nodeId, hostname: "Accounts fixture", platform: "linux", status: "online", approvalStatus: "approved",
-  capabilities: { appServer: true, codexAccountsV1: true }, reportedAppServer: { status: "stopped" }, desiredAppServer: { defaultCwd: "/work" },
+  capabilities: { appServer: true, codexAccountsV1: true, accountEgressV1: true }, reportedAppServer: { status: "stopped" }, desiredAppServer: { defaultCwd: "/work" },
   codexAccounts: [account(official, "Official", true, { id: "openai" }), account(custom, "Provider", false, { id: "custom", name: "Private API", baseUrl: "https://api.example.test/v1" })] };
 const thread = { threadId, title: "Account handoff", cwd: "/work", model: "gpt-6-astra", runtimeNodeId: nodeId, nodeAccountId: official,
   generation: 1, itemCount: 5, activity: { state: "idle" } };
@@ -25,6 +25,11 @@ try {
     const binding = path.split("/")[5], selected = node.codexAccounts.find(value => value.nodeAccountId === binding);
     if (request.method() === "PATCH") selected.name = body.name;
     return route.fulfill({ json: path.endsWith("/login") ? { status: "completed" } : { ok: true } });
+  });
+  await context.route("**/v1/accounts/codex/*/egress", route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    mutations.push({ path, body: request.postData() ? request.postDataJSON() : null, method: request.method() });
+    return route.fulfill({ json: { configured: request.method() !== "DELETE" } });
   });
   await context.route("**/v1/codex/runtimes/**", route => {
     const body = route.request().postDataJSON(), selected = node.codexAccounts.find(value => value.nodeAccountId === body.nodeAccountId);
@@ -79,6 +84,7 @@ try {
   await dialog.locator('[name="name"]').fill("Renamed provider"); await dialog.locator('[type="submit"]').click();
   await page.getByText("配置已保存。启动账号后可查看额度或登录。", { exact: true }).waitFor();
   assert.equal(mutations.filter(value => value.path.endsWith("/configure")).length, 0, "renaming must not require changing live credentials");
+  assert.equal(mutations.find(value => value.path.endsWith("/egress")).method, "DELETE", "saving preserves the disabled account egress setting");
   await dialog.locator('[name="apiKey"]').fill("synthetic-browser-secret"); await dialog.locator('[type="submit"]').click();
   await page.waitForFunction(() => document.querySelector('[name="apiKey"]').value === "");
   assert.equal(mutations.find(value => value.path.endsWith("/configure")).body.apiKey, "synthetic-browser-secret");

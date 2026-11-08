@@ -147,12 +147,31 @@ type storedConfig struct {
 	ListenPort int  `json:"listenPort"`
 }
 
+// gatewayReady broadcasts one startup result to every current and future caller.
+// A channel carrying a single error would let only one Acquire observe it.
+type gatewayReady struct {
+	done chan struct{}
+	once sync.Once
+	err  error
+}
+
+func newGatewayReady() *gatewayReady {
+	return &gatewayReady{done: make(chan struct{})}
+}
+
+func (ready *gatewayReady) complete(err error) {
+	ready.once.Do(func() {
+		ready.err = err
+		close(ready.done)
+	})
+}
+
 type entry struct {
 	config   storedConfig
 	refs     int
 	stopping bool
 	lastErr  string
-	ready    chan error
+	ready    *gatewayReady
 	done     chan struct{}
 	cancel   context.CancelFunc
 }
@@ -160,6 +179,7 @@ type entry struct {
 // Manager owns the local proxy process for every configured account.
 type Manager struct {
 	root, binary string
+	checkHealth  func(context.Context, storedConfig) error
 	mu           sync.Mutex
 	entries      map[string]*entry
 	closed       bool
@@ -172,7 +192,7 @@ func New(identityDir string) *Manager {
 	if binary == "" {
 		binary = "sing-box"
 	}
-	return &Manager{root: filepath.Join(identityDir, "account-egress"), binary: binary, entries: map[string]*entry{}}
+	return &Manager{root: filepath.Join(identityDir, "account-egress"), binary: binary, checkHealth: checkGatewayHealth, entries: map[string]*entry{}}
 }
 
 func (manager *Manager) accountRoot(id string) (string, error) {
@@ -330,10 +350,10 @@ func (manager *Manager) Acquire(id string) (map[string]string, func(), error) {
 	manager.mu.Unlock()
 	if ready != nil {
 		select {
-		case err := <-ready:
-			if err != nil {
+		case <-ready.done:
+			if ready.err != nil {
 				manager.Release(id)
-				return nil, nil, err
+				return nil, nil, ready.err
 			}
 		case <-time.After(15 * time.Second):
 			manager.Release(id)
@@ -356,7 +376,7 @@ func (manager *Manager) startLocked(id string, value *entry) error {
 	root, _ := manager.accountRoot(id)
 	ctx, cancel := context.WithCancel(context.Background())
 	value.cancel = cancel
-	value.ready = make(chan error, 1)
+	value.ready = newGatewayReady()
 	value.done = make(chan struct{})
 	value.stopping = false
 	value.lastErr = ""
@@ -365,11 +385,16 @@ func (manager *Manager) startLocked(id string, value *entry) error {
 }
 
 func (manager *Manager) run(ctx context.Context, id string, value *entry, root string) {
-	defer close(value.done)
+	done := value.done
+	defer func() {
+		manager.mu.Lock()
+		value.cancel = nil
+		close(done)
+		manager.mu.Unlock()
+	}()
 	for {
 		manager.mu.Lock()
 		if manager.closed || value.stopping || value.refs == 0 {
-			value.cancel = nil
 			manager.mu.Unlock()
 			return
 		}
@@ -383,20 +408,21 @@ func (manager *Manager) run(ctx context.Context, id string, value *entry, root s
 		command.Stderr = &stderr
 		if err := command.Start(); err != nil {
 			attemptCancel()
+			startErr := fmt.Errorf("start account egress: %w", err)
 			manager.mu.Lock()
-			value.lastErr = fmt.Sprintf("start account egress: %v", err)
+			value.lastErr = startErr.Error()
 			manager.mu.Unlock()
-			deliver(ready, errors.New(value.lastErr))
+			ready.complete(startErr)
 			if !manager.retry(id, value, ctx) {
 				return
 			}
 			continue
 		}
-		healthErr := manager.waitHealthy(ctx, value)
+		healthErr := manager.checkHealth(ctx, value.config)
 		if healthErr == nil {
-			deliver(ready, nil)
+			ready.complete(nil)
 		} else {
-			deliver(ready, healthErr)
+			ready.complete(healthErr)
 			attemptCancel()
 		}
 		_ = command.Wait()
@@ -404,15 +430,9 @@ func (manager *Manager) run(ctx context.Context, id string, value *entry, root s
 		manager.mu.Lock()
 		if manager.entries[id] == value && value.refs > 0 && !value.stopping && !manager.closed {
 			value.lastErr = healthErrString(healthErr, stderr.String())
-			value.ready = make(chan error, 1)
 		}
 		manager.mu.Unlock()
 		if !manager.retry(id, value, ctx) {
-			manager.mu.Lock()
-			if manager.entries[id] == value {
-				value.cancel = nil
-			}
-			manager.mu.Unlock()
 			return
 		}
 	}
@@ -432,19 +452,12 @@ func healthErrString(err error, stderr string) string {
 	return line
 }
 
-func deliver(ch chan error, err error) {
-	if ch == nil {
-		return
-	}
-	select {
-	case ch <- err:
-	default:
-	}
-}
-
 func (manager *Manager) retry(id string, value *entry, ctx context.Context) bool {
 	manager.mu.Lock()
 	ok := manager.entries[id] == value && value.refs > 0 && !value.stopping && !manager.closed
+	if ok {
+		value.ready = newGatewayReady()
+	}
 	manager.mu.Unlock()
 	if !ok {
 		return false
@@ -457,9 +470,12 @@ func (manager *Manager) retry(id string, value *entry, ctx context.Context) bool
 	}
 }
 
-func (manager *Manager) waitHealthy(ctx context.Context, value *entry) error {
-	profile := profileFor(value.config.Spec.Profile)
-	proxy, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", value.config.ListenPort))
+func checkGatewayHealth(ctx context.Context, config storedConfig) error {
+	return waitHealthy(ctx, config, profileFor(config.Spec.Profile))
+}
+
+func waitHealthy(ctx context.Context, config storedConfig, profile *routeProfile) error {
+	proxy, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", config.ListenPort))
 	client := &http.Client{
 		Timeout: 3 * time.Second,
 		Transport: &http.Transport{
@@ -467,6 +483,7 @@ func (manager *Manager) waitHealthy(ctx context.Context, value *entry) error {
 		},
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 	}
+	defer client.CloseIdleConnections()
 	deadline := time.NewTimer(12 * time.Second)
 	defer deadline.Stop()
 	ticker := time.NewTicker(250 * time.Millisecond)

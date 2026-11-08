@@ -40,7 +40,8 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # Keep the browser runner within pinned Playwright's supported platforms.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
 

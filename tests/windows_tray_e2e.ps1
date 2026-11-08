@@ -126,7 +126,7 @@ try {
     [MiraTrayTest]::PostMessage($window,0x111,[IntPtr]1004,[IntPtr]::Zero) | Out-Null
     $dialog = Wait-Until { $w=[MiraTrayTest]::FindWindow('#32770',$exitTitle); if ($w -ne [IntPtr]::Zero) { $w } } 'exit confirmation'
     [MiraTrayTest]::PostMessage($dialog,0x111,[IntPtr]7,[IntPtr]::Zero) | Out-Null
-    Start-Sleep -Milliseconds 200
+    Wait-Until { [MiraTrayTest]::FindWindow('#32770',$exitTitle) -eq [IntPtr]::Zero } 'cancelled exit confirmation to close' | Out-Null
     Assert-True (-not $process.HasExited) 'Cancel exit stopped Node'
     [MiraTrayTest]::PostMessage($window,0x111,[IntPtr]1004,[IntPtr]::Zero) | Out-Null
     $dialog = Wait-Until { $w=[MiraTrayTest]::FindWindow('#32770',$exitTitle); if ($w -ne [IntPtr]::Zero) { $w } } 'second exit confirmation'
