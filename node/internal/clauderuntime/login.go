@@ -184,11 +184,9 @@ func (m *Manager) startLogin(params map[string]any) (any, error) {
 		m.mu.Unlock()
 		return nil, errors.New("Too many Claude account logins are waiting")
 	}
-	for _, process := range m.processes {
-		if process.accountID == id {
-			m.mu.Unlock()
-			return nil, errors.New("Claude account has an active turn; wait or interrupt it before logging in")
-		}
+	if m.accountBusyLocked(id) {
+		m.mu.Unlock()
+		return nil, errors.New("Claude account has an active turn; wait or interrupt it before logging in")
 	}
 	account, err := m.readAccount(id)
 	if err != nil {
@@ -367,11 +365,9 @@ func (m *Manager) logoutAccount(params map[string]any) (any, error) {
 		return nil, errors.New("Invalid Claude Node account ID")
 	}
 	m.mu.Lock()
-	for _, process := range m.processes {
-		if process.accountID == id {
-			m.mu.Unlock()
-			return nil, errors.New("Claude account has an active turn; wait or interrupt it before logging out")
-		}
+	if m.accountBusyLocked(id) {
+		m.mu.Unlock()
+		return nil, errors.New("Claude account has an active turn; wait or interrupt it before logging out")
 	}
 	login := m.logins[id]
 	m.mu.Unlock()

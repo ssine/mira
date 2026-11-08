@@ -53,6 +53,8 @@ type Manager struct {
 	// Completed IDs prevent an ambiguous control reply from rerunning tools.
 	accepted  map[string]bool
 	sealed    map[string]bool
+	starting  map[string]int
+	cacheMu   sync.Mutex
 	closeOnce sync.Once
 }
 
@@ -66,7 +68,7 @@ func NewWithEgress(identityDir string, egress *accountegress.Manager) *Manager {
 	if egress == nil {
 		egress = accountegress.New(identityDir)
 	}
-	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, logins: map[string]*loginProcess{}, accepted: map[string]bool{}, sealed: map[string]bool{}}
+	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, logins: map[string]*loginProcess{}, accepted: map[string]bool{}, sealed: map[string]bool{}, starting: map[string]int{}}
 	m.egress = egress
 	m.ownsEgress = ownsEgress
 	m.cachePaths(identityDir)
@@ -198,149 +200,214 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		}
 		return m.oneShot(params)
 	}
+	action, _ := params["action"].(string)
+	id, _ := params["turnId"].(string)
+	accountID, _ := params["nodeAccountId"].(string)
+	// Reconciliation probes share m.mu and have a short Server budget. Child
+	// processes and account egress readiness therefore run outside the lock.
+	switch action {
+	case "describe":
+		return m.describe(accountID)
+	case "start":
+		return m.start(params)
+	case "cache-status", "cache-configure":
+		m.mu.Lock()
+		closed := m.closed
+		m.mu.Unlock()
+		if closed {
+			return nil, errors.New("Claude manager is shutting down")
+		}
+		return m.cacheCall(action, params["maxBytes"])
+	case "prepare", "status":
+		if accountID != "" {
+			if _, err := m.accountEnvironment(accountID); err != nil {
+				return nil, err
+			}
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
 		return nil, errors.New("Claude manager is shutting down")
 	}
-	action, _ := params["action"].(string)
-	id, _ := params["turnId"].(string)
-	accountID, _ := params["nodeAccountId"].(string)
 	switch action {
 	case "reconcile":
 		return m.reconcile(params)
-	case "cache-status", "cache-configure":
-		return m.cacheCall(action, params["maxBytes"])
 	case "account/configure":
 		return m.configureAccount(params)
 	case "prepare":
 		m.prepare()
 		fallthrough
 	case "status":
-		if accountID != "" {
-			if _, err := m.accountEnvironment(accountID); err != nil {
-				return nil, err
-			}
-		}
 		return map[string]any{"runtimeId": m.runtimeID, "status": m.state, "error": m.lastError, "active": m.processes[id] != nil, "accepted": m.accepted[id]}, nil
-	case "describe":
-		if m.state != "ready" {
-			return nil, errors.New("Claude runtime is not ready")
-		}
-		command := []byte("{\"action\":\"describe\"}\n")
-		timeout := 30 * time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
-		env, release, err := m.accountEnvironmentAcquired(accountID, false)
-		if err != nil {
-			return nil, err
-		}
-		defer release()
-		cmd.Env = env
-		cmd.Dir = m.dir
-		configureCommand(cmd)
-		cmd.Stdin = bytes.NewReader(command)
-		cmd.Cancel = func() error { killCommand(cmd); return nil }
-		cmd.WaitDelay = 5 * time.Second
-		output := &boundedOutput{limit: 4 * 1024 * 1024}
-		cmd.Stdout = output
-		err = cmd.Run()
-		if err != nil {
-			return nil, errors.New("Could not read Claude models or Node-local authentication")
-		}
-		var value any
-		err = json.Unmarshal(output.Bytes(), &value)
-		return value, err
-	case "start":
-		if params["runtimeId"] != m.runtimeID {
-			return nil, errors.New("Claude runtime changed before start; execution state is unknown")
-		}
-		if m.sealed[id] {
-			return nil, errors.New("Claude turn was fenced after its worker stopped")
-		}
-		if m.accepted[id] {
-			return map[string]any{"accepted": true, "active": m.processes[id] != nil}, nil
-		}
-		if m.state != "ready" {
-			return nil, errors.New("Claude runtime is not ready")
-		}
-		if len(m.processes) >= 8 {
-			return nil, errors.New("Claude runtime has reached its 8 active turn limit")
-		}
-		if id == "" {
-			return nil, errors.New("turnId is required")
-		}
-		// Cache failures never prevent native execution. Maintenance repairs locks
-		// left by a crashed SDK worker before the next turn starts.
-		_, _ = m.cacheCall("cache-status", nil)
-		params["cache"] = map[string]string{"root": m.cacheRoot, "config": m.cacheConfig}
-		cmd := exec.Command(nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
-		env, release, err := m.accountEnvironmentAcquired(accountID, false)
-		if err != nil {
-			return nil, err
-		}
-		cmd.Env = env
-		cmd.Dir = m.dir
-		configureCommand(cmd)
-		input, err := cmd.StdinPipe()
-		if err != nil {
-			return nil, err
-		}
-		// Transcripts flow directly to Server; stdout carries only steer
-		// acknowledgements and stderr is not an unbounded log.
-		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{}), release: release}
-		cmd.Stdout = &p.acks
-		cmd.Stderr = io.Discard
-		cmd.WaitDelay = 2 * time.Second
-		if err = cmd.Start(); err != nil {
-			input.Close()
-			release()
-			return nil, err
-		}
-		cleanup, err := guardProcessTree(cmd)
-		if err != nil {
-			killCommand(cmd)
-			_ = input.Close()
-			_ = cmd.Wait()
-			release()
-			return nil, err
-		}
-		var stopOnce sync.Once
-		var stopped bool
-		p.stop = func() bool { stopOnce.Do(func() { stopped = cleanup() }); return stopped }
-		m.processes[id] = p
-		m.accepted[id] = true
-		if len(m.accepted) > 4096 {
-			for key := range m.accepted {
-				if m.processes[key] == nil && key != id {
-					delete(m.accepted, key)
-					break
-				}
-			}
-		}
-		encoded, _ := json.Marshal(params)
-		// Startup stdin is bounded too: a wedged worker must not hold m.mu and
-		// prevent shutdown or reconciliation. Failure retains the accepted ID.
-		err = writeProcessControl(p, append(encoded, '\n'))
-		if err != nil {
-			p.stop()
-		}
-		go func() {
-			_ = cmd.Wait()
-			stopped := p.stop()
-			_ = input.Close()
-			m.mu.Lock()
-			m.unconfirmedExit = m.unconfirmedExit || !stopped
-			delete(m.processes, id)
-			m.mu.Unlock()
-			p.release()
-			close(p.done)
-		}()
-		return map[string]any{"accepted": true}, err
 	default:
 		return nil, errors.New("unknown Claude runtime action")
 	}
+}
+
+func (m *Manager) describe(accountID string) (any, error) {
+	m.mu.Lock()
+	closed, ready, dir := m.closed, m.state == "ready", m.dir
+	m.mu.Unlock()
+	if closed {
+		return nil, errors.New("Claude manager is shutting down")
+	}
+	if !ready {
+		return nil, errors.New("Claude runtime is not ready")
+	}
+	env, release, err := m.accountEnvironmentAcquired(accountID, false)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(dir, "worker.mjs"))
+	cmd.Env = env
+	cmd.Dir = dir
+	configureCommand(cmd)
+	cmd.Stdin = bytes.NewReader([]byte("{\"action\":\"describe\"}\n"))
+	cmd.Cancel = func() error { killCommand(cmd); return nil }
+	cmd.WaitDelay = 5 * time.Second
+	output := &boundedOutput{limit: 4 * 1024 * 1024}
+	cmd.Stdout = output
+	if err = cmd.Run(); err != nil {
+		return nil, errors.New("Could not read Claude models or Node-local authentication")
+	}
+	var value any
+	err = json.Unmarshal(output.Bytes(), &value)
+	return value, err
+}
+
+// startRejectedLocked holds every fencing and admission check for a start. A
+// start runs them before and again after its unlocked preparation, so a
+// reconciliation that fenced the turn meanwhile still prevents the worker.
+func (m *Manager) startRejectedLocked(params map[string]any, id string) (any, error) {
+	if m.closed {
+		return nil, errors.New("Claude manager is shutting down")
+	}
+	if params["runtimeId"] != m.runtimeID {
+		return nil, errors.New("Claude runtime changed before start; execution state is unknown")
+	}
+	if m.sealed[id] {
+		return nil, errors.New("Claude turn was fenced after its worker stopped")
+	}
+	if m.accepted[id] {
+		return map[string]any{"accepted": true, "active": m.processes[id] != nil}, nil
+	}
+	if m.state != "ready" {
+		return nil, errors.New("Claude runtime is not ready")
+	}
+	if len(m.processes) >= 8 {
+		return nil, errors.New("Claude runtime has reached its 8 active turn limit")
+	}
+	if id == "" {
+		return nil, errors.New("turnId is required")
+	}
+	return nil, nil
+}
+
+func (m *Manager) start(params map[string]any) (any, error) {
+	id, _ := params["turnId"].(string)
+	accountID, _ := params["nodeAccountId"].(string)
+	m.mu.Lock()
+	if result, err := m.startRejectedLocked(params, id); result != nil || err != nil {
+		m.mu.Unlock()
+		return result, err
+	}
+	// Account changes wait for this start as they wait for a running turn.
+	m.starting[accountID]++
+	m.mu.Unlock()
+	// Cache failures never prevent native execution. Maintenance repairs locks
+	// left by a crashed SDK worker before the next turn starts.
+	_, _ = m.cacheCall("cache-status", nil)
+	env, release, err := m.accountEnvironmentAcquired(accountID, false)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.starting[accountID]--; m.starting[accountID] <= 0 {
+		delete(m.starting, accountID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if result, err := m.startRejectedLocked(params, id); result != nil || err != nil {
+		release()
+		return result, err
+	}
+	params["cache"] = map[string]string{"root": m.cacheRoot, "config": m.cacheConfig}
+	cmd := exec.Command(nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
+	cmd.Env = env
+	cmd.Dir = m.dir
+	configureCommand(cmd)
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		release()
+		return nil, err
+	}
+	// Transcripts flow directly to Server; stdout carries only steer
+	// acknowledgements and stderr is not an unbounded log.
+	p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{}), release: release}
+	cmd.Stdout = &p.acks
+	cmd.Stderr = io.Discard
+	cmd.WaitDelay = 2 * time.Second
+	if err = cmd.Start(); err != nil {
+		input.Close()
+		release()
+		return nil, err
+	}
+	cleanup, err := guardProcessTree(cmd)
+	if err != nil {
+		killCommand(cmd)
+		_ = input.Close()
+		_ = cmd.Wait()
+		release()
+		return nil, err
+	}
+	var stopOnce sync.Once
+	var stopped bool
+	p.stop = func() bool { stopOnce.Do(func() { stopped = cleanup() }); return stopped }
+	m.processes[id] = p
+	m.accepted[id] = true
+	if len(m.accepted) > 4096 {
+		for key := range m.accepted {
+			if m.processes[key] == nil && key != id {
+				delete(m.accepted, key)
+				break
+			}
+		}
+	}
+	encoded, _ := json.Marshal(params)
+	// Startup stdin is bounded too: a wedged worker must not hold m.mu and
+	// prevent shutdown or reconciliation. Failure retains the accepted ID.
+	err = writeProcessControl(p, append(encoded, '\n'))
+	if err != nil {
+		p.stop()
+	}
+	go func() {
+		_ = cmd.Wait()
+		stopped := p.stop()
+		_ = input.Close()
+		m.mu.Lock()
+		m.unconfirmedExit = m.unconfirmedExit || !stopped
+		delete(m.processes, id)
+		m.mu.Unlock()
+		p.release()
+		close(p.done)
+	}()
+	return map[string]any{"accepted": true}, err
+}
+
+// accountBusyLocked reports a running or starting turn for the account.
+func (m *Manager) accountBusyLocked(id string) bool {
+	if m.starting[id] > 0 {
+		return true
+	}
+	for _, p := range m.processes {
+		if p.accountID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // oneShot runs a short-lived worker for a single native title request.

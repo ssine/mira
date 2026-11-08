@@ -26,8 +26,11 @@ const (
 var hex64 = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 // Cache maintenance uses only Node builtins and does not install or start Claude.
-// Calls are serialized by Manager.mu; only this path may reap dead writer locks.
+// Calls are serialized by Manager.cacheMu, not Manager.mu, so maintenance never
+// delays reconciliation. Only this path may reap dead writer locks.
 func (m *Manager) cacheCall(action string, maxBytes any) (any, error) {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
 	source, _ := assets.ReadFile("assets/session-cache.mjs")
 	script := string(source) + `
 let input = "";

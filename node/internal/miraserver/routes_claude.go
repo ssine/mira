@@ -1058,9 +1058,12 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		}
 		// An authenticated write from the owning turn proves its worker is alive.
 		// Only positive observations come from writes; stopping still needs proof.
-		if !completed {
-			server.rememberClaudeExecution(claudeExecutionTarget{session: id, turn: turn, node: actor.NodeID, revision: revision}, "running", "")
+		// Completion retires the positive observation instead of letting it linger.
+		observed, reason := "running", ""
+		if completed {
+			observed, reason = "unknown", "history"
 		}
+		server.rememberClaudeExecution(claudeExecutionTarget{session: id, turn: turn, node: actor.NodeID, revision: revision}, observed, reason)
 		server.claudeLive.publish(id, turn, durable, live)
 		if batch {
 			return writeJSON(w, 200, map[string]any{"ok": true, "seq": durable})
