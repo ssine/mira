@@ -74,6 +74,7 @@ export class CodexAccounts {
     this.form.addEventListener("submit", event => { event.preventDefault(); void this.run(() => this.save()); });
     this.form.elements.mode.addEventListener("change", () => this.modeChanged());
     this.form.elements.engine.addEventListener("change", () => this.engineChanged());
+    this.form.elements.egressEnabled.addEventListener("change", () => this.egressChanged());
     this.dialog.querySelector("[data-account-close]").addEventListener("click", () => this.dialog.close());
     this.dialog.addEventListener("close", () => { this.clearSecrets(); void this.cancelLogin(); });
     for (const action of ["start", "stop", "login", "logout", "cancel-login"]) {
@@ -102,7 +103,7 @@ export class CodexAccounts {
         const identity = el("span"); identity.append(el("strong", account.name), el("small", `${node.displayName || node.hostname} · ${account.engine === "claude" ? "Claude · " : "Codex · "}${account.reportedAppServer?.provider?.name || account.reportedAppServer?.provider?.id || account.provider || "待配置"}`));
         const snapshot = account.snapshot, quota = weeklyQuota(snapshot?.limits);
         const custom = account.reportedAppServer?.provider?.id && account.reportedAppServer.provider.id !== "openai";
-        const usage = account.engine === "claude" ? account.reportedAppServer?.provider?.model || "Claude API 账号" : custom ? "服务商未提供额度接口" : quota.remaining === null ? "尚无额度数据" : `周额度剩余 ${Number(quota.remaining.toFixed(1))}%`;
+        const usage = account.engine === "claude" ? account.authType === "subscription" ? "Claude.ai 订阅" : account.reportedAppServer?.provider?.model || "Claude API 账号" : custom ? "服务商未提供额度接口" : quota.remaining === null ? "尚无额度数据" : `周额度剩余 ${Number(quota.remaining.toFixed(1))}%`;
         const state = node.status !== "online" ? "节点离线" : stateLabel[account.reportedAppServer?.status] || "等待节点确认";
         const status = el("span"); status.append(el("span", usage), el("small", snapshot?.account?.email || state));
         row.append(identity, status, el("span", state, "muted")); row.addEventListener("click", () => this.edit(node, account)); list.append(row);
@@ -122,16 +123,27 @@ export class CodexAccounts {
     this.form.elements.node.disabled = Boolean(account);
     this.form.elements.name.value = account?.name || "";
     this.form.elements.mode.value = account?.isDefault || account?.desiredAppServer?.codexHome ? "adopt" : account?.authType === "providerConfig" ? "custom" : "chatgpt";
-    if (account?.engine === "claude") this.form.elements.mode.value = account.provider || "anthropic";
+    if (account?.engine === "claude") this.form.elements.mode.value = account.authType === "subscription" ? "subscription" : account.provider || "anthropic";
     this.form.elements.mode.disabled = Boolean(account);
     this.form.elements.home.value = account?.desiredAppServer?.codexHome || account?.reportedAppServer?.codexHome || "";
     this.form.elements.home.disabled = Boolean(account);
     this.form.elements.environmentFiles.value = (account?.desiredAppServer?.environmentFiles ?? []).join("\n");
     this.form.elements.inheritEnv.value = (account?.desiredAppServer?.inheritEnv ?? []).join(", ");
     this.form.elements.baseUrl.value = account?.reportedAppServer?.provider?.baseUrl || "";
+    this.form.elements.loginEmail.value = account?.email || "";
     this.form.elements.claudeModel.value = account?.reportedAppServer?.provider?.model || "";
     this.form.elements.claudeEffort.value = account?.reportedAppServer?.provider?.effort || "";
     this.form.elements.region.value = account?.reportedAppServer?.provider?.region || "us-east-1";
+    const egress = account?.egress || {};
+    this.form.elements.egressEnabled.checked = Boolean(account?.egressConfigured || egress.server);
+    this.form.elements.egressType.value = egress.type || "socks5";
+    this.form.elements.egressServer.value = egress.server || "";
+    this.form.elements.egressPort.value = egress.port || "";
+    this.form.elements.egressUsername.value = egress.username || "";
+    this.form.elements.egressProfile.value = egress.profile || (account?.engine === "claude" ? "claude" : "mafia");
+    this.dialog.querySelector("[data-account-egress-status]").textContent = account?.egressConfigured ? "节点已配置托管出口；密码留空会保留。" : "尚未配置托管出口。";
+    this.dialog.querySelector("[data-account-egress]").hidden = !node?.capabilities?.accountEgressV1;
+    this.egressChanged();
     this.dialog.querySelector("[data-account-actions]").hidden = !account;
     this.dialog.querySelector("[data-account-title]").textContent = `${account ? "管理" : "添加"} ${account?.engine === "claude" ? "Claude" : "Codex"} 账号`;
     const provider = account?.reportedAppServer?.provider;
@@ -143,7 +155,8 @@ export class CodexAccounts {
     const claude = this.form.elements.engine.value === "claude", selected = this.form.elements.node.value;
     this.form.elements.node.replaceChildren(...this.nodes.filter(node => node.capabilities?.[claude ? "claudeAccountsV1" : "codexAccountsV1"]).map(node => new Option(node.displayName || node.hostname, node.nodeId)));
     if ([...this.form.elements.node.options].some(option => option.value === selected)) this.form.elements.node.value = selected;
-    this.form.elements.mode.replaceChildren(...(claude ? [["anthropic", "Anthropic / Messages API"], ["bedrock", "Amazon Bedrock / AWS 透传"]] : [["chatgpt", "ChatGPT / OpenAI API Key"], ["custom", "自定义 Responses 服务商"], ["adopt", "接管已有 Codex 配置"]]).map(([value, label]) => new Option(label, value)));
+    this.form.elements.mode.replaceChildren(...(claude ? [["subscription", "Claude.ai 订阅（官方 OAuth）"], ["anthropic", "Anthropic / Messages API"], ["bedrock", "Amazon Bedrock / AWS 透传"]] : [["chatgpt", "ChatGPT / OpenAI API Key"], ["custom", "自定义 Responses 服务商"], ["adopt", "接管已有 Codex 配置"]]).map(([value, label]) => new Option(label, value)));
+    this.form.elements.egressProfile.value = claude ? "claude" : "mafia";
     this.dialog.querySelector("[data-account-title]").textContent = `添加 ${claude ? "Claude" : "Codex"} 账号`;
     this.modeChanged();
   }
@@ -151,11 +164,16 @@ export class CodexAccounts {
   modeChanged() {
     const mode = this.form.elements.mode.value;
     const claude = this.form.elements.engine.value === "claude";
+    const subscription = claude && mode === "subscription";
     this.dialog.querySelector("[data-account-home]").hidden = mode !== "adopt";
-    this.dialog.querySelector("[data-account-provider]").hidden = !claude && mode !== "custom";
+    this.dialog.querySelector("[data-account-provider]").hidden = subscription || !claude && mode !== "custom";
+    this.dialog.querySelector("[data-account-login-email]").hidden = !subscription;
+    this.dialog.querySelector("[data-account-api-key]").hidden = subscription;
     this.form.elements.home.required = mode === "adopt";
-    this.form.elements.baseUrl.required = claude || mode === "custom";
+    this.form.elements.baseUrl.required = claude && !subscription || mode === "custom";
+    this.form.elements.loginEmail.required = subscription;
     this.form.elements.claudeModel.required = claude;
+    if (subscription && !this.form.elements.claudeModel.value) this.form.elements.claudeModel.value = "opus";
     this.form.elements.region.required = claude && mode === "bedrock";
     this.dialog.querySelector("[data-account-claude-model]").hidden = !claude;
     this.dialog.querySelector("[data-account-claude-effort]").hidden = !claude;
@@ -163,14 +181,20 @@ export class CodexAccounts {
     this.dialog.querySelector("[data-account-environment]").hidden = claude;
     this.dialog.querySelector("[data-account-start]").textContent = claude ? "启用" : "启动";
     this.dialog.querySelector("[data-account-stop]").textContent = claude ? "停用" : "停止";
+    this.dialog.querySelector("[data-account-login]").textContent = subscription ? "登录 Claude.ai" : "登录";
     const provider = this.current?.account.reportedAppServer?.provider?.id;
-    const custom = claude || mode === "custom" || (provider && provider !== "openai");
+    const custom = subscription ? false : claude || mode === "custom" || (provider && provider !== "openai");
     for (const action of ["login", "logout", "cancel-login"]) this.dialog.querySelector(`[data-account-${action}]`).hidden = custom;
-    this.dialog.querySelector("[data-account-clear-key]").hidden = !claude && mode !== "custom";
-    this.dialog.querySelector("[data-account-key-hint]").textContent = claude || mode === "custom" ? "密钥只写入所选节点。留空保留已有密钥。" : mode === "adopt" ? "现有 config.toml 与凭据继续由原文件管理；环境设置可在下方补充。" : "使用 ChatGPT 登录，或填写 OpenAI API Key 后点击「登录」。";
+    this.dialog.querySelector("[data-account-clear-key]").hidden = subscription || !claude && mode !== "custom";
+    this.dialog.querySelector("[data-account-key-hint]").textContent = subscription ? "使用 Claude 官方 OAuth 登录；凭据只写入所选节点。" : claude || mode === "custom" ? "密钥只写入所选节点。留空保留已有密钥。" : mode === "adopt" ? "现有 config.toml 与凭据继续由原文件管理；环境设置可在下方补充。" : "使用 ChatGPT 登录，或填写 OpenAI API Key 后点击「登录」。";
   }
 
-  clearSecrets() { this.form.elements.apiKey.value = ""; this.form.elements.environment.value = ""; }
+  egressChanged() {
+    const enabled = this.form.elements.egressEnabled.checked;
+    for (const name of ["egressServer", "egressPort", "egressProfile"]) this.form.elements[name].required = enabled;
+  }
+
+  clearSecrets() { this.form.elements.apiKey.value = ""; this.form.elements.environment.value = ""; this.form.elements.egressPassword.value = ""; }
 
   async run(operation) {
     if (this.busy) return; this.busy = true;
@@ -219,8 +243,10 @@ export class CodexAccounts {
     } else {
       await this.api(this.endpoint(""), { method: "PATCH", body: JSON.stringify({ name: fields.name.value.trim() }) });
     }
-    try { if (Object.keys(body).length) await this.api(this.endpoint("configure"), { method: "POST", body: JSON.stringify(body) }); }
-    finally { this.clearSecrets(); }
+    try {
+      if (Object.keys(body).length) await this.api(this.endpoint("configure"), { method: "POST", body: JSON.stringify(body) });
+      await this.saveEgress(fields.node.value, this.current.account.nodeAccountId);
+    } finally { this.clearSecrets(); }
     await this.refresh();
     this.dialog.querySelector("[data-account-actions]").hidden = false;
     this.dialog.querySelector("[data-account-profile]").textContent = "配置已保存。启动账号后可查看额度或登录。";
@@ -229,31 +255,65 @@ export class CodexAccounts {
 
   async saveClaude() {
     const fields = this.form.elements;
-    const provider = { id: fields.mode.value, baseUrl: fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.claudeEffort.value ? { effort: fields.claudeEffort.value } : {}), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
+    const subscription = fields.mode.value === "subscription";
+    const provider = { id: subscription ? "anthropic" : fields.mode.value, baseUrl: subscription ? "https://api.anthropic.com" : fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.claudeEffort.value ? { effort: fields.claudeEffort.value } : {}), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
+    const authType = subscription ? "subscription" : "api_key";
+    const loginEmail = fields.loginEmail.value.trim();
     if (!this.current) {
-      const created = await this.api("/v1/claude/accounts", { method: "POST", body: JSON.stringify({ nodeId: fields.node.value, name: fields.name.value.trim() }) });
+      const created = await this.api("/v1/claude/accounts", { method: "POST", body: JSON.stringify({ nodeId: fields.node.value, name: fields.name.value.trim(), authType, loginEmail }) });
       this.current = { node: { nodeId: fields.node.value }, account: created };
       fields.node.disabled = fields.engine.disabled = true;
     } else await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}`, { method: "PATCH", body: JSON.stringify({ name: fields.name.value.trim() }) });
-    const body = { provider };
-    if (fields.apiKey.value) body.apiKey = fields.apiKey.value;
-    else if (fields.clearKey.checked) body.apiKey = "";
+    const body = { provider, authType, loginEmail };
+    if (!subscription && fields.apiKey.value) body.apiKey = fields.apiKey.value;
+    else if (!subscription && fields.clearKey.checked) body.apiKey = "";
     const previous = this.current.account.reportedAppServer?.provider || {};
-    const changed = "apiKey" in body || ["id", "baseUrl", "model", "effort", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
-    try { if (changed) await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}/configure`, { method: "POST", body: JSON.stringify(body) }); }
-    finally { this.clearSecrets(); }
+    const changed = authType !== (this.current.account.authType || "api_key") || loginEmail !== (this.current.account.email || "") || "apiKey" in body || ["id", "baseUrl", "model", "effort", "region"].some(key => (provider[key] || "") !== (previous[key] || ""));
+    try {
+      if (changed) await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}/configure`, { method: "POST", body: JSON.stringify(body) });
+      await this.saveEgress(fields.node.value, this.current.account.nodeAccountId);
+      if (subscription) await this.api(`/v1/claude/runtimes/${fields.node.value}/prepare`, { method: "POST", body: "{}" });
+    } finally { this.clearSecrets(); }
     await this.refresh();
     const node = this.nodes.find(value => value.nodeId === this.current.node.nodeId);
     const account = node?.claudeAccounts?.find(value => value.nodeAccountId === this.current.account.nodeAccountId);
     if (account) this.current = { node, account };
     this.dialog.querySelector("[data-account-actions]").hidden = false;
-    this.dialog.querySelector("[data-account-profile]").textContent = "Claude 账号已保存，可在对话的账号列表中选择使用。";
+    this.dialog.querySelector("[data-account-profile]").textContent = subscription ? "账号配置已保存。点击「登录 Claude.ai」完成官方 OAuth 登录。" : "Claude 账号已保存，可在对话的账号列表中选择使用。";
+  }
+
+  async saveEgress(nodeId, accountId) {
+    const fields = this.form.elements;
+    const endpoint = `/v1/accounts/${fields.engine.value}/${accountId}/egress`;
+    if (!fields.egressEnabled.checked) {
+      await this.api(endpoint, { method: "DELETE" });
+      return;
+    }
+    if (!fields.egressServer.value.trim() || !fields.egressPort.value) throw new Error("请填写托管出口的服务器和端口。");
+    const port = Number(fields.egressPort.value);
+    const body = {
+      type: fields.egressType.value,
+      server: fields.egressServer.value.trim(),
+      port,
+      username: fields.egressUsername.value.trim(),
+      password: fields.egressPassword.value,
+      profile: fields.egressProfile.value,
+    };
+    await this.api(endpoint, { method: "POST", body: JSON.stringify(body) });
   }
 
   async action(action) {
     if (action === "cancel-login") { await this.cancelLogin(); return; }
     if (!this.current) return;
     if (this.current.account.engine === "claude") {
+      if (this.current.account.authType === "subscription" && action === "login") {
+        await this.startClaudeLogin(); return;
+      }
+      if (this.current.account.authType === "subscription" && action === "logout") {
+        if (!confirm("退出此 Claude.ai 订阅账号？对话历史会保留。")) return;
+        await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}/logout`, { method: "POST", body: "{}" });
+        await this.refresh(); this.notice("Claude 账号已退出"); return;
+      }
       if (action !== "start" && action !== "stop") return;
       await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}`, { method: "PATCH", body: JSON.stringify({ enabled: action === "start" }) });
       if (action === "start") await this.api(`/v1/claude/runtimes/${this.current.node.nodeId}/prepare`, { method: "POST", body: "{}" });
@@ -281,13 +341,72 @@ export class CodexAccounts {
     }
   }
 
+  async waitForClaudeRuntime() {
+    const endpoint = `/v1/claude/runtimes/${this.current.node.nodeId}/status`;
+    const deadline = Date.now() + 2 * 60_000;
+    while (Date.now() < deadline) {
+      const result = await this.api(endpoint, { method: "POST", body: "{}" });
+      if (result.status === "ready") return;
+      if (result.status === "error") throw new Error(result.error || "Claude 运行环境准备失败");
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    throw new Error("Claude 运行环境仍未准备完成，请稍后重试。");
+  }
+
+  async startClaudeLogin() {
+    const accountId = this.current.account.nodeAccountId;
+    await this.api(`/v1/claude/runtimes/${this.current.node.nodeId}/prepare`, { method: "POST", body: "{}" });
+    await this.waitForClaudeRuntime();
+    const result = await this.api(`/v1/claude/accounts/${accountId}/login`, { method: "POST", body: JSON.stringify({ email: this.form.elements.loginEmail.value.trim() }) });
+    this.login = {
+      type: "claude",
+      endpoint: `/v1/claude/accounts/${accountId}/login`,
+      cancel: `/v1/claude/accounts/${accountId}/login/cancel`,
+      complete: `/v1/claude/accounts/${accountId}/login/complete`,
+      id: result.sessionId,
+    };
+    this.renderClaudeLogin(result);
+    this.pollLogin();
+  }
+
+  renderClaudeLogin(result) {
+    const info = this.dialog.querySelector("[data-account-login-info]");
+    info.replaceChildren(el("p", "请在已配置美国代理的隔离浏览器中登录，然后粘贴回调页显示的授权码。"));
+    try {
+      const url = new URL(result.verificationUrl);
+      if (url.protocol === "https:") {
+        const link = el("a", "打开 Claude 登录页面 ↗");
+        link.href = url.href; link.target = "_blank"; link.rel = "noopener noreferrer"; info.append(link);
+      }
+    } catch { /* Keep the form usable if the URL is temporarily absent. */ }
+    const form = el("div", "", "account-login-code");
+    const input = el("input"); input.placeholder = "粘贴授权码"; input.autocomplete = "off";
+    const submit = el("button", "完成登录", "primary"); submit.type = "button";
+    form.append(input, submit);
+    const complete = () => {
+      const login = this.login; if (login?.type !== "claude" || !input.value.trim()) return;
+      void this.run(async () => {
+        const state = await this.api(login.complete, { method: "POST", body: JSON.stringify({ sessionId: login.id, code: input.value.trim() }) });
+        if (state.status === "completed") {
+          this.login = null; info.textContent = "Claude 登录完成"; await this.refresh();
+        } else if (state.status === "failed") {
+          this.login = null; info.textContent = state.error || "Claude 登录失败，请重新发起。";
+        } else this.pollLogin();
+      });
+    };
+    submit.addEventListener("click", complete);
+    input.addEventListener("keydown", event => { if (event.key === "Enter") { event.preventDefault(); complete(); } });
+    info.append(form);
+    input.focus();
+  }
+
   pollLogin() {
     clearTimeout(this.loginTimer); const login = this.login; if (!login) return;
     this.loginTimer = setTimeout(async () => {
       try {
         const result = await this.api(`${login.endpoint}?sessionId=${encodeURIComponent(login.id)}`); if (this.login !== login) return;
-        if (result.status === "pending") { this.pollLogin(); return; }
-        this.login = null; this.dialog.querySelector("[data-account-login-info]").textContent = result.status === "completed" ? "登录完成" : "登录未完成，可重新发起。"; await this.refresh();
+        if (result.status === "pending" || result.status === "starting") { this.pollLogin(); return; }
+        this.login = null; this.dialog.querySelector("[data-account-login-info]").textContent = result.status === "completed" ? "登录完成" : result.error || "登录未完成，可重新发起。"; await this.refresh();
       } catch { if (this.login === login) this.pollLogin(); }
     }, 2000);
   }

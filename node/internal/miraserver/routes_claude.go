@@ -68,7 +68,7 @@ const claudeHistoryAcknowledgement = `CASE WHEN persistence='incomplete' THEN NO
    WHERE later.session_id=ack.session_id AND later.revision>=ack.revision AND (
      later.error='Runtime ended without an acknowledged completion' OR EXISTS(
        SELECT 1 FROM mira_claude_events e WHERE e.session_id=later.session_id AND e.turn_id=later.turn_id
-       AND ((e.event_type='system' AND e.payload->>'subtype'='mirror_error') OR e.payload->>'degraded'='true'))))
+       AND ((e.event_type='system' AND e.payload::text ~ '\"subtype\"[[:space:]]*:[[:space:]]*\"mirror_error\"') OR e.payload::text ~ '\"degraded\"[[:space:]]*:[[:space:]]*true'))))
  FROM mira_claude_turns ack WHERE ack.session_id=mira_claude_sessions.session_id
    AND ack.request->>'continueAcknowledgedHistory'='true' ORDER BY ack.revision DESC LIMIT 1
 ),false) ELSE false END`

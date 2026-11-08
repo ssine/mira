@@ -198,6 +198,26 @@ func TestClaudeProjectionCannotRejectNativeNUL(t *testing.T) {
 	}
 }
 
+func TestClaudeHistoryListToleratesNativeNUL(t *testing.T) {
+	f := newClaudeFixture(t)
+	id, turn, headers := f.reserved()
+	if _, err := f.server.pool.Exec(context.Background(), `UPDATE mira_claude_turns SET request='{"continueAcknowledgedHistory":true}'::json WHERE turn_id=$1`, turn); err != nil {
+		t.Fatal(err)
+	}
+	event := map[string]any{"eventId": uuidClaude(), "payload": map[string]any{"type": "system", "subtype": "mirror_error", "unknown": "native\x00field"}}
+	status, raw := f.request("POST", "/v1/claude/sessions/"+id+"/events", event, headers)
+	if status != 200 {
+		t.Fatalf("NUL acknowledgement event: %d %s", status, raw)
+	}
+	if result := f.call("GET", "/v1/claude/conversations/"+id, nil); result["historyAcknowledgementRequired"] != true {
+		t.Fatalf("history acknowledgement projection: %#v", result)
+	}
+	list := f.call("GET", "/v1/claude/conversations", nil)
+	if len(list["data"].([]any)) == 0 {
+		t.Fatal("conversation list omitted NUL-bearing session")
+	}
+}
+
 func TestClaudeRunningTurnCost(t *testing.T) {
 	f := newClaudeFixture(t)
 	ctx := context.Background()

@@ -210,6 +210,7 @@ func (client *controlClient) reconcileAccounts(ctx context.Context) error {
 				}
 				configuration.AppServerCodexHome = home
 				manager = newAppServerManager(configuration)
+				manager.egress = client.egress
 				manager.setNodeCredential(client.token)
 			}
 			entryContext, cancel := context.WithCancel(context.WithoutCancel(ctx))

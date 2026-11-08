@@ -108,7 +108,7 @@ turn. Reads scan the small usage projection, never the raw conversation history.
 The Go Server and normal Node install remain independent of Node.js and Claude.
 An execution Node needs **Node.js 22+ and npm** when Claude is selected. Mira runs
 `npm ci --ignore-scripts` against an embedded lockfile only on demand. SDK
-**0.3.280**, bundled Claude Code **2.1.280**, and MCP SDK **1.30.0** are pinned.
+**0.3.319**, bundled Claude Code **2.1.319**, and MCP SDK **1.30.0** are pinned.
 The cache lives under `<identity-directory>/runtimes/claude/<asset-hash>/`; a
 completed installation is reused offline. Partial installs are staged and removed.
 A Node runs at most eight active Claude turn processes. Preparation is asynchronous
@@ -116,15 +116,59 @@ and does not stop heartbeats. Shutdown interrupts workers, then kills their proc
 trees after a grace period. Windows child processes do not create console windows.
 
 The existing **Accounts** page manages both Codex and Claude accounts. Select
-Claude Code when adding an account, then configure a Messages or Bedrock API,
-default model and API key. Credentials are sent over the approved Node channel
-and saved with private permissions under `<identity-directory>/accounts/<id>/claude/`.
-Only the account name, provider metadata, enabled state and revision are stored
+Claude Code when adding an account, then choose either a Claude.ai subscription
+using the official OAuth flow, or a Messages/Bedrock API with an API key.
+Credentials are sent over the approved Node channel or written by the official
+CLI and saved with private permissions under
+`<identity-directory>/accounts/<id>/claude/`. Only the account name, provider
+metadata, login email, authentication type, enabled state and revision are stored
 on Server. Claude conversations persist their selected Node account and can
-switch accounts between turns; active turns prevent configuration changes.
-Model discovery and native child processes use that account's isolated environment.
-The shared page supports renaming, updating credentials, and enabling/disabling
-Claude accounts. Claude API quotas are not presented as Codex subscription quotas.
+switch accounts between turns; active turns prevent configuration and login
+changes. Model discovery and native child processes use that account's isolated
+environment. The shared page supports renaming, updating credentials,
+enabling/disabling and subscription login/logout. Claude API quotas are not
+presented as Codex subscription quotas.
+
+### Claude.ai subscription login
+
+The execution Node starts its pinned official `claude auth login --claudeai`
+binary with the account's isolated `CLAUDE_CONFIG_DIR` and managed egress. The
+Server returns the OAuth URL and keeps one bounded login process per account.
+After the user signs in through the isolated browser, the callback authorization
+code is returned through the same private Node channel. A successful process
+must produce a `.credentials.json` containing refreshable `claudeAiOauth`
+credentials with `user:inference`; Mira then marks the account configured.
+The access and refresh tokens never enter PostgreSQL.
+
+Subscription account starts omit `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`,
+so Claude Code uses its native refreshable login. The same account-scoped egress
+is active for token exchange, refresh and inference, while tools stay direct.
+Logout runs `claude auth logout` through the account environment and removes the
+local credential file. Login and logout are rejected while the account has an
+active turn.
+
+### Account-scoped managed egress
+
+Claude and managed Codex accounts can attach one optional egress profile. Mira
+starts a loopback-only sing-box gateway before the runtime, checks the upstream
+through the gateway, and injects only local proxy variables into the account.
+Claude and Mafia profiles route their model/authentication destinations to the
+remote proxy and use `direct` for every other destination, so shell tools keep
+using normal local, private and home-network routes. A failed gateway blocks the
+account start instead of silently leaking a direct request. Process references
+stop the gateway after the account runtime exits.
+
+Remote proxy credentials stay in
+`<identity-directory>/account-egress/<account-id>/config.json` with `0600`
+permissions. Server stores only server, port, username, profile and a
+password-present flag. The sing-box executable is selected by
+`MIRA_NODE_SING_BOX`, then by `sing-box` on `PATH`.
+
+Claude account environments also disable telemetry, error reporting, feedback
+surveys, feature flags and official marketplace auto-install. SDK 2.1.317+
+enables the built-in `cc-plugin-privacy` mod by default; 0.3.319 contains that
+fix. Mira adds a second privacy prompt and a generic Git author identity so new
+commits do not expose the host user's email.
 
 Without a managed account, the Node's existing native Claude login/configuration
 or provider environment remains available as **Node default configuration**. A Windows service does not automatically inherit an interactive user's
@@ -135,6 +179,7 @@ Claude login. These optional, local environment settings are supported:
 | `MIRA_NODE_CLAUDE_NODE` | Select an installed Node.js executable. npm must also be available. |
 | `MIRA_NODE_CLAUDE_CONFIG_DIR` | Select the local Claude configuration/auth directory. |
 | `MIRA_NODE_CLAUDE_BINARY` | Explicit native Claude executable override for the pinned SDK. |
+| `MIRA_NODE_SING_BOX` | Explicit sing-box executable used by managed account egress. |
 
 An executable wrapper used with `MIRA_NODE_CLAUDE_BINARY` must preserve any
 existing `CLAUDE_CONFIG_DIR`: the SDK sets it to a temporary directory when
@@ -142,6 +187,7 @@ restoring a remote session. Overriding that directory breaks native resume.
 Provider credentials may be supplied by the Node environment or such a wrapper;
 Messages-compatible gateways use native Anthropic settings, while AWS gateways
 use native Bedrock settings. No Chat Completions translation is required.
+The override is also used for subscription login and logout.
 
 Mira's existing Node credential is passed privately to the adapter over stdin,
 not through process arguments. Runtime storage and tool calls use Mira Server;

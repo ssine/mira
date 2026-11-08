@@ -129,12 +129,31 @@ an Agent device tool and is not accepted through the generic invoke API.
 
 The existing administrator account UI includes Claude bindings, exposed as
 `claudeAccounts` on Node views. `POST /v1/claude/accounts` creates a Node binding
-from `nodeId` and `name`; `PATCH /v1/claude/accounts/:id` changes `name` or `enabled`.
-`POST /v1/claude/accounts/:id/configure` sends a typed `provider` (`id`: `anthropic`
-or `bedrock`, `baseUrl`, `model`, Bedrock `region`, and optional default `effort`:
-`low`, `medium`, `high`, `xhigh` or `max`) and an optional `apiKey`
-through the private Node channel. Omit `apiKey` to retain it; an empty key clears it.
-Keys never enter PostgreSQL, account responses, desired state, or audit metadata.
+from `nodeId`, `name`, optional `authType` (`api_key` default or `subscription`)
+and optional `loginEmail`; `PATCH /v1/claude/accounts/:id` changes `name` or
+`enabled`. `POST /v1/claude/accounts/:id/configure` sends a typed `provider`
+(`id`: `anthropic` or `bedrock`, `baseUrl`, `model`, Bedrock `region`, and optional
+default `effort`: `low`, `medium`, `high`, `xhigh` or `max`), optional `authType`
+and optional `apiKey` through the private Node channel. Omit `apiKey` to retain
+it; an empty key clears it. Keys never enter PostgreSQL, account responses,
+desired state, or audit metadata.
+
+Subscription accounts use the official OAuth flow:
+
+- `POST /v1/claude/accounts/:id/login` starts or reuses one pending login and
+  returns `{sessionId,status,verificationUrl}`.
+- `GET /v1/claude/accounts/:id/login?sessionId=` returns
+  `starting|pending|completed|failed|cancelled`, an optional URL and bounded error.
+- `POST /v1/claude/accounts/:id/login/complete` takes `{sessionId,code}` and
+  writes the callback code to the waiting CLI.
+- `POST /v1/claude/accounts/:id/login/cancel` stops the pending process.
+- `POST /v1/claude/accounts/:id/logout` revokes the local login through the CLI.
+
+The Node runs the pinned CLI with the account's isolated `CLAUDE_CONFIG_DIR` and
+managed egress. Successful credentials are private local `claudeAiOauth`
+access/refresh tokens; Server stores only configured state, login email,
+authentication type and revision. Login and logout reject active turns. Account
+starts for subscriptions omit `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL`.
 
 Session creation and turn submission accept `nodeAccountId`. Turns inherit the
 session's binding when omitted; an explicit empty string selects native Node

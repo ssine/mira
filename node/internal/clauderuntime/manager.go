@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ssine/mira/node/internal/accountegress"
 )
 
 //go:embed assets/*.mjs assets/package*.json
@@ -32,18 +34,22 @@ type process struct {
 	write     sync.Mutex
 	acks      ackReader
 	stop      func() bool
+	release   func()
 }
 type Manager struct {
 	mu                          sync.Mutex
 	root, dir, state, lastError string
 	accountsRoot                string
 	cacheRoot, cacheConfig      string
+	egress                      *accountegress.Manager
+	ownsEgress                  bool
 	runtimeID                   string
 	preparing                   bool
 	closed                      bool
 	unconfirmedExit             bool
 	cancel                      context.CancelFunc
 	processes                   map[string]*process
+	logins                      map[string]*loginProcess
 	// Completed IDs prevent an ambiguous control reply from rerunning tools.
 	accepted  map[string]bool
 	sealed    map[string]bool
@@ -51,7 +57,18 @@ type Manager struct {
 }
 
 func New(identityDir string) *Manager {
-	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, accepted: map[string]bool{}, sealed: map[string]bool{}}
+	return NewWithEgress(identityDir, nil)
+}
+
+// NewWithEgress uses a shared account egress manager.
+func NewWithEgress(identityDir string, egress *accountegress.Manager) *Manager {
+	ownsEgress := egress == nil
+	if egress == nil {
+		egress = accountegress.New(identityDir)
+	}
+	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, logins: map[string]*loginProcess{}, accepted: map[string]bool{}, sealed: map[string]bool{}}
+	m.egress = egress
+	m.ownsEgress = ownsEgress
 	m.cachePaths(identityDir)
 	return m
 }
@@ -156,6 +173,9 @@ func (m *Manager) install(ctx context.Context) (string, error) {
 	return dir, nil
 }
 func (m *Manager) Call(params map[string]any) (any, error) {
+	if action, _ := params["action"].(string); strings.HasPrefix(action, "account/login/") || action == "account/logout" {
+		return m.loginCall(params)
+	}
 	if params["action"] == "steer" {
 		return m.steer(params)
 	}
@@ -197,10 +217,11 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
-		env, err := m.accountEnvironment(accountID)
+		env, release, err := m.accountEnvironmentAcquired(accountID, false)
 		if err != nil {
 			return nil, err
 		}
+		defer release()
 		cmd.Env = env
 		cmd.Dir = m.dir
 		configureCommand(cmd)
@@ -240,7 +261,7 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		_, _ = m.cacheCall("cache-status", nil)
 		params["cache"] = map[string]string{"root": m.cacheRoot, "config": m.cacheConfig}
 		cmd := exec.Command(nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
-		env, err := m.accountEnvironment(accountID)
+		env, release, err := m.accountEnvironmentAcquired(accountID, false)
 		if err != nil {
 			return nil, err
 		}
@@ -253,12 +274,13 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		}
 		// Transcripts flow directly to Server; stdout carries only steer
 		// acknowledgements and stderr is not an unbounded log.
-		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{})}
+		p := &process{accountID: accountID, command: cmd, input: input, done: make(chan struct{}), release: release}
 		cmd.Stdout = &p.acks
 		cmd.Stderr = io.Discard
 		cmd.WaitDelay = 2 * time.Second
 		if err = cmd.Start(); err != nil {
 			input.Close()
+			release()
 			return nil, err
 		}
 		cleanup, err := guardProcessTree(cmd)
@@ -266,6 +288,7 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 			killCommand(cmd)
 			_ = input.Close()
 			_ = cmd.Wait()
+			release()
 			return nil, err
 		}
 		var stopOnce sync.Once
@@ -296,6 +319,7 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 			m.unconfirmedExit = m.unconfirmedExit || !stopped
 			delete(m.processes, id)
 			m.mu.Unlock()
+			p.release()
 			close(p.done)
 		}()
 		return map[string]any{"accepted": true}, err
@@ -397,7 +421,14 @@ func (m *Manager) close() {
 	for _, p := range m.processes {
 		ps = append(ps, p)
 	}
+	logins := make([]*loginProcess, 0, len(m.logins))
+	for _, login := range m.logins {
+		logins = append(logins, login)
+	}
 	m.mu.Unlock()
+	for _, login := range logins {
+		login.cancel()
+	}
 	for _, p := range ps {
 		// A wedged stdin or a concurrent steer must not consume the Supervisor's
 		// entire stop deadline before we can terminate and reap the worker.
@@ -437,6 +468,9 @@ func (m *Manager) close() {
 	m.mu.Unlock()
 	if uncertain {
 		return
+	}
+	if m.ownsEgress && m.egress != nil {
+		m.egress.Close()
 	}
 	_ = m.recordClosedRuntime()
 }

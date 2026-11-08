@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 const { chromium } = await import(process.argv[2] ?? "playwright");
 const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8787";
-const nodeId = randomUUID(), ids = [randomUUID(), randomUUID()];
-const account = (id, name, provider) => ({ engine: "claude", nodeAccountId: id, accountId: id, nodeId, name,
-  enabled: true, configured: true, provider, reportedAppServer: { status: "ready", provider: {
+const nodeId = randomUUID(), ids = [randomUUID(), randomUUID(), randomUUID()];
+const account = (id, name, provider, authType = "api_key", email = "") => ({ engine: "claude", nodeAccountId: id, accountId: id, nodeId, name,
+  enabled: true, configured: true, provider, authType, email, reportedAppServer: { status: "ready", provider: {
     id: provider, baseUrl: "https://api.example.test", region: "us-east-1", model: provider === "bedrock" ? "anthropic.claude-example" : "claude-example",
     ...(provider === "anthropic" ? { effort: "xhigh" } : {}) } } });
 const node = { nodeId, hostname: "WSL fixture", platform: "linux", status: "online", approvalStatus: "approved",
-  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true, claudeSteerV1: true },
+  capabilities: { appServer: true, codexAccountsV1: true, claudeRuntimeV1: true, claudeAccountsV1: true, claudeSessionCacheV1: true, claudeSteerV1: true, accountEgressV1: true },
   desiredAppServer: { defaultCwd: "/work" }, reportedAppServer: { status: "stopped" }, codexAccounts: [],
-  claudeAccounts: [account(ids[0], "Messages account", "anthropic"), account(ids[1], "AWS account", "bedrock")] };
+  claudeAccounts: [account(ids[0], "Messages account", "anthropic"), account(ids[1], "AWS account", "bedrock"), account(ids[2], "Max subscription", "anthropic", "subscription", "person@example.test")] };
 const codexId = randomUUID();
 node.codexAccounts = [{ nodeAccountId: codexId, name: "Messages account", enabled: true, isDefault: true, reportedAppServer: {status:"stopped"} }];
 const calls = [], sessions = [];
@@ -21,11 +21,16 @@ const summary = s => ({ ...s, threadId:s.sessionId, engine:"claude", runtimeNode
  ...(s.activeTurn ? {costEstimate:{amount:.12,status:"complete",basis:"claude_sdk",running:true,note:"运行中估算"}} : {})}, costEstimate:{amount:.4,status:"complete",basis:"claude_sdk"} });
 const browser = await chromium.launch({ headless: true });
 try {
-  const context = await browser.newContext({ viewport: { width: 1200, height: 900 } });
+  const context = await browser.newContext({ viewport: { width: 1200, height: 900 }, bypassCSP: true });
   await context.route(/\/v1\/nodes(?:\?.*)?$/, route => route.fulfill({ json: { data: [node] } }));
   await context.route(`**/v1/nodes/${nodeId}`, route => route.fulfill({ json: node }));
   await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data:[],projects:[],paged:true } }));
   await context.route("**/v1/codex/threads/*?*", route => route.fulfill({status:404,json:{error:"missing"}}));
+  await context.route("**/v1/accounts/**", route => {
+    const req = route.request(), path = new URL(req.url()).pathname;
+    calls.push({ path, body: req.postData() ? req.postDataJSON() : null, query: "" });
+    return route.fulfill({ json: { configured: req.method() !== "DELETE" } });
+  });
   await context.route("**/v1/claude/**", route => {
     const req = route.request(), path = new URL(req.url()).pathname, body = req.postData() ? req.postDataJSON() : null;
     calls.push({ path, body, query: new URL(req.url()).search });
@@ -37,6 +42,10 @@ try {
     }
     if (path === "/v1/claude/conversations") return route.fulfill({json:{data:sessions.map(summary),paged:true,projects:sessions.length?[{key:JSON.stringify([nodeId,"/work"]),nodeId,cwd:"/work",count:sessions.length}]:[]}});
     if (path.startsWith("/v1/claude/conversations/")) return route.fulfill({json:summary(sessions.find(s=>s.sessionId===path.split("/")[4]))});
+    if (path.endsWith("/login") && req.method() === "POST") return route.fulfill({ json: { sessionId: "fixture-session", status: "pending", verificationUrl: "https://claude.com/cai/oauth/authorize?code=true" } });
+    if (path.endsWith("/login") && req.method() === "GET") return route.fulfill({ json: { sessionId: "fixture-session", status: "pending" } });
+    if (path.endsWith("/login/complete")) return route.fulfill({ json: { sessionId: "fixture-session", status: "completed" } });
+    if (path.endsWith("/login/cancel")) return route.fulfill({ json: { sessionId: "fixture-session", status: "cancelled" } });
     if (path.includes("/accounts/")) return route.fulfill({ json: { configured: true } });
     if (path.endsWith("/cache-status") || path.endsWith("/cache-configure")) {
       if (path.endsWith("/cache-configure")) cacheBytes = body.maxBytes;
@@ -89,12 +98,34 @@ try {
   assert.equal(await dialog.locator("[name=claudeEffort]").inputValue(), "");
   await dialog.locator("[name=claudeEffort]").selectOption("high");
   await dialog.locator("[name=apiKey]").fill("synthetic-claude-browser-secret");
+  assert.equal(await dialog.locator("[data-account-egress]").isVisible(), true);
+  await dialog.locator("[data-account-egress] summary").click();
+  await dialog.locator("[name=egressEnabled]").locator("..").click();
+  await dialog.locator("[name=egressServer]").fill("proxy.example.test");
+  await dialog.locator("[name=egressPort]").fill("8022");
+  await dialog.locator("[name=egressUsername]").fill("proxy-user");
+  await dialog.locator("[name=egressPassword]").fill("proxy-secret");
   await dialog.locator("button[type=submit]").click();
   await dialog.getByText("Claude 账号已保存，可在对话的账号列表中选择使用。", { exact: true }).waitFor();
   assert.equal(calls.find(c => c.path.endsWith("/configure")).body.apiKey, "synthetic-claude-browser-secret");
   assert.equal(calls.find(c => c.path.endsWith("/configure")).body.provider.effort, "high");
+  const egressCall = calls.find(c => c.path === `/v1/accounts/claude/${ids[1]}/egress`);
+  assert.deepEqual(egressCall.body, { type: "socks5", server: "proxy.example.test", port: 8022, username: "proxy-user", password: "proxy-secret", profile: "claude" });
   assert.equal(await dialog.locator("[name=apiKey]").inputValue(), "");
   assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("synthetic-claude-browser-secret")), false);
+  await dialog.locator("[data-account-close]").click();
+  await page.locator(".codex-account-row").filter({ hasText: "Max subscription" }).click();
+  assert.equal(await dialog.locator("[name=mode]").inputValue(), "subscription");
+  assert.equal(await dialog.locator("[name=apiKey]").isVisible(), false);
+  assert.equal(await dialog.locator("[name=loginEmail]").isVisible(), true);
+  await dialog.locator("[data-account-login]").click();
+  await dialog.locator(".account-login-code input").waitFor();
+  assert.equal(calls.some(c => c.path === `/v1/claude/runtimes/${nodeId}/prepare`), true);
+  assert.equal(calls.find(c => c.path === `/v1/claude/accounts/${ids[2]}/login`).body.email, "person@example.test");
+  await dialog.locator(".account-login-code input").fill("code#state");
+  await dialog.locator(".account-login-code button").click();
+  await dialog.getByText("Claude 登录完成", { exact: true }).waitFor();
+  assert.equal(calls.find(c => c.path === `/v1/claude/accounts/${ids[2]}/login/complete`).body.code, "code#state");
   await dialog.locator("[data-account-close]").click();
   await page.locator("#globalAgent").click();
   const view = page.locator("#agentView");
@@ -184,7 +215,7 @@ try {
   assert.deepEqual([late.text, late.attachments], ["Too late", []], "a finished turn takes the message as the next turn");
   assert.notEqual(sessions[0].activeTurn, steered);
   assert.equal(await view.locator('.sidebar-account-row[data-account-engine="codex"]').count(),1);
-  assert.equal(await view.locator('.sidebar-account-row[data-account-engine="claude"]').count(),2);
+  assert.equal(await view.locator('.sidebar-account-row[data-account-engine="claude"]').count(),3);
   const awsRow = view.locator('.sidebar-account-row[data-account-engine="claude"]').filter({hasText:"AWS account"});
   assert.equal(await awsRow.isVisible(), false, "accounts outside the recent conversations stay folded");
   await view.locator("[data-account-more]").click();
