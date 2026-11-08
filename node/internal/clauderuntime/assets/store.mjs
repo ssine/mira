@@ -8,6 +8,7 @@ export function serverClient({
   turnId,
   revision,
   cache,
+  eventBatchV1,
 }) {
   const base = new URL(endpoint);
   if (
@@ -88,13 +89,88 @@ export function serverClient({
       return (await (await request("/subkeys")).json()).subkeys;
     },
   };
+  const batched = eventBatchV1 === true;
+  const queue = batched ? eventQueue(request) : null;
   async function event(
     payload,
     eventId = payload.type === "mira_question" ? payload.questionId : randomUUID(),
   ) {
+    if (queue) return queue.push({ eventId, payload });
     // Retrying this exact storage envelope cannot replay model/tool execution.
     const response = await request("/events", { eventId, payload });
     await response.body?.cancel();
   }
-  return { store, event };
+  // SDK events: streaming deltas and token counters are relayed live without
+  // being stored when Server supports batches; everything else is durable.
+  function emit(payload) {
+    if (!queue) return event(payload);
+    if (ephemeral(payload)) return queue.push({ payload, ephemeral: true });
+    return event(payload);
+  }
+  return {
+    store, event, emit,
+    backlog: () => queue?.bytes() ?? 0,
+    failure: () => queue?.failure() ?? null,
+    close: () => queue?.close(),
+  };
+}
+
+export function ephemeral(payload) {
+  return payload?.type === "stream_event" ||
+    payload?.type === "system" && payload.subtype === "thinking_tokens";
+}
+
+// eventQueue sends events in order, many per request. Each batch is frozen once
+// and retried byte-for-byte; durable items carry stable event IDs, so a lost
+// response cannot duplicate them. A failed batch rejects only its own items and
+// is remembered so the SDK loop stops, as with the former per-event writes.
+// An idle queue sends an empty batch every few seconds as a liveness heartbeat.
+export function eventQueue(request, { maxBatchBytes = 2 << 20, heartbeatMs = 5000 } = {}) {
+  const pending = [];
+  let bytes = 0, running = null, failed = null, closed = false, last = Date.now();
+  const heartbeat = setInterval(() => {
+    if (!closed && !running && !pending.length && Date.now() - last >= heartbeatMs) drain([]).catch(() => {});
+  }, Math.min(heartbeatMs, 1000));
+  heartbeat.unref?.();
+  async function drain(batch) {
+    last = Date.now();
+    const response = await request("/events", { items: batch.map(entry => entry.item) });
+    await response.body?.cancel();
+  }
+  async function run() {
+    while (pending.length) {
+      const batch = [];
+      let size = 0;
+      while (pending.length && (!batch.length || size + pending[0].size <= maxBatchBytes)) {
+        const entry = pending.shift();
+        size += entry.size;
+        batch.push(entry);
+      }
+      bytes -= size;
+      try {
+        await drain(batch);
+        for (const entry of batch) entry.resolve();
+      } catch (error) {
+        failed ??= error;
+        for (const entry of batch) entry.reject(error);
+      }
+    }
+    running = null;
+  }
+  return {
+    push(item) {
+      const size = JSON.stringify(item.payload).length + 64;
+      const done = new Promise((resolve, reject) => {
+        pending.push({ item, size, resolve, reject });
+      });
+      bytes += size;
+      // Callers that do not await (live SDK events) must not surface unhandled rejections.
+      done.catch(() => {});
+      running ??= Promise.resolve().then(run);
+      return done;
+    },
+    bytes: () => bytes,
+    failure: () => failed,
+    close() { closed = true; clearInterval(heartbeat); },
+  };
 }

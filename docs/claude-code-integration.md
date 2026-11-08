@@ -59,8 +59,13 @@ Implemented:
   The user chooses a compatible workspace there. An active turn prevents ownership
   transfer; old Node/revision writers are rejected after a new turn is reserved.
 
+Titles follow Codex: the first message of a new conversation gets a generated
+title, and the conversation menu regenerates it. Generation is a one-shot,
+tool-free native request on the conversation's Node and account (the small
+model alias first, then the conversation model).
+
 The Claude adapter does not yet implement conversation forking,
-permanent deletion, automatic title generation or a `mira claude` CLI wrapper.
+permanent deletion or a `mira claude` CLI wrapper.
 Unsupported actions are omitted from its menu. Native child records are grouped beneath
 the owning session for browsing, without asserting unknown nested parentage. Continue
 child work through its root session. Workspace files and attachment paths are not
@@ -239,6 +244,13 @@ JSON field extraction itself can reject escaped NUL anywhere in a raw object.
 - The SDK materializes an entire transcript array on resume. Server reads/writes
   stream native JSONL, but the SDK's resume memory requirement remains. A mirror
   record is bounded to 64 MiB; there is no total transcript size ceiling.
+- Streaming deltas (`stream_event`) and thinking-token counters are ephemeral
+  since schema 45: workers relay them through the Server's in-memory live stream
+  instead of storing them, and the browser receives them over Server-Sent Events.
+  Complete assistant blocks remain durable SDK events, so history and resume are
+  unaffected. Before this, every delta was a separate HTTPS write awaited by the
+  SDK loop; one long turn stored 75k delta rows and the Server fell minutes behind
+  the local Claude process.
 - UI history pages omit token deltas and are projections of recorded SDK events.
   Live events are cursor-based; older history loads on request. Raw native entries
   remain the resume source, independent of the visible event projection.
@@ -250,6 +262,13 @@ to every question. Polls preserve drafts, focus and in-flight submission state;
 recorded answers become read-only summaries and ended turns close unanswered forms.
 The activity line distinguishes waiting for an answer from model execution.
 
+Schema 45 adds a partial index for exactly the gap records the projection reads:
+`system/mirror_error` and degraded `mira_completed`/`mira_execution_stopped`. The
+projection uses the same predicate verbatim so reads stay index-backed; an earlier
+form regex-scanned every raw event row in the database on each incomplete-session
+read (seconds per request, including under the turn-acceptance session lock).
+Text that merely quotes `"degraded": true` inside other records no longer opens a gap.
+
 For incomplete history, the composer explains that continuing uses the saved records
 and does not recover missing content. An accepted continuation acknowledges the
 known gap across reloads and later turns. `historyAcknowledgementRequired` is a read
@@ -259,6 +278,12 @@ lock before accepting a new turn. A new gap requires a new acknowledgement; an
 ordinary model error does not. Historical `persistence=incomplete` stays intact and
 remains visible in conversation details, while an acknowledged gap stops occupying
 the composer. Older Servers without this projection retain the conservative prompt.
+
+Workers send SDK events through one ordered queue: many events per request, each
+batch frozen and retried byte-for-byte, with an empty heartbeat batch every five
+seconds while idle. A permanently failed batch stops the turn as a failed write
+did before. Writes from the owning turn refresh the execution observation, so an
+active, reachable worker no longer shows "状态待确认" between Server probes.
 
 Transient event/transcript write failures retry the identical serialized operation
 with capped backoff within one 45-second deadline, below the SDK's 60-second append

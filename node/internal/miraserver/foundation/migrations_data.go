@@ -851,4 +851,5 @@ CREATE INDEX codex_thread_events_provider_idx
 	{Version: 42, Name: "scheduled-scripts", SQL: scheduledScriptsSQL, Checksum: "1c313431c6a0239b7d4d79aaeb017f5baca3b07c2af4eff963a7100777b6f3d2"},
 	{Version: 43, Name: "account-egress", SQL: accountEgressSQL, Checksum: "f9d2c2b2ec8525534dfb6673e083126d82eb302903c69f19f5bfac251e100181"},
 	{Version: 44, Name: "claude-account-auth", SQL: claudeAccountAuthSQL, Checksum: "18aecca2cdb697781a8c715bc20af1726864229019b5d3c893535e96312a4448"},
+	{Version: 45, Name: "claude-history-gap-index", SQL: claudeHistoryGapSQL, Checksum: "d212fd036d8f6673ee0d445620ded98aacf06f3857a0793dc2ede9f03dc0b2fc"},
 }

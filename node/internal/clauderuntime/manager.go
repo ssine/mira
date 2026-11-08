@@ -185,6 +185,19 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	if params["action"] == "interrupt" || params["action"] == "answer" {
 		return m.writeControl(params)
 	}
+	if params["action"] == "title" {
+		// A model request can take a minute; never hold the manager lock for it.
+		m.mu.Lock()
+		closed, ready := m.closed, m.state == "ready"
+		m.mu.Unlock()
+		if closed {
+			return nil, errors.New("Claude manager is shutting down")
+		}
+		if !ready {
+			return nil, errors.New("Claude runtime is not ready")
+		}
+		return m.oneShot(params)
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -214,7 +227,9 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		if m.state != "ready" {
 			return nil, errors.New("Claude runtime is not ready")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		command := []byte("{\"action\":\"describe\"}\n")
+		timeout := 30 * time.Second
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
 		env, release, err := m.accountEnvironmentAcquired(accountID, false)
@@ -225,7 +240,7 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 		cmd.Env = env
 		cmd.Dir = m.dir
 		configureCommand(cmd)
-		cmd.Stdin = strings.NewReader("{\"action\":\"describe\"}\n")
+		cmd.Stdin = bytes.NewReader(command)
 		cmd.Cancel = func() error { killCommand(cmd); return nil }
 		cmd.WaitDelay = 5 * time.Second
 		output := &boundedOutput{limit: 4 * 1024 * 1024}
@@ -326,6 +341,47 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	default:
 		return nil, errors.New("unknown Claude runtime action")
 	}
+}
+
+// oneShot runs a short-lived worker for a single native title request.
+func (m *Manager) oneShot(params map[string]any) (any, error) {
+	prompt, _ := params["prompt"].(string)
+	model, _ := params["model"].(string)
+	accountID, _ := params["nodeAccountId"].(string)
+	if prompt == "" || len(prompt) > 64*1024 {
+		return nil, errors.New("A title prompt of at most 64 KiB is required")
+	}
+	command, _ := json.Marshal(map[string]any{"action": "title", "prompt": prompt, "model": model})
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Second)
+	defer cancel()
+	m.mu.Lock()
+	dir := m.dir
+	env, release, err := m.accountEnvironmentAcquired(accountID, false)
+	m.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(dir, "worker.mjs"))
+	cmd.Env = env
+	cmd.Dir = dir
+	configureCommand(cmd)
+	cmd.Stdin = bytes.NewReader(append(command, '\n'))
+	cmd.Cancel = func() error { killCommand(cmd); return nil }
+	cmd.WaitDelay = 5 * time.Second
+	output := &boundedOutput{limit: 64 * 1024}
+	cmd.Stdout = output
+	if err = cmd.Run(); err != nil {
+		return nil, errors.New("Claude could not generate a title")
+	}
+	var value map[string]any
+	if err = json.Unmarshal(output.Bytes(), &value); err != nil {
+		return nil, errors.New("Claude returned an invalid title response")
+	}
+	if text, _ := value["error"].(string); text != "" {
+		return nil, errors.New("Claude title request failed: " + text)
+	}
+	return value, nil
 }
 
 func writeProcessControl(p *process, body []byte) error {

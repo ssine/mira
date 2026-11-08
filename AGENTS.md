@@ -213,6 +213,10 @@ PostgreSQL, surface mirror failures as incomplete persistence, and never replay
 tool side effects to repair a missing batch. Do not claim Codex's pre-sampling
 durability barrier for Claude or weaken the existing Codex guarantees. Keep the
 engine's native history and resume semantics; shared views are projections.
+Claude streaming deltas are ephemeral: workers batch SDK events in order, store
+complete events and relay deltas through the Server's in-memory SSE stream. Never
+make a live relay or browser copy authoritative, and never await one Server round
+trip per streamed event again.
 Production Agent runtimes access storage through Mira Server with their Node
 identity, not with direct database credentials. The direct PostgreSQL adapter in
 `experiments/claude-code/` is restricted to disposable local validation.

@@ -63,17 +63,19 @@ type claudeSession struct {
 // on every turn. Rebuild the acknowledgement boundary from accepted turn requests;
 // a mirror failure or reconciled worker exit at/after that revision opens a new gap.
 // This also recognizes acknowledgements made by older Servers without rewriting history.
+// The gap predicate is served by a partial index (schema 45); keep it verbatim.
 const claudeHistoryAcknowledgement = `CASE WHEN persistence='incomplete' THEN NOT COALESCE((
  SELECT NOT EXISTS(SELECT 1 FROM mira_claude_turns later
    WHERE later.session_id=ack.session_id AND later.revision>=ack.revision AND (
      later.error='Runtime ended without an acknowledged completion' OR EXISTS(
-       SELECT 1 FROM mira_claude_events e WHERE e.session_id=later.session_id AND e.turn_id=later.turn_id
-       AND ((e.event_type='system' AND e.payload::text ~ '\"subtype\"[[:space:]]*:[[:space:]]*\"mirror_error\"') OR e.payload::text ~ '\"degraded\"[[:space:]]*:[[:space:]]*true'))))
+       SELECT 1 FROM mira_claude_events WHERE mira_claude_events.session_id=later.session_id AND mira_claude_events.turn_id=later.turn_id
+       AND ` + foundation.ClaudeHistoryGapPredicate + `)))
  FROM mira_claude_turns ack WHERE ack.session_id=mira_claude_sessions.session_id
    AND ack.request->>'continueAcknowledgedHistory'='true' ORDER BY ack.revision DESC LIMIT 1
 ),false) ELSE false END`
 
 const claudeSessionColumns = `session_id::text,node_id::text,cwd,title,model,effort,archived,revision,active_turn::text,persistence,created_at,updated_at,COALESCE(node_account_id::text,'')`
+const claudeSessionColumnsQualified = `s.session_id::text,s.node_id::text,s.cwd,s.title,s.model,s.effort,s.archived,s.revision,s.active_turn::text,s.persistence,s.created_at,s.updated_at,COALESCE(s.node_account_id::text,'')`
 const claudeColumns = claudeSessionColumns + `,` + claudeHistoryAcknowledgement
 
 func scanClaude(row pgx.Row) (claudeSession, error) {
@@ -141,7 +143,7 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 	}
 	if len(parts) == 3 && parts[0] == "runtimes" && claudeUUID(parts[1]) && r.Method == "POST" {
 		action := parts[2]
-		if action != "prepare" && action != "status" && action != "describe" && action != "cache-status" && action != "cache-configure" {
+		if action != "prepare" && action != "status" && action != "describe" && action != "title" && action != "cache-status" && action != "cache-configure" {
 			return true, claudeError(404, "Unknown runtime action")
 		}
 		node, err := server.nodes.Get(ctx, parts[1], false)
@@ -186,7 +188,20 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 				return true, claudeError(409, "Claude account is unavailable on this Node")
 			}
 		}
-		result, err := server.channel.Invoke(ctx, parts[1], "claude", map[string]any{"action": action, "nodeAccountId": accountID}, 30*time.Second)
+		params, timeout := map[string]any{"action": action, "nodeAccountId": accountID}, 30*time.Second
+		if action == "title" {
+			// A one-shot, tool-free native request. The prompt carries conversation
+			// excerpts as data; the Node never resumes or writes a session for it.
+			if node.Capabilities["claudeTitleV1"] != true {
+				return true, claudeError(409, "Upgrade this Node to generate Claude titles")
+			}
+			prompt, model := claudeString(body, "prompt"), claudeString(body, "model")
+			if prompt == "" || len(prompt) > 64*1024 || len(model) > 256 {
+				return true, claudeError(400, "A title prompt of at most 64 KiB is required")
+			}
+			params["prompt"], params["model"], timeout = prompt, model, 90*time.Second
+		}
+		result, err := server.channel.Invoke(ctx, parts[1], "claude", params, timeout)
 		if err != nil {
 			return true, err
 		}
@@ -306,6 +321,10 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 			return true, err
 		}
 		title := s.Title
+		// A generated title must not replace a rename made while it was generated.
+		if expected, ok := b["expectedTitle"].(string); ok && expected != s.Title {
+			return true, claudeError(409, "会话标题已被修改，生成的标题未保存。")
+		}
 		if v, ok := b["title"].(string); ok {
 			title = strings.ReplaceAll(v, "\x00", "")
 			if len(title) > 1024 {
@@ -316,9 +335,13 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if v, ok := b["archived"].(bool); ok {
 			archived = v
 		}
-		_, err = server.pool.Exec(ctx, `UPDATE mira_claude_sessions SET title=$2,archived=$3,updated_at=now() WHERE session_id=$1`, id, title, archived)
+		expected, compare := b["expectedTitle"].(string)
+		tag, err := server.pool.Exec(ctx, `UPDATE mira_claude_sessions SET title=$2,archived=$3,updated_at=now() WHERE session_id=$1 AND (NOT $4 OR title=$5)`, id, title, archived, compare, expected)
 		if err != nil {
 			return true, err
+		}
+		if tag.RowsAffected() == 0 {
+			return true, claudeError(409, "会话标题已被修改，生成的标题未保存。")
 		}
 		return true, writeJSON(w, 200, map[string]any{"ok": true})
 	}
@@ -332,17 +355,25 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if before < 0 {
 			return true, claudeError(400, "Invalid history cursor")
 		}
-		query := `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND seq>$2 ORDER BY seq LIMIT 200`
-		args := []any{id, cursor}
+		// scope=root omits rows the root conversation view never renders: native
+		// subagent messages/deltas (read through their own history) and thinking
+		// token counters. Cursors still advance past the omitted rows.
+		root := op == "events" && r.URL.Query().Get("scope") == "root"
+		limit := 200
+		if root {
+			limit = claudeRootScanLimit
+		}
+		query := `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND seq>$2 ORDER BY seq LIMIT $3`
+		args := []any{id, cursor, limit + 1}
 		if op == "history" {
-			query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$3 ORDER BY seq LIMIT 200`
+			query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$4 ORDER BY seq LIMIT $3`
 			args = append(args, r.URL.Query().Get("subpath"))
 		}
 		if backward {
-			args = []any{id, before}
-			query = `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND event_type<>'stream_event' ORDER BY seq DESC LIMIT 200`
+			args = []any{id, before, limit + 1}
+			query = `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND event_type<>'stream_event' ORDER BY seq DESC LIMIT $3`
 			if op == "history" {
-				query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND subpath=$3 ORDER BY seq DESC LIMIT 200`
+				query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND subpath=$4 ORDER BY seq DESC LIMIT $3`
 				args = append(args, r.URL.Query().Get("subpath"))
 			}
 		}
@@ -352,7 +383,9 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		}
 		defer rows.Close()
 		data := []any{}
-		pageBytes := 0
+		pageBytes, scanned := 0, 0
+		var first, last int64
+		more := false
 		for rows.Next() {
 			var seq int64
 			var raw json.RawMessage
@@ -360,25 +393,40 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 			if err = rows.Scan(&seq, &raw, &turnID); err != nil {
 				return true, err
 			}
-			if len(data) > 0 && pageBytes+len(raw) > 4*1024*1024 {
+			omitted := root && claudeRootOmitted(raw)
+			if scanned == limit || !omitted && (len(data) == 200 || len(data) > 0 && pageBytes+len(raw) > 4*1024*1024) {
+				// Resume at this row on the next page.
+				more = true
 				break
+			}
+			scanned++
+			if first == 0 {
+				first = seq
+			}
+			last = seq
+			if omitted {
+				continue
 			}
 			pageBytes += len(raw)
 			data = append(data, map[string]any{"seq": seq, "payload": raw, "turnId": turnID})
-			cursor = seq
 		}
 		if err = rows.Err(); err != nil {
 			return true, err
 		}
+		if scanned > 0 && !backward {
+			cursor = last
+		}
 		var earliest int64
-		if backward && len(data) > 0 {
-			cursor = data[0].(map[string]any)["seq"].(int64)
-			earliest = data[len(data)-1].(map[string]any)["seq"].(int64)
+		if backward && scanned > 0 {
+			cursor, earliest = first, last
 			for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
 				data[i], data[j] = data[j], data[i]
 			}
 		}
-		return true, writeJSON(w, 200, map[string]any{"data": data, "cursor": cursor, "earliest": earliest, "session": s, "hasMore": len(data) > 0})
+		return true, writeJSON(w, 200, map[string]any{"data": data, "cursor": cursor, "earliest": earliest, "session": s, "hasMore": len(data) > 0, "more": more})
+	}
+	if op == "live" && r.Method == "GET" {
+		return true, server.claudeLiveStream(ctx, w, r, id)
 	}
 	if op == "costs" && r.Method == "GET" {
 		ids := r.URL.Query()["turnId"]
@@ -677,12 +725,12 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		return err
 	}
 
-	var count int
-	err = tx.QueryRow(ctx, `SELECT count(*) FROM mira_claude_entries WHERE session_id=$1 AND subpath=''`, s.ID).Scan(&count)
+	var saved bool
+	err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_entries WHERE session_id=$1 AND subpath='')`, s.ID).Scan(&saved)
 	if err != nil {
 		return err
 	}
-	if count == 0 {
+	if !saved {
 		var priorTurns bool
 		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_turns WHERE session_id=$1)`, s.ID).Scan(&priorTurns); err != nil {
 			return err
@@ -746,7 +794,9 @@ func (server *Server) claudeStartTurn(ctx context.Context, w http.ResponseWriter
 		return err
 	}
 
-	params := map[string]any{"runtimeId": state["runtimeId"], "action": "start", "sessionId": s.ID, "turnId": turnID, "revision": revision, "cwd": cwd, "model": model, "effort": effort, "text": text, "attachments": b["attachments"], "resume": count > 0, "instructions": instructions, "nodeAccountId": accountID}
+	params := map[string]any{"runtimeId": state["runtimeId"], "action": "start", "sessionId": s.ID, "turnId": turnID, "revision": revision, "cwd": cwd, "model": model, "effort": effort, "text": text, "attachments": b["attachments"], "resume": saved, "instructions": instructions, "nodeAccountId": accountID,
+		// Workers batch events in order, relay deltas ephemerally and heartbeat.
+		"eventBatchV1": true}
 	result, err := server.channel.Invoke(ctx, nodeID, "claude", params, 30*time.Second)
 	// A timeout is ambiguous. Keep the reservation until the owner reports exit;
 	// neither an HTTP retry nor a reconnect may run the prompt again.
@@ -888,11 +938,24 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		if err = tx.QueryRow(ctx, `SELECT next_seq FROM mira_claude_transcripts WHERE session_id=$1 AND subpath=$2`, id, subpath).Scan(&seq); err != nil {
 			return err
 		}
+		var started, latest *time.Time
 		for scanner.Scan() {
 			raw := scanner.Bytes()
 			var entry map[string]json.RawMessage
 			if err = json.Unmarshal(raw, &entry); err != nil || entry == nil {
 				return claudeError(400, "Invalid raw transcript entry")
+			}
+			// Native record times feed the per-transcript activity projection.
+			var stamp string
+			if json.Unmarshal(entry["timestamp"], &stamp) == nil {
+				if at, e := time.Parse(time.RFC3339Nano, stamp); e == nil {
+					if started == nil || at.Before(*started) {
+						started = &at
+					}
+					if latest == nil || at.After(*latest) {
+						latest = &at
+					}
+				}
 			}
 			var uuid string
 			_ = json.Unmarshal(entry["uuid"], &uuid)
@@ -925,85 +988,166 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		if err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE mira_claude_transcripts SET next_seq=$3 WHERE session_id=$1 AND subpath=$2`, id, subpath, seq)
+		_, err = tx.Exec(ctx, `UPDATE mira_claude_transcripts SET next_seq=$3,
+ started_at=CASE WHEN $4::timestamptz IS NULL THEN started_at ELSE least(coalesce(started_at,$4),$4) END,
+ updated_at=CASE WHEN $5::timestamptz IS NULL THEN updated_at ELSE greatest(coalesce(updated_at,$5),$5) END
+ WHERE session_id=$1 AND subpath=$2`, id, subpath, seq, started, latest)
 		if err != nil {
 			return err
 		}
 	} else if op == "events" {
 		var b struct {
-			EventID string          `json:"eventId"`
-			Payload json.RawMessage `json:"payload"`
+			EventID string            `json:"eventId"`
+			Payload json.RawMessage   `json:"payload"`
+			Items   []claudeBatchItem `json:"items"`
 		}
 		if err = foundation.ReadJSON(r, &b, server.config.Foundation.MaxBodyBytes); err != nil {
 			return err
 		}
-		if !claudeUUID(b.EventID) || len(b.Payload) == 0 {
-			return claudeError(400, "eventId and payload are required")
+		batch := b.Items != nil
+		if !batch {
+			if !claudeUUID(b.EventID) || len(b.Payload) == 0 {
+				return claudeError(400, "eventId and payload are required")
+			}
+			b.Items = []claudeBatchItem{{EventID: b.EventID, Payload: b.Payload}}
 		}
-		var event struct {
-			Type        string `json:"type"`
-			Subtype     string `json:"subtype"`
-			Failed      bool   `json:"failed"`
-			Degraded    bool   `json:"degraded"`
-			Interrupted bool   `json:"interrupted"`
+		if len(b.Items) > 4096 {
+			return claudeError(400, "Too many Claude events in one batch")
 		}
-		if err = json.Unmarshal(b.Payload, &event); err != nil {
+		// Ephemeral items are positioned after the session's latest durable event,
+		// read under the same session lock that serializes appends.
+		var durable int64
+		if err = tx.QueryRow(ctx, `SELECT coalesce((SELECT seq FROM mira_claude_events WHERE session_id=$1 ORDER BY seq DESC LIMIT 1),0)`, id).Scan(&durable); err != nil {
 			return err
 		}
-		tag, err := tx.Exec(ctx, `INSERT INTO mira_claude_events(event_id,session_id,turn_id,payload,event_type) VALUES($1,$2,$3,$4::json,$5) ON CONFLICT(event_id) DO NOTHING`, b.EventID, id, turn, b.Payload, strings.ReplaceAll(event.Type, "\x00", ""))
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			var previous []byte
-			var eventSession, eventTurn string
-			if err = tx.QueryRow(ctx, `SELECT session_id::text,turn_id::text,payload FROM mira_claude_events WHERE event_id=$1`, b.EventID).Scan(&eventSession, &eventTurn, &previous); err != nil {
+		live := []claudeLiveItem{}
+		running, completed := false, false
+		for _, item := range b.Items {
+			if len(item.Payload) == 0 {
+				return claudeError(400, "Every Claude event needs a payload")
+			}
+			if item.Ephemeral {
+				live = append(live, claudeLiveItem{AfterSeq: durable, Payload: item.Payload, root: !claudeRootOmitted(item.Payload)})
+				continue
+			}
+			if !claudeUUID(item.EventID) {
+				return claudeError(400, "Durable Claude events need a UUID eventId")
+			}
+			seq, kind, err := claudeAppendEvent(ctx, tx, id, turn, item.EventID, item.Payload)
+			if err != nil {
 				return err
 			}
-			if eventSession != id || eventTurn != turn || string(previous) != string(b.Payload) {
-				return claudeError(409, "Event ID reused with different content")
+			if seq > durable {
+				durable = seq
+			}
+			switch kind {
+			case claudeEventCompleted:
+				completed = true
+			case claudeEventInserted:
+				running = true
 			}
 		}
-		if tag.RowsAffected() > 0 {
-			if event.Type == "system" && event.Subtype == "mirror_error" || event.Degraded {
-				_, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET persistence='incomplete' WHERE session_id=$1`, id)
-				if err != nil {
-					return err
-				}
-			}
-			if event.Type == "mira_completed" {
-				status := "completed"
-				if event.Interrupted {
-					status = "interrupted"
-				}
-				if event.Failed {
-					status = "failed"
-				}
-				// Push and native notification queues currently resolve Codex
-				// ThreadStore identities only. Claude completion must not depend
-				// on whether the administrator has subscribed to those queues.
-				_, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status=$2,completed_at=now() WHERE turn_id=$1 AND completed_at IS NULL`, turn, status)
-				if err != nil {
-					return err
-				}
-				_, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET active_turn=NULL,persistence=CASE WHEN persistence='incomplete' OR NOT EXISTS(SELECT 1 FROM mira_claude_entries WHERE session_id=$1 AND subpath='') THEN 'incomplete' ELSE 'saved' END,updated_at=now() WHERE session_id=$1 AND active_turn=$2`, id, turn)
-				if err != nil {
-					return err
-				}
-			} else {
-				_, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status='running' WHERE turn_id=$1 AND completed_at IS NULL`, turn)
-				if err != nil {
-					return err
-				}
+		if running && !completed {
+			// One status write per batch, not one row update per streamed event.
+			if _, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status='running' WHERE turn_id=$1 AND completed_at IS NULL AND status<>'running'`, turn); err != nil {
+				return err
 			}
 		}
+		if err = tx.Commit(ctx); err != nil {
+			return err
+		}
+		// An authenticated write from the owning turn proves its worker is alive.
+		// Only positive observations come from writes; stopping still needs proof.
+		if !completed {
+			server.rememberClaudeExecution(claudeExecutionTarget{session: id, turn: turn, node: actor.NodeID, revision: revision}, "running", "")
+		}
+		server.claudeLive.publish(id, turn, durable, live)
+		if batch {
+			return writeJSON(w, 200, map[string]any{"ok": true, "seq": durable})
+		}
+		return writeJSON(w, 200, map[string]any{"ok": true})
 	} else {
 		return claudeError(404, fmt.Sprintf("Unknown storage operation %s", op))
 	}
 	if err = tx.Commit(ctx); err != nil {
 		return err
 	}
+	if op == "entries" && r.Method == "POST" {
+		server.rememberClaudeExecution(claudeExecutionTarget{session: id, turn: turn, node: actor.NodeID, revision: revision}, "running", "")
+	}
 	return writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// claudeBatchItem is one ordered entry of a worker event batch. Durable items
+// are appended to PostgreSQL; ephemeral items (streaming deltas, token counters)
+// are only relayed to live subscribers, positioned after the preceding durable seq.
+type claudeBatchItem struct {
+	EventID   string          `json:"eventId"`
+	Payload   json.RawMessage `json:"payload"`
+	Ephemeral bool            `json:"ephemeral"`
+}
+
+type claudeEventKind int
+
+const (
+	claudeEventReplayed claudeEventKind = iota
+	claudeEventInserted
+	claudeEventCompleted
+)
+
+// claudeAppendEvent appends one durable SDK/lifecycle event inside the caller's
+// session-locked transaction and returns its seq. Exact replays are idempotent;
+// a reused event ID with different content conflicts.
+func claudeAppendEvent(ctx context.Context, tx pgx.Tx, id, turn, eventID string, payload json.RawMessage) (int64, claudeEventKind, error) {
+	var event struct {
+		Type        string `json:"type"`
+		Subtype     string `json:"subtype"`
+		Failed      bool   `json:"failed"`
+		Degraded    bool   `json:"degraded"`
+		Interrupted bool   `json:"interrupted"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil {
+		return 0, 0, err
+	}
+	var seq int64
+	err := tx.QueryRow(ctx, `INSERT INTO mira_claude_events(event_id,session_id,turn_id,payload,event_type) VALUES($1,$2,$3,$4::json,$5) ON CONFLICT(event_id) DO NOTHING RETURNING seq`, eventID, id, turn, payload, strings.ReplaceAll(event.Type, "\x00", "")).Scan(&seq)
+	if errors.Is(err, pgx.ErrNoRows) {
+		var previous []byte
+		var eventSession, eventTurn string
+		if err = tx.QueryRow(ctx, `SELECT seq,session_id::text,turn_id::text,payload FROM mira_claude_events WHERE event_id=$1`, eventID).Scan(&seq, &eventSession, &eventTurn, &previous); err != nil {
+			return 0, 0, err
+		}
+		if eventSession != id || eventTurn != turn || string(previous) != string(payload) {
+			return 0, 0, claudeError(409, "Event ID reused with different content")
+		}
+		return seq, claudeEventReplayed, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	if event.Type == "system" && event.Subtype == "mirror_error" || event.Degraded {
+		if _, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET persistence='incomplete' WHERE session_id=$1`, id); err != nil {
+			return 0, 0, err
+		}
+	}
+	if event.Type != "mira_completed" {
+		return seq, claudeEventInserted, nil
+	}
+	status := "completed"
+	if event.Interrupted {
+		status = "interrupted"
+	}
+	if event.Failed {
+		status = "failed"
+	}
+	// Push and native notification queues currently resolve Codex
+	// ThreadStore identities only. Claude completion must not depend
+	// on whether the administrator has subscribed to those queues.
+	if _, err = tx.Exec(ctx, `UPDATE mira_claude_turns SET status=$2,completed_at=now() WHERE turn_id=$1 AND completed_at IS NULL`, turn, status); err != nil {
+		return 0, 0, err
+	}
+	_, err = tx.Exec(ctx, `UPDATE mira_claude_sessions SET active_turn=NULL,persistence=CASE WHEN persistence='incomplete' OR NOT EXISTS(SELECT 1 FROM mira_claude_entries WHERE session_id=$1 AND subpath='') THEN 'incomplete' ELSE 'saved' END,updated_at=now() WHERE session_id=$1 AND active_turn=$2`, id, turn)
+	return seq, claudeEventCompleted, err
 }
 
 // claudeRead acknowledges a rendered snapshot with the Codex read contract.
@@ -1086,4 +1230,29 @@ func (server *Server) claudeSessionCache(ctx context.Context, s claudeSession, s
 		result["state"], result["message"] = "loaded", message
 	}
 	return result, nil
+}
+
+// claudeRootScanLimit bounds the raw rows one scope=root page may examine, so a
+// burst of omitted subagent rows cannot turn one request into a table scan.
+const claudeRootScanLimit = 2000
+
+// claudeRootOmitted reports raw SDK events the root conversation view ignores:
+// subagent assistant/user/stream rows (shown in the subagent's own transcript)
+// and thinking-token counters. Lifecycle, result and system records are kept.
+func claudeRootOmitted(raw json.RawMessage) bool {
+	var e struct {
+		Type     string          `json:"type"`
+		Subtype  string          `json:"subtype"`
+		ParentID json.RawMessage `json:"parent_tool_use_id"`
+	}
+	if json.Unmarshal(raw, &e) != nil {
+		return false
+	}
+	switch e.Type {
+	case "assistant", "user", "stream_event":
+		return len(e.ParentID) > 0 && string(e.ParentID) != "null"
+	case "system":
+		return e.Subtype == "thinking_tokens"
+	}
+	return false
 }

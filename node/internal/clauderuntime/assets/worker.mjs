@@ -109,6 +109,15 @@ lines.on("line", async (line) => {
         lines.close();
         process.stdin.destroy();
       }
+    } else if (command.action === "title") {
+      try {
+        await title(command);
+      } finally {
+        stopping = true;
+        wake?.();
+        lines.close();
+        process.stdin.destroy();
+      }
     } else if (command.action === "answer") {
       const resolve = questions.get(command.questionId);
       if (resolve) {
@@ -267,7 +276,12 @@ async function main(spec) {
     for await (const event of run) {
       if (event.type === "system" && event.subtype === "mirror_error")
         degraded = true;
-      await client.event(event);
+      // Batched workers keep consuming the SDK while earlier events are in
+      // flight; ordering is preserved by the queue. A large backlog applies
+      // backpressure, and a failed batch stops the turn like a failed write.
+      const write = client.emit(event);
+      if (!spec.eventBatchV1 || client.backlog() > 8 * 1024 * 1024) await write;
+      if (client.failure()) throw client.failure();
       if (event.type === "system" && event.subtype === "session_state_changed") {
         nativeIdle = event.state === "idle";
         // Cancelling the initial input during resume can produce idle without
@@ -322,7 +336,47 @@ async function main(spec) {
     } catch {
       process.exitCode = 1;
     }
+    client?.close();
     lines.close();
     process.stdin.destroy();
   }
+}
+// A one-shot, tool-free request for a conversation title. It never resumes or
+// persists a session; the prompt treats conversation excerpts as data.
+async function title(command) {
+  const q = query({
+    prompt: command.prompt,
+    options: {
+      model: command.model || undefined,
+      maxTurns: 1,
+      tools: [],
+      mcpServers: {},
+      settingSources: [],
+      persistSession: false,
+      thinking: { type: "disabled" },
+      systemPrompt: "You write short conversation titles. Reply with exactly the JSON object requested and nothing else.",
+      env: {
+        ...process.env,
+        ...(process.env.MIRA_NODE_CLAUDE_CONFIG_DIR
+          ? { CLAUDE_CONFIG_DIR: process.env.MIRA_NODE_CLAUDE_CONFIG_DIR }
+          : {}),
+      },
+      ...(process.env.MIRA_NODE_CLAUDE_BINARY
+        ? { pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY }
+        : {}),
+      stderr: () => {},
+    },
+  });
+  let text = "", error = "";
+  try {
+    for await (const event of q) {
+      if (event.type === "result") {
+        if (event.is_error) error = String(event.errors?.join("\n") || event.result || event.subtype || "failed");
+        else text = String(event.result ?? "");
+      }
+    }
+  } finally {
+    q.close();
+  }
+  process.stdout.write(JSON.stringify(error ? { error: error.slice(0, 1000) } : { text: text.slice(0, 8192) }));
 }

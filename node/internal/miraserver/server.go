@@ -39,6 +39,7 @@ type Server struct {
 	stopClaudeExecution   func()
 	claudeExecutionMu     sync.Mutex
 	claudeExecution       map[string]claudeExecutionObservation
+	claudeLive            claudeLiveHub
 	stopRecovery          func()
 	stopSchedules         func()
 	config                Config

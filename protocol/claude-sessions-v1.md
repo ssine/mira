@@ -40,6 +40,15 @@ Use Mira's existing administrator session; mutations require `X-Mira-CSRF`.
   record to remain atomic. There is no whole-history count limit.
 - `GET sessions/{id}/history?subpath=...`: equivalent paging for raw transcript
   entries (also accepts `view=transcript&before=N`).
+- Event pages also return `more` (schema 45 Servers): `true` only when rows remain
+  beyond this page, in either direction. Clients poll again immediately instead
+  of waiting a fixed interval, so a fast stream cannot outpace one page per tick.
+- `scope=root` on `events` (both directions) omits rows the root view never
+  renders: subagent `assistant`/`user`/`stream_event` rows (non-null
+  `parent_tool_use_id`, read through the subagent's own `history`) and
+  `system/thinking_tokens`. One page examines at most 2000 raw rows; `cursor` and
+  `earliest` advance past omitted rows, so a page may be empty while `more` is
+  true. Unscoped reads are unchanged and remain the raw event stream.
 - `GET sessions/{id}/children`: independent transcript IDs/subpaths, source kind,
   root ID and nullable known parent ID. No guessed nested ancestry.
 
@@ -120,6 +129,49 @@ receipt lookup and inserts share a transaction and session serialization lock.
 interruption and mirror degradation separately. `system/mirror_error` marks the
 session incomplete, even if a later result reports successful model execution.
 Neither a failed batch nor a missing display event authorizes replaying tool effects.
+
+### Event batches and live relay (schema 45 Servers)
+
+Turn `start` parameters carry `eventBatchV1:true` when the Server accepts batches.
+Such workers post `POST sessions/{id}/events` as `{items:[...]}`, in SDK order:
+
+- Durable items `{eventId:UUID,payload}` are appended in one transaction under
+  one session lock, with the same idempotency and conflict rules as single events.
+- Ephemeral items `{ephemeral:true,payload}` (`stream_event` and
+  `system/thinking_tokens`) are **not stored**. Server relays them to live
+  subscribers positioned after the session's latest durable seq (`afterSeq`).
+- The reply is `{ok:true,seq}`, the latest durable seq. A lost reply is retried
+  with the identical body. An empty `items` array is a heartbeat.
+- Every accepted write from the owning turn (batch, heartbeat or transcript
+  append) records a positive `running` execution observation. Writes never
+  provide stopped evidence; reconciliation rules below are unchanged.
+
+Workers keep consuming the SDK while batches are in flight (bounded at 8 MiB of
+queued events) instead of awaiting one round trip per event. Older Servers omit
+the flag and receive single durable events, including stream deltas.
+
+Administrator `GET sessions/{id}/live?scope=root&after=N` is a Server-Sent Events
+stream: `live` `{items:[{id,turnId,afterSeq,payload}]}`, `durable` `{seq}` (read
+events after your cursor) and `reset` (ephemeral items were missed; drop partial
+text). The SSE id is the live cursor; `Last-Event-ID` resumes. Rings hold at most
+4096 items or 4 MiB per session and reset on a new turn; 64 subscribers total; a
+stream closes after 10 minutes and reconnects. The relay is memory only: a Server
+restart loses partial text, never history.
+
+### Titles
+
+Nodes advertising `claudeTitleV1` accept administrator
+`POST runtimes/{nodeId}/title` `{nodeAccountId?,prompt,model?}` (prompt at most
+64 KiB). The Node runs one native request with no tools, MCP servers, setting
+sources or persisted session and returns `{text}`. `PATCH sessions/{id}` accepts
+`expectedTitle`; a different current title returns 409 so a rename made while a
+title was generated is kept.
+
+### Subagent summaries
+
+Transcripts project `started_at`/`updated_at` from native record `timestamp`
+fields (schema 45, backfilled from the first/last 32 records). Child summaries use
+them as `createdAt`/`updatedAt`; root summaries expose `subagentCount`.
 
 Transport is the existing outbound Node channel for control and HTTPS to Mira
 Server for storage. The private `claude` control capability is not advertised as
