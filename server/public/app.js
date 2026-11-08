@@ -2,7 +2,7 @@ import { SchedulesPanel } from "/schedules.js";
 import { SitesPanel } from "/sites.js";
 import { MiraSocket, configureMiraTransport } from "./mira-socket.js";
 import { FileReader, FileWorkspace, workspaceURL } from "/file-preview.js";
-import { ClaudeRuntime, claudeHistoryAcknowledgementRequired } from "/claude.js";
+import { ClaudeRuntime, claudeHistoryAcknowledgementRequired, claudeTrace } from "/claude.js";
 import { conversationPageReader } from "/conversation-pages.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
@@ -16,7 +16,7 @@ import { ViewportRenderer } from "/viewport-renderer.js";
 import { conversationScroll } from "/conversation-scroll.js";
 import { ReplyProgress, turnActivityPhase } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute, createCompletionNotifications } from "/pwa.js";
-import { generateThreadTitle, titleMessages, titlePrompt } from "/thread-title.js";
+import { generateThreadTitle, parseGeneratedTitle, titleMessages, titlePrompt } from "/thread-title.js";
 import { interruptThread } from "/thread-interrupt.js";
 import { AccountSidebar } from "/account-status.js";
 import { CodexAccounts, accountNode, accountQuery } from "/codex-accounts.js";
@@ -47,7 +47,7 @@ let dashboardNodes = new Map();
 let nodeMetadataTarget = null;
 
 const claudeRuntime = new ClaudeRuntime(api);
-let claudePollTimer = null, claudeHistoryJob = null;
+let claudePollTimer = null, claudeHistoryJob = null, claudeLive = null;
 
 const themeStorageKey = "mira.theme";
 const agentThreadDrawerWide = window.matchMedia("(min-width: 1100px)");
@@ -342,6 +342,7 @@ async function loadClaudeTranscript(threadId, options = {}) {
   job.promise = (async () => {
     const result = await claudeRuntime.history(thread, { older: !!options.prepend, poll: !!options.poll });
     if (!result || agent.threadId !== threadId || agent.selectionEpoch !== epoch) return;
+    job.backlog = result.more;
     const activeBefore = agent.activeTurns.get(threadId) ?? null;
     if (!thread.subpath) {
       if (result.session.activeTurn) agent.activeTurns.set(threadId, result.session.activeTurn);
@@ -355,29 +356,7 @@ async function loadClaudeTranscript(threadId, options = {}) {
       summary._claudeReadAt = Date.now(); acceptClaudeSummary(summary); renderReplyProgress();
     }
     if (!options.poll || result.changed || activeBefore !== (result.session.activeTurn ?? null)) {
-      const follow = !options.prepend && traceNearBottom();
-      const viewport = options.prepend ? { mode: "prepend", top: traceScroller().scrollTop, height: traceScroller().scrollHeight } : follow ? null : captureTraceViewport();
-      const forms = new Map([...$("#conversationTrace").querySelectorAll("form[data-claude-question]")].map(form => [form.dataset.claudeQuestion, form]));
-      const previous = agent.transcriptThreadId === threadId ? agent.transcriptItems : null;
-      agent.transcriptThreadId = threadId; agent.transcriptGeneration = 1;
-      const previousCosts = new Map(agent.transcriptItems.filter(i => i.turnCostEstimate).map(i => [i.key, i.turnCostEstimate]));
-      for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
-      agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
-      agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
-      let cards = (options.poll || options.restored) && previous ? patchClaudeTranscript(previous, result.trace) : null;
-      if (cards) {
-        // Question forms depend on the running turn even when unchanged.
-        for (const item of result.trace) if (item.questionId && !cards.has(item.key)) cards.set(item.key, traceCard(item.key));
-      } else {
-        renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
-        cards = new Map([...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
-      }
-      decorateClaudeCards(cards, result, forms, thread);
-      const progress = replyProgress.current(threadId);
-      if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId &&
-        (item.questionState === "pending" || item.kind === "assistant" && item.body?.trim())))) replyProgress.finish(progress);
-      renderReplyProgress();
-      if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
+      paintClaudeTranscript(threadId, thread, result, options);
     }
     // Saved history remains useful while a turn runs. Waiting for completion
     // leaves long-running conversations uncached every time they are reopened.
@@ -393,12 +372,99 @@ async function loadClaudeTranscript(threadId, options = {}) {
   finally {
     if (claudeHistoryJob === job) claudeHistoryJob = null;
     if (agent.threadId === threadId && agent.selectionEpoch === epoch && document.body.dataset.view === "agentView") {
+      if (!thread.subpath) openClaudeLive(threadId, thread);
+      // A full page, or a durable signal that arrived during this read, means the
+      // Server holds more events: catch up immediately. The live stream pushes
+      // durable signals, so polling is only a fallback while it is connected.
+      const behind = job.backlog || claudeLive?.threadId === threadId && claudeLive.durable > claudeRuntime.cursor;
+      const live = claudeLive?.threadId === threadId && claudeLive.source.readyState === EventSource.OPEN;
+      const active = agent.activeTurns.has(threadId);
       claudePollTimer = setTimeout(() => {
         if (document.hidden) return;
         void loadClaudeTranscript(threadId, { poll: true }).catch(error => setConversationNotice(`连接暂时中断，恢复后会继续加载：${error.message}`, "error"));
-      }, agent.activeTurns.has(threadId) ? 750 : 3000);
+      }, behind ? 0 : live ? (active ? 5000 : 15000) : active ? 750 : 3000);
     }
   }
+}
+
+// One Server-Sent Events stream for the open root Claude conversation. It
+// carries ephemeral streaming deltas and durable-progress signals; PostgreSQL
+// reads remain the source of the transcript.
+function closeClaudeLive() {
+  if (!claudeLive) return;
+  claudeLive.source.close();
+  clearTimeout(claudeLive.paint);
+  claudeLive = null;
+}
+function openClaudeLive(threadId, thread) {
+  if (typeof EventSource !== "function" || document.hidden) return;
+  if (claudeLive?.threadId === threadId && claudeLive.source.readyState !== EventSource.CLOSED) return;
+  closeClaudeLive();
+  const epoch = agent.selectionEpoch;
+  const query = new URLSearchParams({ scope: "root", after: String(claudeRuntime.liveCursor || 0) });
+  const live = { threadId, epoch, durable: 0, paint: null,
+    source: new EventSource(`/v1/claude/sessions/${encodeURIComponent(thread.sessionId)}/live?${query}`) };
+  claudeLive = live;
+  const current = () => claudeLive === live && agent.threadId === threadId && agent.selectionEpoch === epoch;
+  // Repaint at most every 100 ms; deltas only patch the running reply.
+  const repaint = () => {
+    if (live.paint || !current()) return;
+    live.paint = setTimeout(() => {
+      live.paint = null;
+      if (!current() || !claudeRuntime.session || claudeRuntime.id !== threadId) return;
+      const follow = traceNearBottom();
+      paintClaudeTranscript(threadId, thread, claudeRuntime.current(thread), { poll: true });
+      if (follow) scrollTraceToBottom();
+    }, 100);
+  };
+  live.source.addEventListener("live", event => {
+    if (!current()) return;
+    let data; try { data = JSON.parse(event.data); } catch { return; }
+    if (claudeRuntime.acceptLive(threadId, data.items || [])) repaint();
+  });
+  live.source.addEventListener("reset", () => { if (current()) { claudeRuntime.resetLive(); repaint(); } });
+  live.source.addEventListener("durable", event => {
+    if (!current()) return;
+    let data; try { data = JSON.parse(event.data); } catch { return; }
+    live.durable = Math.max(live.durable, Number(data.seq) || 0);
+    if (live.durable <= claudeRuntime.cursor) return;
+    if (claudeHistoryJob?.threadId === threadId) return; // Its completion re-polls when behind.
+    clearTimeout(claudePollTimer);
+    void loadClaudeTranscript(threadId, { poll: true }).catch(() => {});
+  });
+  live.source.addEventListener("error", () => {
+    // EventSource reconnects by itself, resuming after the last live ID. A
+    // closed stream (for example an expired login) falls back to polling.
+    if (live.source.readyState === EventSource.CLOSED && claudeLive === live) claudeLive = null;
+  });
+}
+
+// Renders a Claude result into the open conversation. Polls and live repaints
+// patch changed cards in place; full reads render the transcript.
+function paintClaudeTranscript(threadId, thread, result, options = {}) {
+  const follow = !options.prepend && traceNearBottom();
+  const viewport = options.prepend ? { mode: "prepend", top: traceScroller().scrollTop, height: traceScroller().scrollHeight } : follow ? null : captureTraceViewport();
+  const forms = new Map([...$("#conversationTrace").querySelectorAll("form[data-claude-question]")].map(form => [form.dataset.claudeQuestion, form]));
+  const previous = agent.transcriptThreadId === threadId ? agent.transcriptItems : null;
+  agent.transcriptThreadId = threadId; agent.transcriptGeneration = 1;
+  const previousCosts = new Map(agent.transcriptItems.filter(i => i.turnCostEstimate).map(i => [i.key, i.turnCostEstimate]));
+  for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
+  agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
+  agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
+  let cards = (options.poll || options.restored) && previous ? patchClaudeTranscript(previous, result.trace) : null;
+  if (cards) {
+    // Question forms depend on the running turn even when unchanged.
+    for (const item of result.trace) if (item.questionId && !cards.has(item.key)) cards.set(item.key, traceCard(item.key));
+  } else {
+    renderTranscript(null, { anchorBottom: follow, preserveViewport: viewport });
+    cards = new Map([...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")].map(card => [card.dataset.traceKey, card]));
+  }
+  decorateClaudeCards(cards, result, forms, thread);
+  const progress = replyProgress.current(threadId);
+  if (progress && (!result.session.activeTurn || result.trace.some(item => item.turnId === progress.turnId &&
+    (item.questionState === "pending" || item.kind === "assistant" && item.body?.trim())))) replyProgress.finish(progress);
+  renderReplyProgress();
+  if (viewport) restoreTraceViewport(viewport); else if (follow) scrollTraceToBottom();
 }
 
 // Steer notes and question forms are added after Markdown cards render.
@@ -622,6 +688,7 @@ async function sendClaudeMessage(text, attachments, progress) {
     agent.draftProject = null; agent.projectOpen.set(projectForThread(thread).key, true);
     refreshAccountChoices(nodeAccountId); renderAgentThreads();
     updateReplyProgress(progress, { threadId: thread.threadId });
+    if (text.trim()) agent.untitledNewThreadIds.add(thread.threadId);
   }
   const thread = currentAgentThread();
   let body = claudeRuntime.turnRequests.get(thread.sessionId);
@@ -634,6 +701,10 @@ async function sendClaudeMessage(text, attachments, progress) {
   agent.activeTurns.set(thread.threadId, result.turnId);
   updateReplyProgress(progress, { threadId: thread.threadId, turnId: result.turnId, phase: "Claude 正在处理，等待回复…" });
   $("#claudeContinue").checked = false;
+  // Like Codex, the first message of a new conversation gets a generated title.
+  if (text.trim() && agent.untitledNewThreadIds.delete(thread.threadId)) {
+    void regenerateThreadTitle(thread.threadId, { automatic: true, firstMessage: text });
+  }
   await loadClaudeTranscript(thread.threadId, { poll: claudeRuntime.cursor > 0 });
   void loadAgentThreads().catch(() => {});
 }
@@ -2896,6 +2967,7 @@ function scheduleAgentRecovery(delay = null) {
 function stopAgentRecovery({ resetTurnState = false } = {}) {
   agent.connectionWanted = false;
   agent.selectionEpoch++;
+  closeClaudeLive();
   agent.runtimePromise = null;
   clearTimeout(agent.reconnectTimer);
   clearTimeout(agent.heartbeatTimer);
@@ -5755,8 +5827,8 @@ function openThreadMenu(threadId, anchor, point = null) {
   if (!threadId) return;
   agent.menuThreadId = threadId;
   const native = engineOf(threadId) === "claude";
-  for (const id of ["threadFork", "threadRegenerateTitle", "threadDelete"]) $("#"+id).classList.toggle("hidden", native);
-  for (const id of ["threadArchive", "threadRename"]) $("#"+id).classList.toggle("hidden", !!agent.threads.find(t => t.threadId === threadId)?.subpath);
+  for (const id of ["threadFork", "threadDelete"]) $("#"+id).classList.toggle("hidden", native);
+  for (const id of ["threadArchive", "threadRename", "threadRegenerateTitle"]) $("#"+id).classList.toggle("hidden", !!agent.threads.find(t => t.threadId === threadId)?.subpath);
   syncTitleMenu();
   const menu = $("#threadOptionsMenu");
   $("#threadOpenWindow").href = `/?thread=${encodeURIComponent(threadId)}`;
@@ -5808,6 +5880,10 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
       await new Promise(resolve => setTimeout(resolve, 300));
       signal.throwIfAborted();
     }
+    if (source.engine === "claude") {
+      await regenerateClaudeTitle(threadId, source, job, { automatic, firstMessage });
+      return;
+    }
     if (automatic && source.name) return;
     if (!Number.isSafeInteger(source.generation)) throw new Error("会话信息尚未就绪，请稍后重试。");
     const nodeId = source.runtimeNodeId || source.sourceNodeId;
@@ -5849,6 +5925,43 @@ async function regenerateThreadTitle(threadId, { automatic = false, firstMessage
     renderAgentThreads();
     syncTitleMenu();
   }
+}
+
+// Claude titles use a one-shot, tool-free native request on the conversation's
+// Node and account. The saved title is compared, so a rename made meanwhile wins.
+async function regenerateClaudeTitle(threadId, source, job, { automatic, firstMessage }) {
+  const signal = job.controller.signal;
+  let messages = automatic ? [{ kind: "user", body: firstMessage }] : [];
+  if (!automatic) {
+    let rows = [], before = 0;
+    for (let page = 0; page < 6 && messages.length < 8; page++) {
+      const query = new URLSearchParams({ view: "transcript", scope: "root", before: String(before) });
+      const result = await api(`/v1/claude/sessions/${encodeURIComponent(source.sessionId)}/events?${query}`, { signal });
+      rows = [...result.data, ...rows];
+      messages = titleMessages(claudeTrace(rows).trace);
+      if (result.more === false || !result.earliest) break;
+      before = result.earliest;
+    }
+  }
+  const prompt = titlePrompt(messages);
+  const nodeId = source.runtimeNodeId || source.sourceNodeId;
+  const request = model => api(`/v1/claude/runtimes/${nodeId}/title`, { method: "POST", signal,
+    body: JSON.stringify({ nodeAccountId: source.nodeAccountId || "", prompt, model }) });
+  // A small model first; accounts or gateways without it use the conversation's model.
+  let result;
+  try { result = await request("haiku"); }
+  catch (error) { signal.throwIfAborted(); result = await request(source.model || ""); }
+  const title = parseGeneratedTitle(String(result.text || "").replace(/^\s*```(?:json)?\s*|\s*```\s*$/g, "").trim());
+  signal.throwIfAborted();
+  job.saving = true;
+  syncTitleMenu();
+  await api(`/v1/claude/sessions/${encodeURIComponent(source.sessionId)}`, { method: "PATCH",
+    body: JSON.stringify({ title, expectedTitle: source.title ?? "" }) });
+  const summary = await readConversation(threadId);
+  acceptClaudeSummary(summary);
+  if (agent.threadId === threadId) setConversationTitle(summary.title);
+  threadMetadataChannel?.postMessage({ threadId });
+  if (!automatic) toast("标题已更新");
 }
 
 async function forkWithNode(node, params, onProgress = () => {}) {
@@ -6601,6 +6714,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   saveOpenTranscript();
   void clientCache.flush();
   agent.selectionEpoch++;
+  closeClaudeLive();
   agent.threadId = null;
   clearTimeout(claudePollTimer); claudeRuntime.reset(); refreshAccountChoices();
   accountRecovery.select(null, "");
@@ -7183,6 +7297,7 @@ $("#agentThreadList").addEventListener("scroll", scheduleSidebarCosts, { passive
 window.addEventListener("popstate", () => {
   if (["loginView", "setupView"].includes(document.body.dataset.view)) return;
   agent.selectionEpoch++;
+  closeClaudeLive();
   void restoreBrowserRoute().catch((error) => setConversationNotice(error.message, "error"));
 });
 agentThreadDrawerWide.addEventListener("change", () => syncSidebarLayout());
@@ -7250,6 +7365,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     clearTimeout(agent.reconnectTimer);
     clearTimeout(agent.heartbeatTimer);
+    closeClaudeLive();
   } else void recoverAgentSession({ probe: true });
 });
 window.addEventListener("pageshow", (event) => { syncAccountSidebar(); if (event.persisted) { scheduleThreadActivity(0); void recoverAgentSession({ probe: true }); } });
@@ -7837,6 +7953,7 @@ function openNotificationConversation(target) {
   window.history.pushState(null, "", target);
   rememberAppRoute();
   agent.selectionEpoch++;
+  closeClaudeLive();
   if (csrfToken) void restoreBrowserRoute().catch((error) => setConversationNotice(error.message, "error"));
   return true;
 }

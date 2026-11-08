@@ -307,7 +307,7 @@ test("sending or reselecting during a native history read starts a fresh poll", 
  const app=await fs.readFile(new URL("../server/public/app.js",import.meta.url),"utf8");
  const start=app.indexOf("async function loadClaudeTranscript(");
  const reads=[],timers=[];
- const context=vm.createContext({agent:{threadId:"s",selectionEpoch:1,threads:[{threadId:"s"}],activeTurns:new Map()},claudeHistoryJob:null,claudePollTimer:null,
+ const context=vm.createContext({agent:{threadId:"s",selectionEpoch:1,threads:[{threadId:"s"}],activeTurns:new Map()},claudeHistoryJob:null,claudePollTimer:null,claudeLive:null,
   claudeRuntime:{history:()=>new Promise(resolve=>reads.push(resolve))},clearTimeout(){},setTimeout:callback=>timers.push(callback),document:{body:{dataset:{view:"agentView"}}}});
  vm.runInContext(app.slice(start,app.indexOf("\nfunction claudeQuestionForm",start)),context);
  const old=context.loadClaudeTranscript("s");
@@ -379,4 +379,54 @@ test("Claude compaction renders like Codex with its summary", () => {
  assert.deepEqual(child.map(x=>[x.kind,x.title,x.body,x.compactionSummary]),[["compaction","上下文压缩","较早的上下文已压缩（压缩前 9,000 tokens）。","摘要"]]);
  // A compaction cut off with its turn leaves no running notice.
  assert.equal(claudeTrace(rows.slice(0,2)).trace.some(x=>x.kind==="compaction"),false);
+});
+
+test("root history asks for scoped rows, continues past omitted pages and reports poll backlog", async () => {
+ const urls=[];const pages=[
+  {data:[],cursor:900,earliest:500,more:true,session:{}},            // only omitted subagent rows
+  {data:[{seq:10,turnId:"t",payload:{type:"mira_user",text:"hi"}}],cursor:10,earliest:10,more:false,session:{}},
+  {data:[],cursor:2900,earliest:0,more:true,session:{}}];
+ const runtime=new ClaudeRuntime(async url=>{urls.push(url);return pages.shift();});
+ const thread={threadId:"s",sessionId:"s"};
+ const latest=await runtime.history(thread);
+ assert.match(urls[0],/scope=root/);
+ assert.equal(latest.nextCursor,500,"an empty scoped page still advances the older-history cursor");
+ const older=await runtime.history(thread,{older:true});
+ assert.match(urls[1],/before=500/);
+ assert.equal(older.nextCursor,null,"more:false marks the beginning");
+ const poll=await runtime.history(thread,{poll:true});
+ assert.match(urls[2],/after=900/);
+ assert.equal(poll.more,true);
+ const child=new ClaudeRuntime(async url=>{urls.push(url);return {data:[],cursor:0,earliest:0,session:{}};});
+ await child.history({threadId:"c",sessionId:"s",subpath:"subagents/a"});
+ assert.doesNotMatch(urls.at(-1),/scope=root/);
+});
+
+test("live deltas render after their durable position, yield to saved blocks and stay out of the cache", async () => {
+ const session={activeTurn:"t"};
+ const pages=[{data:[{seq:5,turnId:"t",payload:{type:"mira_user",text:"hi"}}],cursor:5,earliest:5,more:false,session}];
+ const runtime=new ClaudeRuntime(async()=>pages.shift()??{data:[],cursor:5,earliest:0,more:false,session});
+ const thread={threadId:"s",sessionId:"s"};
+ await runtime.history(thread);
+ const delta=(id,text,extra={})=>({id,turnId:"t",afterSeq:5,payload:{type:"stream_event",event:{type:"content_block_delta",index:0,delta:{type:"text_delta",text}},...extra}});
+ assert.equal(runtime.acceptLive("s",[{id:1,turnId:"t",afterSeq:5,payload:{type:"stream_event",event:{type:"message_start",message:{id:"m"}}}},delta(2,"Hel"),delta(3,"lo")]),true);
+ assert.equal(runtime.acceptLive("other",[delta(4,"x")]),false,"another conversation's stream is ignored");
+ assert.equal(runtime.acceptLive("s",[{id:5,turnId:"t",afterSeq:5,payload:{type:"system",subtype:"thinking_tokens"}}]),false);
+ let trace=runtime.current(thread).trace;
+ assert.deepEqual(trace.map(i=>[i.kind,i.body]),[["user","hi"],["assistant","Hello"]]);
+ assert.equal(runtime.liveCursor,5);
+ assert.equal(runtime.snapshot().rows.length,1,"ephemeral rows are never cached");
+ // The durable block arrives through a poll; the partial text is replaced, not duplicated.
+ pages.push({data:[{seq:9,turnId:"t",payload:{type:"assistant",uuid:"a",message:{id:"m",content:[{type:"text",text:"Hello"}]}}}],cursor:9,session});
+ await runtime.history(thread,{poll:true});
+ runtime.acceptLive("s",[{id:6,turnId:"t",afterSeq:9,payload:{type:"stream_event",event:{type:"message_stop"}}}]);
+ trace=runtime.current(thread).trace;
+ assert.deepEqual(trace.map(i=>[i.kind,i.body]),[["user","hi"],["assistant","Hello"]]);
+ assert.equal([...runtime.rows.values()].filter(r=>r.live).length,0,"completed streams are pruned");
+ // Partial output of an ended turn is dropped; a reset clears what remains.
+ runtime.acceptLive("s",[delta(7,"stale")]);
+ runtime.session={activeTurn:null};
+ assert.ok(!runtime.current(thread).trace.some(i=>i.body==="stale"));
+ runtime.session=session; runtime.acceptLive("s",[delta(8,"more")]); runtime.resetLive();
+ assert.equal([...runtime.rows.values()].filter(r=>r.live).length,0);
 });

@@ -228,6 +228,8 @@ func TestClaudeHistoryAcknowledgement(t *testing.T) {
 	check(true)
 	reserve(2, true)
 	check(false)
+	// Tool output quoting a degraded record is conversation content, not a gap.
+	event(map[string]any{"type": "user", "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "content": `{"degraded": true}`}}}, "nested": map[string]any{"degraded": true}})
 	event(map[string]any{"type": "mira_completed"})
 	check(false)
 	reserve(3, false)
@@ -245,6 +247,107 @@ func TestClaudeHistoryAcknowledgement(t *testing.T) {
 	exec(`UPDATE mira_claude_turns SET error='Runtime ended without an acknowledged completion',status='failed',completed_at=now() WHERE turn_id=$1`, turn)
 	exec(`UPDATE mira_claude_sessions SET active_turn=NULL WHERE session_id=$1`, id)
 	check(true) // Reconciliation has no mirror_error event.
+	// The projection must stay index-backed: a whole-table regex scan of raw
+	// events made every incomplete session read take seconds.
+	exec(`ANALYZE mira_claude_events`)
+	tx, err := f.server.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	exec2 := func(sql string) {
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec2(`SET LOCAL enable_seqscan=off`)
+	var plan strings.Builder
+	rows, err := tx.Query(ctx, `EXPLAIN SELECT `+claudeHistoryAcknowledgement+` FROM mira_claude_sessions WHERE session_id=$1`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var line string
+		if err = rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		plan.WriteString(line + "\n")
+	}
+	if rows.Err() != nil || !strings.Contains(plan.String(), "mira_claude_events_history_gap") {
+		t.Fatalf("acknowledgement projection does not use the gap index:\n%s", plan.String())
+	}
+}
+
+func TestClaudeRootEventScope(t *testing.T) {
+	f := newClaudeFixture(t)
+	id, _, headers := f.reserved()
+	route := "/v1/claude/sessions/" + id
+	event := func(payload map[string]any) {
+		t.Helper()
+		status, raw := f.request("POST", route+"/events", map[string]any{"eventId": uuidClaude(), "payload": payload}, headers)
+		if status != 200 {
+			t.Fatalf("event: %d %s", status, raw)
+		}
+	}
+	event(map[string]any{"type": "mira_user", "text": "hi"})
+	// A subagent burst larger than one scan bound, inserted directly for speed.
+	if _, err := f.server.pool.Exec(context.Background(), `INSERT INTO mira_claude_events(event_id,session_id,turn_id,event_type,payload)
+  SELECT gen_random_uuid(),$1,$2,CASE WHEN i%2=0 THEN 'assistant' ELSE 'system' END,
+    CASE WHEN i%2=0 THEN '{"type":"assistant","parent_tool_use_id":"toolu_child","message":{"id":"child"}}' ELSE '{"type":"system","subtype":"thinking_tokens"}' END::json
+  FROM generate_series(1,$3::int) i`, id, headers["X-Mira-Claude-Turn"], claudeRootScanLimit*2+100); err != nil {
+		t.Fatal(err)
+	}
+	event(map[string]any{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": "root"}})
+	types := func(page map[string]any) []string {
+		var out []string
+		for _, row := range page["data"].([]any) {
+			out = append(out, row.(map[string]any)["payload"].(map[string]any)["type"].(string))
+		}
+		return out
+	}
+	// Latest page: the root reply is returned and the omitted burst is skipped.
+	// An empty page still advances "earliest" so the client can continue.
+	before, seen := 0.0, []string{}
+	for pages := 0; ; pages++ {
+		page := f.call("GET", fmt.Sprintf("%s/events?view=transcript&before=%v&scope=root", route, before), nil)
+		seen = append(types(page), seen...)
+		if pages == 0 && (len(seen) != 1 || seen[0] != "assistant" || page["more"] != true) {
+			t.Fatalf("latest root page: %v more=%v", seen, page["more"])
+		}
+		if page["more"] != true {
+			break
+		}
+		before = page["earliest"].(float64)
+		if pages > 10 || before == 0 {
+			t.Fatalf("root history did not converge: %v", page["earliest"])
+		}
+	}
+	if len(seen) != 2 || seen[0] != "mira_user" {
+		t.Fatalf("root history rows: %v", seen)
+	}
+	// Forward polling advances past omitted rows, reporting more until caught up.
+	cursor, polls := 0.0, 0
+	seen = nil
+	for {
+		poll := f.call("GET", fmt.Sprintf("%s/events?after=%v&scope=root", route, cursor), nil)
+		seen = append(seen, types(poll)...)
+		cursor = poll["cursor"].(float64)
+		polls++
+		if poll["more"] != true {
+			break
+		}
+		if polls > 10 {
+			t.Fatal("root poll did not converge")
+		}
+	}
+	if len(seen) != 2 || seen[0] != "mira_user" || seen[1] != "assistant" {
+		t.Fatalf("root poll rows: %v", seen)
+	}
+	// Unscoped reads keep the raw stream and report a precise continuation flag.
+	raw := f.call("GET", route+"/events?after=0", nil)
+	if len(raw["data"].([]any)) != 200 || raw["more"] != true {
+		t.Fatalf("raw page: %d more=%v", len(raw["data"].([]any)), raw["more"])
+	}
 }
 
 func TestClaudeCompletionWithCodexPushSubscription(t *testing.T) {

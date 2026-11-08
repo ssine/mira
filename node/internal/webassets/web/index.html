@@ -570,10 +570,11 @@
         <label>配置方式<select name="mode"><option value="chatgpt">ChatGPT / OpenAI API Key</option><option value="custom">自定义 Responses 服务商</option><option value="adopt">接管已有 Codex 配置</option></select></label>
         <label data-account-home hidden>节点上的 Codex home<input name="home" placeholder="配置目录的绝对路径"></label>
         <label data-account-provider hidden>服务商 API 地址<input name="baseUrl" type="url" placeholder="https://provider.example/v1"></label>
+        <label data-account-login-email hidden>Claude 登录邮箱<input name="loginEmail" type="email" maxlength="320" placeholder="name@example.com"></label>
         <label data-account-claude-model hidden>默认模型<input name="claudeModel" maxlength="200" placeholder="claude-opus-5-5"></label>
         <label data-account-claude-effort hidden>默认思考强度<select name="claudeEffort"><option value="">Claude Code 默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">很高</option><option value="max">最高</option></select></label>
         <label data-account-region hidden>AWS 区域<input name="region" value="us-east-1" maxlength="64"></label>
-        <label>API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="32768"></label>
+        <label data-account-api-key>API Key<input name="apiKey" type="password" autocomplete="new-password" maxlength="32768"></label>
         <p data-account-key-hint class="muted"></p>
         <label data-account-clear-key class="toggle" hidden><input name="clearKey" type="checkbox">清除此账号保存的服务商密钥</label>
         <details data-account-environment><summary>环境变量与配置来源</summary>
@@ -582,6 +583,17 @@
           <label>额外继承的 Node 环境变量名称<input name="inheritEnv" placeholder="PROVIDER_API_KEY, CUSTOM_SETTING"></label>
           <label>保存到此账号的环境变量（JSON）<textarea name="environment" rows="3" spellcheck="false" placeholder='{"PROVIDER_API_KEY":"..."}'></textarea></label>
           <label class="toggle"><input name="clearEnvironment" type="checkbox">清空此前保存的账号环境变量</label>
+        </details>
+        <details data-account-egress><summary>账号托管出口代理</summary>
+          <p class="muted">Mira 会在账号启动前验证本地 sing-box；只有配置档中的目标走远端，工具和其他请求保持直连。</p>
+          <label class="toggle"><input name="egressEnabled" type="checkbox">为此账号启用托管出口</label>
+          <label>代理类型<select name="egressType"><option value="socks5">SOCKS5</option><option value="http">HTTP</option></select></label>
+          <label>代理服务器<input name="egressServer" maxlength="253" placeholder="proxy.example"></label>
+          <label>代理端口<input name="egressPort" type="number" min="1" max="65535"></label>
+          <label>代理用户名<input name="egressUsername" maxlength="256"></label>
+          <label>代理密码<input name="egressPassword" type="password" autocomplete="new-password" maxlength="1024" placeholder="留空保留已有密码"></label>
+          <label>路由配置档<select name="egressProfile"><option value="claude">Claude / Anthropic</option><option value="mafia">Mafia API</option></select></label>
+          <p data-account-egress-status class="muted" role="status"></p>
         </details>
         <p data-account-profile class="muted" role="status"></p>
         <div data-account-login-info role="status"></div>

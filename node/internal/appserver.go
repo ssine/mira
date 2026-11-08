@@ -19,6 +19,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ssine/mira/node/internal/accountegress"
 )
 
 type codexInstallation struct {
@@ -56,6 +58,8 @@ type appServerInstance struct {
 	ready              bool
 	done               chan struct{}
 	output             outputBuffer
+	releaseEgress      func()
+	releaseEgressOnce  sync.Once
 }
 
 type appServerManager struct {
@@ -64,6 +68,7 @@ type appServerManager struct {
 	residencyUnsupported *appServerInstance
 
 	configuration     config
+	egress            *accountegress.Manager
 	mu                sync.Mutex
 	nodeToken         string
 	bindingID         string // actual binding, including the legacy default profile
@@ -428,17 +433,36 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		manager.lastError = err.Error()
 		return err
 	}
+	var egressEnvironment map[string]string
+	var releaseEgress func()
+	if manager.bindingID != "" && manager.egress != nil {
+		egressEnvironment, releaseEgress, err = manager.egress.Acquire(manager.bindingID)
+		if err != nil {
+			manager.lastError = err.Error()
+			return err
+		}
+	}
+	releaseOnError := func() {
+		if releaseEgress != nil {
+			releaseEgress()
+		}
+	}
 	effective := desired
 	effective.ConfigOverrides = append(append([]string(nil), desired.ConfigOverrides...), managed...)
 	environment, provider, err := prepareAccountEnvironment(manager.configuration, effective)
 	manager.providerView = provider
 	if err != nil {
 		manager.lastError = err.Error()
+		releaseOnError()
 		return err
+	}
+	for key, value := range egressEnvironment {
+		environment = append(environment, key+"="+value)
 	}
 	listenURL, err := availableAppServerListenURL(desired.ListenURL)
 	if err != nil {
 		manager.lastError = err.Error()
+		releaseOnError()
 		return err
 	}
 	arguments := []string{"app-server", "--listen", listenURL}
@@ -446,6 +470,7 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		override, err := codexAccountSQLiteOverride(manager.configuration.IdentityFile, codex.Path, manager.configuration.CodexAccountID, desired.ConfigOverrides)
 		if err != nil {
 			manager.lastError = err.Error()
+			releaseOnError()
 			return err
 		}
 		hasEnvironmentOverride := false
@@ -478,6 +503,7 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 	}
 	runtimeID, err := randomUUID()
 	if err != nil {
+		releaseOnError()
 		return err
 	}
 	if manager.bindingID != "" {
@@ -490,17 +516,21 @@ func (manager *appServerManager) startLocked(ctx context.Context, desired desire
 		environmentFiles: append([]string(nil), desired.EnvironmentFiles...), inheritEnv: append([]string(nil), desired.InheritEnv...),
 		command: command, codex: codex, requestedListenURL: desired.ListenURL, listenURL: listenURL,
 		codexHome: desired.CodexHome, configOverrides: append([]string(nil), desired.ConfigOverrides...),
-		startedAt: time.Now().UTC(), done: make(chan struct{}),
+		startedAt: time.Now().UTC(), done: make(chan struct{}), releaseEgress: releaseEgress,
 	}
 	command.Stdout = streamWriter{buffer: &instance.output, stream: "stdout"}
 	command.Stderr = streamWriter{buffer: &instance.output, stream: "stderr"}
 	if err := command.Start(); err != nil {
 		manager.lastError = err.Error()
+		releaseOnError()
 		return err
 	}
 	manager.instance = instance
 	go func() {
 		_ = command.Wait()
+		if instance.releaseEgress != nil {
+			instance.releaseEgressOnce.Do(instance.releaseEgress)
+		}
 		instance.output.flush()
 		close(instance.done)
 		manager.mu.Lock()

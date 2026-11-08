@@ -24,7 +24,8 @@ const selectNodeColumns = `
        THEN 'online' ELSE 'offline' END AS status, ` + accountRowsJSON + `, COALESCE((SELECT jsonb_agg(jsonb_build_object(
  'engine','claude','nodeAccountId',a.node_account_id,'accountId',a.node_account_id,'nodeId',a.node_id,
  'name',a.name,'enabled',a.enabled,'configured',a.configured,'provider',a.provider->>'id',
- 'credentialRevision',a.credential_revision,'authType','providerConfig','desiredAppServer','{}'::jsonb,
+ 'credentialRevision',a.credential_revision,'egress',a.egress,'egressConfigured',a.egress_configured,
+ 'authType',a.auth_type,'email',a.login_email,'desiredAppServer','{}'::jsonb,
  'reportedAppServer',jsonb_build_object('provider',a.provider,'status',CASE WHEN NOT a.configured THEN 'unconfigured' WHEN a.enabled THEN 'ready' ELSE 'stopped' END)
  ) ORDER BY a.name,a.node_account_id) FROM mira_claude_accounts a WHERE a.node_id=nodes.node_id),'[]'::jsonb)`
 

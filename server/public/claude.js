@@ -43,9 +43,14 @@ function patchStats(result) {
 
 const streamScope = row => JSON.stringify([row.turnId ?? null, row.payload.parent_tool_use_id ?? null]);
 
+// Live rows sit after the durable event they followed (seq = afterSeq) and keep
+// their arrival order there; durable rows have no live ID and sort first.
+const rowOrder = (a, b) => a.seq - b.seq || (a.live || 0) - (b.live || 0);
+const rowKey = row => row.live ? `L${row.live}` : row.seq;
+
 function pruneCompletedStreams(rows) {
   const active = new Map(), messages = new Map();
-  for (const row of [...rows.values()].sort((a, b) => a.seq - b.seq)) {
+  for (const row of [...rows.values()].sort(rowOrder)) {
     const e = row.payload, scope = streamScope(row);
     const id = e.type === "assistant" ? e.message?.id : e.type === "stream_event" && e.event?.type === "message_start" ? e.event.message?.id : null;
     if (id) {
@@ -57,7 +62,7 @@ function pruneCompletedStreams(rows) {
     if (!message) continue;
     if (e.type === "assistant" && id) message.saved = true;
     if (e.type !== "stream_event") continue;
-    message.rows.push(row.seq);
+    message.rows.push(rowKey(row));
     if (e.event?.type === "message_stop") { message.stopped = true; active.delete(scope); }
   }
   // SDK assistant events complete individual blocks (thinking, text, tools).
@@ -219,17 +224,39 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
 
 export class ClaudeRuntime {
   constructor(api) { this.api = api; this.turnRequests = new Map(); this.steerRequests = new Map(); this.reset(); }
-  reset(id = null) { this.epoch = (this.epoch || 0) + 1; this.id = id; this.rows = new Map(); this.cursor = 0; this.earliest = null; this.restored = false; }
+  reset(id = null) { this.epoch = (this.epoch || 0) + 1; this.id = id; this.rows = new Map(); this.cursor = 0; this.earliest = null; this.restored = false; this.liveCursor = 0; this.session = null; }
   // A browser-cached copy of the rows read so far. The next latest-page read
   // keeps the cached older rows only when that page overlaps them.
-  snapshot() { return { rows: [...this.rows.values()], cursor: this.cursor, earliest: this.earliest }; }
+  snapshot() { return { rows: [...this.rows.values()].filter(row => !row.live), cursor: this.cursor, earliest: this.earliest }; }
   restore(id, snapshot) {
     this.reset(id);
-    for (const row of snapshot.rows) this.rows.set(row.seq, row);
+    for (const row of snapshot.rows) if (!row.live) this.rows.set(row.seq, row);
     this.cursor = snapshot.cursor; this.earliest = snapshot.earliest; this.restored = true;
   }
   trace(thread, activeTurn) {
-    return claudeTrace([...this.rows.values()].sort((a,b) => a.seq-b.seq), { child: !!thread.subpath, activeTurn });
+    // Partial output belongs to the running turn; afterwards durable assistant
+    // events hold the complete text.
+    for (const [key, row] of this.rows) if (row.live && row.turnId !== activeTurn) this.rows.delete(key);
+    return claudeTrace([...this.rows.values()].sort(rowOrder), { child: !!thread.subpath, activeTurn });
+  }
+  // Ephemeral items pushed by the Server's live stream. Only streaming deltas
+  // affect the transcript; other counters are not rendered.
+  acceptLive(id, items) {
+    if (this.id !== id) return false;
+    let changed = false;
+    for (const item of items) {
+      this.liveCursor = Math.max(this.liveCursor, item.id);
+      if (item.payload?.type !== "stream_event") continue;
+      this.rows.set(`L${item.id}`, { seq: item.afterSeq, live: item.id, turnId: item.turnId, payload: item.payload });
+      changed = true;
+    }
+    if (changed) pruneCompletedStreams(this.rows);
+    return changed;
+  }
+  resetLive() { for (const [key, row] of this.rows) if (row.live) this.rows.delete(key); }
+  // The transcript from rows already read, for live repaints without a request.
+  current(thread) {
+    return { ...this.trace(thread, this.session?.activeTurn ?? null), session: this.session, nextCursor: this.earliest, changed: true, more: false };
   }
   call(path, body) { return this.api(`/v1/claude/${path}`, body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }); }
   async prepare(nodeId, progress = () => {}) {
@@ -248,7 +275,8 @@ export class ClaudeRuntime {
     const info = await this.call(`runtimes/${node.nodeId}/describe`, { nodeAccountId: node.nodeAccountId || "" });
     const provider = node.reportedAppServer?.provider || {}, catalog = info.models || [];
     const efforts = m => m.supportsEffort === false ? [] : (m.supportedEffortLevels || []).map(reasoningEffort => ({ reasoningEffort }));
-    const models = catalog.map(m => ({ model: m.value || m.id, displayName: m.displayName || m.value, description: m.description, supportedReasoningEfforts: efforts(m) }));
+    // [1m] is a catalog capability suffix; the CLI accepts the base alias.
+    const models = catalog.map(m => ({ model: String(m.value || m.id || "").replace(/\[1m\]$/i, ""), displayName: m.displayName || m.value, description: m.description, supportedReasoningEfforts: efforts(m) }));
     // The SDK lists aliases; an account's full model ID borrows the capabilities of the alias resolving to it.
     if (provider.model && !models.some(m => m.model === provider.model)) {
       const base = id => String(id || "").replace(/\[1m\]$/i, "");
@@ -261,25 +289,31 @@ export class ClaudeRuntime {
     if (this.id !== thread.threadId) this.reset(thread.threadId);
     const epoch = this.epoch;
     const query = new URLSearchParams({ subpath: thread.subpath || "" });
+    // The root view skips subagent rows and thinking counters on the Server;
+    // subagents are read through their own history. Older Servers ignore it.
+    if (!thread.subpath) query.set("scope", "root");
     if (poll) query.set("after", this.cursor); else { query.set("view", "transcript"); query.set("before", older ? this.earliest || 0 : 0); }
     const result = await this.call(`sessions/${thread.sessionId}/${thread.subpath ? "history" : "events"}?${query}`);
     if (epoch !== this.epoch) return null;
-    let earliest = result.data.length ? result.earliest : null;
+    // A scoped page may hold only omitted rows yet still advance "earliest".
+    // `more:false` (newer Servers) means the beginning was reached.
+    let earliest = result.more === false ? null : result.data.length || result.earliest > 0 ? result.earliest : null;
     if (this.restored && !poll && !older) {
       // Stream events after this page are re-read by the next poll.
       this.restored = false; this.cursor = 0;
-      const cachedMax = Math.max(0, ...[...this.rows.values()].filter(row => row.payload?.type !== "stream_event").map(row => row.seq));
+      const cachedMax = Math.max(0, ...[...this.rows.values()].filter(row => !row.live && row.payload?.type !== "stream_event").map(row => row.seq));
       if (earliest !== null && earliest <= cachedMax) {
-        for (const seq of [...this.rows.keys()]) if (seq >= earliest) this.rows.delete(seq);
+        for (const [key, row] of [...this.rows]) if (!row.live && row.seq >= earliest) this.rows.delete(key);
         earliest = this.earliest;
       } else this.rows.clear();
     }
     for (const row of result.data) this.rows.set(row.seq, row);
+    if (result.session) this.session = result.session;
     if (!older) this.cursor = Math.max(this.cursor, result.cursor || 0);
     if (!poll) this.earliest = earliest;
     pruneCompletedStreams(this.rows);
     return { ...this.trace(thread, result.session?.activeTurn), session: result.session,
-      nextCursor: this.earliest, changed: result.data.length > 0, more: poll && result.data.length > 0 };
+      nextCursor: this.earliest, changed: result.data.length > 0, more: poll && result.more === true };
   }
   send(thread, body) { return this.#retained(this.turnRequests, "turns", thread, body); }
   steer(thread, body) { return this.#retained(this.steerRequests, "steer", thread, body); }

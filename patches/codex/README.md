@@ -6,7 +6,7 @@ App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 - Upstream: <https://github.com/openai/codex>
 - Base tag: `rust-v0.159.3` (pinned in repository-root `CODEX_VERSION`)
 - Base commit: `01fc69f40267` (annotated tag object: `8e46774a94a7`)
-- Patch source commit: `6cde59106b48`
+- Patch source commit: `4b4b548c2e61`
 
 Apply it to a clean checkout:
 
@@ -32,6 +32,41 @@ capacity checks while preserving remote persistence, account handoff, input
 recovery and memory residency. Stable and experimental protocol bundles and the
 Python SDK types are regenerated from the new baseline. Model access still
 follows the selected account/provider.
+
+Runtime `0.159.3-mira.2` adds an optional image-count compaction trigger:
+
+```toml
+mira_auto_compact_image_limit = 40
+```
+
+The setting counts typed images in the active model input, including user
+attachments and tool screenshots, before each model step. At or above the
+threshold, Codex summarizes the consumed history through native plaintext
+compaction and preserves unread input and its paired tool calls verbatim. The
+checkpoint is flushed to the remote store before sampling continues. This path
+uses a summary even when opaque compaction or token-budget reset is selected.
+Between checkpoints, input keeps its append-only prefix; each checkpoint has the
+ordinary compaction cache cost. Canonical image records remain intact.
+
+Omitting the setting or using `0` disables this trigger. It supports normal
+config/profile precedence, CLI `-c mira_auto_compact_image_limit=40`, and the
+App Server `config` override on thread start or cold resume. Live children inherit
+the parent's effective configuration. It is a runtime setting, not a persisted
+thread preference; configure it again when resuming through another runtime.
+
+For providers with a 50-image request cap, 40 leaves room for incoming tool
+results. This is a trigger, not an attachment/upload limit: unread image batches
+are never silently reduced. A fresh batch exceeding the provider's own cap still
+requires smaller batches. When restored history is already oversized, only the
+compaction request substitutes older excess images with explanatory text while
+retaining recent images, all text and the original durable history. Compaction
+failure stops further sampling and does not rerun completed tools.
+
+`tests/image_compaction_runtime_e2e.py` covers threshold and oversized cold
+restore, failed compaction, fresh images, paired screenshot tools, checkpoint
+persistence and stable subsequent prefixes in canonical platform packages.
+The account runtime scenario also verifies PostgreSQL history and cold account
+resume alongside CLI and subagent persistence.
 
 Runtime `0.155.1-mira.3` defaults to portable plaintext context for every provider,
 including built-in OpenAI, Azure and restored subagents. No per-account setting

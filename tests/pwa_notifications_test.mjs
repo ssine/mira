@@ -101,7 +101,7 @@ test("app notification routing retains text and attachments even when draft stor
     document: { querySelector: () => null }, $: () => input,
     agent: { attachments: [file], selectionEpoch: 0 }, csrfToken: "fixture", composerDraftKey: key,
     composerDraftLoading: false, composerDraftReadFailed: false, composerDraftRemoveKey: null, composerSaveRevision: 0,
-    setComposerDraftStatus() {}, rememberAppRoute() {},
+    setComposerDraftStatus() {}, rememberAppRoute() {}, closeClaudeLive() {},
     restoreBrowserRoute: async () => { input.value = ""; context.agent.attachments = []; },
   });
   vm.runInContext(drafts + "\nglobalThis.composerDrafts = new ComposerDrafts(); composerDrafts.open = () => Promise.reject(new Error('storage blocked'));\n" + saveFunction + openFunction, context);

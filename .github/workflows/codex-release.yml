@@ -16,6 +16,7 @@ on:
       - tests/interrupted_tool_resume_e2e.py
       - tests/encrypted_context_runtime_e2e.py
       - tests/plaintext_context_runtime_e2e.py
+      - tests/image_compaction_runtime_e2e.py
       - tests/reasoning_recovery_runtime_e2e.py
       - tests/codex_release_test.mjs
       - scripts/build-codex-release.mjs
@@ -415,6 +416,18 @@ jobs:
           suffix=""
           [[ "$TARGET" == *windows* ]] && suffix=".exe"
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/reasoning_recovery_runtime_e2e.py
+
+      - name: Test image-count checkpoints in the release runtime
+        if: inputs.codex_release == ''
+        shell: bash
+        env:
+          PACKAGE: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          suffix=""
+          [[ "$TARGET" == *windows* ]] && suffix=".exe"
+          CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/image_compaction_runtime_e2e.py
 
       - uses: actions/upload-artifact@v4
         # Retain a completed candidate for diagnosis even if acceptance fails.

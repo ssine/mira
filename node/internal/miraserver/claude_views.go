@@ -245,6 +245,8 @@ func (server *Server) claudeSummary(ctx context.Context, s claudeSession) (map[s
 	result["costEstimate"].(map[string]any)["subagentCount"] = count
 	result["childCount"] = count
 	result["descendantCount"] = count
+	// The sidebar reads the top-level count before children are paged in.
+	result["subagentCount"] = count
 	result["itemCount"] = seq
 	activity := "idle"
 	reason := ""
@@ -267,38 +269,48 @@ func (server *Server) claudeConversation(ctx context.Context, id string) (map[st
 	if err == nil {
 		return server.claudeSummary(ctx, s)
 	}
+	return server.claudeChild(ctx, id)
+}
+
+// claudeChild is a lightweight summary of one native subagent transcript. It
+// uses that transcript's own record times and never recomputes the session's
+// usage or history projections for every listed child.
+func (server *Server) claudeChild(ctx context.Context, id string) (map[string]any, error) {
 	var sessionID, subpath string
-	err = server.pool.QueryRow(ctx, `SELECT session_id::text,subpath FROM mira_claude_transcripts WHERE thread_id=$1`, id).Scan(&sessionID, &subpath)
+	var started, updated *time.Time
+	var s claudeSession
+	err := server.pool.QueryRow(ctx, `SELECT t.session_id::text,t.subpath,t.started_at,t.updated_at,`+claudeSessionColumnsQualified+`
+ FROM mira_claude_transcripts t JOIN mira_claude_sessions s USING(session_id) WHERE t.thread_id=$1 AND t.subpath<>''`, id).Scan(
+		&sessionID, &subpath, &started, &updated, &s.ID, &s.NodeID, &s.Cwd, &s.Title, &s.Model, &s.Effort, &s.Archived, &s.Revision, &s.ActiveTurn, &s.Persistence, &s.CreatedAt, &s.UpdatedAt, &s.AccountID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, claudeError(404, "Claude conversation not found")
 	}
 	if err != nil {
 		return nil, err
 	}
-	s, err = scanClaude(server.pool.QueryRow(ctx, `SELECT `+claudeColumns+` FROM mira_claude_sessions WHERE session_id=$1`, sessionID))
-	if err != nil {
+	createdAt, updatedAt := s.CreatedAt, s.UpdatedAt
+	if started != nil {
+		createdAt = *started
+	}
+	if updated != nil {
+		updatedAt = *updated
+	}
+	var items int64
+	if err = server.pool.QueryRow(ctx, `SELECT coalesce((SELECT next_seq-1 FROM mira_claude_transcripts WHERE session_id=$1 AND subpath=$2),0)`, sessionID, subpath).Scan(&items); err != nil {
 		return nil, err
 	}
-	value, err := server.claudeSummary(ctx, s)
-	if err != nil {
-		return nil, err
-	}
-	value["threadId"] = id
-	value["subpath"] = subpath
-	// Group native subpaths beneath their owning session without asserting native parentage.
-	value["parentThreadId"] = sessionID
-	value["nativeParentUnknown"] = true
-	value["listRoot"] = false
-	value["childCount"] = 0
-	value["descendantCount"] = 0
-	value["title"] = "子 Agent · " + strings.TrimSuffix(strings.TrimPrefix(subpath, "subagents/agent-"), ".jsonl")
-	value["costEstimate"] = claudeEstimate(nil, false)
-	delete(value, "tokenUsage")
-	delete(value, "tokenUsageSummary")
-	// Read state belongs to the session's main transcript.
-	delete(value, "readState")
-	value["activity"] = map[string]any{"state": "idle", "generation": 1, "itemCount": 0}
-	return value, nil
+	return map[string]any{
+		"threadId": id, "sessionId": sessionID, "subpath": subpath, "engine": "claude",
+		"title": "子 Agent · " + strings.TrimSuffix(strings.TrimPrefix(subpath, "subagents/agent-"), ".jsonl"),
+		"cwd":   s.Cwd, "model": s.Model, "reasoningEffort": s.Effort, "nodeAccountId": s.AccountID,
+		"runtimeNodeId": s.NodeID, "sourceNodeId": s.NodeID, "archived": s.Archived, "generation": int64(1),
+		"createdAt": createdAt, "updatedAt": updatedAt, "persistence": s.Persistence,
+		// Group native subpaths beneath their owning session without asserting native parentage.
+		"parentThreadId": sessionID, "nativeParentUnknown": true, "listRoot": false,
+		"childCount": 0, "descendantCount": 0, "itemCount": items,
+		"costEstimate": claudeEstimate(nil, false),
+		"activity":     map[string]any{"state": "idle", "generation": 1, "itemCount": 0},
+	}, nil
 }
 
 const claudeProjectPath = `CASE WHEN cwd ~ '^[A-Za-z]:' OR left(cwd,2)=E'\\\\' THEN lower(replace(cwd,E'\\','/')) ELSE cwd END`
