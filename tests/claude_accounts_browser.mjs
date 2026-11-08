@@ -51,7 +51,7 @@ try {
       if (path.endsWith("/cache-configure")) cacheBytes = body.maxBytes;
       return route.fulfill({ json: { maxBytes: cacheBytes, usedBytes: 0, entries: 0, cleanupPending: false } });
     }
-    if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "opus", resolvedModel: "claude-example", displayName: "Claude", supportedEffortLevels: ["low", "high", "xhigh"] }] } : { status: "ready" } });
+    if (path.includes("/runtimes/")) return route.fulfill({ json: path.endsWith("describe") ? { models: [{ value: "opus[1m]", resolvedModel: "claude-example", displayName: "Claude", supportedEffortLevels: ["low", "high", "xhigh"] }] } : { status: "ready" } });
     if (path === "/v1/claude/sessions") {
       if (req.method() === "POST") { const session = { ...body, sessionId: randomUUID(), persistence: "saved", activeTurn: null }; sessions.push(session); return route.fulfill({ json: session }); }
       return route.fulfill({ json: { data: sessions, nextOffset: null } });
@@ -229,6 +229,10 @@ try {
   await view.locator("#conversationAccount").selectOption(ids[0]);
   await page.waitForFunction(() => document.querySelector("#conversationEffortLabel").textContent === "思考 · 很高");
   assert.equal(await view.locator("#conversationModelLabel").textContent(), "Claude", "the account model ID uses its SDK alias capabilities");
+  await view.locator("#conversationModelSelect").click();
+  assert.equal(await view.locator('#conversationModelMenu [data-model-choice="opus"]').count(), 1, "the CLI receives the base alias without the 1M capability suffix");
+  assert.equal(await view.locator('#conversationModelMenu [data-model-choice="opus[1m]"]').count(), 0);
+  await page.keyboard.press("Escape");
   await view.locator("#conversationInput").fill("Use the account default effort");
   await view.locator("#conversationSend").click();
   await page.waitForFunction(() => document.querySelector("#conversationInput").value === "");

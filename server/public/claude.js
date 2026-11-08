@@ -248,7 +248,8 @@ export class ClaudeRuntime {
     const info = await this.call(`runtimes/${node.nodeId}/describe`, { nodeAccountId: node.nodeAccountId || "" });
     const provider = node.reportedAppServer?.provider || {}, catalog = info.models || [];
     const efforts = m => m.supportsEffort === false ? [] : (m.supportedEffortLevels || []).map(reasoningEffort => ({ reasoningEffort }));
-    const models = catalog.map(m => ({ model: m.value || m.id, displayName: m.displayName || m.value, description: m.description, supportedReasoningEfforts: efforts(m) }));
+    // [1m] is a catalog capability suffix; the CLI accepts the base alias.
+    const models = catalog.map(m => ({ model: String(m.value || m.id || "").replace(/\[1m\]$/i, ""), displayName: m.displayName || m.value, description: m.description, supportedReasoningEfforts: efforts(m) }));
     // The SDK lists aliases; an account's full model ID borrows the capabilities of the alias resolving to it.
     if (provider.model && !models.some(m => m.model === provider.model)) {
       const base = id => String(id || "").replace(/\[1m\]$/i, "");
