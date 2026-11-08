@@ -171,10 +171,8 @@ func (m *Manager) configureAccount(params map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range m.processes {
-		if p.accountID == id {
-			return nil, errors.New("Claude account has an active turn; wait or interrupt it before changing credentials")
-		}
+	if m.accountBusyLocked(id) {
+		return nil, errors.New("Claude account has an active turn; wait or interrupt it before changing credentials")
 	}
 	account, _ := m.readAccount(id)
 	if account.AuthType == "" {

@@ -257,42 +257,56 @@ test("Claude rejected input only falls back after verified completion", async ()
  const app=await fs.readFile(new URL("../server/public/app.js",import.meta.url),"utf8");
  const start=app.indexOf("async function steerClaudeTurn(");
  const source=app.slice(start,app.indexOf("\nasync function sendClaudeMessage(",start));
- for (const scenario of ["unknown","lost_while_finishing","different_turn","finished","recovered"]) {
+ // Scenarios: steer verdict, reconcile results in order (then "unknown" or "stopped" repeats), turn end.
+ const scenarios={
+  unknown:{steer:"unknown",probes:["unknown"],active:()=>"t"},
+  lost_while_finishing:{steer:"finishing",probes:["unknown"],active:()=>"t"},
+  different_turn:{steer:"finishing",probes:["stopped"],active:()=>"other"},
+  finished:{steer:"finishing",probes:["stopped"],active:()=>null},
+  recovered:{steer:"finishing",probes:["stopped"]},
+  slow_probe:{steer:"finishing",probes:["unknown","unknown","stopped"],endsAfter:3},
+  unknown_then_finished:{steer:"unknown",probes:["unknown","stopped"],endsAfter:2},
+ };
+ for (const [scenario,plan] of Object.entries(scenarios)) {
   const phases=[],calls=[],attachments=[{path:"/uploaded.png"}];
-  let reads=0,uploads=0,reloads=0;
+  let reads=0,uploads=0,reloads=0,probes=0,clock=0;
   const unknown=()=>Object.assign(new Error("无法确认上一轮是否已停止"),{status:409,code:"execution_unknown"});
   const context=vm.createContext({
    agent:{activeTurns:new Map([["s","t"]])},dashboardNodes:new Map(),
    claudeRuntime:{steerRequests:new Map(),cursor:10,
-    async steer(){throw scenario==="unknown"?unknown():Object.assign(new Error("finishing"),{status:409,code:"turn_not_steerable"});},
+    async steer(){throw plan.steer==="unknown"?unknown():Object.assign(new Error("finishing"),{status:409,code:"turn_not_steerable"});},
     async call(path,body){
      calls.push(path);
      if(path.endsWith("/reconcile")) {
       assert.deepEqual(Object.keys(body),[]);
-      if(scenario==="lost_while_finishing")throw unknown();
-      return {state:"stopped"};
+      const result=plan.probes[Math.min(probes++,plan.probes.length-1)];
+      if(result==="unknown")throw unknown();
+      return {state:result};
      }
      reads++;
-     return {activeTurn:scenario==="different_turn"?"other":scenario==="finished"||reads>1?null:"t"};
+     if(plan.active)return {activeTurn:plan.active()};
+     return {activeTurn:reads>(plan.endsAfter??1)?null:"t"};
     }},
    async prepareTurnInput(){uploads++;return {nativeAttachments:attachments};},
    updateReplyProgress(_progress,value){phases.push(value.phase);},
-   async loadClaudeTranscript(){reloads++;},setTimeout:callback=>callback(),
+   async loadClaudeTranscript(){reloads++;},setTimeout:(callback,delay)=>{clock+=delay;callback();},
+   Date:{now:()=>clock},
   });
   vm.runInContext(source,context);
   const sending=context.steerClaudeTurn({threadId:"s",sessionId:"s"},"draft",[],{});
-  if(["finished","recovered"].includes(scenario)) {
+  if(["finished","recovered","slow_probe","unknown_then_finished"].includes(scenario)) {
    const input=await sending;
-   assert.equal(input.text,"draft");assert.equal(input.attachments,attachments);
+   assert.equal(input.text,"draft",scenario);assert.equal(input.attachments,attachments);
    assert.equal(reloads,1,"refresh history acknowledgement before sending a new turn");
   } else {
-   await assert.rejects(sending,error=>scenario==="different_turn"?/另一轮/.test(error.message):error.code==="execution_unknown");
+   await assert.rejects(sending,error=>scenario==="different_turn"?/另一轮/.test(error.message):error.code==="execution_unknown"&&/消息未发送/.test(error.message));
    assert.equal(reloads,0);
   }
   assert.equal(uploads,1);
   assert.equal(phases.some(phase=>phase.includes("已结束")),false);
-  if(scenario==="unknown")assert.deepEqual(calls,[],"do not poll or fall back on an unknown execution");
-  if(scenario==="lost_while_finishing")assert.equal(reads,1,"stop waiting as soon as execution becomes unknown");
+  // An execution that stays unknown is never treated as stopped; it fails
+  // within the short confirmation window instead of waiting two minutes.
+  if(["unknown","lost_while_finishing"].includes(scenario))assert.ok(clock>15_000&&clock<20_000,`${scenario} waited ${clock} ms`);
  }
 });
 

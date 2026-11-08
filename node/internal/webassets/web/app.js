@@ -625,23 +625,31 @@ async function steerClaudeTurn(thread, text, attachments, progress) {
   try {
     await claudeRuntime.steer(thread, body);
   } catch (error) {
-    if (error.code !== "turn_not_steerable") throw error;
+    // Both codes mean the message did not join the turn. "Unknown" may be one
+    // slow probe of a busy Node, so it gets the same short confirmation wait.
+    if (error.code !== "turn_not_steerable" && error.code !== "execution_unknown") throw error;
     updateReplyProgress(progress, { phase: "正在确认上一轮结束，随后作为新一轮发送…" });
     const deadline = Date.now() + 120_000;
+    let unknownSince = 0;
     for (;;) {
       const session = await claudeRuntime.call(`sessions/${thread.sessionId}`);
       if (!session.activeTurn) break;
       if (session.activeTurn !== body.expectedTurnId) throw new Error("消息未发送：会话已进入另一轮，请刷新后重试");
       // A finishing worker can disappear while we wait. Reconciliation requires
-      // stop evidence and fails promptly if the owning execution is unknown.
+      // stop evidence; an execution that stays unknown fails within seconds.
       try {
         await claudeRuntime.call(`sessions/${thread.sessionId}/reconcile`, {});
+        unknownSince = 0;
       } catch (error) {
-        error.message = `消息未发送：${error.message}`;
-        throw error;
+        unknownSince ||= Date.now();
+        if (error.code !== "execution_unknown" || Date.now() - unknownSince > 15_000) {
+          error.message = `消息未发送：${error.message}`;
+          throw error;
+        }
+        updateReplyProgress(progress, { phase: "运行状态待确认，正在重试…" });
       }
       if (Date.now() > deadline) throw new Error("消息未发送：Claude 仍在结束上一轮，请稍后重试");
-      await new Promise(resolve => setTimeout(resolve, 750));
+      await new Promise(resolve => setTimeout(resolve, unknownSince ? 1500 : 750));
     }
     await loadClaudeTranscript(thread.threadId, { poll: claudeRuntime.cursor > 0 });
     return { text: body.text, attachments: body.attachments };

@@ -29,6 +29,13 @@ func (server *Server) rememberClaudeExecution(target claudeExecutionTarget, stat
 	if server.claudeExecution == nil {
 		server.claudeExecution = make(map[string]claudeExecutionObservation)
 	}
+	// One slow control round trip does not overwrite a fresh confirmation of the
+	// same execution; it simply expires on its normal schedule.
+	if previous, ok := server.claudeExecution[target.session]; ok && state == "unknown" && reason == "connection" &&
+		previous.state == "running" && previous.turn == target.turn && previous.node == target.node &&
+		previous.revision == target.revision && time.Since(previous.checked) < 20*time.Second {
+		return
+	}
 	if len(server.claudeExecution) >= 4096 {
 		for key := range server.claudeExecution {
 			delete(server.claudeExecution, key)
