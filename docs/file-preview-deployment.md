@@ -115,10 +115,11 @@ grant/cookie on another hostname or port. Include an unmapped console origin.
 - The HTML parent is the default root; directory actions can choose a wider
   explicit root and nested entry. Missing resources link to root/entry controls.
 - Preview bootstrap grants last 60 seconds and are consumed once. Host-only
-  HttpOnly cookies and the live administrator session authorize a 30-minute
-  preview; owners can close/renew it before expiry. The scoped cookie may remain
-  for 24 hours to support owner leases, but is never authorization beyond the
-  Server session lifetime. Active streams recheck ownership every
+  HttpOnly cookies and the live administrator session authorize a 90-day
+  preview (three months); owners can close it or renew it before expiry, setting
+  the expiry to 90 days from renewal. The scoped cookie lasts 90 days from claim, but is
+  never authorization beyond the Server session lifetime or the live administrator
+  session. Active streams recheck ownership every
   two seconds. Node disconnect/revocation closes data sockets immediately and invalidates the site control epoch.
 - ZIP central-directory index budget: 32 MiB and 100,000 entries. This bounds
   index allocation; it is not an ordinary file-size ceiling. Invalid names and

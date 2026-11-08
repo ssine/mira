@@ -15,12 +15,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/ssine/mira/node/internal/accountegress"
 	"github.com/ssine/mira/node/internal/clauderuntime"
 	"github.com/ssine/mira/node/internal/transport"
 )
 
 type controlClient struct {
 	notificationMu    sync.Mutex
+	egress            *accountegress.Manager
 	claude            *clauderuntime.Manager
 	desktop           *desktopStatus
 	configuration     config
@@ -108,7 +110,7 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 	httpClient := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 	client := &controlClient{
 		configuration: configuration, runtime: runtimeValue,
-		claude:         clauderuntime.New(filepath.Dir(configuration.IdentityFile)),
+		egress:         accountegress.New(filepath.Dir(configuration.IdentityFile)),
 		token:          configuration.Token,
 		appServer:      newAppServerManager(configuration),
 		http:           httpClient,
@@ -116,6 +118,8 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 		tunnelAccounts: make(map[string]appServerTunnelAccount),
 		sshWorkers:     make(map[string]context.CancelFunc),
 	}
+	client.claude = clauderuntime.NewWithEgress(filepath.Dir(configuration.IdentityFile), client.egress)
+	client.appServer.egress = client.egress
 	client.endpoints = newServerEndpointSelector(configuration.ServerURL, httpClient)
 	return client
 }
@@ -573,7 +577,12 @@ func (client *controlClient) handleMessage(ctx context.Context, message controlM
 		go func() {
 			var result any
 			var err error
-			if message.Capability == "claude" {
+			if message.Capability == "egress" {
+				var params map[string]any
+				if err = json.Unmarshal(message.Params, &params); err == nil {
+					result, err = client.handleAccountEgress(params)
+				}
+			} else if message.Capability == "claude" {
 				var params map[string]any
 				if err = json.Unmarshal(message.Params, &params); err == nil {
 					params["endpoint"] = client.endpoints.endpoint(ctx)
@@ -804,6 +813,9 @@ func (client *controlClient) closeTunnels() {
 func (client *controlClient) close() {
 	if client.claude != nil {
 		client.claude.Close()
+	}
+	if client.egress != nil {
+		client.egress.Close()
 	}
 	client.connectionMu.Lock()
 	connection := client.connection

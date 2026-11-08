@@ -25,6 +25,8 @@ type CodexAccount struct {
 	Enabled            bool           `json:"enabled"`
 	Revision           int64          `json:"revision"`
 	CredentialRevision int64          `json:"credentialRevision"`
+	Egress             map[string]any `json:"egress"`
+	EgressConfigured   bool           `json:"egressConfigured"`
 	Desired            map[string]any `json:"desiredAppServer"`
 	Reported           map[string]any `json:"reportedAppServer"`
 	Snapshot           map[string]any `json:"snapshot,omitempty"`
@@ -91,6 +93,7 @@ const accountRowsJSON = `COALESCE((SELECT jsonb_agg(jsonb_build_object(
   'nodeAccountId',b.node_account_id,'nodeId',b.node_id,'accountId',b.account_id,
   'name',a.name,'provider',a.provider,'authType',a.auth_type,'isDefault',b.is_default,
   'enabled',b.enabled,'revision',b.revision,'credentialRevision',b.credential_revision,
+  'egress',b.egress,'egressConfigured',b.egress_configured,
   'desiredAppServer',CASE WHEN b.is_default THEN nodes.desired_app_server ELSE
     b.desired || jsonb_build_object('defaultCwd',nodes.desired_app_server->'defaultCwd',
       'developerInstructionsFile',nodes.desired_app_server->'developerInstructionsFile') END,

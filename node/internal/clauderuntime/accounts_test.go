@@ -44,6 +44,10 @@ func TestAccountCredentialsStayLocalAndIsolated(t *testing.T) {
 		if env[keyName] != "private-"+id || !strings.Contains(env["CLAUDE_CONFIG_DIR"], id) {
 			t.Fatal("account credentials/config directory crossed")
 		}
+		if env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] != "1" || env["DISABLE_TELEMETRY"] != "1" ||
+			env["CLAUDE_CODE_DISABLE_FEATURE_FLAGS"] != "1" || env["GIT_AUTHOR_EMAIL"] != "claude@local.invalid" {
+			t.Fatal("privacy defaults missing from account environment")
+		}
 		info, err := os.Stat(filepath.Join(env["CLAUDE_CONFIG_DIR"], "mira-account.json"))
 		if err != nil {
 			t.Fatal(err)

@@ -20,6 +20,8 @@ import (
 	"github.com/ssine/mira/node/internal/resourcewire"
 )
 
+const previewSessionLifetime = 90 * 24 * time.Hour
+
 type previewSession struct {
 	Epoch        any `json:"-"`
 	ID           string
@@ -231,7 +233,7 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		id := strings.ToLower(previewToken()[:20])
 		id = strings.ReplaceAll(strings.ReplaceAll(id, "_", "a"), "-", "b")
 		now := time.Now()
-		session := &previewSession{ID: id, Epoch: server.channel.NodeConnectionEpoch(body.NodeID), Owner: actor.SessionID, NodeID: body.NodeID, Resource: p, Entry: "/" + escapeSitePath(entry), GrantHash: foundation.TokenHash(grant), Expires: now.Add(30 * time.Minute), GrantExpires: now.Add(time.Minute)}
+		session := &previewSession{ID: id, Epoch: server.channel.NodeConnectionEpoch(body.NodeID), Owner: actor.SessionID, NodeID: body.NodeID, Resource: p, Entry: "/" + escapeSitePath(entry), GrantHash: foundation.TokenHash(grant), Expires: now.Add(previewSessionLifetime), GrantExpires: now.Add(time.Minute)}
 		controlQuery := url.Values{"nodeId": {body.NodeID}, "path": {p.Path}, "view": {"site"}, "noauto": {"1"}, "previewId": {id}}
 		if p.Archive {
 			controlQuery.Set("archive", "true")
@@ -283,7 +285,7 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 			return writeJSON(w, 200, map[string]any{"closed": true})
 		}
 		if r.Method == "POST" {
-			s.Expires = time.Now().Add(30 * time.Minute)
+			s.Expires = time.Now().Add(previewSessionLifetime)
 			return writeJSON(w, 200, map[string]any{"expiresAt": s.Expires})
 		}
 		return foundation.WriteErrorJSON(w, 405, "method not allowed", "method_not_allowed")
@@ -390,7 +392,7 @@ func (server *Server) servePreviewHost(w http.ResponseWriter, r *http.Request, i
 		current.CookieHash = foundation.TokenHash(cookie)
 		current.GrantHash = ""
 		server.previews.Unlock()
-		http.SetCookie(w, &http.Cookie{Name: previewCookieName(server.config.Foundation.SecureCookies), Value: cookie, Path: "/", HttpOnly: true, Secure: server.config.Foundation.SecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: 86400})
+		http.SetCookie(w, &http.Cookie{Name: previewCookieName(server.config.Foundation.SecureCookies), Value: cookie, Path: "/", HttpOnly: true, Secure: server.config.Foundation.SecureCookies, SameSite: http.SameSiteStrictMode, MaxAge: int(previewSessionLifetime / time.Second)})
 		_ = writeJSON(w, 200, map[string]any{"entry": s.Entry})
 		return
 	}

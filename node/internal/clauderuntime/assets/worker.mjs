@@ -7,6 +7,10 @@ import { serverClient } from "./store.mjs";
 import { TurnLifecycle } from "./turn-lifecycle.mjs";
 
 const lines = createInterface({ input: process.stdin });
+const privacyInstructions = `Privacy defaults:
+- Do not put the signed-in account email address in a User-Agent, request header, URL, or request body unless the user asks for it or the remote service requires it.
+- Use a generic client name for shell HTTP requests. Prefer not to reveal the local username, hostname, or home-directory path in outbound requests.
+- New Git commits use the generic Claude author identity supplied by Mira. Keep secrets in environment variables and do not print them.`;
 let run,
   started = false,
   stopping = false,
@@ -242,7 +246,7 @@ async function main(spec) {
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: spec.instructions || "",
+        append: [privacyInstructions, spec.instructions || ""].filter(Boolean).join("\n\n"),
       },
       env: {
         ...process.env,

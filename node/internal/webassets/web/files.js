@@ -6,7 +6,7 @@ async function api(path,method='GET',body) { const r=await fetch(path,{method,he
 async function site() {
   const root=$('siteRoot').value.trim();const entry=$('siteEntry').value.trim();if(sessionID)await api(`/v1/file-previews/${sessionID}`,'DELETE');
   const result=await api('/v1/file-previews','POST',{nodeId:ref.nodeId,root,entry,resource:ref});sessionID=result.id;clearInterval(lease);lease=setInterval(()=>api(`/v1/file-previews/${sessionID}`,'POST').catch(e=>{$('filePageStatus').textContent=e.message;clearInterval(lease)}),10*60*1000);
-  $('siteStop').hidden=false;$('filePageStatus').textContent=`网站已准备好 · 有效期 ${new Date(result.expiresAt).toLocaleTimeString()}`;
+  $('siteStop').hidden=false;$('filePageStatus').textContent=`网站已准备好 · 到期时间 ${new Date(result.expiresAt).toLocaleString()}`;
   // Automatic entry runs in the tab opened synchronously by the chat click.
   // For root adjustments a user-created tab is reserved before the request.
   return result.url;

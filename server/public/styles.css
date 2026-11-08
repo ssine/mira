@@ -1070,6 +1070,10 @@ progress { width: 100%; accent-color: var(--accent); }
 .codex-account-dialog details > label { margin-top: 12px; }
 .codex-account-dialog .actions { flex-wrap: wrap; }
 .codex-account-dialog [hidden] { display: none; }
+.codex-account-dialog [data-account-login-info] { display: grid; gap: 8px; }
+.codex-account-dialog [data-account-login-info] p { margin: 0; }
+.account-login-code { display: flex; gap: 8px; }
+.account-login-code input { flex: 1; min-width: 0; }
 .composer-account-choice { max-width: 155px; min-width: 60px; }
 .composer-account-choice select { padding: 5px; width: 100%; border: 0; color: var(--muted); background-color: transparent; font-size: 12px; text-overflow: ellipsis; }
 @media (max-width: 640px) {
