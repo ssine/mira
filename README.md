@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.100 增加 Claude.ai 订阅账号的官方 OAuth 登录与账号级托管出口，登录、刷新和模型请求固定走账号代理，工具流量保持直连。
+1.0.101 增加 Claude.ai 订阅账号的官方 OAuth 登录与账号级托管出口，登录、刷新和模型请求固定走账号代理，工具流量保持直连。
 
 1.0.94 让 `mira file write --input/--stdin` 和 `mira file read --output` 自动分块传输完整文件，去掉 CLI 的 4 MiB 文件大小限制，支持进度、取消和范围下载。需升级调用端 CLI；Agent 使用说明需升级 Server，目标 Node 需支持 `fileChunkedWrite`。
 
@@ -204,13 +204,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.100
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.101
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.100'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.101'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
