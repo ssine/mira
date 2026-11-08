@@ -1,16 +1,179 @@
 package accountegress
 
 import (
+	"context"
 	"encoding/json"
-	"io"
+	"errors"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("GO_WANT_EGRESS_HELPER") == "1" && len(os.Args) > 1 && os.Args[1] == "run" {
+		runEgressHelper()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func TestAcquireSharesReadyGateway(t *testing.T) {
+	manager, id := testManager(t)
+	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileClaude}
+	if _, err := manager.Configure(id, spec); err != nil {
+		t.Fatal(err)
+	}
+	first, releaseFirst, err := manager.Acquire(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirst()
+	started := time.Now()
+	second, releaseSecond, err := manager.Acquire(id)
+	if err != nil {
+		t.Fatalf("reusing a healthy account gateway failed after %s: %v", time.Since(started), err)
+	}
+	defer releaseSecond()
+	if second["HTTPS_PROXY"] != first["HTTPS_PROXY"] {
+		t.Fatalf("acquisitions did not share a gateway: %v != %v", second, first)
+	}
+	status, err := manager.Status(id)
+	if err != nil || status["refs"] != 2 || status["running"] != true {
+		t.Fatalf("shared gateway status: %#v %v", status, err)
+	}
+	releaseSecond()
+	releaseSecond() // Releasing one acquisition is idempotent.
+	status, err = manager.Status(id)
+	if err != nil || status["refs"] != 1 || status["running"] != true {
+		t.Fatalf("releasing one caller stopped another caller's gateway: %#v %v", status, err)
+	}
+}
+
+func TestConcurrentAcquireSharesGateway(t *testing.T) {
+	manager, id := testManager(t)
+	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileClaude}
+	if _, err := manager.Configure(id, spec); err != nil {
+		t.Fatal(err)
+	}
+	const callers = 8
+	type result struct {
+		env     map[string]string
+		release func()
+		err     error
+	}
+	results := make(chan result, callers)
+	start := make(chan struct{})
+	for range callers {
+		go func() {
+			<-start
+			env, release, err := manager.Acquire(id)
+			results <- result{env, release, err}
+		}()
+	}
+	close(start)
+	proxy := ""
+	for range callers {
+		value := <-results
+		if value.err != nil {
+			t.Errorf("concurrent acquire: %v", value.err)
+			continue
+		}
+		defer value.release()
+		if proxy == "" {
+			proxy = value.env["HTTPS_PROXY"]
+		} else if value.env["HTTPS_PROXY"] != proxy {
+			t.Errorf("concurrent callers received different gateways")
+		}
+	}
+	status, err := manager.Status(id)
+	if err != nil || status["refs"] != callers || status["running"] != true {
+		t.Fatalf("concurrent gateway status: %#v %v", status, err)
+	}
+}
+
+func TestAcquireCanRetryAfterStartFailure(t *testing.T) {
+	manager, id := testManager(t)
+	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileClaude}
+	binary := manager.binary
+	manager.binary = filepath.Join(t.TempDir(), "missing-sing-box")
+	if _, err := manager.Configure(id, spec); err == nil || !strings.Contains(err.Error(), "start account egress:") {
+		t.Fatalf("missing executable error: %v", err)
+	}
+	status, err := manager.Status(id)
+	if err != nil || status["refs"] != 0 || status["running"] != false {
+		t.Fatalf("failed startup left an active gateway: %#v %v", status, err)
+	}
+	manager.binary = binary
+	_, release, err := manager.Acquire(id)
+	if err != nil {
+		t.Fatalf("retry after restoring executable: %v", err)
+	}
+	defer release()
+}
+
+func TestConcurrentAcquireReceivesStartupFailure(t *testing.T) {
+	manager, id := testManager(t)
+	if _, err := manager.Configure(id, Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileClaude}); err != nil {
+		t.Fatal(err)
+	}
+	probe := manager.checkHealth
+	failure := errors.New("upstream health failed")
+	gate := make(chan struct{})
+	var unblock sync.Once
+	defer unblock.Do(func() { close(gate) })
+	manager.checkHealth = func(ctx context.Context, _ storedConfig) error {
+		select {
+		case <-gate:
+			return failure
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	const callers = 8
+	results := make(chan error, callers)
+	for range callers {
+		go func() {
+			_, release, err := manager.Acquire(id)
+			if release != nil {
+				release()
+			}
+			results <- err
+		}()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		status, err := manager.Status(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if status["refs"] == callers {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("callers did not all wait for startup: %#v", status)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	unblock.Do(func() { close(gate) })
+	for range callers {
+		if err := <-results; !errors.Is(err, failure) {
+			t.Errorf("startup failure was not shared: %v", err)
+		}
+	}
+	manager.checkHealth = probe
+	_, release, err := manager.Acquire(id)
+	if err != nil {
+		t.Fatalf("retry after failed health check: %v", err)
+	}
+	defer release()
+}
 
 func TestConfigureAcquireReleaseAndDelete(t *testing.T) {
 	manager, id := testManager(t)
@@ -29,7 +192,7 @@ func TestConfigureAcquireReleaseAndDelete(t *testing.T) {
 	}
 	root, _ := manager.accountRoot(id)
 	info, err := os.Stat(filepath.Join(root, "config.json"))
-	if err != nil || info.Mode().Perm() != 0600 {
+	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("private config permissions: %v %v", info, err)
 	}
 	stored, err := readStored(filepath.Join(root, "config.json"))
@@ -107,23 +270,22 @@ func TestValidation(t *testing.T) {
 
 func testManager(t *testing.T) (*Manager, string) {
 	t.Helper()
-	script := filepath.Join(t.TempDir(), "sing-box")
-	body := "#!/bin/sh\nexec \"$EGRESS_TEST_BINARY\" -test.run TestEgressHelper -- \"$@\"\n"
-	if err := os.WriteFile(script, []byte(body), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MIRA_NODE_SING_BOX", script)
-	t.Setenv("EGRESS_TEST_BINARY", os.Args[0])
+	// Run a native helper on every platform, including Windows without a shell.
+	t.Setenv("MIRA_NODE_SING_BOX", os.Args[0])
 	t.Setenv("GO_WANT_EGRESS_HELPER", "1")
 	manager := New(t.TempDir())
+	manager.checkHealth = func(ctx context.Context, config storedConfig) error {
+		// Exercise the real proxy health loop without depending on public APIs.
+		return waitHealthy(ctx, config, &routeProfile{
+			healthURL: "http://account-egress.test/health",
+			expected:  map[int]bool{http.StatusNotFound: true},
+		})
+	}
 	t.Cleanup(manager.Close)
 	return manager, "00000000-0000-4000-8000-000000000001"
 }
 
-func TestEgressHelper(t *testing.T) {
-	if os.Getenv("GO_WANT_EGRESS_HELPER") != "1" {
-		return
-	}
+func runEgressHelper() {
 	configPath := ""
 	for index, value := range os.Args {
 		if value == "-c" && index+1 < len(os.Args) {
@@ -147,31 +309,7 @@ func TestEgressHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	server := &http.Server{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodConnect {
-			writer.WriteHeader(http.StatusNotFound)
-			return
-		}
-		upstream, err := net.Dial("tcp", request.Host)
-		if err != nil {
-			writer.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		defer upstream.Close()
-		hijacker := writer.(http.Hijacker)
-		client, buffered, err := hijacker.Hijack()
-		if err != nil {
-			return
-		}
-		defer client.Close()
-		_, _ = buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
-		_ = buffered.Flush()
-		done := make(chan struct{}, 1)
-		go func() {
-			_, _ = io.Copy(upstream, client)
-			done <- struct{}{}
-		}()
-		_, _ = io.Copy(client, upstream)
-		<-done
+		writer.WriteHeader(http.StatusNotFound)
 	})}
 	_ = server.Serve(listener)
 }
