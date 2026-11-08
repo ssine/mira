@@ -139,7 +139,7 @@ def run_checkpoint_case(provider, mode):
                 provider.partial_failure = mode == "partial_failure"
                 turn(runtime, thread["id"], 1, "FRESH_IMAGES", "failed")
                 assert len(provider.requests) == 2, "sampling continued after summary failure"
-                assert not any(json.loads(line)["type"] == "compacted" for line in path.read_text().splitlines())
+                assert not any(json.loads(line)["type"] == "compacted" for line in path.read_text(encoding="utf-8").splitlines())
                 turn(runtime, thread["id"], 0, "RETRY")
                 compact, sampling = provider.requests[2:4]
             else:
@@ -191,7 +191,7 @@ def run_tool_case(provider):
             assert image_count(sampling) == 1
             assert sum(item["type"] == "function_call" and item["call_id"] == "screen-once" for item in sampling) == 1
             assert any(item["type"] == "function_call_output" and item["call_id"] == "screen-once" for item in sampling)
-            records = [json.loads(line) for line in Path(thread["path"]).read_text().splitlines()]
+            records = [json.loads(line) for line in Path(thread["path"]).read_text(encoding="utf-8").splitlines()]
             assert sum(record["type"] == "response_item" and record["payload"]["type"] == "function_call" for record in records) == 1
         finally:
             runtime.close()
