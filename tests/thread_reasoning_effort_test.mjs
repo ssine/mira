@@ -125,3 +125,11 @@ test("a new draft starts from the account's most recently used model and effort"
   agent.threads = agent.threads.map(value => ({ ...value, model: "retired" }));
   assert.equal(context.selectedConversationEffort(), "medium", "an unavailable model falls back to the catalog default");
 });
+
+test("legacy Nodes without an account binding use history without a cached account settings result", () => {
+  const { context, agent } = fixture();
+  context.selectedAccountNode = () => ({ nodeId: "node" });
+  agent.lastAccountSettings = null;
+  assert.equal(context.selectedConversationEffort(), "xhigh");
+  assert.equal(context.selectedConversationTier(), "default");
+});

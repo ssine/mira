@@ -3148,7 +3148,7 @@ function conversationModelKey() {
 function lastUsedConversationSettings() {
   const node = selectedAccountNode(), catalog = modelCatalogForConversation();
   if (agent.threadId || !node || !catalog) return null;
-  if (agent.lastAccountSettings?.key === node.nodeAccountId) {
+  if (agent.lastAccountSettings && agent.lastAccountSettings.key === node.nodeAccountId) {
     const settings = agent.lastAccountSettings.value;
     return { ...settings, model: catalog.models.some(item => item.model === settings.model) ? settings.model : null };
   }
