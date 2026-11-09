@@ -8,6 +8,7 @@ export function accountNode(node, bindingId = "") {
   if (claude) return { ...node, engine: "claude", nodeAccountId: claude.nodeAccountId, accountName: claude.name, accountRevision: claude.credentialRevision,
     reportedAppServer: claude.reportedAppServer, accountSnapshot: null };
   const account = (node.codexAccounts ?? []).find(value => bindingId ? value.nodeAccountId === bindingId : value.isDefault);
+  if (account?.deletedAt) return null;
   if (!account) return bindingId ? null : node;
   return { ...node, nodeAccountId: account.nodeAccountId, accountName: account.name, accountRevision: account.credentialRevision ?? account.revision,
     desiredAppServer: account.desiredAppServer, reportedAppServer: account.reportedAppServer, accountSnapshot: account.snapshot };
