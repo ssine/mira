@@ -354,3 +354,63 @@ func TestExecutionClaimRejectsThreadDeletedAfterFamilyRead(t *testing.T) {
 		t.Fatalf("deleted thread acquired execution: %d %v", writes, err)
 	}
 }
+
+func TestRetiredAccountHistoryCanMoveFromOfflineNode(t *testing.T) {
+	pool := executionTestDatabase(t)
+	ctx := context.Background()
+	const a = "123e4567-e89b-12d3-a456-426614174031"
+	const b = "123e4567-e89b-12d3-a456-426614174032"
+	const runtimeA = "123e4567-e89b-12d3-a456-426614174033"
+	const runtimeB = "123e4567-e89b-12d3-a456-426614174034"
+	const store = "retired-handoff"
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := pool.Exec(ctx, sql, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range [][2]string{{testNodeA, a}, {testNodeB, b}} {
+		exec(`INSERT INTO codex_nodes(node_id,node_key,hostname,platform,architecture,node_mode,node_version,capabilities,codex_installations) VALUES($1::uuid,$1::text,'fixture','linux','amd64','linux','test','{}','[]')`, row[0])
+		exec(`INSERT INTO mira_codex_accounts(account_id,name) VALUES($1::uuid,'fixture')`, row[1])
+		exec(`INSERT INTO mira_node_codex_accounts(node_account_id,node_id,account_id,is_default) VALUES($1::uuid,$2::uuid,$1::uuid,true)`, row[1], row[0])
+	}
+	for _, id := range []string{"root", "child"} {
+		parent := ""
+		if id == "child" {
+			parent = "root"
+		}
+		exec(`INSERT INTO codex_thread_projections(store_id,thread_id,active_generation,item_count,state,through_event_seq,parent_thread_id) VALUES($1,$2,1,0,'{}',1,NULLIF($3,''))`, store, id, parent)
+		exec(`INSERT INTO mira_codex_thread_runtimes(store_id,thread_id,node_id,node_account_id) VALUES($1,$2,$3::uuid,$4::uuid)`, store, id, testNodeA, a)
+	}
+	// The root has an explicit route; its legacy child resolves the default
+	// binding. Both source paths must accept the confirmed retired binding.
+	exec(`INSERT INTO mira_codex_execution_routes(store_id,thread_id,generation,node_account_id,runtime_id,revision,state) VALUES($1,'root',1,$2::uuid,$3,1,'idle')`, store, a, runtimeA)
+	exec(`INSERT INTO mira_codex_account_protocols(node_account_id,runtime_id,protocol) VALUES($1::uuid,$2::uuid,2)`, b, runtimeB)
+	registry := &fakeRegistry{values: map[string]nodes.Node{
+		testNodeA: {NodeID: testNodeA, Status: "offline", CodexAccounts: []nodes.CodexAccount{{NodeAccountID: a, IsDefault: true, Enabled: false, Desired: map[string]any{"running": false}, Reported: map[string]any{"status": "stopped", "runtimeId": runtimeA}}}},
+		testNodeB: {NodeID: testNodeB, Status: "online", CodexAccounts: []nodes.CodexAccount{{NodeAccountID: b, IsDefault: true, Enabled: true, Reported: map[string]any{"status": "running", "runtimeId": runtimeB}}}},
+	}}
+	channel := &Channel{db: pool, nodes: registry, nodeSockets: map[string]*socket{testNodeB: {}}}
+	client := &proxy{targetNodeID: testNodeB, nodeAccountID: b, runtimeID: runtimeB, storeID: store}
+	if _, err := channel.claimExecution(ctx, client, "root", true, false); err == nil {
+		t.Fatal("ordinary disabled offline source allowed handoff")
+	}
+	deleted := "2026-01-01T00:00:00Z"
+	source := &registry.values[testNodeA].CodexAccounts[0]
+	source.DeletedAt = &deleted
+	source.Reported["status"] = "running"
+	if _, err := channel.claimExecution(ctx, client, "root", true, false); err == nil {
+		t.Fatal("unconfirmed stopped source allowed handoff")
+	}
+	source.Reported["status"] = "stopped"
+	if _, err := channel.claimExecution(ctx, client, "root", true, false); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mira_codex_execution_routes WHERE store_id=$1 AND node_account_id=$2::uuid`, store, b).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("tree did not move: %d %v", count, err)
+	}
+	if _, err := channel.claimExecution(ctx, &proxy{targetNodeID: testNodeA, nodeAccountID: a, runtimeID: runtimeA, storeID: store}, "root", true, false); err == nil {
+		t.Fatal("deleted binding accepted as execution target")
+	}
+}

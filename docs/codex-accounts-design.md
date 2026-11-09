@@ -42,6 +42,17 @@ App Server 中全部已加载对话的状态。漏收完成通知不会让空闲
 会话切换与历史兼容处理只检查当前对话树，其他主对话可以继续运行。
 未完成登录断开后会结束其空闲实例，避免后台继续改写凭据。
 
+删除账号前必须停止实例并取得 Node 的停止报告。删除只停用并隐藏该 Node 的绑定，保留本地凭据、
+原始会话和费用归属；默认绑定保留删除标记，重连不会重新创建。历史主会话仍可切换到其他账号继续，
+已确认停止并删除的旧绑定即使 Node 离线也可交接。其他离线账号仍按原规则检查。
+Web 只列出已配置的 Claude 账号，不自动生成「Node 默认配置」选项；已有历史和后端兼容入口保留。
+
+ChatGPT 登录账号在输入栏提供 Fast 开关，API key 和自定义服务商不显示。Fast 使用原生 App Server
+`serviceTier: "priority"`，关闭时显式发送 `null`。每个对话从 canonical settings 恢复自己的设置；
+新对话从 PostgreSQL 查该 Node 账号最近主会话的模型、思考强度和 Fast，不受侧栏分页影响。
+没有历史时使用账号原始配置。设置随下一次发送生效；Fast 的可用性和额度消耗由 OpenAI 决定。
+完整 `thread_settings_applied` 快照缺少 tier 表示 Standard，旧 `turn_context` 缺少 tier 不表示重置。
+
 ## 路由与额度
 
 CodexAccount 是逻辑账号，NodeAccount 将其关联到 Node 的本地配置。可经创建接口的 accountId
@@ -156,6 +167,8 @@ Schema 29 将 Codex AgentGraphStore 的父子关系及 open/closed 状态保存�
 
 - GET /v1/codex/accounts：全局列表。
 - GET/POST /v1/nodes/:nodeId/codex-accounts：列出/创建；单个绑定可 PATCH 名称。
+- DELETE /v1/nodes/:nodeId/codex-accounts/:bindingId：幂等删除已停止绑定，要求管理员和 CSRF；schema 46 保留删除时间和历史引用。
+- GET /v1/nodes/:nodeId/codex-accounts/:bindingId/last-settings：最近主会话的 canonical 设置，不使用浏览器缓存。
 - 绑定下的 quota、quota-history、configure、login、login-status、login-cancel、logout：额度和凭据管理。
 - 既有 runtime start/stop 请求及 App Server WebSocket 接受 nodeAccountId；省略用默认账号，显式无效值不回退。
 - GET/PUT /v1/codex/threads/:threadId/automatic-input-recovery：读取/更新自动恢复偏好与最近尝试状态；PUT 校验 generation，要求管理员与 CSRF。

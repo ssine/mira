@@ -66,6 +66,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
   ]) context[name] = () => {};
   for (const name of [
     "modelCatalogForConversation", "conversationModelDefinition", "conversationEffortOptions", "lastUsedConversationSettings",
+    "loadLastAccountSettings", "conversationSupportsFast", "selectedConversationTier", "conversationIsFast",
     "selectedConversationEffort", "resumeAgentThread", "restoreAgentThread", "sendAgentMessage",
   ]) vm.runInContext(source(name), context);
   context.resumeAgentThreadOnSocket = id => context.restoreAgentThread(id, agent.socket);
@@ -123,4 +124,12 @@ test("a new draft starts from the account's most recently used model and effort"
   assert.equal(context.selectedConversationEffort(), "xhigh");
   agent.threads = agent.threads.map(value => ({ ...value, model: "retired" }));
   assert.equal(context.selectedConversationEffort(), "medium", "an unavailable model falls back to the catalog default");
+});
+
+test("legacy Nodes without an account binding use history without a cached account settings result", () => {
+  const { context, agent } = fixture();
+  context.selectedAccountNode = () => ({ nodeId: "node" });
+  agent.lastAccountSettings = null;
+  assert.equal(context.selectedConversationEffort(), "xhigh");
+  assert.equal(context.selectedConversationTier(), "default");
 });

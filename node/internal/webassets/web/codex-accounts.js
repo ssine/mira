@@ -8,6 +8,7 @@ export function accountNode(node, bindingId = "") {
   if (claude) return { ...node, engine: "claude", nodeAccountId: claude.nodeAccountId, accountName: claude.name, accountRevision: claude.credentialRevision,
     reportedAppServer: claude.reportedAppServer, accountSnapshot: null };
   const account = (node.codexAccounts ?? []).find(value => bindingId ? value.nodeAccountId === bindingId : value.isDefault);
+  if (account?.deletedAt) return null;
   if (!account) return bindingId ? null : node;
   return { ...node, nodeAccountId: account.nodeAccountId, accountName: account.name, accountRevision: account.credentialRevision ?? account.revision,
     desiredAppServer: account.desiredAppServer, reportedAppServer: account.reportedAppServer, accountSnapshot: account.snapshot };
@@ -20,6 +21,7 @@ export function accountGroups(nodes) {
   for (const node of nodes) {
     if (node.approvalStatus && node.approvalStatus !== "approved") continue;
     for (const account of [...(node.codexAccounts ?? []), ...(node.claudeAccounts ?? [])]) {
+      if (account.deletedAt) continue;
       const name = account.name?.trim();
       if (!name) continue;
       const provider = account.reportedAppServer?.provider;
@@ -77,7 +79,7 @@ export class CodexAccounts {
     this.form.elements.egressEnabled.addEventListener("change", () => this.egressChanged());
     this.dialog.querySelector("[data-account-close]").addEventListener("click", () => this.dialog.close());
     this.dialog.addEventListener("close", () => { this.clearSecrets(); void this.cancelLogin(); });
-    for (const action of ["start", "stop", "login", "logout", "cancel-login"]) {
+    for (const action of ["start", "stop", "login", "logout", "cancel-login", "delete"]) {
       this.dialog.querySelector(`[data-account-${action}]`).addEventListener("click", () => void this.run(() => this.action(action)));
     }
   }
@@ -99,6 +101,7 @@ export class CodexAccounts {
     for (const node of this.nodes) {
       if (this.filter.value && this.filter.value !== node.nodeId) continue;
       for (const account of [...(node.codexAccounts ?? []), ...(node.claudeAccounts ?? [])]) {
+        if (account.deletedAt) continue;
         const row = el("button", "", "codex-account-row"); row.type = "button";
         const identity = el("span"); identity.append(el("strong", account.name), el("small", `${node.displayName || node.hostname} · ${account.engine === "claude" ? "Claude · " : "Codex · "}${account.reportedAppServer?.provider?.name || account.reportedAppServer?.provider?.id || account.provider || "待配置"}`));
         const snapshot = account.snapshot, quota = weeklyQuota(snapshot?.limits);
@@ -181,6 +184,7 @@ export class CodexAccounts {
     this.dialog.querySelector("[data-account-region]").hidden = !claude || mode !== "bedrock";
     this.dialog.querySelector("[data-account-environment]").hidden = claude;
     this.dialog.querySelector("[data-account-start]").textContent = claude ? "启用" : "启动";
+    this.dialog.querySelector("[data-account-delete]").hidden = claude;
     this.dialog.querySelector("[data-account-stop]").textContent = claude ? "停用" : "停止";
     this.dialog.querySelector("[data-account-login]").textContent = subscription ? "登录 Claude.ai" : "登录";
     const provider = this.current?.account.reportedAppServer?.provider?.id;
@@ -306,6 +310,11 @@ export class CodexAccounts {
   async action(action) {
     if (action === "cancel-login") { await this.cancelLogin(); return; }
     if (!this.current) return;
+    if (action === "delete") {
+      if (!confirm(`删除账号「${this.current.account.name}」？历史会话与节点上的原始凭据会保留。请先停止账号。`)) return;
+      await this.api(this.endpoint(""), { method: "DELETE" });
+      this.dialog.close(); this.current = null; await this.refresh(); this.notice("账号已删除，历史会话保留"); return;
+    }
     if (this.current.account.engine === "claude") {
       if (this.current.account.authType === "subscription" && action === "login") {
         await this.startClaudeLogin(); return;

@@ -12,7 +12,7 @@ import (
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
 
-var nodeAccountsPattern = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/codex-accounts(?:/([0-9a-f-]{36})(?:/(quota|quota-history|residency|login|logout|login-status|login-cancel|configure))?)?$`)
+var nodeAccountsPattern = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/codex-accounts(?:/([0-9a-f-]{36})(?:/(quota|quota-history|last-settings|residency|login|logout|login-status|login-cancel|configure))?)?$`)
 
 func (server *Server) routeAccounts(ctx context.Context, response http.ResponseWriter, request *http.Request) (bool, error) {
 	path := request.URL.Path
@@ -80,6 +80,10 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 			return true, writeNodeResult(response, result, err)
 		}
 	}
+	if request.Method == http.MethodDelete && match[2] != "" && match[3] == "" {
+		result, err := server.nodes.DeleteAccount(ctx, request, principal, node.NodeID, match[2])
+		return true, writeNodeResult(response, result, err)
+	}
 	account, err := nodes.SelectAccount(node, match[2])
 	if err != nil {
 		return true, err
@@ -93,6 +97,14 @@ func (server *Server) routeAccounts(ctx context.Context, response http.ResponseW
 	}
 	if request.Method == http.MethodGet && match[3] == "" {
 		return true, writeJSON(response, 200, account)
+	}
+	if request.Method == http.MethodGet && match[3] == "last-settings" {
+		settings, err := server.views.LatestAccountSettings(ctx, account.NodeAccountID)
+		if err != nil {
+			return true, err
+		}
+		response.Header().Set("Cache-Control", "no-store")
+		return true, writeJSON(response, 200, settings)
 	}
 	if request.Method == http.MethodGet && match[3] == "quota-history" {
 		result, err := server.views.CodexAccountHistory(ctx, account, request.URL.Query().Get("range"))

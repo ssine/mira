@@ -225,7 +225,7 @@ func (service *Service) addModelSettings(ctx context.Context, storeID string, th
 			threads[index].ReasoningEffort = efforts[threads[index].ThreadID]
 		}
 	}
-	return threads, nil
+	return service.addServiceTiers(ctx, storeID, threads)
 }
 
 // Reasoning effort is a rebuildable read projection, never a Node/UI preference.
@@ -243,6 +243,31 @@ func reasoningEffortFromRecord(record map[string]any) *string {
 	}
 	if strings.TrimSpace(value) == "" {
 		return nil
+	}
+	return &value
+}
+
+// Full settings snapshots omit service_tier when Standard is selected. Treat
+// that omission as a reset; turn_context in older runtimes has no tier field.
+func serviceTierFromRecord(record map[string]any) *string {
+	payload := object(record["payload"])
+	if stringValue(record["type"]) == "event_msg" && stringValue(payload["type"]) == "thread_settings_applied" {
+		payload = object(payload["thread_settings"])
+		value := stringValue(payload["service_tier"])
+		if value == "" {
+			value = "default"
+		}
+		return &value
+	} else if stringValue(record["type"]) != "turn_context" {
+		return nil
+	}
+	raw, present := payload["service_tier"]
+	if !present {
+		return nil
+	}
+	value := stringValue(raw)
+	if value == "" {
+		value = "default"
 	}
 	return &value
 }

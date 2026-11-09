@@ -61,6 +61,7 @@ type Thread struct {
 	ChildCount         *int           `json:"childCount,omitempty"`
 	Model              *string        `json:"model"`
 	ReasoningEffort    *string        `json:"reasoningEffort"`
+	ServiceTier        *string        `json:"serviceTier"`
 	CreatedAt          *string        `json:"createdAt"`
 	UpdatedAt          *string        `json:"updatedAt"`
 	ImportID           *string        `json:"importId"`

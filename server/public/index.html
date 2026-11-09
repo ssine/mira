@@ -275,6 +275,7 @@
                     </button>
                     <div id="conversationEffortMenu" class="composer-choice-menu composer-effort-menu" popover="auto" role="listbox" aria-label="选择思考强度"></div>
                   </div>
+                  <button id="conversationFast" class="composer-choice-toggle hidden" type="button" aria-pressed="false" title="Fast 会消耗更多额度；新对话沿用此账号上一次对话的设置">Fast · 关</button>
                   </div>
                   <div class="composer-submit-slot">
                     <button id="conversationSend" class="primary composer-icon composer-send" type="submit" aria-label="发送消息" title="发送消息" disabled><svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 16V4"></path><path d="m5.5 8.5 4.5-4.5 4.5 4.5"></path></svg></button>
@@ -599,7 +600,7 @@
         <div data-account-login-info role="status"></div>
         <p data-account-error class="error" role="alert"></p>
         <div class="actions"><button class="primary" type="submit">保存账号配置</button></div>
-        <div data-account-actions class="actions" hidden><button data-account-start class="approve" type="button">启动</button><button data-account-stop class="secondary" type="button">停止</button><button data-account-login class="secondary" type="button">登录</button><button data-account-cancel-login class="ghost" type="button">取消登录</button><button data-account-logout class="danger" type="button">退出账号</button></div>
+        <div data-account-actions class="actions" hidden><button data-account-start class="approve" type="button">启动</button><button data-account-stop class="secondary" type="button">停止</button><button data-account-login class="secondary" type="button">登录</button><button data-account-cancel-login class="ghost" type="button">取消登录</button><button data-account-logout class="danger" type="button">退出账号</button><button data-account-delete class="danger" type="button">删除账号</button></div>
       </form>
     </dialog>
     <div id="toast" class="toast hidden" role="status"></div>
