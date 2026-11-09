@@ -23,6 +23,7 @@ type CodexAccount struct {
 	AuthType           string         `json:"authType"`
 	IsDefault          bool           `json:"isDefault"`
 	Enabled            bool           `json:"enabled"`
+	DeletedAt          *string        `json:"deletedAt,omitempty"`
 	Revision           int64          `json:"revision"`
 	CredentialRevision int64          `json:"credentialRevision"`
 	Egress             map[string]any `json:"egress"`
@@ -67,7 +68,7 @@ func SelectAccount(node *Node, selector string) (*CodexAccount, error) {
 	if selected == nil && selector == "" && len(node.CodexAccounts) == 0 {
 		return nil, nil // A legacy Node/test registry without account metadata.
 	}
-	if selected == nil || !selected.Enabled {
+	if selected == nil || !selected.Enabled || selected.DeletedAt != nil {
 		return nil, &foundation.HTTPError{Status: 409, Code: "account_unavailable", Message: "所选账号未在此节点配置或已停用"}
 	}
 	if !selected.IsDefault {
@@ -92,7 +93,7 @@ func AccountNode(node *Node, account CodexAccount) *Node {
 const accountRowsJSON = `COALESCE((SELECT jsonb_agg(jsonb_build_object(
   'nodeAccountId',b.node_account_id,'nodeId',b.node_id,'accountId',b.account_id,
   'name',a.name,'provider',a.provider,'authType',a.auth_type,'isDefault',b.is_default,
-  'enabled',b.enabled,'revision',b.revision,'credentialRevision',b.credential_revision,
+  'enabled',b.enabled,'deletedAt',b.deleted_at,'revision',b.revision,'credentialRevision',b.credential_revision,
   'egress',b.egress,'egressConfigured',b.egress_configured,
   'desiredAppServer',CASE WHEN b.is_default THEN nodes.desired_app_server ELSE
     b.desired || jsonb_build_object('defaultCwd',nodes.desired_app_server->'defaultCwd',

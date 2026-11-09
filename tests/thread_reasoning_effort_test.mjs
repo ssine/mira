@@ -66,6 +66,7 @@ function fixture({ effort = "xhigh", cached = true, loaded = true } = {}) {
   ]) context[name] = () => {};
   for (const name of [
     "modelCatalogForConversation", "conversationModelDefinition", "conversationEffortOptions", "lastUsedConversationSettings",
+    "loadLastAccountSettings", "conversationSupportsFast", "selectedConversationTier", "conversationIsFast",
     "selectedConversationEffort", "resumeAgentThread", "restoreAgentThread", "sendAgentMessage",
   ]) vm.runInContext(source(name), context);
   context.resumeAgentThreadOnSocket = id => context.restoreAgentThread(id, agent.socket);

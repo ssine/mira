@@ -16,10 +16,10 @@ type historyKey struct {
 }
 
 type historySummary struct {
-	key              historyKey
-	activity, usage  map[string]any
-	model, effort    *string
-	latestVisibleSeq int64
+	key                 historyKey
+	activity, usage     map[string]any
+	model, effort, tier *string
+	latestVisibleSeq    int64
 }
 
 func (service *Service) cachedHistory(key historyKey) (historySummary, bool) {
@@ -61,7 +61,7 @@ func (service *Service) addHistorySummaries(ctx context.Context, storeID string,
 		} else {
 			// Metadata can change without an append. Cache only the canonical
 			// fallback and apply current metadata after loading it.
-			thread.TokenUsage, thread.Model, thread.ReasoningEffort = nil, nil, nil
+			thread.TokenUsage, thread.Model, thread.ReasoningEffort, thread.ServiceTier = nil, nil, nil, nil
 			pending = append(pending, thread)
 		}
 	}
@@ -81,7 +81,7 @@ func (service *Service) addHistorySummaries(ctx context.Context, storeID string,
 		}
 		for _, thread := range batch {
 			latest, _ := safeInteger(thread.ReadState["latestItemSeq"])
-			summary := historySummary{keyFor(thread), thread.Activity, thread.TokenUsage, thread.Model, thread.ReasoningEffort, latest}
+			summary := historySummary{keyFor(thread), thread.Activity, thread.TokenUsage, thread.Model, thread.ReasoningEffort, thread.ServiceTier, latest}
 			summaries[summary.key] = summary
 			service.rememberHistory(summary)
 		}
@@ -101,6 +101,10 @@ func (service *Service) addHistorySummaries(ctx context.Context, storeID string,
 				model := *summary.model
 				thread.Model = &model
 			}
+		}
+		if summary.tier != nil {
+			tier := *summary.tier
+			thread.ServiceTier = &tier
 		}
 		if summary.effort != nil {
 			effort := *summary.effort

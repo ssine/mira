@@ -10,6 +10,22 @@ import (
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
 
+// A retired binding remains a historical source, never an execution target.
+// Deletion requires a confirmed stop and disables reconciliation permanently,
+// so it can release old histories even after its Node goes offline.
+func selectExecutionSourceAccount(node *nodes.Node, binding string) (*nodes.CodexAccount, error) {
+	if node != nil {
+		for i := range node.CodexAccounts {
+			account := &node.CodexAccounts[i]
+			if (binding == account.NodeAccountID || (binding == "" && account.IsDefault)) &&
+				account.DeletedAt != nil && !account.Enabled && account.Desired["running"] == false && account.Reported["status"] == "stopped" {
+				return account, nil
+			}
+		}
+	}
+	return nodes.SelectAccount(node, binding)
+}
+
 // The returned release keeps the Node's thread gate until the database route
 // transaction has committed or rolled back. Other conversations keep running.
 func (channel *Channel) unloadAccountThreads(ctx context.Context, tx pgx.Tx, source executionSource, root string, ids []string) (func(), error) {
@@ -17,9 +33,12 @@ func (channel *Channel) unloadAccountThreads(ctx context.Context, tx pgx.Tx, sou
 	if err != nil {
 		return nil, err
 	}
-	account, err := nodes.SelectAccount(node, source.Binding)
+	account, err := selectExecutionSourceAccount(node, source.Binding)
 	if err != nil || account == nil {
 		return nil, errors.New("无法确认旧账号状态，暂不能交接此对话")
+	}
+	if account.DeletedAt != nil {
+		return func() {}, nil
 	}
 	if node.Status != "online" || !channel.IsConnected(source.Node) {
 		return nil, errors.New("旧账号所在节点离线，暂不能确认对话已停止")

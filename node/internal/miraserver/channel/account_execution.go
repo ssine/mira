@@ -293,7 +293,7 @@ func (channel *Channel) executionSource(ctx context.Context, tx pgx.Tx, member e
 	if err != nil {
 		return nil, err
 	}
-	account, err := nodes.SelectAccount(node, "")
+	account, err := selectExecutionSourceAccount(node, "")
 	if err != nil {
 		return nil, err
 	}

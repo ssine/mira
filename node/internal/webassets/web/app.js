@@ -290,6 +290,9 @@ const agent = {
   modelCatalogJob: null,
   modelCatalogError: "",
   effortChoice: null,
+  fastChoice: null,
+  lastAccountSettings: null,
+  lastAccountSettingsJob: null,
   threadReasoningEffort: null,
 };
 
@@ -735,8 +738,8 @@ function refreshAccountChoices(preferred) {
   const node = dashboardNodes.get($("#agentRuntimeNode").value);
   const engine = agent.threadId ? engineOf(agent.threadId) : null;
   const previous = preferred ?? agent.accountSelections.get(node?.nodeId) ?? "";
-  const codex = node?.capabilities?.appServer ? node.codexAccounts?.length ? node.codexAccounts : [{ name: "默认账号", nodeAccountId: "", enabled: true, isDefault: true }] : [];
-  const claude = node?.capabilities?.claudeRuntimeV1 ? [...(node.claudeAccounts || []), { engine: "claude", name: "Node 默认配置", nodeAccountId: "claude-default", enabled: true, configured: true }] : [];
+  const codex = (node?.capabilities?.appServer ? node.codexAccounts?.length ? node.codexAccounts : [{ name: "默认账号", nodeAccountId: "", enabled: true, isDefault: true }] : []).filter(a => !a.deletedAt);
+  const claude = node?.capabilities?.claudeRuntimeV1 ? (node.claudeAccounts || []) : [];
   for (const select of [$("#conversationAccount"), $("#agentRuntimeAccount"), $("#conversationDetailsAccount")]) {
     const accounts = select.id === "agentRuntimeAccount" ? codex : [...codex, ...claude].filter(a => !engine || (a.engine || "codex") === engine);
     select.replaceChildren(...accounts.map(account => {
@@ -753,6 +756,7 @@ function selectConversationAccount(bindingId) {
   const nodeId = $("#agentRuntimeNode").value;
   agent.accountSelections.set(nodeId, bindingId); refreshAccountChoices(bindingId);
   stopAgentRecovery(); closeAgentSocket(); agent.modelChoice = null; agent.effortChoice = null;
+  agent.fastChoice = null; agent.lastAccountSettings = null;
   agent.modelCatalog = null; agent.modelCatalogKey = null;
   syncAccountSidebar(); syncConversationSendUi(); void loadConversationModels();
   if (!agent.threadId && agent.draftProject) void selectComposerDraft(`personal:new:${agent.draftProject.key}:${bindingId}`);
@@ -3144,6 +3148,10 @@ function conversationModelKey() {
 function lastUsedConversationSettings() {
   const node = selectedAccountNode(), catalog = modelCatalogForConversation();
   if (agent.threadId || !node || !catalog) return null;
+  if (agent.lastAccountSettings?.key === node.nodeAccountId) {
+    const settings = agent.lastAccountSettings.value;
+    return { ...settings, model: catalog.models.some(item => item.model === settings.model) ? settings.model : null };
+  }
   const engine = node.engine || "codex", binding = node.nodeAccountId || "";
   let latest = null;
   for (const thread of agent.threads) {
@@ -3152,8 +3160,42 @@ function lastUsedConversationSettings() {
     if (!latest || (Date.parse(thread.updatedAt) || 0) > (Date.parse(latest.updatedAt) || 0)) latest = thread;
   }
   if (!latest || !catalog.models.some(item => item.model === latest.model)) return null;
-  return { model: latest.model, effort: latest.reasoningEffort || null };
+  return { model: latest.model, effort: latest.reasoningEffort || null, serviceTier: latest.serviceTier };
 }
+
+async function loadLastAccountSettings() {
+  const node = selectedAccountNode(), key = node?.nodeAccountId;
+  if (agent.threadId || node?.engine === "claude" || !key || agent.lastAccountSettings?.key === key) return;
+  if (agent.lastAccountSettingsJob?.key === key) return agent.lastAccountSettingsJob.promise;
+  const job = { key };
+  agent.lastAccountSettingsJob = job;
+  job.promise = (async () => {
+    try {
+      const value = await api(`/v1/nodes/${node.nodeId}/codex-accounts/${key}/last-settings`);
+      if (selectedAccountNode()?.nodeAccountId === key && !agent.threadId && agent.lastAccountSettingsJob === job) {
+        agent.lastAccountSettings = { key, value };
+        renderConversationModel();
+      }
+    } catch { /* Older Servers and offline reads retain the visible canonical fallback. */ }
+    finally { if (agent.lastAccountSettingsJob === job) agent.lastAccountSettingsJob = null; }
+  })();
+  return job.promise;
+}
+
+function conversationSupportsFast() {
+  const node = selectedAccountNode();
+  if (!node || node.engine === "claude") return false;
+  const provider = node.reportedAppServer?.provider;
+  if (provider?.id && provider.id !== "openai") return false;
+  const type = node.accountSnapshot?.account?.type;
+  return type ? type === "chatgpt" : provider?.credentialSource === "chatgpt";
+}
+
+function selectedConversationTier() {
+  return agent.fastChoice ?? currentAgentThread()?.serviceTier ?? lastUsedConversationSettings()?.serviceTier ??
+    modelCatalogForConversation()?.configuredServiceTier ?? "default";
+}
+function conversationIsFast() { return ["fast", "priority"].includes(selectedConversationTier()); }
 
 function selectedConversationModel() {
   const catalog = modelCatalogForConversation();
@@ -3269,6 +3311,11 @@ function renderConversationModel() {
     select.dataset.signature = signature;
   }
   const busy = Boolean(agent.sendPromise || agent.forkPromise || agent.threadActionPromise || agent.activeTurns.has(agent.threadId));
+  const fast = $("#conversationFast");
+  fast.classList.toggle("hidden", !conversationSupportsFast());
+  fast.disabled = busy;
+  fast.setAttribute("aria-pressed", String(conversationIsFast()));
+  fast.textContent = `Fast · ${conversationIsFast() ? "开" : "关"}`;
   select.disabled = busy || !catalog?.models.length;
   const error = agent.modelCatalogError;
   $("#conversationModelLabel").textContent = conversationModelDefinition()?.displayName || model || placeholder;
@@ -3356,6 +3403,7 @@ function rememberModelCatalog(key, catalog, at) {
 }
 
 async function loadConversationModels({ refresh = false } = {}) {
+  void loadLastAccountSettings();
   const node = selectedAccountNode(), key = conversationModelKey();
   if (agent.modelCatalogJob?.key === key) return agent.modelCatalogJob.promise;
   if (agent.modelCatalogKey !== key) {
@@ -6555,6 +6603,10 @@ async function restoreAgentThread(threadId, socket) {
   if (typeof projectedThread?.reasoningEffort === "string" && projectedThread.reasoningEffort) {
     params.config = { model_reasoning_effort: projectedThread.reasoningEffort };
   }
+  if (conversationSupportsFast() && projectedThread?.serviceTier != null) {
+    const tier = projectedThread.serviceTier;
+    params.serviceTier = tier === "default" ? null : tier === "fast" ? "priority" : tier;
+  }
   // An elapsed UI deadline does not cancel Codex's accepted resume. Keep the
   // original request and single-flight promise until its reply or disconnect.
   const result = await rpc("thread/resume", params, null);
@@ -6572,6 +6624,7 @@ async function restoreAgentThread(threadId, socket) {
     agent.modelChoice = result.model;
     if (currentProjection) currentProjection.model = result.model;
   }
+  if (currentProjection && currentProjection.serviceTier == null && "serviceTier" in result) currentProjection.serviceTier = result.serviceTier ?? "default";
   // The read projection carries the last applied setting even when a fresh
   // App Server resumes with its Node default.
   agent.threadReasoningEffort = currentProjection?.reasoningEffort ??
@@ -6618,6 +6671,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   const epoch = ++agent.selectionEpoch;
   agent.modelChoice = null;
   agent.effortChoice = null;
+  agent.fastChoice = null; agent.lastAccountSettings = null;
   agent.threadReasoningEffort = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
@@ -6728,6 +6782,7 @@ function newAgentThread({ updateRoute = true, project = null, force = false } = 
   accountRecovery.select(null, "");
   agent.modelChoice = null;
   agent.effortChoice = null;
+  agent.fastChoice = null; agent.lastAccountSettings = null;
   agent.threadReasoningEffort = null;
   agent.resumeRequestedThreadId = null;
   agent.composerValue = $("#conversationInput").value;
@@ -6991,6 +7046,9 @@ function addComposerFiles(files) {
 
 async function sendAgentMessage(text, attachments = [], progress = null) {
   if (conversationEngine() === "claude") return sendClaudeMessage(text, attachments, progress);
+  await loadLastAccountSettings();
+  const tier = selectedConversationTier();
+  const requestedTier = conversationSupportsFast() ? (tier === "default" ? null : tier === "fast" ? "priority" : tier) : undefined;
   const requestedModel = selectedConversationModel();
   const requestedEffort = selectedConversationEffort();
   updateReplyProgress(progress, { phase: agent.socket?.readyState === WebSocket.OPEN ? "正在发送…" : "正在连接运行节点…" });
@@ -7010,6 +7068,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       approvalPolicy: "never",
       sandbox: "danger-full-access",
       ...(requestedModel ? { model: requestedModel } : {}),
+      ...(requestedTier !== undefined ? { serviceTier: requestedTier } : {}),
       ...(requestedEffort ? { config: { model_reasoning_effort: requestedEffort } } : {}),
     };
     const cwd = $("#conversationCwd").value.trim();
@@ -7049,6 +7108,8 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       runtimeNodeId: agent.threadRuntimeNodeId,
       model: started.model,
       reasoningEffort: requestedEffort || agent.threadReasoningEffort,
+      serviceTier: requestedTier === undefined ? (started.serviceTier ?? null) : requestedTier ?? "default",
+      nodeAccountId: agent.socketAccountId,
       updatedAt: new Date().toISOString(),
       archived: false,
     };
@@ -7081,6 +7142,7 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
       input: prepared.inputs,
       approvalPolicy: "never",
       ...(requestedModel ? { model: requestedModel } : {}),
+      ...(requestedTier !== undefined ? { serviceTier: requestedTier } : {}),
       ...(requestedEffort ? { effort: requestedEffort } : {}),
     }, 120_000);
   } catch (error) {
@@ -7098,6 +7160,10 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     agent.effortChoice = requestedEffort;
     agent.threadReasoningEffort = requestedEffort;
     if (currentAgentThread()) currentAgentThread().reasoningEffort = requestedEffort;
+  }
+  if (requestedTier !== undefined) {
+    agent.fastChoice = requestedTier ?? "default";
+    if (currentAgentThread()) currentAgentThread().serviceTier = requestedTier ?? "default";
   }
   // turn/start can accept input into an already-running turn, without emitting
   // another turn/started. The RPC acknowledgement ends submission in both cases.
@@ -7333,6 +7399,7 @@ $("#agentRuntimeNode").addEventListener("change", () => {
   refreshAccountChoices();
   agent.modelChoice = null;
   agent.effortChoice = null;
+  agent.fastChoice = null; agent.lastAccountSettings = null;
   agent.threadReasoningEffort = null;
   syncAccountSidebar();
   if (agent.socketNodeId !== $("#agentRuntimeNode").value) stopAgentRecovery();
@@ -7351,6 +7418,11 @@ $("#agentRuntimeNode").addEventListener("change", () => {
 
 installComposerChoiceMenu($("#conversationModelSelect"), $("#conversationModelMenu"));
 installComposerChoiceMenu($("#conversationEffortSelect"), $("#conversationEffortMenu"));
+$("#conversationFast").addEventListener("click", () => {
+  if (!conversationSupportsFast()) return;
+  agent.fastChoice = conversationIsFast() ? "default" : "priority";
+  renderConversationModel();
+});
 $("#conversationDetailsModel").addEventListener("change", event => {
   if (event.target.disabled || ($("#conversationDetails").dataset.threadId || null) !== (agent.threadId || null)) return;
   chooseConversationModel(event.target.value);

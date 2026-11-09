@@ -78,7 +78,7 @@ export async function readModelCatalog(nodeId, cwd, { refresh = false, nodeAccou
       if (defaultModel && !models.has(defaultModel)) models.set(defaultModel, { model: defaultModel, displayName: defaultModel,
         description: "节点配置中的模型", supportedReasoningEfforts: [], defaultReasoningEffort: null });
       const configuredReasoningEffort = typeof config.model_reasoning_effort === "string" ? config.model_reasoning_effort : null;
-      return { models: [...models.values()], defaultModel, configuredReasoningEffort };
+      return { models: [...models.values()], defaultModel, configuredReasoningEffort, configuredServiceTier: config.service_tier ?? "default" };
     } finally { clearTimeout(timer); socket.close(); }
   })();
   entry.job = job;
