@@ -157,11 +157,13 @@ active turn.
 Claude and managed Codex accounts can attach one optional egress profile. Mira
 starts a loopback-only sing-box gateway before the runtime, checks the upstream
 through the gateway, and injects only local proxy variables into the account.
-Claude and Mafia profiles route their model/authentication destinations to the
-remote proxy and use `direct` for every other destination, so shell tools keep
-using normal local, private and home-network routes. A failed gateway blocks the
-account start instead of silently leaking a direct request. Process references
-stop the gateway after the account runtime exits.
+Claude, OpenAI and Mafia profiles route their model/authentication destinations
+to the remote proxy and use `direct` for every other destination, so shell tools
+keep using normal local, private and home-network routes. The OpenAI profile
+covers ChatGPT, API, authentication, static content and their Cloudflare/analytics
+dependencies. A failed gateway blocks the account start instead of silently
+leaking a direct request. Process references stop the gateway after the account
+runtime exits.
 
 Remote proxy credentials stay in
 `<identity-directory>/account-egress/<account-id>/config.json` with `0600`

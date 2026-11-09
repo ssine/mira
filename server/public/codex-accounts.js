@@ -140,7 +140,7 @@ export class CodexAccounts {
     this.form.elements.egressServer.value = egress.server || "";
     this.form.elements.egressPort.value = egress.port || "";
     this.form.elements.egressUsername.value = egress.username || "";
-    this.form.elements.egressProfile.value = egress.profile || (account?.engine === "claude" ? "claude" : "mafia");
+    this.form.elements.egressProfile.value = egress.profile || (account?.engine === "claude" ? "claude" : account?.authType === "providerConfig" ? "mafia" : "openai");
     this.dialog.querySelector("[data-account-egress-status]").textContent = account?.egressConfigured ? "节点已配置托管出口；密码留空会保留。" : "尚未配置托管出口。";
     this.dialog.querySelector("[data-account-egress]").hidden = !node?.capabilities?.accountEgressV1;
     this.egressChanged();
@@ -156,7 +156,7 @@ export class CodexAccounts {
     this.form.elements.node.replaceChildren(...this.nodes.filter(node => node.capabilities?.[claude ? "claudeAccountsV1" : "codexAccountsV1"]).map(node => new Option(node.displayName || node.hostname, node.nodeId)));
     if ([...this.form.elements.node.options].some(option => option.value === selected)) this.form.elements.node.value = selected;
     this.form.elements.mode.replaceChildren(...(claude ? [["subscription", "Claude.ai 订阅（官方 OAuth）"], ["anthropic", "Anthropic / Messages API"], ["bedrock", "Amazon Bedrock / AWS 透传"]] : [["chatgpt", "ChatGPT / OpenAI API Key"], ["custom", "自定义 Responses 服务商"], ["adopt", "接管已有 Codex 配置"]]).map(([value, label]) => new Option(label, value)));
-    this.form.elements.egressProfile.value = claude ? "claude" : "mafia";
+    this.form.elements.egressProfile.value = claude ? "claude" : "openai";
     this.dialog.querySelector("[data-account-title]").textContent = `添加 ${claude ? "Claude" : "Codex"} 账号`;
     this.modeChanged();
   }
@@ -165,6 +165,7 @@ export class CodexAccounts {
     const mode = this.form.elements.mode.value;
     const claude = this.form.elements.engine.value === "claude";
     const subscription = claude && mode === "subscription";
+    if (!this.current) this.form.elements.egressProfile.value = claude ? "claude" : mode === "chatgpt" ? "openai" : "mafia";
     this.dialog.querySelector("[data-account-home]").hidden = mode !== "adopt";
     this.dialog.querySelector("[data-account-provider]").hidden = subscription || !claude && mode !== "custom";
     this.dialog.querySelector("[data-account-login-email]").hidden = !subscription;

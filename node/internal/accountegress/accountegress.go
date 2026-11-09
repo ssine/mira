@@ -25,6 +25,7 @@ import (
 const (
 	ProfileClaude = "claude"
 	ProfileMafia  = "mafia"
+	ProfileOpenAI = "openai"
 )
 
 var (
@@ -134,6 +135,28 @@ func profileFor(name string) *routeProfile {
 			healthURL:    "https://api.appintheloop.com/v1/models",
 			expected:     map[int]bool{http.StatusOK: true, http.StatusUnauthorized: true, http.StatusForbidden: true},
 			noProxy:      defaultNoProxy,
+		}
+	case ProfileOpenAI:
+		return &routeProfile{
+			domainSuffixes: []string{
+				"openai.com",
+				"chatgpt.com",
+				"oaistatic.com",
+				"oaiusercontent.com",
+				"sora.com",
+				"livekit.cloud",
+				"challenges.cloudflare.com",
+				"statsig.com",
+				"statsigapi.net",
+				"featuregates.org",
+				"sentry.io",
+				"intercom.io",
+				"intercomcdn.com",
+				"browser-intake-datadoghq.com",
+			},
+			healthURL: "https://api.openai.com/v1/models",
+			expected:  map[int]bool{http.StatusUnauthorized: true, http.StatusForbidden: true},
+			noProxy:   defaultNoProxy,
 		}
 	default:
 		return nil

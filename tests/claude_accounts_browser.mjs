@@ -114,6 +114,10 @@ try {
   assert.equal(await dialog.locator("[name=apiKey]").inputValue(), "");
   assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes("synthetic-claude-browser-secret")), false);
   await dialog.locator("[data-account-close]").click();
+  await page.locator("[data-accounts-new]").click();
+  assert.equal(await dialog.locator("[name=engine]").inputValue(), "codex");
+  assert.equal(await dialog.locator("[name=egressProfile]").inputValue(), "openai", "new ChatGPT accounts default to the OpenAI route profile");
+  await dialog.locator("[data-account-close]").click();
   await page.locator(".codex-account-row").filter({ hasText: "Max subscription" }).click();
   assert.equal(await dialog.locator("[name=mode]").inputValue(), "subscription");
   assert.equal(await dialog.locator("[name=apiKey]").isVisible(), false);

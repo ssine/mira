@@ -249,6 +249,42 @@ func TestGeneratedConfigRoutesOnlyProfileAndFallsBackDirect(t *testing.T) {
 	}
 }
 
+func TestGeneratedOpenAIConfigRoutesChatGPTAndFallsBackDirect(t *testing.T) {
+	manager, id := testManager(t)
+	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileOpenAI}
+	if _, err := manager.Configure(id, spec); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := manager.accountRoot(id)
+	data, err := os.ReadFile(filepath.Join(root, "sing-box.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	route := config["route"].(map[string]any)
+	if route["final"] != "direct" {
+		t.Fatalf("final route = %#v", route["final"])
+	}
+	rules := route["rules"].([]any)
+	first := rules[0].(map[string]any)
+	suffixes := first["domain_suffix"].([]any)
+	if !containsString(suffixes, "openai.com") || !containsString(suffixes, "chatgpt.com") || first["outbound"] != "remote" {
+		t.Fatalf("unexpected first rule: %#v", first)
+	}
+}
+
+func containsString(values []any, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
 func TestValidation(t *testing.T) {
 	base := Spec{Type: "socks5", Server: "proxy.example", Port: 1, Username: "u", Password: "p", Profile: ProfileClaude}
 	if err := base.Validate(); err != nil {
