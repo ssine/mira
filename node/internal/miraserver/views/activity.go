@@ -211,10 +211,13 @@ func (service *Service) addActivityHistory(ctx context.Context, storeID string, 
 }
 
 func (service *Service) addActivityReachability(ctx context.Context, threads []Thread) ([]Thread, error) {
-	nodeIDs := []string{}
+	nodeIDs, accountIDs := []string{}, []string{}
 	for _, thread := range threads {
 		if thread.RuntimeNodeID != nil {
 			nodeIDs = appendUnique(nodeIDs, *thread.RuntimeNodeID)
+			if thread.NodeAccountID != nil && *thread.NodeAccountID != "" {
+				accountIDs = appendUnique(accountIDs, *thread.NodeAccountID)
+			}
 		} else if thread.SourceNodeID != nil {
 			nodeIDs = appendUnique(nodeIDs, *thread.SourceNodeID)
 		}
@@ -250,6 +253,36 @@ func (service *Service) addActivityReachability(ctx context.Context, threads []T
 		}
 		nodeRows.Close()
 	}
+	// A thread bound to a non-default account runs in that account's own
+	// App Server. The Node row reports only the default instance, which may
+	// be stopped or retired while account runtimes keep executing turns.
+	type accountRuntime struct {
+		nodeID   string
+		reported map[string]any
+	}
+	byAccount := map[string]accountRuntime{}
+	if len(accountIDs) > 0 {
+		accountRows, err := service.pool.Query(ctx, `SELECT node_account_id::text, node_id::text, reported
+      FROM mira_node_codex_accounts WHERE node_account_id=ANY($1::uuid[]) AND NOT is_default`, accountIDs)
+		if err != nil {
+			return nil, err
+		}
+		for accountRows.Next() {
+			var id, nodeID string
+			var reportedRaw []byte
+			if err := accountRows.Scan(&id, &nodeID, &reportedRaw); err != nil {
+				accountRows.Close()
+				return nil, err
+			}
+			reported, _ := decodeObject(reportedRaw)
+			byAccount[id] = accountRuntime{nodeID: nodeID, reported: reported}
+		}
+		if err := accountRows.Err(); err != nil {
+			accountRows.Close()
+			return nil, err
+		}
+		accountRows.Close()
+	}
 	now := service.now()
 	for index := range threads {
 		thread := &threads[index]
@@ -279,9 +312,15 @@ func (service *Service) addActivityReachability(ctx context.Context, threads []T
 		} else if connected, _ := node.channel["connected"].(bool); node.approval != "approved" || !connected || now.Sub(node.lastSeen) >= 15*time.Second {
 			reason = "offline"
 		} else if thread.RuntimeNodeID != nil {
+			reported := node.reported
+			if thread.NodeAccountID != nil {
+				if account, ok := byAccount[*thread.NodeAccountID]; ok && account.nodeID == *nodeID {
+					reported = account.reported
+				}
+			}
 			started, startOK := parseISO(stringValue(thread.Activity["startedAt"]))
-			runtimeStarted, runtimeOK := parseISO(stringValue(node.reported["startedAt"]))
-			if stringValue(node.reported["status"]) != "running" || (startOK && runtimeOK && runtimeStarted.After(started)) {
+			runtimeStarted, runtimeOK := parseISO(stringValue(reported["startedAt"]))
+			if stringValue(reported["status"]) != "running" || (startOK && runtimeOK && runtimeStarted.After(started)) {
 				reason = "runtime"
 			}
 		}
