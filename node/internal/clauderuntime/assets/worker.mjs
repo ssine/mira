@@ -109,6 +109,41 @@ lines.on("line", async (line) => {
         lines.close();
         process.stdin.destroy();
       }
+    } else if (command.action === "usage") {
+      // Plan rate-limit windows only. No prompt is sent and local transcripts
+      // are not scanned; the native CLI owns OAuth refresh for this read.
+      const q = query({
+        prompt: prompts(),
+        options: {
+          settingSources: [],
+          strictMcpConfig: true,
+          mcpServers: {},
+          ...(process.env.MIRA_NODE_CLAUDE_BINARY
+            ? {
+                pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY,
+              }
+            : {}),
+        },
+      });
+      try {
+        const usage =
+          await q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({
+            skipBehaviors: true,
+          });
+        process.stdout.write(
+          JSON.stringify({
+            subscription_type: usage?.subscription_type ?? null,
+            rate_limits_available: usage?.rate_limits_available === true,
+            rate_limits: usage?.rate_limits ?? null,
+          }),
+        );
+      } finally {
+        stopping = true;
+        wake?.();
+        q.close();
+        lines.close();
+        process.stdin.destroy();
+      }
     } else if (command.action === "title") {
       try {
         await title(command);

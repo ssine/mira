@@ -413,6 +413,12 @@ tbody tr:hover { background: var(--hover); }
 .sidebar-account meter::-webkit-meter-optimum-value { background: var(--accent); }
 .sidebar-account meter::-moz-meter-bar { background: var(--accent); }
 .sidebar-account-status { margin: 3px 0 0; color: var(--muted); line-height: 1.5; overflow-wrap: anywhere; }
+.account-plan-usage { display: grid; gap: 10px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.account-plan-usage.hidden { display: none; }
+.account-plan-row { display: grid; gap: 3px; }
+.account-plan-row > div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.account-plan-row meter { margin-top: 2px; }
+.account-plan-row small { color: var(--muted); font-size: 11px; }
 .chat-manage-link { width: 100%; }
 .chat-manage-link.danger { color: var(--danger); }
 .chat-manage-link > span:last-child { display: grid; gap: 3px; min-width: 0; }

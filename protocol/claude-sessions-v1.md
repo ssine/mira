@@ -225,6 +225,25 @@ Codex, to the Claude Code system prompt. It uses the same bounded file-capabilit
 reader (UTF-8, at most 256 KiB), is read on every turn, and blocks the turn when it
 cannot be read or validated.
 
+Subscription plan usage (Nodes advertising `claudeUsageV1`):
+
+- `GET /v1/claude/accounts/:id/usage[?refresh=1]` returns
+  `{nodeAccountId,usage,observedAt,stale,message?}`. `usage` holds
+  `subscriptionType`, `available`, optional `fiveHour`, `sevenDay`, `sevenDayOpus`
+  and `sevenDaySonnet` windows (`{utilization,resetsAt}`, used percentage and Unix
+  milliseconds), `models[]` (`{name,utilization,resetsAt}`) and `extra`. Results
+  are shared for five minutes; `refresh=1` accepts a result up to 30 seconds old.
+  A failed read falls back to the latest stored sample with `stale: true`. API-key
+  accounts return 409.
+- `GET /v1/claude/accounts/:id/usage-history?range=24h|7d|30d` returns
+  `{nodeAccountId,range,from,to,intervalMs,points}`; each point has `at`, `status`,
+  weekly `remaining`, five-hour `session` and weekly `resetsAt`. Failed samples
+  have null values.
+
+Both routes require administrator authentication. The Node action is
+`{"action":"account/usage","nodeAccountId":...}` on the private `claude`
+capability and is not an Agent tool.
+
 ## Shared conversation read projections (Mira 1.0.59)
 
 `GET /v1/claude/conversations` exposes bounded keyset pages (`view=roots|children`,

@@ -49,6 +49,7 @@ type Server struct {
 	channel               *serverchannel.Channel
 	views                 *serverviews.Service
 	accountCosts          *accountCostCache
+	claudePlanUsage       claudeUsageCache
 	imports               *serverimports.Service
 	sampler               *accountsampler.Sampler
 	authState             foundation.AuthState
@@ -58,6 +59,7 @@ type Server struct {
 	stopNodeNotifications func()
 	stopErasure           func()
 	stopAccountCosts      func()
+	stopClaudeUsage       func()
 	closeOnce             sync.Once
 }
 
@@ -138,6 +140,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	server.stopPush = server.startPushWorker(ctx)
 	server.stopNodeNotifications = server.startNodeNotificationWorker(ctx)
 	server.sampler.Start(ctx)
+	server.stopClaudeUsage = server.startClaudeUsageSampler(ctx)
 	server.http = &http.Server{
 		Handler:           server,
 		ReadHeaderTimeout: 15 * time.Second,
@@ -188,6 +191,9 @@ func (server *Server) Shutdown(ctx context.Context) error {
 		}
 		if server.stopPush != nil {
 			server.stopPush()
+		}
+		if server.stopClaudeUsage != nil {
+			server.stopClaudeUsage()
 		}
 		server.accountCosts.Close()
 		if server.stopAccountCosts != nil {

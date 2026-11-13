@@ -122,7 +122,7 @@ export class AccountHistory {
   }
 
   historyKey(node, account, range = this.range) {
-    return JSON.stringify([node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.codexHome,
+    return JSON.stringify([node.engine ?? "codex", node.nodeId, node.nodeAccountId, node.accountRevision, node.reportedAppServer?.codexHome,
       node.reportedAppServer?.codexPath, account?.type, account?.email, range]);
   }
 
@@ -149,6 +149,8 @@ export class AccountHistory {
   }
 
   historyURL() {
+    // Claude.ai subscriptions are sampled by Mira Server from the account's plan usage.
+    if (this.node.engine === "claude") return `/v1/claude/accounts/${encodeURIComponent(this.node.nodeAccountId)}/usage-history?range=${this.range}`;
     return `/v1/nodes/${encodeURIComponent(this.node.nodeId)}/${this.node.nodeAccountId ? `codex-accounts/${encodeURIComponent(this.node.nodeAccountId)}/quota-history` : "account-history"}?range=${this.range}`;
   }
 
@@ -158,7 +160,7 @@ export class AccountHistory {
 
   render() {
     const data = this.data;
-    const sameAccount = this.account?.type === "chatgpt" && this.account.email === data?.account?.email;
+    const sameAccount = this.node?.engine === "claude" || this.account?.type === "chatgpt" && this.account.email === data?.account?.email;
     // An offline Node can still show its last recorded account, explicitly named.
     const offline = this.node?.status === "offline" && !this.account;
     const points = (sameAccount || offline) && Array.isArray(data?.points) ? data.points : [];
