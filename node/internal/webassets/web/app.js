@@ -13,6 +13,9 @@ import { toolItemView, activitySummary, summarizeActivities, activityStatus, for
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ClientCache } from "/client-cache.js";
 import { ViewportRenderer } from "/viewport-renderer.js";
+import { MessageRail, revealCard } from "/conversation-nav.js";
+import { ConversationTimeline } from "/conversation-timeline.js";
+import { ConversationSearch } from "/conversation-search.js";
 import { conversationScroll } from "/conversation-scroll.js";
 import { ReplyProgress, turnActivityPhase } from "/conversation-progress.js";
 import { initializePwa, rememberAppRoute, clearAppRoute, createCompletionNotifications } from "/pwa.js";
@@ -31,7 +34,8 @@ import { ThreadPager, mergeThreadPages } from "/thread-pages.js";
 
 const $ = (selector) => document.querySelector(selector);
 const composerDrafts = new ComposerDrafts();
-const clientCache = new ClientCache();
+// Opened conversations keep their whole outline; size for long histories.
+const clientCache = new ClientCache({ budgetBytes: 256 * 1024 * 1024, entryBytes: 64 * 1024 * 1024 });
 let composerDraftKey = null;
 let composerDraftLoading = false;
 let composerDraftEpoch = 0;
@@ -266,6 +270,11 @@ const agent = {
   transcriptTailVersion: null,
   transcriptActivityCount: null,
   transcriptGap: null,
+  // A complete outline holds every message and tool skeleton of the thread;
+  // it advances with ?after= reads and never pages older history.
+  transcriptOutline: false,
+  outlineUnsupported: false,
+  pendingJump: null,
   transcriptReconciliations: new Map(),
   transcriptCostRequests: new Map(),
   toolDetailRequests: new Map(),
@@ -298,6 +307,26 @@ const agent = {
 
 const transcriptPageSize = 60;
 const accountSidebar = new AccountSidebar($("#agentAccount"));
+const messageRail = new MessageRail({ rail: $("#conversationRail"), scroller: $("#conversationScroll"),
+  resolveCard: (key, materialize) => transcriptCardForKey(key, materialize), readingOffset: () => readingOffset() });
+const conversationTimeline = new ConversationTimeline({
+  root: $("#conversationTimeline"), toggle: $("#conversationTimelineToggle"),
+  load: threadId => {
+    const thread = agent.threads.find(item => item.threadId === threadId);
+    return engineOf(threadId) === "claude"
+      ? api(`/v1/claude/sessions/${encodeURIComponent(thread?.sessionId || threadId)}/timeline`)
+      : api(`/v1/codex/threads/${encodeURIComponent(threadId)}/timeline?storeId=personal`);
+  },
+  onJump: (threadId, seq, role) => void openConversationAt(threadId, seq, role),
+  onOpenThread: threadId => void openConversationAt(threadId, null, null),
+});
+const conversationSearch = new ConversationSearch({
+  input: $("#agentThreadSearch"), results: $("#agentSearchResults"), list: $("#agentThreadList"), api,
+  onOpen: ({ threadId, itemSeq, role }) => {
+    closeAgentThreadDrawerIfOverlaid();
+    void openConversationAt(threadId, itemSeq, role);
+  },
+});
 let accountNodesTimer = null, accountNodesController = null, accountNodesNextAt = 0;
 const codexAccounts = new CodexAccounts($("#codexAccountsPanel"), { api, refreshNodes: refreshAgentNodes, notice: toast });
 const accountRecovery = new AccountRecovery($("#conversationCompatibility"), { api, notice: toast,
@@ -3094,6 +3123,10 @@ function syncActiveTurnUi() {
   agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
   $("#conversationDetailsToggle").classList.remove("hidden");
+  // An expanded timeline follows a running conversation and settles once more.
+  const running = !!agent.threadId && agent.activeTurns.has(agent.threadId), wasRunning = conversationTimeline.running;
+  conversationTimeline.setRunning(running);
+  if (wasRunning && !running) void conversationTimeline.refresh();
   syncConversationSendUi();
   renderReplyProgress();
   renderThreadStates();
@@ -4320,6 +4353,9 @@ function resetAgentTranscript(threadId = null) {
   agent.transcriptTailVersion = null;
   agent.transcriptActivityCount = null;
   agent.transcriptGap = null;
+  agent.transcriptOutline = false;
+  messageRail.clear();
+  conversationTimeline.select(threadId);
 }
 
 function retainTurnError(threadId, turnId, message) {
@@ -4451,6 +4487,8 @@ async function loadToolDetails(card) {
   if (!job) {
     job = Promise.all(pages.map((page) => {
       const query = new URLSearchParams({ storeId: "personal", tail: "1", toolDetails: "1", limit: String(page.limit ?? transcriptPageSize), cursor: page.cursor });
+      // Outline tool skeletons name their own record range.
+      if (Number.isSafeInteger(page.from)) query.set("from", String(page.from));
       return api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`);
     }));
     agent.toolDetailRequests.set(key, job);
@@ -4494,31 +4532,39 @@ function scheduleTranscriptCosts(threadId, transcript) {
   const turnIds = [...new Set((transcript.trace ?? [])
     .filter((item) => item.kind === "assistant" && item.turnId && item.turnId !== running &&
       (item.turnCostEstimate == null || item.turnCostEstimate.running))
-    .map((item) => item.turnId))];
+    .map((item) => item.turnId))].reverse();
   if (!turnIds.length) return;
   const key = JSON.stringify([threadId, transcript.generation, transcript.itemCount, turnIds]);
   if (agent.transcriptCostRequests.has(key)) return;
-  const query = new URLSearchParams({ storeId: "personal" });
-  for (const turnId of turnIds) query.append("turnId", turnId);
-  const job = api(`${engineOf(threadId) === "claude" ? "/v1/claude/sessions" : "/v1/codex/threads"}/${encodeURIComponent(threadId)}/costs?${query}`);
+  // A whole outline can name hundreds of turns: read the newest first, in
+  // bounded batches, and stop once the reader has moved on.
+  const batches = [];
+  for (let index = 0; index < turnIds.length; index += 50) batches.push(turnIds.slice(index, index + 50));
+  const job = (async () => {
+    for (const batch of batches) {
+      if (agent.threadId !== threadId) return;
+      const query = new URLSearchParams({ storeId: "personal" });
+      for (const turnId of batch) query.append("turnId", turnId);
+      const result = await api(`${engineOf(threadId) === "claude" ? "/v1/claude/sessions" : "/v1/codex/threads"}/${encodeURIComponent(threadId)}/costs?${query}`);
+      if (agent.threadId !== threadId || agent.transcriptGeneration !== result.generation) return;
+      for (const item of agent.transcriptItems) {
+        if (item.kind === "assistant" && item.turnId && Object.hasOwn(result.turnCostEstimates ?? {}, item.turnId)) {
+          item.turnCostEstimate = result.turnCostEstimates[item.turnId];
+        }
+      }
+      for (const card of $("#conversationTrace").querySelectorAll(".trace-card.assistant[data-turn-id]")) {
+        if (Object.hasOwn(result.turnCostEstimates ?? {}, card.dataset.turnId)) {
+          card._miraTurnCostEstimate = result.turnCostEstimates[card.dataset.turnId];
+        }
+      }
+      const projected = agent.threads.find((thread) => thread.threadId === threadId);
+      if (projected) rememberThreadCost({ ...projected, ...result });
+      refreshTurnFooters();
+      renderThreadStates();
+    }
+  })();
   agent.transcriptCostRequests.set(key, job);
-  void job.then((result) => {
-    if (agent.threadId !== threadId || agent.transcriptGeneration !== result.generation) return;
-    for (const item of agent.transcriptItems) {
-      if (item.kind === "assistant" && item.turnId && Object.hasOwn(result.turnCostEstimates ?? {}, item.turnId)) {
-        item.turnCostEstimate = result.turnCostEstimates[item.turnId];
-      }
-    }
-    for (const card of $("#conversationTrace").querySelectorAll(".trace-card.assistant[data-turn-id]")) {
-      if (Object.hasOwn(result.turnCostEstimates ?? {}, card.dataset.turnId)) {
-        card._miraTurnCostEstimate = result.turnCostEstimates[card.dataset.turnId];
-      }
-    }
-    const projected = agent.threads.find((thread) => thread.threadId === threadId);
-    if (projected) rememberThreadCost({ ...projected, ...result });
-    refreshTurnFooters();
-    renderThreadStates();
-  }).catch(() => { /* Cost is supplementary and must never block transcript rendering. */ })
+  void job.catch(() => { /* Cost is supplementary and must never block transcript rendering. */ })
     .finally(() => agent.transcriptCostRequests.delete(key));
 }
 
@@ -4618,6 +4664,7 @@ function traceCardsInOrder(trace) {
 }
 
 function renderTranscript(fallbackThread, options = {}) {
+  queueMicrotask(updateMessageRail);
   const existingTrace = $("#conversationTrace");
   const visibleItems = agent.transcriptItems;
   const summaryKeys = compactionSummaryKeys(visibleItems);
@@ -4767,9 +4814,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
   const epoch = agent.selectionEpoch;
   const request = ++agent.transcriptRequest;
   const liveRevision = agent.liveRevision;
-  const query = new URLSearchParams({ storeId: "personal", tail: "1", toolDetails: "0", limit: String(options.limit ?? transcriptPageSize) });
-  if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
-  const transcript = await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal: options.signal });
+  const transcript = await readCodexTranscript(threadId, options);
   if (agent.threadId !== threadId || agent.selectionEpoch !== epoch || request !== agent.transcriptRequest) return transcript;
 
   const incoming = Array.isArray(transcript.trace) ? transcript.trace : [];
@@ -4798,6 +4843,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     const anchor = [...trace.querySelectorAll(".trace-card[data-trace-key]")].find((card) => card.getBoundingClientRect().bottom > top);
     if (anchor) Object.assign(preserveViewport, { anchorKey: anchor.dataset.traceKey, anchorTop: anchor.getBoundingClientRect().top });
   }
+  const completeOutline = transcript.outline === true && transcript.after == null;
   if (options.prepend && sameThread) {
     agent.transcriptItems = mergeTranscriptItems(incoming, agent.transcriptItems);
     agent.transcriptCursor = transcript.nextCursor ?? null;
@@ -4805,11 +4851,14 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     const wasEmpty = agent.transcriptItems.length === 0;
     agent.transcriptItems = mergeTranscriptItems(agent.transcriptItems, incoming);
     if (wasEmpty) agent.transcriptCursor = transcript.nextCursor ?? null;
+    // A whole outline supersedes any paged prefix: nothing older remains.
+    if (completeOutline) { agent.transcriptCursor = null; agent.transcriptGap = null; agent.transcriptOutline = true; }
   } else {
     agent.transcriptThreadId = threadId;
     agent.transcriptGeneration = transcript.generation ?? null;
     agent.transcriptItems = mergeTranscriptItems([], incoming);
     agent.transcriptCursor = transcript.nextCursor ?? null;
+    agent.transcriptOutline = completeOutline;
   }
   agent.transcriptTotal = transcript.totalTraceItems ?? agent.transcriptItems.length;
   // Do not replace live output that arrived after this HTTP snapshot began.
@@ -4846,6 +4895,7 @@ function saveOpenTranscript() {
   clientCache.write(transcriptCacheKey(threadId), () => current() && !agent.transcriptGap && agent.transcriptTailVersion !== null ? {
     engine: "codex", generation: agent.transcriptGeneration, items: agent.transcriptItems, cursor: agent.transcriptCursor,
     total: agent.transcriptTotal, tailVersion: agent.transcriptTailVersion, activityCount: agent.transcriptActivityCount,
+    outline: agent.transcriptOutline,
   } : undefined);
 }
 
@@ -4868,10 +4918,11 @@ function restoreCachedTranscript(threadId, thread, cached) {
   if (cached.engine !== "codex" || thread.engine === "claude" || !Array.isArray(cached.items)) return false;
   // A new generation rewrote history; a long absence is cheaper to reload.
   if (Number.isSafeInteger(thread.generation) && thread.generation !== cached.generation) return false;
-  if (Number.isSafeInteger(thread.itemCount) && Number.isSafeInteger(cached.activityCount) && thread.itemCount - cached.activityCount > 600) return false;
+  // A complete outline catches up with one ?after= read however far behind it is.
+  if (!cached.outline && Number.isSafeInteger(thread.itemCount) && Number.isSafeInteger(cached.activityCount) && thread.itemCount - cached.activityCount > 600) return false;
   Object.assign(agent, { transcriptThreadId: threadId, transcriptGeneration: cached.generation, transcriptItems: cached.items,
     transcriptCursor: cached.cursor, transcriptTotal: cached.total, transcriptTailVersion: cached.tailVersion,
-    transcriptActivityCount: cached.activityCount });
+    transcriptActivityCount: cached.activityCount, transcriptOutline: cached.outline === true });
   renderTranscript(null, { anchorBottom: true });
   return true;
 }
@@ -4900,6 +4951,88 @@ async function syncPersistedTranscript(threadId, signal) {
     agent.transcriptGap = page.generation === gap.generation && page.nextCursor !== gap.cursor &&
       boundary(page.nextCursor) > gap.after + 1 ? { ...gap, cursor: page.nextCursor } : null;
   }
+}
+
+// Whole-conversation outline first; paged history while the Server is still
+// indexing this conversation (or after any outline failure).
+async function readCodexTranscript(threadId, options = {}) {
+  const paged = (options.cursor !== undefined && options.cursor !== null) || options.prepend;
+  if (!paged && !agent.outlineUnsupported) {
+    const query = new URLSearchParams({ storeId: "personal", outline: "1" });
+    if (agent.transcriptThreadId === threadId && agent.transcriptOutline && options.preserveLoaded &&
+        Number.isSafeInteger(agent.transcriptActivityCount) && Number.isSafeInteger(agent.transcriptGeneration)) {
+      query.set("after", String(agent.transcriptActivityCount));
+      query.set("generation", String(agent.transcriptGeneration));
+    }
+    try {
+      return await api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal: options.signal });
+    } catch (error) {
+      if (error.name === "AbortError" || error.status === 404) throw error;
+    }
+  }
+  const query = new URLSearchParams({ storeId: "personal", tail: "1", toolDetails: "0", limit: String(options.limit ?? transcriptPageSize) });
+  if (options.cursor !== undefined && options.cursor !== null) query.set("cursor", String(options.cursor));
+  return api(`/v1/codex/threads/${encodeURIComponent(threadId)}/transcript?${query}`, { signal: options.signal });
+}
+
+// The header, notices and an open timeline float over the reading surface;
+// a jumped-to message must land below them.
+function readingOffset() {
+  const scroller = traceScroller().getBoundingClientRect();
+  return Math.max(12, $(".conversation-card .conversation-notices").getBoundingClientRect().bottom - scroller.top + 8);
+}
+
+function transcriptCardKey(item) {
+  return item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
+}
+
+function transcriptCardForKey(key, materialize = true) {
+  return $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`) ?? (materialize ? traceCard(key) : null);
+}
+
+function updateMessageRail() {
+  if (!agent.threadId || agent.transcriptThreadId !== agent.threadId) { messageRail.clear(); return; }
+  const hidden = compactionSummaryKeys(agent.transcriptItems);
+  messageRail.update(agent.transcriptItems
+    .filter(item => item.kind === "user" && item.body?.trim() && !hidden.has(item.key))
+    .map(item => ({ key: transcriptCardKey(item), body: item.body })));
+}
+
+// Search hits and timeline markers name canonical sequences: Codex rollout
+// item_seq, or a Claude event seq. Paired records (a user_message event and
+// its model-facing message) may differ by a few positions.
+function transcriptItemForSeq(seq, role) {
+  const kind = role === "assistant" ? "assistant" : "user";
+  const sequence = item => engineOf(agent.threadId) === "claude" ? item.rowSeq : item.sourceItemSeq;
+  const candidates = agent.transcriptItems.filter(item => item.kind === kind && Number.isFinite(sequence(item)));
+  return candidates.find(item => sequence(item) === seq) ?? candidates
+    .filter(item => Math.abs(sequence(item) - seq) <= 5)
+    .sort((left, right) => Math.abs(sequence(left) - seq) - Math.abs(sequence(right) - seq))[0] ?? null;
+}
+
+async function openConversationAt(threadId, seq, role) {
+  if (!threadId) return;
+  const jump = seq == null ? null : { threadId, seq, role };
+  agent.pendingJump = jump;
+  if (agent.threadId !== threadId) {
+    try { await resumeAgentThread(threadId); }
+    catch (error) { setConversationNotice(error.message, "error"); return; }
+  }
+  if (!jump || agent.pendingJump !== jump || agent.threadId !== threadId) return;
+  let item = transcriptItemForSeq(seq, role);
+  // Paged history only: read older pages until the message is present.
+  for (let pages = 0; !item && pages < 200 && agent.transcriptCursor !== null && agent.pendingJump === jump; pages++) {
+    if (agent.transcriptLoadingOlder) await new Promise(resolve => setTimeout(resolve, 100));
+    else await loadOlderAgentTranscript();
+    if (agent.transcriptOlderError) break;
+    item = transcriptItemForSeq(seq, role);
+  }
+  if (agent.pendingJump !== jump || agent.threadId !== threadId) return;
+  agent.pendingJump = null;
+  const card = item && transcriptCardForKey(transcriptCardKey(item), true);
+  if (!card) { toast("没有找到这条消息，它可能已被压缩或删除"); return; }
+  revealCard(card, traceScroller(), { offset: readingOffset() });
+  messageRail.schedule();
 }
 
 async function loadOlderAgentTranscript() {

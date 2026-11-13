@@ -23,6 +23,7 @@ var (
 	threadCostsPattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/costs$`)
 	threadImagePattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript/image$`)
 	threadTranscriptPattern = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript$`)
+	threadTimelinePattern   = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/timeline$`)
 	accountHistoryPattern   = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/account-history$`)
 )
 
@@ -59,6 +60,39 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 			return true, err
 		}
 		return true, writeJSON(response, 200, map[string]any{"storeId": storeID, "data": threads, "cleanup": cleanup})
+	}
+	if request.Method == http.MethodGet && path == "/v1/conversations/search" {
+		if ok, err := server.authorizeAdminRead(ctx, response, request); err != nil || !ok {
+			return true, err
+		}
+		storeID, err := viewStoreID(request)
+		if err != nil {
+			return true, err
+		}
+		query := request.URL.Query()
+		if len([]rune(query.Get("q"))) > 2000 {
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "search query is too long"}
+		}
+		result, err := server.views.SearchConversations(ctx, storeID, serverviews.SearchOptions{Query: query.Get("q"),
+			Archived: query.Get("archived"), Limit: int(boundedQueryInteger(query.Get("limit"), 50, 1, 100))})
+		if err != nil {
+			return true, err
+		}
+		return true, writeJSON(response, result.Status, result.Body)
+	}
+	if match := pathMatch(threadTimelinePattern, path); request.Method == http.MethodGet && match != nil {
+		if ok, err := server.authorizeAdminRead(ctx, response, request); err != nil || !ok {
+			return true, err
+		}
+		storeID, err := viewStoreID(request)
+		if err != nil {
+			return true, err
+		}
+		result, err := server.views.GetCodexTimeline(ctx, storeID, match[1])
+		if err != nil {
+			return true, err
+		}
+		return true, writeJSON(response, result.Status, result.Body)
 	}
 	if match := pathMatch(accountHistoryPattern, path); request.Method == http.MethodGet && match != nil {
 		if principal, err := server.authorize(ctx, response, request, "admin", authOptions{}); err != nil || principal == nil {
@@ -284,8 +318,42 @@ func (server *Server) threadTranscript(ctx context.Context, response http.Respon
 	}
 	limit := int(boundedQueryInteger(query.Get("limit"), 60, 10, 200))
 	timings := map[string]time.Duration{}
+	optionalSequence := func(name string) (*int64, error) {
+		values, exists := query[name]
+		if !exists {
+			return nil, nil
+		}
+		parsed, parseErr := strconv.ParseInt(values[0], 10, 64)
+		if len(values) != 1 || parseErr != nil || parsed < 0 || parsed > 9_007_199_254_740_991 {
+			return nil, &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid transcript " + name}
+		}
+		return &parsed, nil
+	}
+	if query.Get("outline") == "1" {
+		after, err := optionalSequence("after")
+		if err != nil {
+			return err
+		}
+		generation, err := optionalSequence("generation")
+		if err != nil {
+			return err
+		}
+		result, err := server.views.GetTranscriptOutline(ctx, storeID, threadID, after, generation)
+		if err != nil {
+			return err
+		}
+		timings["handler"] = time.Since(started)
+		return writeTimedTranscriptJSON(response, result.Status, result.Body, timings, started)
+	}
+	from, err := optionalSequence("from")
+	if err != nil {
+		return err
+	}
+	if from != nil && (!tail || cursor == nil) {
+		return &HTTPError{Status: 400, Code: "invalid_request", Message: "transcript range requires a tail cursor"}
+	}
 	result, err := server.views.GetTranscript(ctx, storeID, threadID, serverviews.TranscriptOptions{
-		Cursor: cursor, Limit: limit, Tail: tail, ToolDetails: toolDetails, Timings: timings,
+		Cursor: cursor, Limit: limit, Tail: tail, ToolDetails: toolDetails, Timings: timings, From: from,
 	})
 	if err != nil {
 		return err

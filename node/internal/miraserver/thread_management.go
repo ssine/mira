@@ -308,6 +308,10 @@ func ManageThread(ctx context.Context, pool *pgxpool.Pool, storeID, threadID, ac
 	if action == "delete" {
 		for _, query := range []string{
 			"DELETE FROM codex_thread_projections WHERE store_id=$1 AND thread_id=$2",
+			// Derived conversation index copies of prose must disappear with the thread.
+			"DELETE FROM mira_conversation_records WHERE store_id=$1 AND thread_id=$2",
+			"DELETE FROM mira_conversation_messages WHERE engine='codex' AND store_id=$1 AND thread_id=$2",
+			"DELETE FROM mira_conversation_index_state WHERE store_id=$1 AND thread_id=$2",
 			"DELETE FROM codex_store_state_entries WHERE store_id=$1 AND thread_id=$2",
 			"DELETE FROM mira_codex_thread_runtimes WHERE store_id=$1 AND thread_id=$2",
 			"DELETE FROM mira_thread_read_positions WHERE store_id=$1 AND thread_id=$2",

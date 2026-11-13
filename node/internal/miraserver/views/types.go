@@ -31,6 +31,9 @@ type Service struct {
 	pageCache   map[string]*list.Element
 	pageLRU     list.List
 	pageBytes   int
+
+	indexerWake     chan struct{}
+	indexerProgress map[string]int64
 }
 
 func New(pool *pgxpool.Pool) *Service {
@@ -88,6 +91,8 @@ type TranscriptOptions struct {
 	Tail        bool
 	ToolDetails *bool
 	Timings     map[string]time.Duration
+	// From, with Cursor, reads tool details for one outline range [From, end).
+	From *int64
 }
 
 type ProjectionOptions struct {
@@ -99,4 +104,7 @@ type ProjectionOptions struct {
 	Fragments                     bool
 	RecordedAt                    map[int64]string
 	TimingRecords                 []map[string]any
+	// Sequences, when set, gives each record's canonical item_seq. Index
+	// outlines omit records that never render, so their sequences are sparse.
+	Sequences []int64
 }

@@ -169,6 +169,10 @@
               </div>
             </div>
             <section class="thread-browser" aria-label="项目与对话">
+              <div class="thread-search" role="search">
+                <input id="agentThreadSearch" type="search" placeholder="搜索对话标题与内容" aria-label="搜索对话标题与内容" aria-controls="agentSearchResults" autocomplete="off" enterkeyhint="search">
+              </div>
+              <div id="agentSearchResults" class="agent-search-results" aria-label="搜索结果" hidden></div>
               <div id="agentThreadList" class="agent-thread-list"></div>
             </section>
             <footer class="chat-drawer-footer">
@@ -222,7 +226,14 @@
             <button id="conversationDetailsToggle" class="chat-icon-button conversation-details-toggle hidden" type="button" aria-label="打开会话详情" aria-expanded="false" aria-controls="conversationDetails" title="会话详情">
               <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3.5" width="14" height="13" rx="1.5"></rect><path d="M12 4v12"></path></svg>
             </button>
+            <button id="conversationTimelineToggle" class="chat-icon-button conversation-timeline-toggle hidden" type="button" aria-label="展开会话时间线" aria-expanded="false" aria-controls="conversationTimeline" title="时间线">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 6h6M11 6h6M3 10h3M8 10h9M3 14h9M14 14h3"></path></svg>
+            </button>
             <div class="conversation-notices">
+            <section id="conversationTimeline" class="conversation-timeline" aria-label="会话时间线" hidden>
+              <header class="timeline-head"><strong>时间线</strong><span data-timeline-summary class="timeline-summary"></span><button type="button" class="chat-icon-button" data-timeline-close aria-label="收起时间线" title="收起">×</button></header>
+              <div data-timeline-body class="timeline-body"></div>
+            </section>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="resumeProgress" class="workspace-notice hidden" role="status" aria-live="polite">
               <span id="resumeProgressText"></span>
@@ -239,6 +250,7 @@
             <div id="conversationScroll" class="conversation-scroll">
             <div id="conversationTrace" class="conversation-trace" aria-live="polite"><div class="conversation-empty">连接一个运行节点，然后选择会话。</div></div>
             </div>
+            <nav id="conversationRail" class="message-rail" aria-label="跳转到你的消息" hidden></nav>
             <div id="conversationComposer" class="conversation-compose-area">
             <aside id="claudePersistence" class="claude-persistence" hidden aria-label="历史保存状态">
               <strong>部分历史可能未保存</strong>

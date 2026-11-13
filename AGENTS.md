@@ -178,6 +178,11 @@ items. Render them independently of tool details, ordered and keyed by raw recor
 content position, and lazily load their saved data from PostgreSQL in the active generation.
 Do not reconstruct historical images from tool arguments, event notifications or current Node files.
 Expanded tool detail updates must preserve existing bodies and the user's reading position.
+The conversation index (schema 48, `docs/conversation-index.md`) is a derived, rebuildable copy of
+displayed prose and tool skeletons for whole-conversation outlines, search, the message rail and
+timelines. Never make it authoritative or read tool bodies from it; bump its projector version
+when slimming rules change. Permanent deletion must remove its rows in the same transaction, and
+search/outline reads must join the active generation. `pg_trgm` stays optional.
 The Web sidebar paginates root conversations per project and loads direct subagent children on
 expansion. Preserve the complete project directory, merge loaded pages during refresh, and keep
 Token/cost totals independent of which rows are loaded. See `docs/thread-list-pagination.md`.

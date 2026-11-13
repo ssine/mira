@@ -444,8 +444,15 @@ func persistBoundaries(ctx context.Context, tx pgx.Tx, storeID, operationID stri
 			return nil, err
 		}
 		if !hasNext {
-			if _, err := tx.Exec(ctx, "DELETE FROM codex_thread_projections WHERE store_id=$1 AND thread_id=$2", storeID, id); err != nil {
-				return nil, err
+			for _, query := range []string{
+				"DELETE FROM codex_thread_projections WHERE store_id=$1 AND thread_id=$2",
+				"DELETE FROM mira_conversation_records WHERE store_id=$1 AND thread_id=$2",
+				"DELETE FROM mira_conversation_messages WHERE engine='codex' AND store_id=$1 AND thread_id=$2",
+				"DELETE FROM mira_conversation_index_state WHERE store_id=$1 AND thread_id=$2",
+			} {
+				if _, err := tx.Exec(ctx, query, storeID, id); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

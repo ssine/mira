@@ -13,7 +13,10 @@ disposable, may be stale, and is replaced by the next successful Server read.
   account (at most 24), cost estimates (at most 300) and residency observations.
 - `entries` hold per-conversation transcripts, with `meta` recording each entry's
   size and last use. Entries are evicted least recently used first once the total
-  exceeds 96 MB or 400 entries; a single entry larger than 16 MB is not stored.
+  exceeds 256 MB or 400 entries; a single entry larger than 64 MB is not stored.
+  Opened Codex conversations store their whole outline (every message and tool
+  skeleton, see `conversation-index.md`); conversations never opened are not
+  prefetched.
 
 Every record carries the Server version reported by `/healthz`. A different version
 never reads it, so projection changes between releases cannot surface old shapes.
@@ -33,7 +36,9 @@ private browsing) only lose copies.
   falls back to the copy only when that read fails.
 - **Transcripts.** A Codex transcript is saved only when it has no history gap and a
   known tail version; on reopen it is synchronized incrementally from the cached
-  cursor. Prose contents render within the reading viewport plus half a screen
+  cursor. A complete outline (`outline: true`) is synchronized with one
+  `?outline=1&after=` read however far behind it is, and never pages older
+  history; paged copies keep the rules below. Prose contents render within the reading viewport plus half a screen
   on either side; offscreen bodies retain source data and measured height without
   Markdown DOM. Folded tool/thinking groups retain complete summaries and no child
   DOM. Expanded groups use height placeholders and create only nearby tool cards;
