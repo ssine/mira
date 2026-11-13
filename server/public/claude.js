@@ -90,7 +90,10 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
   // Compaction is reported as status -> boundary -> a synthetic user message holding the summary.
   const compacting = new Map(), summaries = new Map();
   let interrupted = false, cwd = "";
-  const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, ...extra });
+  // rowSeq: the durable event that first produced an item, for search and
+  // timeline jumps. Live rows have none until their durable event arrives.
+  let rowSeq = null;
+  const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, rowSeq: items.get(key)?.rowSeq ?? rowSeq, ...extra });
   const image = (key, url, turnId, timing) => put(key, "image", "图片", "", turnId, { ...timing, image: { url } });
   function blocks(message, key, role, turnId, timestamp, toolResult) {
     const timing = timestamp ? { completedAt: timestamp, timingScope: "recorded" } : {};
@@ -133,6 +136,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
     userInput(`steer:${id}`, steer, steer.turnId, { steerState });
   }
   for (const row of rows) {
+    rowSeq = row.live ? null : row.seq;
     const e = row.payload, turnId = row.turnId, key = `claude:${e.uuid || row.seq}`, scope = streamScope(row);
     if (!child && e.parent_tool_use_id && ["assistant", "user", "stream_event"].includes(e.type)) continue;
     if (e.type === "mira_user") {

@@ -429,6 +429,14 @@ func (service *Service) getTranscriptTail(ctx context.Context, storeID, threadID
 	if windowSize < 120 {
 		windowSize = 120
 	}
+	if options.From != nil {
+		if options.Cursor == nil || *options.From < 1 || *options.From >= end {
+			return errorResult(400, "invalid transcript range", "invalid_request"), nil
+		}
+		// Outline tool details: the call through its last record, plus a short
+		// prefix so the projector sees the turn's context. Bounded per request.
+		windowSize = int(min(end-*options.From+16, 2000))
+	}
 	dbTailStarted := time.Now()
 	rows, err := service.queryTranscriptRows(ctx, storeID, threadID, generation, end, windowSize)
 	addTranscriptTiming(options, "db_tail", dbTailStarted)
@@ -538,6 +546,21 @@ func (service *Service) getTranscriptTail(ctx context.Context, storeID, threadID
 	}
 	addTranscriptTiming(options, "projection", projectionStarted)
 	pageCursor := fmt.Sprintf("t2:%d:%d:%d", generation, end, snapshotCount)
+	if options.From != nil {
+		referenceTranscriptImages(projected, storeID, threadID, generation)
+		selected := []map[string]any{}
+		for _, item := range projected {
+			sequence, _ := safeInteger(item["sourceItemSeq"])
+			if stringValue(item["kind"]) == "tool" && sequence >= *options.From && sequence < end && len(selected) < 200 {
+				selected = append(selected, item)
+			}
+		}
+		trace := transcriptToolDetails(selected, pageCursor, limit, true)
+		if err := service.attachFileContexts(ctx, storeID, threadID, generation, trace); err != nil {
+			return Result{}, err
+		}
+		return Result{Status: 200, Body: map[string]any{"storeId": storeID, "threadId": threadID, "generation": generation, "itemCount": itemCount, "storeVersion": storeVersion, "trace": trace, "projectionVersion": 2, "totalTraceItems": nil, "pageCursor": pageCursor, "nextCursor": nil}}, nil
+	}
 	startIndex := len(projected) - limit
 	if startIndex < 0 {
 		startIndex = 0

@@ -59,6 +59,7 @@ type Server struct {
 	stopNodeNotifications func()
 	stopErasure           func()
 	stopAccountCosts      func()
+	stopConversationIndex func()
 	stopClaudeUsage       func()
 	closeOnce             sync.Once
 }
@@ -137,6 +138,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	server.stopClaudeExecution = server.startClaudeExecutionReconciliation(ctx)
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.stopAccountCosts = viewService.StartAccountCostProjector(ctx, configuration.Logger)
+	server.stopConversationIndex = viewService.StartConversationIndexer(ctx, configuration.Logger)
 	server.stopPush = server.startPushWorker(ctx)
 	server.stopNodeNotifications = server.startNodeNotificationWorker(ctx)
 	server.sampler.Start(ctx)
@@ -198,6 +200,9 @@ func (server *Server) Shutdown(ctx context.Context) error {
 		server.accountCosts.Close()
 		if server.stopAccountCosts != nil {
 			server.stopAccountCosts()
+		}
+		if server.stopConversationIndex != nil {
+			server.stopConversationIndex()
 		}
 		server.previews.Lock()
 		server.previews.sessions = nil

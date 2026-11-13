@@ -312,6 +312,13 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 	if err != nil {
 		return true, err
 	}
+	if op == "timeline" && r.Method == "GET" {
+		result, err := server.views.GetClaudeTimeline(ctx, id)
+		if err != nil {
+			return true, err
+		}
+		return true, writeJSON(w, result.Status, result.Body)
+	}
 	if op == "" && r.Method == "GET" {
 		return true, writeJSON(w, 200, s)
 	}

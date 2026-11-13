@@ -244,6 +244,30 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 	if scannedTurnID != "" && options.InitialTurnStartedAt != "" {
 		turnTimings[scannedTurnID] = &turnTiming{startedAt: options.InitialTurnStartedAt, startedApproximate: options.InitialTurnStartedApproximate}
 	}
+	// Sparse index records carry their canonical sequences explicitly; ordinary
+	// pages are contiguous from ItemOffset.
+	seqAt := func(index int) int64 {
+		if options.Sequences != nil && index < len(options.Sequences) {
+			return options.Sequences[index]
+		}
+		return options.ItemOffset + int64(index) + 1
+	}
+	var sparseIndex map[int64]int
+	if options.Sequences != nil {
+		sparseIndex = make(map[int64]int, len(options.Sequences))
+		for index, sequence := range options.Sequences {
+			sparseIndex[sequence] = index
+		}
+	}
+	recordIndex := func(sequence int64) int64 {
+		if sparseIndex != nil {
+			if index, ok := sparseIndex[sequence]; ok {
+				return int64(index)
+			}
+			return -1
+		}
+		return sequence - options.ItemOffset - 1
+	}
 	all := append(append([]map[string]any{}, records...), options.TimingRecords...)
 	for index, record := range all {
 		payload := object(record["payload"])
@@ -267,7 +291,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			if stringValue(record["type"]) == "turn_context" && timing.startedAt == "" {
 				timing.startedAt = recordTimestamp(record)
 				if timing.startedAt == "" {
-					timing.startedAt = options.RecordedAt[options.ItemOffset+int64(index)+1]
+					timing.startedAt = options.RecordedAt[seqAt(index)]
 				}
 				timing.startedApproximate = timing.startedAt != ""
 			}
@@ -287,9 +311,9 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			}
 			turnTimings[turnID] = timing
 		}
-		itemSeq := options.ItemOffset + int64(index) + 1
+		itemSeq := seqAt(index)
 		if stringValue(record["type"]) == "response_item" {
-			if tool := responseToolCall(payload, itemSeq, index, turnID); tool != nil && (tool.isCall || options.Fragments && tool.isOutput) {
+			if tool := responseToolCall(payload, itemSeq, 0, turnID); tool != nil && (tool.isCall || options.Fragments && tool.isOutput) {
 				responseCalls[callKey(turnID, tool.callID)] = true
 			}
 		}
@@ -301,7 +325,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 				item = object(payload["item"])
 			}
 			if item != nil && stringValue(item["id"]) != "" {
-				if entry := projectedMaterializedItem(item, itemSeq, index, turnID); stringValue(entry["kind"]) == "tool" {
+				if entry := projectedMaterializedItem(item, itemSeq, 0, turnID); stringValue(entry["kind"]) == "tool" {
 					materializedTools[callKey(turnID, stringValue(item["id"]))] = entry
 				}
 			}
@@ -323,7 +347,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 		timing := turnTimings[turnID]
 		itemClock := stringValue(entry["completedAt"])
 		sequence, _ := safeInteger(entry["sourceItemSeq"])
-		index := sequence - options.ItemOffset - 1
+		index := recordIndex(sequence)
 		if itemClock == "" && index >= 0 && index < int64(len(records)) {
 			itemClock = recordTimestamp(records[index])
 		}
@@ -416,7 +440,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 	compactionKey := ""
 	for index, record := range records {
 		payload := object(record["payload"])
-		itemSeq := options.ItemOffset + int64(index) + 1
+		itemSeq := seqAt(index)
 		recordTurnID := stringValue(first(payload["turn_id"], object(payload["internal_chat_message_metadata_passthrough"])["turn_id"]))
 		if recordTurnID == "" {
 			recordTurnID = currentTurnID
@@ -483,7 +507,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 			}
 			key := callKey(materializedTurnID, stringValue(item["id"]))
 			if !(materializedTools[key] != nil && responseCalls[key]) {
-				entry := projectedMaterializedItem(item, itemSeq, index, materializedTurnID)
+				entry := projectedMaterializedItem(item, itemSeq, 0, materializedTurnID)
 				if entry != nil && options.Fragments && stringValue(entry["kind"]) == "tool" && entry["itemId"] != nil {
 					entry["key"] = "history-tool-" + func() string {
 						if materializedTurnID == "" {
@@ -517,7 +541,7 @@ func ProjectCodexTranscript(items []map[string]any, options ProjectionOptions) [
 				"kind": "image", "title": "图片", "body": "", "turnId": nullableString(recordTurnID),
 				"sourceItemSeq": itemSeq, "imageIndex": image.index, "image": map[string]any{"url": image.url}})
 		}
-		if tool := responseToolCall(payload, itemSeq, index, recordTurnID); tool != nil {
+		if tool := responseToolCall(payload, itemSeq, 0, recordTurnID); tool != nil {
 			key := callKey(recordTurnID, tool.callID)
 			state := toolCalls[key]
 			if state == nil {

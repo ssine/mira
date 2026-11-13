@@ -1,6 +1,9 @@
 :root {
   --safe-area-top: env(safe-area-inset-top, 0px);
   color-scheme: light;
+  --timeline-model: #8b6fd6;
+  --timeline-tool: #3f9f6b;
+  --timeline-wait: #cf952a;
   --canvas: #ffffff;
   --surface: #f6f8fb;
   --surface-raised: #ffffff;
@@ -51,6 +54,9 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
+  --timeline-model: #a48cf0;
+  --timeline-tool: #4fbf84;
+  --timeline-wait: #e0ae4a;
   --canvas: #1f2226;
   --surface: #24272b;
   --surface-raised: #282b30;
@@ -1149,3 +1155,99 @@ progress { width: 100%; accent-color: var(--accent); }
 .schedule-actions button { margin: 2px; }
 .schedule-output { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
 #schedulesPanel details { margin: 10px 0; }
+
+/* Conversation search: replaces the conversation list while a query is present. */
+.thread-search { padding: 0 12px 8px; }
+.thread-search input { width: 100%; min-height: 32px; padding: 5px 10px; border: 1px solid var(--input-border); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--text); font: 13px/1.4 var(--font-ui); }
+.thread-search input:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 1px; }
+.agent-search-results { flex: 1; min-height: 0; overflow-y: auto; padding: 0 6px 12px; }
+.agent-search-results[hidden], .agent-thread-list[hidden] { display: none; }
+.search-status { margin: 4px 8px 8px; color: var(--muted); font-size: 11px; }
+.search-result-list { margin: 0; padding: 0; list-style: none; }
+.search-result { display: grid; padding: 4px 0 6px; border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
+.search-result-title, .search-result-hit { display: grid; width: 100%; min-width: 0; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text); text-align: left; cursor: pointer; }
+.search-result-title { gap: 2px; padding: 5px 8px; }
+.search-result-name { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-meta { overflow: hidden; color: var(--muted); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.search-result-hit { grid-template-columns: auto minmax(0, 1fr); gap: 6px; padding: 3px 8px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.search-result-hit > span:last-child { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow-wrap: anywhere; }
+.search-result-role { color: var(--quiet); font-size: 10.5px; line-height: 17px; }
+.search-result-title:hover, .search-result-hit:hover { background: var(--hover); }
+.search-result-title:focus-visible, .search-result-hit:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -2px; }
+.agent-search-results mark { border-radius: 2px; background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); }
+
+/* Message rail: one tick per user message along the reading surface's edge. */
+.message-rail { grid-area: 3 / 1 / 4 / 2; justify-self: end; align-self: center; z-index: 2; position: relative; display: flex; max-height: min(70%, 560px); margin-right: calc(var(--conversation-scrollbar-width) + 6px); }
+.message-rail[hidden] { display: none; }
+.message-rail-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 6px 2px; overflow-y: auto; list-style: none; scrollbar-width: none; }
+.message-rail-list::-webkit-scrollbar { display: none; }
+.message-rail-tick { position: relative; display: block; width: 24px; height: 9px; padding: 0; border: 0; background: transparent; cursor: pointer; }
+.message-rail-tick::before { content: ""; position: absolute; top: 3.5px; right: 3px; width: 10px; height: 2px; border-radius: 1px; background: var(--line-strong); transition: width var(--motion-fast) ease, background-color var(--motion-fast) ease; }
+.message-rail-tick:hover::before, .message-rail-tick:focus-visible::before { width: 16px; background: var(--muted); }
+.message-rail-tick[aria-current="true"]::before { width: 18px; background: var(--accent); }
+.message-rail-tick:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -1px; border-radius: 2px; }
+.message-rail-tip { position: absolute; right: 30px; width: max-content; max-width: min(300px, 60vw); padding: 6px 9px; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); box-shadow: var(--shadow-float); color: var(--text); font: 12px/1.5 var(--font-ui); overflow-wrap: anywhere; pointer-events: none; }
+.message-rail-tip[hidden] { display: none; }
+@media (max-width: 640px), (pointer: coarse) and (max-width: 900px) { .message-rail { display: none; } }
+.trace-card-flash { border-radius: var(--radius-float); animation: trace-card-flash 1.6s ease-out; }
+@keyframes trace-card-flash { 0%, 35% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 45%, transparent); } 100% { box-shadow: 0 0 0 3px transparent; } }
+@media (prefers-reduced-motion: reduce) { .trace-card-flash { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); } }
+
+/* Conversation timeline: collapsed by default, a floating panel when open. */
+.conversation-timeline-toggle { grid-area: conversation-head; justify-self: end; align-self: start; z-index: 3; margin: 6px 93px 0 0; background: var(--glass-header); box-shadow: inset 0 1px var(--glass-highlight); backdrop-filter: var(--glass-header-filter); -webkit-backdrop-filter: var(--glass-header-filter); }
+.conversation-timeline-toggle[aria-expanded="true"] { color: var(--accent); }
+.conversation-timeline { display: grid; grid-template-rows: auto minmax(0, 1fr); max-height: min(52vh, 440px); margin: 8px 16px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); box-shadow: var(--shadow-float); }
+.conversation-timeline[hidden] { display: none; }
+.timeline-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 6px 4px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.timeline-summary { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.timeline-head [data-timeline-close] { margin-left: auto; }
+.timeline-body { min-height: 0; overflow-y: auto; }
+.timeline-status { margin: 0; padding: 14px 12px; color: var(--muted); font-size: 12px; }
+.timeline-toolbar { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; padding: 5px 12px; border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent); background: var(--surface-raised); }
+.timeline-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 0; padding: 0; color: var(--muted); font-size: 11px; list-style: none; }
+.timeline-legend li { display: inline-flex; align-items: center; gap: 5px; }
+.timeline-legend li::before { content: ""; width: 10px; height: 8px; border-radius: 2px; background: var(--timeline-tool); }
+.timeline-legend [data-kind="model"]::before { background: var(--timeline-model); }
+.timeline-legend [data-kind="wait"]::before { background: var(--timeline-wait); }
+.timeline-legend [data-kind="user"]::before { width: 7px; height: 7px; border-radius: 1px; background: var(--accent); transform: rotate(45deg); }
+.timeline-legend [data-kind="break"]::before { background: repeating-linear-gradient(135deg, var(--line-strong) 0 2px, transparent 2px 4px); }
+.timeline-zoom { display: flex; gap: 2px; margin-left: auto; }
+.timeline-zoom .chat-icon-button { width: auto; min-width: 26px; height: 24px; padding: 0 6px; font-size: 12px; }
+.timeline-partial { color: var(--warning); font-size: 11px; }
+.timeline-grid { display: grid; grid-template-columns: 150px minmax(0, 1fr); }
+.timeline-labels { display: grid; grid-template-rows: 26px; grid-auto-rows: 22px; border-right: 1px solid color-mix(in srgb, var(--line) 65%, transparent); }
+.timeline-lane-label { min-width: 0; overflow: hidden; padding: 0 8px; border: 0; background: transparent; color: var(--text); font: 11px/22px var(--font-ui); text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+button.timeline-lane-label { color: var(--accent-hover); cursor: pointer; }
+button.timeline-lane-label:hover { text-decoration: underline; }
+button.timeline-lane-label:disabled { color: var(--text); cursor: default; text-decoration: none; }
+.timeline-scroll { overflow-x: auto; overflow-y: hidden; }
+.timeline-chart { display: block; font: 10px var(--font-ui); }
+.timeline-row { fill: transparent; }
+.timeline-row.odd { fill: color-mix(in srgb, var(--surface-soft) 70%, transparent); }
+.timeline-axis-line, .timeline-axis-tick { stroke: var(--line-strong); }
+.timeline-axis-text, .timeline-axis-start { fill: var(--muted); }
+.timeline-axis-start { font-weight: 600; }
+.timeline-break-band { fill: color-mix(in srgb, var(--surface-soft) 80%, transparent); }
+.timeline-break-zigzag { fill: none; stroke: var(--quiet); stroke-width: 1; }
+.timeline-break-text { fill: var(--quiet); font-size: 9.5px; }
+.timeline-turn { fill: var(--line-strong); }
+.timeline-turn.open, .timeline-span.open { opacity: .55; }
+.timeline-span.model { fill: var(--timeline-model); }
+.timeline-span.tool { fill: var(--timeline-tool); }
+.timeline-span.wait { fill: var(--timeline-wait); }
+.timeline-message.user { fill: var(--accent); stroke: var(--surface-raised); stroke-width: 1; cursor: pointer; }
+.timeline-message.user:hover, .timeline-message.user:focus-visible { fill: var(--accent-hover); outline: none; stroke: var(--text); }
+.timeline-message.assistant { stroke: var(--muted); stroke-width: 1.5; }
+@media (max-width: 640px) {
+  .conversation-timeline { margin: 6px 8px 0; max-height: 60vh; }
+  .timeline-grid { grid-template-columns: 96px minmax(0, 1fr); }
+}
+@media (prefers-reduced-transparency: reduce) { .conversation-timeline-toggle { background: var(--surface-raised); backdrop-filter: none; -webkit-backdrop-filter: none; } }
+@media (forced-colors: active) {
+  .conversation-timeline-toggle, .conversation-timeline, .message-rail-tip { background: Canvas; box-shadow: none; backdrop-filter: none; }
+  .message-rail-tick::before { background: CanvasText; }
+  .message-rail-tick[aria-current="true"]::before { background: Highlight; }
+  .timeline-span.model, .timeline-span.tool, .timeline-span.wait, .timeline-turn { fill: CanvasText; }
+  .timeline-message.user { fill: Highlight; }
+  .agent-search-results mark { background: Highlight; color: HighlightText; }
+}

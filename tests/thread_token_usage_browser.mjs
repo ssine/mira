@@ -20,7 +20,8 @@ try {
     const url = new URL(route.request().url()), path = url.pathname, row = rows.find(row => path.includes(row.threadId));
     if (path.endsWith("/transcript")) {
       assert.equal(url.searchParams.get("includeCost"), null, "transcript first paint does not wait for costs");
-      assert.equal(url.searchParams.get("toolDetails"), "0", "transcript first paint defers tool details");
+      // A whole-conversation outline omits tool bodies just like a paged read without details.
+      assert.ok(url.searchParams.get("outline") === "1" || url.searchParams.get("toolDetails") === "0", "transcript first paint defers tool details");
     }
     if (path.endsWith("/costs")) return route.fulfill({ json: {
       threadId: row.threadId, generation: row.generation, itemCount: row.itemCount, tokenUsage: row.tokenUsage, costEstimate: row.costEstimate, tokenUsageSummary: row.tokenUsageSummary,
