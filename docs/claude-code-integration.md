@@ -152,6 +152,34 @@ Logout runs `claude auth logout` through the account environment and removes the
 local credential file. Login and logout are rejected while the account has an
 active turn.
 
+### Claude.ai plan usage
+
+Subscription accounts show their claude.ai plan windows in the Web sidebar the
+same way Codex shows weekly quota: remaining 5-hour and weekly percentages, any
+per-model weekly windows and local reset times. API-key and Bedrock accounts keep
+their SDK cost estimate instead.
+
+Nodes advertising `claudeUsageV1` accept the private `account/usage` action. It
+starts a short-lived pinned SDK worker with no prompt and calls the official
+experimental `get_usage` control request with `skipBehaviors`, so no local
+transcripts are scanned. The account environment normally sets
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which also disables Claude Code's
+usage request; only this read-only worker clears that one variable. Telemetry,
+error reporting, feature flags, auto-update and claude.ai MCP connectors stay
+disabled, traffic uses the account's managed egress, and the native CLI keeps
+ownership of OAuth refresh. The Node returns only window percentages, reset times,
+subscription type and extra-usage settings. At most two reads run per Node.
+
+Mira Server shares one in-flight read and a five-minute in-memory result across
+browsers and its background sampler. Every five minutes it records one
+observation for each enabled, logged-in subscription account on an approved,
+connected, capable Node in `mira_claude_account_usage_samples` (schema 47). Read
+failures are stored as gaps; offline periods have no rows. When no live read is
+available, the usage route returns the latest stored sample as stale. The account
+popover draws the weekly remaining percentage with the same step chart as Codex.
+This SDK API is marked experimental upstream: re-check it when changing the
+pinned SDK version.
+
 ### Account-scoped managed egress
 
 Claude and managed Codex accounts can attach one optional egress profile. Mira

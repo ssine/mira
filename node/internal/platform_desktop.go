@@ -114,6 +114,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 		"claudeSteerV1":              true,
 		"claudeExecutionStatusV1":    true,
 		"claudeTitleV1":              true,
+		"claudeUsageV1":              true,
 		"codexAccountsV1":            true,
 		"accountEgressV1":            true,
 		"codexThreadHandoffV1":       true,

@@ -5,7 +5,7 @@ export function accountNode(node, bindingId = "") {
   if (!node) return null;
   if (bindingId === "claude-default") return { ...node, engine: "claude", nodeAccountId: "", accountName: "Node 默认配置", reportedAppServer: { status: "ready" } };
   const claude = (node.claudeAccounts || []).find(a => a.nodeAccountId === bindingId);
-  if (claude) return { ...node, engine: "claude", nodeAccountId: claude.nodeAccountId, accountName: claude.name, accountRevision: claude.credentialRevision,
+  if (claude) return { ...node, engine: "claude", nodeAccountId: claude.nodeAccountId, accountName: claude.name, accountRevision: claude.credentialRevision, authType: claude.authType,
     reportedAppServer: claude.reportedAppServer, accountSnapshot: null };
   const account = (node.codexAccounts ?? []).find(value => bindingId ? value.nodeAccountId === bindingId : value.isDefault);
   if (account?.deletedAt) return null;

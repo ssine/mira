@@ -56,6 +56,8 @@ type Manager struct {
 	starting  map[string]int
 	cacheMu   sync.Mutex
 	closeOnce sync.Once
+	// usageSlots bounds concurrent plan-usage workers.
+	usageSlots chan struct{}
 }
 
 func New(identityDir string) *Manager {
@@ -68,7 +70,7 @@ func NewWithEgress(identityDir string, egress *accountegress.Manager) *Manager {
 	if egress == nil {
 		egress = accountegress.New(identityDir)
 	}
-	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, logins: map[string]*loginProcess{}, accepted: map[string]bool{}, sealed: map[string]bool{}, starting: map[string]int{}}
+	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, logins: map[string]*loginProcess{}, accepted: map[string]bool{}, sealed: map[string]bool{}, starting: map[string]int{}, usageSlots: make(chan struct{}, usageReads)}
 	m.egress = egress
 	m.ownsEgress = ownsEgress
 	m.cachePaths(identityDir)
@@ -208,6 +210,8 @@ func (m *Manager) Call(params map[string]any) (any, error) {
 	switch action {
 	case "describe":
 		return m.describe(accountID)
+	case "account/usage":
+		return m.usage(accountID)
 	case "start":
 		return m.start(params)
 	case "cache-status", "cache-configure":

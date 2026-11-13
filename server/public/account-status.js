@@ -1,6 +1,6 @@
 import { MiraSocket } from "./mira-socket.js";
 import { accountQuery, accountNode, accountGroups, recentAccountKeys } from "./codex-accounts.js";
-import { weeklyQuota } from "./account-quota.js";
+import { weeklyQuota, claudePlanQuota } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
 import { AccountSpend, spendCacheLifetime, spendProjectionStatus } from "./account-spend.js";
 export { weeklyQuota } from "./account-quota.js";
@@ -11,6 +11,13 @@ export function resetTime(timestamp, now = Date.now()) {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false }).format(timestamp);
 }
 
+function claudePlanText(quota) {
+  const parts = [];
+  if (quota.session?.remaining != null) parts.push(`5h ${Number(quota.session.remaining.toFixed(1))}%`);
+  if (quota.remaining !== null) parts.push(`周 ${Number(quota.remaining.toFixed(1))}%`);
+  return parts.length ? `剩余 ${parts.join(" · ")}` : "";
+}
+
 // A read-only subscription: it never starts/resumes a thread or changes the Node's runtime.
 export class AccountSidebar {
   constructor(root, { intervalMs = 5 * 60_000, timeoutMs = 15_000 } = {}) {
@@ -19,11 +26,14 @@ export class AccountSidebar {
     this.timeoutMs = timeoutMs;
     this.cache = new Map();
     this.summaries = new Map(); this.summaryJobs = new Map();
+    this.planUsage = new Map(); this.planJobs = new Map();
     this.threads = []; this.expanded = false;
     this.history = new AccountHistory(root.querySelector("[data-account-history]"));
     this.spend = new AccountSpend(root.querySelector("[data-account-spend]"));
     root.querySelector("[data-account-refresh]").addEventListener("click", () => {
       void this.refresh();
+      const subscription = this.subscriptionMember(this.groups?.find(group => group.key === this.selectedName));
+      if (subscription) { this.loadPlanUsage(subscription.account.nodeAccountId, true); this.render(); }
       if (this.selectedName && !root.querySelector("[data-account-spend]").classList.contains("hidden")) {
         this.summaries.delete(this.selectedName); this.loadSummaries();
         if (this.spend.range !== "7d") this.spend.select({ nodeId: this.selectedName }, null, true, true);
@@ -82,8 +92,18 @@ export class AccountSidebar {
     this.render();
   }
 
+  // Claude.ai subscriptions report plan windows; API-key accounts only have cost estimates.
+  subscriptionMember(group) {
+    if (group?.engine !== "claude") return null;
+    const members = group.members.filter(({ account }) => account.authType === "subscription" && account.configured && account.enabled !== false);
+    return members.find(({ node }) => node.status === "online") ?? members[0] ?? null;
+  }
+
   groupQuota(group) {
-    if (group.engine === "claude") return weeklyQuota(null);
+    if (group.engine === "claude") {
+      const member = this.subscriptionMember(group);
+      return member ? claudePlanQuota(this.planUsage.get(member.account.nodeAccountId)?.data?.usage) : weeklyQuota(null);
+    }
     const account = group.members[0].account;
     return weeklyQuota(this.node?.nodeAccountId === account.nodeAccountId && this.limits ? this.limits : account.snapshot?.limits);
   }
@@ -113,8 +133,14 @@ export class AccountSidebar {
       row.lastChild.textContent = quota.remaining === null ? cost : `剩余 ${Number(quota.remaining.toFixed(1))}%`;
       if (quota.remaining === null && Number.isFinite(estimate?.amount) && spendProjectionStatus(summary?.data)) row.lastChild.textContent += " · 汇总中";
       if (quota.remaining === null && summary?.data?.cache?.stale) row.lastChild.textContent += " · 上次统计";
+      const subscription = this.subscriptionMember(group);
+      const plan = subscription && this.planUsage.get(subscription.account.nodeAccountId);
+      const planText = subscription && claudePlanText(quota);
+      if (planText) row.lastChild.textContent = planText + (plan?.data?.stale || plan?.message ? " · 上次结果" : "");
+      else if (subscription && !plan && this.planJobs.has(subscription.account.nodeAccountId)) row.lastChild.textContent = "套餐用量…";
       row.title = `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name} · ${[...new Set(group.members.map(value => value.node.displayName || value.node.hostname))].join("、")}${node.status !== "online" ? " · 上次记录" : ""}`;
-      if (quota.remaining === null) row.title += " · 最近 7 天标准 API 价格估算，点击查看每日费用";
+      if (planText) row.title += ` · ${quota.windows.map(value => `${value.label}${value.resetsAt ? ` ${resetTime(value.resetsAt)} 重置` : ""}`).join("；")}`;
+      else if (quota.remaining === null) row.title += " · 最近 7 天标准 API 价格估算，点击查看每日费用";
       if (quota.remaining === null && summary?.message) row.title += ` · ${summary.message}`;
       row.setAttribute("aria-label", `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name}，${row.lastChild.textContent}`);
     }
@@ -124,10 +150,54 @@ export class AccountSidebar {
     more.textContent = this.expanded ? "收起账号" : `展开其余 ${folded} 个账号`;
     more.setAttribute("aria-expanded", String(this.expanded));
     this.loadSummaries();
+    this.loadPlanUsages();
+  }
+
+  // Each read starts a short native Claude process on the Node; the Server
+  // shares one in-flight read and a five-minute result across browsers.
+  loadPlanUsages() {
+    clearTimeout(this.planTimer);
+    if (!this.summariesActive || navigator.onLine === false) return;
+    const members = (this.groups?.length ? this.visibleGroups().visible : []).map(group => this.subscriptionMember(group)).filter(Boolean);
+    let started = false;
+    for (const { account } of members) {
+      if (this.planJobs.size >= 2) break;
+      const id = account.nodeAccountId;
+      if (this.planJobs.has(id) || (this.planUsage.get(id)?.expiresAt ?? 0) > Date.now()) continue;
+      this.loadPlanUsage(id); started = true;
+    }
+    const next = members.map(({ account }) => this.planUsage.get(account.nodeAccountId)?.expiresAt).filter(value => value > Date.now());
+    if (next.length) this.planTimer = setTimeout(() => this.loadPlanUsages(), Math.max(1_000, Math.min(...next) - Date.now()));
+    if (started) this.renderOverview();
+  }
+
+  loadPlanUsage(id, force = false) {
+    if (this.planJobs.has(id)) { if (!force) return; this.planJobs.get(id).abort(); }
+    const controller = new AbortController(); this.planJobs.set(id, controller);
+    void (async () => {
+      const timer = setTimeout(() => controller.abort(), 65_000);
+      const previous = this.planUsage.get(id);
+      try {
+        const response = await fetch(`/v1/claude/accounts/${encodeURIComponent(id)}/usage${force ? "?refresh=1" : ""}`, { signal: controller.signal });
+        const data = await response.json().catch(() => null);
+        if (this.planJobs.get(id) !== controller) return;
+        if (!response.ok) throw new Error(typeof data?.error === "string" ? data.error : "套餐用量暂不可用");
+        this.planUsage.set(id, { data, message: data.message || "", expiresAt: Date.now() + (data.stale ? 60_000 : this.intervalMs) });
+      } catch (error) {
+        if (this.planJobs.get(id) !== controller) return;
+        const message = error?.name === "AbortError" ? "套餐用量读取超时" : error?.message || "套餐用量暂不可用";
+        this.planUsage.set(id, { data: previous?.data, message, expiresAt: Date.now() + 60_000 });
+      } finally {
+        clearTimeout(timer);
+        if (this.planJobs.get(id) === controller) { this.planJobs.delete(id); this.render(); }
+      }
+    })();
   }
 
   stopSummaries() {
-    clearTimeout(this.summaryTimer);
+    clearTimeout(this.summaryTimer); clearTimeout(this.planTimer);
+    for (const controller of this.planJobs?.values() ?? []) controller.abort();
+    this.planJobs?.clear();
     for (const controller of this.summaryJobs.values()) controller.abort();
     this.summaryJobs.clear();
   }
@@ -181,7 +251,8 @@ export class AccountSidebar {
     this.message = !active ? "" : !node ? "请选择运行节点" : node.status !== "online" ? "运行节点离线"
       : node.reportedAppServer?.status !== "running" ? "Codex 尚未启动" : cached ? cached.message : "正在读取账户…";
     this.available = Boolean(active && node?.engine !== "claude" && node?.status === "online" && node?.reportedAppServer?.status === "running");
-    if (node?.engine === "claude") this.message = "Claude SDK 价格估算；网关实际扣费可能不同。";
+    if (node?.engine === "claude") this.message = node.authType === "subscription"
+      ? "套餐用量来自 claude.ai，Mira Server 每 5 分钟采样一次。" : "Claude SDK 价格估算；网关实际扣费可能不同。";
     this.render();
     if (this.available) {
       if (cached && Date.now() - cached.updatedAt < this.intervalMs) this.schedule();
@@ -193,7 +264,7 @@ export class AccountSidebar {
     this.active = this.summariesActive = false;
     this.stop();
     this.cache.clear();
-    this.stopSummaries(); this.summaries.clear();
+    this.stopSummaries(); this.summaries.clear(); this.planUsage.clear();
     this.history.clear();
     this.spend.clear();
     this.groups = []; this.selectedName = null;
@@ -391,6 +462,47 @@ export class AccountSidebar {
     target.replaceChildren(fragment);
   }
 
+  renderPlanUsage(group) {
+    const target = this.root.querySelector("[data-account-plan-usage]");
+    if (!target) return;
+    const member = this.subscriptionMember(group);
+    target.classList.toggle("hidden", !member);
+    if (!member) { target.replaceChildren(); return; }
+    const id = member.account.nodeAccountId, entry = this.planUsage.get(id), quota = claudePlanQuota(entry?.data?.usage);
+    const el = (tag, text, className) => {
+      const value = document.createElement(tag); value.textContent = text; if (className) value.className = className; return value;
+    };
+    const plan = entry?.data?.usage?.subscriptionType;
+    if (plan) this.root.querySelector("[data-account-plan]").textContent = plan.toUpperCase();
+    const fragment = document.createDocumentFragment();
+    for (const window of quota.windows) {
+      const row = el("div", "", "account-plan-row"), line = el("div", "");
+      const remaining = window.remaining === null ? "未提供" : `剩余 ${Number(window.remaining.toFixed(1))}%`;
+      line.append(el("span", window.label), el("strong", remaining));
+      const meter = document.createElement("meter");
+      meter.min = 0; meter.max = 100; meter.low = 20; meter.optimum = 100; meter.value = window.remaining ?? 0;
+      meter.hidden = window.remaining === null;
+      meter.setAttribute("aria-label", `${window.label}${remaining}`);
+      const reset = el("small", window.resetsAt ? `${resetTime(window.resetsAt)} 重置` : "重置时间未提供");
+      if (window.resetsAt) reset.title = `${new Date(window.resetsAt).toLocaleString()}（本地时间）`;
+      row.append(line, meter, reset);
+      fragment.append(row);
+    }
+    const extra = entry?.data?.usage?.extra;
+    if (extra?.enabled) {
+      const row = el("div", "", "account-plan-row"), line = el("div", "");
+      const used = Number.isFinite(extra.usedCredits) ? extra.usedCredits : null, limit = Number.isFinite(extra.monthlyLimit) ? extra.monthlyLimit : null;
+      line.append(el("span", "额外用量 · 本月"), el("strong", used === null ? "已开启" : `${used}${limit === null ? "" : ` / ${limit}`}${extra.currency ? ` ${extra.currency}` : ""}`));
+      row.append(line); fragment.append(row);
+    }
+    const status = !entry ? "正在读取套餐用量…" : entry.message ? (quota.windows.length ? `更新失败，显示上次结果：${entry.message}` : entry.message)
+      : !entry.data?.usage?.available ? "此账号未提供套餐用量" : !quota.windows.length ? "套餐用量未提供窗口数据" : "";
+    const observed = entry?.data?.observedAt;
+    const footer = el("small", status || (observed ? `更新于 ${new Date(observed).toLocaleTimeString("zh-CN", { hour12: false })}` : ""), "muted");
+    if (footer.textContent) fragment.append(footer);
+    target.replaceChildren(fragment);
+  }
+
   render() {
     const find = selector => this.root.querySelector(selector);
     const { remaining, resetsAt, resetCount } = weeklyQuota(this.limits);
@@ -411,6 +523,7 @@ export class AccountSidebar {
     const summary = remaining === null ? "查看账户与额度" : resetsAt === null ? `剩余 ${remainingText} · 时间未提供`
       : deadline === "等待更新" ? "已到重置时间，等待更新" : `${deadline} 前剩余 ${remainingText}`;
     const summaryNode = find("[data-account-summary-remaining]");
+    this.renderPlanUsage(group);
     summaryNode.textContent = this.node?.engine === "claude" ? "Claude API · 查看估算费用" : this.node && !this.available ? (this.node.status !== "online" ? "运行节点离线" : "Codex 尚未启动") : summary;
     summaryNode.title = this.message || summary;
     const summaryCredits = find("[data-account-summary-credits]");
@@ -428,7 +541,8 @@ export class AccountSidebar {
     find("[data-account-status]").classList.toggle("hidden", !this.message);
     find("[data-account-refresh]").disabled = (!this.available && !group) || Boolean(this.operation);
     this.root.setAttribute("aria-busy", String(Boolean(this.operation)));
-    const spending = Boolean(group && remaining === null);
+    // Subscriptions chart their remaining quota; API accounts chart estimated cost.
+    const spending = Boolean(group && remaining === null && !this.subscriptionMember(group));
     find("[data-account-history]").classList.toggle("hidden", spending);
     find("[data-account-spend]").classList.toggle("hidden", !spending);
     this.history.select(this.node, this.account, Boolean(this.key) && !spending);

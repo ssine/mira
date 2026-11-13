@@ -101,3 +101,41 @@ test("seven-day summaries bound concurrent reads, reuse totals and discard repli
     sidebar.loadSummaries(); assert.equal(pending.length, 3, "hidden or signed-out pages do not start further reads");
   } finally { sidebar.summariesActive = false; sidebar.stopSummaries(); globalThis.fetch = originalFetch; }
 });
+
+test("Claude subscription windows read like Codex quota and API accounts keep cost estimates", async () => {
+  const { claudePlanQuota } = await import("../server/public/account-quota.js");
+  const quota = claudePlanQuota({ fiveHour: { utilization: 12.5, resetsAt: 1_800_000_000_000 }, sevenDay: { utilization: 104, resetsAt: null },
+    sevenDayOpus: null, models: [{ name: "Fable", utilization: 0, resetsAt: 1_800_000_000_000 }, { name: "Empty", utilization: null, resetsAt: null }] });
+  assert.deepEqual(quota.windows.map(window => [window.label, window.remaining]), [["5 小时", 87.5], ["本周 · 全部模型", 0], ["本周 · Fable", 100]]);
+  assert.equal(quota.remaining, 0, "over-limit weekly usage clamps to zero instead of disappearing");
+  assert.equal(quota.session.remaining, 87.5);
+  assert.deepEqual(claudePlanQuota(null).windows, []);
+
+  const originalFetch = globalThis.fetch, pending = [];
+  globalThis.fetch = (url, { signal }) => new Promise(resolve => pending.push({ url, signal, resolve }));
+  const member = (id, authType = "subscription") => ({ node: { status: "online" }, account: { nodeAccountId: id, authType, configured: true, enabled: true } });
+  const sidebar = Object.assign(Object.create(AccountSidebar.prototype), {
+    summariesActive: true, intervalMs: 300_000, planJobs: new Map(), planUsage: new Map(), summaryJobs: new Map(), threads: [], expanded: true,
+    groups: [{ key: "a", engine: "claude", members: [member("a")] }, { key: "b", engine: "claude", members: [member("b")] },
+      { key: "c", engine: "claude", members: [member("c")] }, { key: "api", engine: "claude", members: [member("api", "api_key")] }],
+    render() {}, renderOverview() {},
+  });
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  try {
+    sidebar.loadPlanUsages();
+    assert.deepEqual(pending.map(request => request.url), ["/v1/claude/accounts/a/usage", "/v1/claude/accounts/b/usage"], "plan reads are bounded and skip API-key accounts");
+    pending[0].resolve({ ok: true, json: async () => ({ usage: { available: true, fiveHour: { utilization: 40 }, sevenDay: { utilization: 10 } }, observedAt: Date.now() }) });
+    pending[1].resolve({ ok: false, json: async () => ({ error: "Claude account Node is offline" }) });
+    await settle(); await settle();
+    assert.equal(sidebar.groupQuota(sidebar.groups[0]).remaining, 90);
+    assert.equal(sidebar.planUsage.get("b").message, "Claude account Node is offline");
+    assert.equal(sidebar.groupQuota(sidebar.groups[3]).remaining, null, "API-key accounts have no plan quota");
+    sidebar.loadPlanUsages();
+    assert.deepEqual(pending.slice(2).map(request => request.url), ["/v1/claude/accounts/c/usage"], "fresh and recently failed reads are reused");
+    sidebar.summariesActive = false; sidebar.stopSummaries();
+    assert.equal(pending[2].signal.aborted, true);
+    pending[2].resolve({ ok: true, json: async () => ({ usage: { available: true } }) });
+    await settle(); await settle();
+    assert.equal(sidebar.planUsage.has("c"), false, "aborted replies cannot repopulate after logout");
+  } finally { sidebar.summariesActive = false; sidebar.stopSummaries(); globalThis.fetch = originalFetch; }
+});

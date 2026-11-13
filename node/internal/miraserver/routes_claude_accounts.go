@@ -69,6 +69,12 @@ func (server *Server) routeClaudeAccounts(ctx context.Context, w http.ResponseWr
 	if len(parts) == 3 && parts[2] == "login" && r.Method == "GET" {
 		return server.claudeAccountLoginStatus(ctx, w, r, id)
 	}
+	if len(parts) == 3 && parts[2] == "usage" && r.Method == "GET" {
+		return server.claudeAccountUsage(ctx, w, r, id)
+	}
+	if len(parts) == 3 && parts[2] == "usage-history" && r.Method == "GET" {
+		return server.claudeAccountUsageHistory(ctx, w, r, id)
+	}
 	if (len(parts) == 3 && parts[2] == "login" && r.Method == "POST") ||
 		(len(parts) == 4 && parts[2] == "login" && (parts[3] == "complete" || parts[3] == "cancel") && r.Method == "POST") ||
 		(len(parts) == 3 && parts[2] == "logout" && r.Method == "POST") {
