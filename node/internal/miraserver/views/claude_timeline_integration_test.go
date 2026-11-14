@@ -79,7 +79,9 @@ func TestClaudeTimelinePostgres(t *testing.T) {
 	exec(`INSERT INTO mira_claude_sessions(session_id,request_id,node_id,cwd,title) VALUES($1,gen_random_uuid(),$2,'/work','时间线测试')`, sessionID, nodeID)
 	exec(`INSERT INTO mira_claude_turns(turn_id,session_id,node_id,revision,request,status,created_at,completed_at)
 	  VALUES($1,$2,$3,1,'{}','completed',$4,$5)`, turnID, sessionID, nodeID, start, start.Add(time.Minute))
-	at := func(seconds int) string { return start.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339Nano) }
+	at := func(seconds int) string {
+		return start.Add(time.Duration(seconds) * time.Second).Format(time.RFC3339Nano)
+	}
 	events := []map[string]any{
 		{"type": "mira_user", "text": "检查测试", "timestamp": at(0)},
 		{"type": "assistant", "timestamp": at(5), "message": map[string]any{"id": "m1", "content": []any{
