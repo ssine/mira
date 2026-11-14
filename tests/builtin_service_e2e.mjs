@@ -22,7 +22,7 @@ try {
  assert.equal(current.status,'running');assert.notEqual(originalPID,process.pid);
  assert.equal(run(['doctor','--state-dir',state],installed()).healthy,true);
  await Promise.all(Array.from({length:6},()=>new Promise((resolve,reject)=>{
-  const p=spawn(installed(),['--json','start','--state-dir',state],{env,stdio:['ignore','pipe','pipe']});let output='';p.stdout.on('data',b=>output+=b);p.on('error',reject);p.on('exit',code=>code===0?resolve(JSON.parse(output)):reject(Error('concurrent start failed')))
+  const p=spawn(installed(),['--json','start','--state-dir',state],{env,stdio:['ignore','pipe','pipe']});let output='';p.stdout.on('data',b=>output+=b);p.on('error',reject);p.on('close',code=>code===0?resolve(JSON.parse(output)):reject(Error('concurrent start failed')))
  })));
  assert.equal(service().pid,originalPID);assert.equal((await children(originalPID)).length,1);
  const worker=(await children(originalPID))[0];process.kill(worker,'SIGKILL');await wait(async()=>{const p=await children(originalPID);return p.length===1&&p[0]!==worker},'worker recovery');
