@@ -43,6 +43,34 @@ test("ordinary completion, errors and ambient tasks retain bounded turn ownershi
 const lifecycle = (uuid, state) => ({ type: "command_lifecycle", command_uuid: uuid, state });
 const sessionState = state => ({ type: "system", subtype: "session_state_changed", state });
 
+test("native idle with background work keeps input open through the task's continuation", () => {
+  for (const is_error of [false, true]) {
+    const state = new TurnLifecycle();
+    state.observe(sessionState("running"));
+    state.observe(tasks({ task_id: "backup", task_type: "local_bash" }));
+    state.observe({ ...result, is_error });
+    assert.equal(state.observe(sessionState("idle")), false, "foreground idle does not finish background work");
+    assert.equal(state.steer("while-waiting"), true);
+    state.observe(sessionState("running"));
+    state.observe({ ...result, user_message_uuids: ["while-waiting"] });
+    assert.equal(state.observe(sessionState("idle")), false);
+    assert.equal(state.observe(tasks()), false, "wait for the task notification's response");
+    state.observe({ type: "system", subtype: "task_notification", task_id: "backup", status: "completed" });
+    assert.equal(state.observe(sessionState("running")), false);
+    assert.equal(state.steer("after-notification"), true);
+    state.observe({ ...result, user_message_uuids: ["after-notification"] });
+    assert.equal(state.observe(sessionState("idle")), true);
+  }
+});
+
+test("native idle ignores ambient watchers after foreground work ends", () => {
+  const state = new TurnLifecycle();
+  state.observe(sessionState("running"));
+  state.observe(tasks({ task_id: "watcher", ambient: true }));
+  state.observe(result);
+  assert.equal(state.observe(sessionState("idle")), true);
+});
+
 test("an API error followed by a background notification keeps native input open", () => {
   const state = new TurnLifecycle();
   state.observe(sessionState("running"));
