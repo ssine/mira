@@ -142,9 +142,13 @@ export function timelineSummary(data) {
 }
 
 export class ConversationTimeline {
-  constructor({ root, toggle, load, onJump, onOpenThread }) {
+  // The timeline is a pinned, non-modal panel at the top of the conversation.
+  // Its visibility is a remembered preference shared by all conversations;
+  // the navigation menu toggles it and onPinnedChange reflects the state.
+  constructor({ root, load, onJump, onOpenThread, onPinnedChange, returnFocus }) {
     this.root = root;
-    this.toggle = toggle;
+    this.onPinnedChange = onPinnedChange;
+    this.returnFocus = returnFocus;
     this.load = load;
     this.onJump = onJump;
     this.onOpenThread = onOpenThread;
@@ -157,13 +161,13 @@ export class ConversationTimeline {
     this.timer = null;
     this.ticker = null;
     try { this.mode = localStorage.getItem("mira.timeline.mode") === "hour" ? "hour" : "all"; } catch { this.mode = "all"; }
-    toggle.addEventListener("click", () => this.setOpen(!this.open));
-    root.querySelector("[data-timeline-close]")?.addEventListener("click", () => { this.setOpen(false); toggle.focus(); });
+    try { this.pinned = localStorage.getItem("mira.timeline.pinned") === "1"; } catch { this.pinned = false; }
+    root.querySelector("[data-timeline-close]")?.addEventListener("click", () => { this.setPinned(false); this.returnFocus?.(); });
     root.addEventListener("keydown", event => {
       if (event.key !== "Escape") return;
       // Handled here: do not also close the conversation drawer.
       event.preventDefault(); event.stopPropagation();
-      this.setOpen(false); toggle.focus();
+      this.setPinned(false); this.returnFocus?.();
     });
     this.body.addEventListener("click", event => {
       const zoom = event.target.closest("[data-timeline-zoom]");
@@ -190,15 +194,22 @@ export class ConversationTimeline {
 
   get open() { return !this.root.hidden; }
 
-  setOpen(open) {
-    open = open && !!this.threadId;
-    this.root.hidden = !open;
-    this.toggle.setAttribute("aria-expanded", String(open));
-    this.toggle.setAttribute("aria-label", open ? "收起会话时间线" : "展开会话时间线");
-    if (open) void this.refresh(); else this.stop();
+  setPinned(pinned) {
+    this.pinned = !!pinned;
+    try { localStorage.setItem("mira.timeline.pinned", this.pinned ? "1" : "0"); } catch { /* Preference only. */ }
+    this.show();
+    this.onPinnedChange?.(this.pinned);
   }
 
-  // Each conversation opens collapsed; nothing is read until expanded.
+  // Visible while pinned and a conversation is open; nothing is read otherwise.
+  show() {
+    const open = this.pinned && !!this.threadId;
+    const was = this.open;
+    this.root.hidden = !open;
+    if (open && !was) void this.refresh();
+    else if (!open) this.stop();
+  }
+
   select(threadId) {
     if (threadId === this.threadId) return;
     this.threadId = threadId;
@@ -206,10 +217,11 @@ export class ConversationTimeline {
     this.zoom = 1;
     this.request++;
     this.running = false;
-    this.toggle.classList.toggle("hidden", !threadId);
-    this.setOpen(false);
     this.summary.textContent = "";
     this.body.replaceChildren();
+    this.root.hidden = true;
+    this.stop();
+    this.show();
   }
 
   stop() { clearTimeout(this.timer); this.timer = null; this.setTicker(false); }

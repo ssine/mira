@@ -13,7 +13,7 @@ import { toolItemView, activitySummary, summarizeActivities, activityStatus, for
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ClientCache } from "/client-cache.js";
 import { ViewportRenderer } from "/viewport-renderer.js";
-import { MessageRail, revealCard } from "/conversation-nav.js";
+import { MessageRail, NavigationMenu, revealCard } from "/conversation-nav.js";
 import { ConversationTimeline } from "/conversation-timeline.js";
 import { ConversationSearch } from "/conversation-search.js";
 import { conversationScroll } from "/conversation-scroll.js";
@@ -310,7 +310,9 @@ const accountSidebar = new AccountSidebar($("#agentAccount"));
 const messageRail = new MessageRail({ rail: $("#conversationRail"), scroller: $("#conversationScroll"),
   resolveCard: (key, materialize) => transcriptCardForKey(key, materialize), readingOffset: () => readingOffset() });
 const conversationTimeline = new ConversationTimeline({
-  root: $("#conversationTimeline"), toggle: $("#conversationTimelineToggle"),
+  root: $("#conversationTimeline"),
+  onPinnedChange: pinned => conversationNavigation?.reflectPinned(pinned),
+  returnFocus: () => $("#conversationNavToggle").focus(),
   load: threadId => {
     const thread = agent.threads.find(item => item.threadId === threadId);
     return engineOf(threadId) === "claude"
@@ -319,6 +321,10 @@ const conversationTimeline = new ConversationTimeline({
   },
   onJump: (threadId, seq, role) => void openConversationAt(threadId, seq, role),
   onOpenThread: threadId => void openConversationAt(threadId, null, null),
+});
+const conversationNavigation = new NavigationMenu({
+  toggle: $("#conversationNavToggle"), menu: $("#conversationNavMenu"), rail: messageRail, timeline: conversationTimeline,
+  scroller: $("#conversationScroll"), readingOffset: () => readingOffset(),
 });
 const conversationSearch = new ConversationSearch({
   input: $("#agentThreadSearch"), results: $("#agentSearchResults"), list: $("#agentThreadList"), api,
@@ -3123,6 +3129,7 @@ function syncActiveTurnUi() {
   agent.turnId = agent.threadId ? (agent.activeTurns.get(agent.threadId) ?? null) : null;
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
   $("#conversationDetailsToggle").classList.remove("hidden");
+  $("#conversationNavToggle").classList.toggle("hidden", !agent.threadId);
   // An expanded timeline follows a running conversation and settles once more.
   const running = !!agent.threadId && agent.activeTurns.has(agent.threadId), wasRunning = conversationTimeline.running;
   conversationTimeline.setRunning(running);
@@ -4999,7 +5006,7 @@ function updateMessageRail() {
   const hidden = compactionSummaryKeys(agent.transcriptItems);
   messageRail.update(agent.transcriptItems
     .filter(item => item.kind === "user" && item.body?.trim() && !hidden.has(item.key))
-    .map(item => ({ key: transcriptCardKey(item), body: item.body })));
+    .map(item => ({ key: transcriptCardKey(item), body: item.body, at: item.completedAt })));
 }
 
 // Search hits and timeline markers name canonical sequences: Codex rollout
