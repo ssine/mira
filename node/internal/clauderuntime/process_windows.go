@@ -54,3 +54,7 @@ func killCommand(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+// settleProcessGroup is a no-op on Windows: job objects end the tree when the
+// worker's job closes, and Windows has no group SIGTERM to deliver first.
+func settleProcessGroup(cmd *exec.Cmd, grace time.Duration) {}

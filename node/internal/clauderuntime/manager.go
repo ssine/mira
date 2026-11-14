@@ -389,6 +389,9 @@ func (m *Manager) start(params map[string]any) (any, error) {
 	}
 	go func() {
 		_ = cmd.Wait()
+		// A normal exit may leave the CLI completing an OAuth refresh; let it
+		// save before the group is killed and the account egress is released.
+		settleProcessGroup(cmd, processSettleGrace)
 		stopped := p.stop()
 		_ = input.Close()
 		m.mu.Lock()
@@ -442,7 +445,9 @@ func (m *Manager) oneShot(params map[string]any) (any, error) {
 	cmd.WaitDelay = 5 * time.Second
 	output := &boundedOutput{limit: 64 * 1024}
 	cmd.Stdout = output
-	if err = cmd.Run(); err != nil {
+	err = cmd.Run()
+	settleProcessGroup(cmd, processSettleGrace) // Before the deferred egress release.
+	if err != nil {
 		return nil, errors.New("Claude could not generate a title")
 	}
 	var value map[string]any
@@ -454,6 +459,10 @@ func (m *Manager) oneShot(params map[string]any) (any, error) {
 	}
 	return value, nil
 }
+
+// processSettleGrace bounds how long an exited worker's descendants may take
+// to finish (the CLI waits about two seconds for an in-flight OAuth refresh).
+const processSettleGrace = 5 * time.Second
 
 func writeProcessControl(p *process, body []byte) error {
 	written := make(chan error, 1)

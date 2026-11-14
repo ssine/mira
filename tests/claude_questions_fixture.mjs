@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const questionThread = "00000000-0000-4000-8000-0000000000a1";
-export async function startQuestionFixture({ cacheHistory = false, images = false, compaction = false } = {}) {
+export async function startQuestionFixture({ cacheHistory = false, images = false, compaction = false, longHistory = 0 } = {}) {
   const nodeId = "00000000-0000-4000-8000-000000000001", accountId = "00000000-0000-4000-8000-000000000002";
   const turnId = "00000000-0000-4000-8000-000000000003", questionId = "00000000-0000-4000-8000-000000000004";
   const session = { sessionId: questionThread, nodeId, nodeAccountId: accountId, title: "Claude 问答回归", cwd: "/work", model: "opus", persistence: "pending", activeTurn: turnId };
@@ -47,6 +47,17 @@ export async function startQuestionFixture({ cacheHistory = false, images = fals
     emit({ type: "assistant", uuid: "reply", message: { id: "reply", content: [{ type: "text", text: "继续处理。" }] } });
     emit({ type: "mira_completed" });
   }
+  if (longHistory) {
+    // Many completed turns, served in small transcript pages like the Server.
+    events.length = 0;
+    session.activeTurn = null;
+    for (let i = 0; i < longHistory; i++) {
+      emit({ type: "mira_user", text: `第 ${i + 1} 个问题` });
+      emit({ type: "assistant", uuid: `long-${i}`, message: { id: `long-${i}`, content: [{ type: "text", text: `第 ${i + 1} 个回答\n\n${"较长的回答内容。".repeat(30)}` }] } });
+      emit({ type: "mira_completed" });
+    }
+  }
+  const pageRequests = [];
   let holdHistory = false;
   const heldHistory = new Set();
   const summary = () => ({ ...session, threadId: questionThread, engine: "claude", runtimeNodeId: nodeId, generation: 1, listRoot: true, childCount: 0,
@@ -58,7 +69,7 @@ export async function startQuestionFixture({ cacheHistory = false, images = fals
     const json = (value, status = 200) => { res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" }); res.end(JSON.stringify(value)); };
     let raw = ""; for await (const chunk of req) raw += chunk;
     const body = raw ? JSON.parse(raw) : {};
-    if (path === "/__test/state") return json({ answers, turns, activeTurn: session.activeTurn, held: !!heldAnswer });
+    if (path === "/__test/state") return json({ answers, turns, activeTurn: session.activeTurn, held: !!heldAnswer, pageRequests });
     if (path === "/__test/control") {
       if (body.action === "hold-history") holdHistory = true;
       if (body.action === "release-history") { holdHistory = false; for (const release of heldHistory) release(); heldHistory.clear(); }
@@ -85,6 +96,11 @@ export async function startQuestionFixture({ cacheHistory = false, images = fals
     if (path.endsWith("/events")) {
       if (holdHistory) await new Promise(resolve => { heldHistory.add(resolve); res.once("close", () => { heldHistory.delete(resolve); resolve(); }); });
       const before = Number(url.searchParams.get("before")), after = Number(url.searchParams.get("after"));
+      if (longHistory && url.searchParams.get("view") === "transcript") {
+        pageRequests.push(before);
+        const older = events.filter(e => !before || e.seq < before), data = older.slice(-30);
+        return json({ data, cursor: events.at(-1)?.seq || 0, earliest: data[0]?.seq || 0, hasMore: data.length > 0, more: older.length > data.length, session });
+      }
       const data = events.filter(e => e.seq > after && (!before || e.seq < before));
       return json({ data, cursor: events.at(-1)?.seq || 0, earliest: data[0]?.seq || 0, hasMore: false, session });
     }

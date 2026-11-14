@@ -1,5 +1,7 @@
 // A vertical rail of the user's own messages in the open conversation. Each
-// tick previews its message on hover/focus and scrolls the transcript to it.
+// tick previews its message on hover/focus and scrolls the transcript to it;
+// pressing and dragging along the rail scrubs through messages like a
+// scrollbar.
 // The rail reads only the transcript already held by the browser; with a full
 // outline that is the whole conversation.
 
@@ -51,13 +53,38 @@ export class MessageRail {
     rail.hidden = true;
     scroller.addEventListener("scroll", () => this.schedule(), { passive: true });
     window.addEventListener("resize", () => this.schedule(), { passive: true });
+    // Pointer presses are handled by the scrub below; click covers keyboard
+    // activation (detail 0) and synthetic clicks.
     rail.addEventListener("click", event => {
       const tick = event.target.closest("[data-rail-index]");
-      if (tick) this.jump(Number(tick.dataset.railIndex));
+      if (tick && event.detail === 0) this.jump(Number(tick.dataset.railIndex));
     });
-    rail.addEventListener("pointerover", event => this.preview(event.target.closest("[data-rail-index]")));
+    this.dragging = null;
+    this.list.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || !this.entries.length) return;
+      event.preventDefault();
+      this.list.setPointerCapture?.(event.pointerId);
+      this.dragging = { pointerId: event.pointerId, index: -1 };
+      this.rail.dataset.scrubbing = "true";
+      this.scrubTo(event.clientY);
+    });
+    this.list.addEventListener("pointermove", event => {
+      if (this.dragging?.pointerId === event.pointerId) this.scrubTo(event.clientY);
+    });
+    const finish = event => {
+      if (this.dragging?.pointerId !== event.pointerId) return;
+      const { index } = this.dragging;
+      this.dragging = null;
+      delete this.rail.dataset.scrubbing;
+      this.list.releasePointerCapture?.(event.pointerId);
+      if (event.type === "pointerup" && index >= 0) this.jump(index);
+      this.preview(null);
+    };
+    this.list.addEventListener("pointerup", finish);
+    this.list.addEventListener("pointercancel", finish);
+    rail.addEventListener("pointerover", event => { if (!this.dragging) this.preview(event.target.closest("[data-rail-index]")); });
     rail.addEventListener("focusin", event => this.preview(event.target.closest("[data-rail-index]")));
-    rail.addEventListener("pointerleave", () => this.preview(null));
+    rail.addEventListener("pointerleave", () => { if (!this.dragging) this.preview(null); });
     rail.addEventListener("focusout", event => { if (!rail.contains(event.relatedTarget)) this.preview(null); });
     rail.addEventListener("keydown", event => {
       if (!["ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
@@ -100,15 +127,16 @@ export class MessageRail {
     this.frame = requestAnimationFrame(() => { this.frame = null; this.sync(); });
   }
 
-  // The active message is the last one whose card starts above 35% of the
-  // reading area; at the end of the conversation, the last one in view.
+  // The active message is the last one whose card starts at or above the top
+  // of the reading area (so a jumped-to message is the active one); at the
+  // end of the conversation, the last one in view.
   // Cards are in document order, so binary search suffices.
   sync() {
     if (!this.entries.length) return;
     const viewport = this.scroller.getBoundingClientRect();
     const top = viewport.top + this.readingOffset();
     const atEnd = this.scroller.scrollHeight - this.scroller.clientHeight - this.scroller.scrollTop <= 2;
-    const line = atEnd ? viewport.bottom - 24 : top + (viewport.bottom - top) * 0.35;
+    const line = atEnd ? viewport.bottom - 24 : top + 48;
     let low = 0, high = this.entries.length - 1, active = -1;
     while (low <= high) {
       const middle = (low + high) >> 1;
@@ -139,10 +167,36 @@ export class MessageRail {
     this.tip.style.top = `${top}px`;
   }
 
-  jump(index) {
+  // The tick nearest to a pointer position, also above or below the ticks.
+  indexAt(clientY) {
+    const ticks = this.list.querySelectorAll(".message-rail-tick");
+    if (!ticks.length) return -1;
+    let low = 0, high = ticks.length - 1;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (ticks[middle].getBoundingClientRect().bottom < clientY) low = middle + 1;
+      else high = middle;
+    }
+    return low;
+  }
+
+  scrubTo(clientY) {
+    const index = this.indexAt(clientY);
+    if (index < 0 || index === this.dragging.index) return;
+    this.dragging.index = index;
+    const tick = this.list.querySelector(`[data-rail-index="${index}"]`);
+    // Follow the pointer when the rail itself scrolls (very long conversations).
+    const list = this.list.getBoundingClientRect();
+    if (clientY < list.top + 12) this.list.scrollTop -= 16;
+    else if (clientY > list.bottom - 12) this.list.scrollTop += 16;
+    this.preview(tick);
+    this.jump(index, { flash: false });
+  }
+
+  jump(index, { flash = true } = {}) {
     const entry = this.entries[index];
     if (!entry) return;
-    revealCard(this.resolveCard(entry.key, true), this.scroller, { offset: this.readingOffset() });
+    revealCard(this.resolveCard(entry.key, true), this.scroller, { offset: this.readingOffset(), flash });
     this.schedule();
   }
 }
