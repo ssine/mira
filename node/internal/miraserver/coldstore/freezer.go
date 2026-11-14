@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -87,6 +88,22 @@ type FreezeStats struct {
 	Threads, Rows int
 	RawBytes      int64
 	StoredBytes   int64
+	// Skipped counts rows left hot because their upload kept failing; their
+	// conversation is not marked scanned, so a later pass retries them.
+	Skipped int
+}
+
+// UploadError marks an object upload that failed after its retries. It
+// affects only that row, never the pass.
+type UploadError struct{ Err error }
+
+func (err *UploadError) Error() string { return err.Err.Error() }
+func (err *UploadError) Unwrap() error { return err.Err }
+
+func (stats *FreezeStats) skip() {
+	statsMu.Lock()
+	stats.Skipped++
+	statsMu.Unlock()
 }
 
 // Start runs the freezer and collector until the returned stop function is
@@ -104,9 +121,9 @@ func (freezer *Freezer) Start(ctx context.Context) func() {
 			stats, err := freezer.FreezePass(runContext, 32)
 			if err != nil && runContext.Err() == nil {
 				freezer.options.Logger.Printf("cold history freeze pass failed: %v", err)
-			} else if stats.Rows > 0 {
-				freezer.options.Logger.Printf("cold history froze %d payloads in %d conversations (%d raw bytes, %d stored)",
-					stats.Rows, stats.Threads, stats.RawBytes, stats.StoredBytes)
+			} else if stats.Rows > 0 || stats.Skipped > 0 {
+				freezer.options.Logger.Printf("cold history froze %d payloads in %d conversations (%d raw bytes, %d stored, %d uploads deferred)",
+					stats.Rows, stats.Threads, stats.RawBytes, stats.StoredBytes, stats.Skipped)
 			}
 			claude, claudeErr := freezer.FreezeClaudePass(runContext, 32)
 			if claudeErr != nil && runContext.Err() == nil {
@@ -128,8 +145,13 @@ func (freezer *Freezer) Start(ctx context.Context) func() {
 				}
 				lastCollect = time.Now()
 			}
+			// Idle: check again in ten minutes. Progress: continue at once.
+			// Errors or deferred uploads: retry soon instead of idling.
 			wait := 10 * time.Minute
-			if stats.Threads > 0 && err == nil {
+			switch {
+			case err != nil || stats.Skipped > 0:
+				wait = time.Minute
+			case stats.Threads > 0:
 				wait = time.Second
 			}
 			if !sleep(runContext, wait) {
@@ -214,8 +236,13 @@ func (freezer *Freezer) FreezePass(ctx context.Context, limit int) (FreezeStats,
 		go func() {
 			defer group.Done()
 			for thread := range work {
-				if err := freezer.freezeThread(passContext, thread, cutoff, &stats); err != nil {
+				deferred, err := freezer.freezeThread(passContext, thread, cutoff, &stats)
+				if err != nil {
 					fail(fmt.Errorf("conversation %s: %w", thread.thread, err))
+					continue
+				}
+				if deferred {
+					// Leave the conversation unscanned so the next pass retries.
 					continue
 				}
 				if _, err := freezer.pool.Exec(passContext, `INSERT INTO mira_cold_thread_scans(store_id,thread_id,generation,item_count,scanned_at)
@@ -252,7 +279,8 @@ type candidateRow struct {
 	payload string
 }
 
-func (freezer *Freezer) freezeThread(ctx context.Context, thread candidateThread, cutoff time.Time, stats *FreezeStats) error {
+func (freezer *Freezer) freezeThread(ctx context.Context, thread candidateThread, cutoff time.Time, stats *FreezeStats) (bool, error) {
+	var deferred atomic.Bool
 	after := int64(0)
 	for {
 		rows, err := freezer.pool.Query(ctx, `SELECT item_seq,payload,payload_sha256 FROM codex_thread_events
@@ -260,23 +288,23 @@ func (freezer *Freezer) freezeThread(ctx context.Context, thread candidateThread
    AND cold_sha256 IS NULL AND created_at<$6 AND pg_column_size(payload)>=$7
  ORDER BY item_seq LIMIT 16`, thread.store, thread.thread, thread.generation, after, thread.count, cutoff, freezer.options.MinBytes)
 		if err != nil {
-			return err
+			return false, err
 		}
 		batch := []candidateRow{}
 		for rows.Next() {
 			var row candidateRow
 			if err := rows.Scan(&row.seq, &row.raw, &row.payload); err != nil {
 				rows.Close()
-				return err
+				return false, err
 			}
 			batch = append(batch, row)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return err
+			return false, err
 		}
 		if len(batch) == 0 {
-			return nil
+			return deferred.Load(), nil
 		}
 		after = batch[len(batch)-1].seq
 		// Rows of one batch upload in parallel, bounded by the shared slots.
@@ -291,13 +319,19 @@ func (freezer *Freezer) freezeThread(ctx context.Context, thread candidateThread
 			case freezer.uploads <- struct{}{}:
 			case <-ctx.Done():
 				group.Wait()
-				return ctx.Err()
+				return false, ctx.Err()
 			}
 			group.Add(1)
 			go func(row candidateRow) {
 				defer group.Done()
 				defer func() { <-freezer.uploads }()
 				stored, ready, err := freezer.ensureObject(ctx, sha, row.raw)
+				var upload *UploadError
+				if errors.As(err, &upload) && ctx.Err() == nil {
+					stats.skip()
+					deferred.Store(true)
+					return
+				}
 				if err != nil {
 					errs <- err
 					return
@@ -318,7 +352,7 @@ func (freezer *Freezer) freezeThread(ctx context.Context, thread candidateThread
 		group.Wait()
 		close(errs)
 		if err := <-errs; err != nil {
-			return err
+			return false, err
 		}
 	}
 }
@@ -354,7 +388,7 @@ func (freezer *Freezer) ensureObject(ctx context.Context, sha string, raw []byte
 		return 0, false, err
 	}
 	if err := freezer.objects.Put(ctx, ObjectKey(sha), encoded); err != nil {
-		return 0, false, err
+		return 0, false, &UploadError{Err: err}
 	}
 	command, err := freezer.pool.Exec(ctx, `UPDATE mira_cold_objects SET uploaded_at=now(),stored_bytes=$2 WHERE sha256=$1 AND NOT deleting`, sha, len(encoded))
 	if err != nil {

@@ -103,22 +103,69 @@ func (client *s3Client) objectURL(key string) *url.URL {
 	return &result
 }
 
+// objectAttempts bounds retries of one object request. Objects are
+// immutable and content-addressed (PUT carries Content-MD5), so repeating a
+// request after a dropped connection is safe.
+const objectAttempts = 4
+
+// retryable reports whether a failed request may succeed when repeated:
+// transport errors (reset or truncated connections on lossy paths), request
+// timeouts, throttling and provider 5xx responses.
+func retryable(ctx context.Context, err error, status int) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500
+}
+
+func backoff(ctx context.Context, attempt int) bool {
+	timer := time.NewTimer(time.Duration(1<<attempt) * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func (client *s3Client) Put(ctx context.Context, key string, body []byte) error {
 	digest := md5.Sum(body)
 	headers := map[string]string{
 		"content-md5":  base64.StdEncoding.EncodeToString(digest[:]),
 		"content-type": "application/octet-stream",
 	}
-	response, err := client.do(ctx, http.MethodPut, key, body, headers)
-	if err != nil {
-		return err
+	var lastErr error
+	for attempt := 0; attempt < objectAttempts; attempt++ {
+		if attempt > 0 && !backoff(ctx, attempt-1) {
+			break
+		}
+		response, err := client.do(ctx, http.MethodPut, key, body, headers)
+		if err != nil {
+			lastErr = err
+			if retryable(ctx, err, 0) {
+				continue
+			}
+			return err
+		}
+		if response.StatusCode/100 == 2 {
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+			response.Body.Close()
+			return nil
+		}
+		lastErr = providerError("upload", response)
+		response.Body.Close()
+		if !retryable(ctx, nil, response.StatusCode) {
+			return lastErr
+		}
 	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		return providerError("upload", response)
+	if ctx.Err() != nil {
+		return ctx.Err()
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-	return nil
+	return fmt.Errorf("%w (after %d attempts)", lastErr, objectAttempts)
 }
 
 // providerError keeps the provider's short error code (for example
@@ -136,25 +183,53 @@ func providerError(operation string, response *http.Response) error {
 }
 
 func (client *s3Client) Get(ctx context.Context, key string) ([]byte, error) {
+	var lastErr error
+	for attempt := 0; attempt < objectAttempts; attempt++ {
+		if attempt > 0 && !backoff(ctx, attempt-1) {
+			break
+		}
+		body, status, err := client.get(ctx, key)
+		if err == nil || !retryable(ctx, errIfTransport(err, status), status) {
+			return body, err
+		}
+		lastErr = err
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return nil, fmt.Errorf("%w (after %d attempts)", lastErr, objectAttempts)
+}
+
+// errIfTransport keeps only transport errors (no HTTP status) for the retry
+// decision; provider responses are classified by their status.
+func errIfTransport(err error, status int) error {
+	if status != 0 {
+		return nil
+	}
+	return err
+}
+
+func (client *s3Client) get(ctx context.Context, key string) ([]byte, int, error) {
 	response, err := client.do(ctx, http.MethodGet, key, nil, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusNotFound {
-		return nil, ErrObjectNotFound
+		return nil, response.StatusCode, ErrObjectNotFound
 	}
 	if response.StatusCode/100 != 2 {
-		return nil, providerError("download", response)
+		return nil, response.StatusCode, providerError("download", response)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxObjectBytes+1))
 	if err != nil {
-		return nil, err
+		// A body cut off mid-transfer is a transport failure.
+		return nil, 0, err
 	}
 	if len(body) > maxObjectBytes {
-		return nil, fmt.Errorf("cold object exceeds %d bytes", maxObjectBytes)
+		return nil, response.StatusCode, fmt.Errorf("cold object exceeds %d bytes", maxObjectBytes)
 	}
-	return body, nil
+	return body, response.StatusCode, nil
 }
 
 func (client *s3Client) Delete(ctx context.Context, key string) error {

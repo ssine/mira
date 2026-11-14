@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -367,5 +368,83 @@ func TestColdHistoryParallelFreeze(t *testing.T) {
 		if string(raw) != want {
 			t.Fatalf("history %s differs after parallel freezing", id)
 		}
+	}
+}
+
+type flakyObjects struct {
+	coldTestObjects
+	failures atomic.Int32
+}
+
+func (store *flakyObjects) Put(ctx context.Context, key string, body []byte) error {
+	if store.failures.Add(-1) >= 0 {
+		return errors.New("connection reset by peer")
+	}
+	return store.coldTestObjects.Put(ctx, key, body)
+}
+
+// A failed upload defers only its row: the pass continues, the conversation
+// stays unscanned, and the next pass freezes the deferred rows.
+func TestColdHistoryDefersFailedUploads(t *testing.T) {
+	pool := accountTestDatabase(t)
+	ctx := context.Background()
+	uuid := func() string {
+		id, err := randomUUID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	storeID := "cold-defer-" + uuid()
+	threads, histories := map[string]any{}, map[string]any{}
+	for range 3 {
+		id := uuid()
+		threads[id] = map[string]any{"thread_id": id}
+		items := []any{map[string]any{"type": "session_meta", "payload": map[string]any{"id": id}}}
+		for range 3 {
+			items = append(items, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "output": randomText(t, 24<<10)}})
+		}
+		histories[id] = items
+	}
+	created, err := PutSnapshot(ctx, pool, storeID, map[string]any{"expectedVersion": 0, "snapshot": map[string]any{
+		"created_threads": threads, "histories": histories,
+	}}, http.Header{"X-Codex-Operation-Id": []string{uuid()}})
+	if err != nil || created.Status != 200 {
+		t.Fatalf("create: %+v %v", created, err)
+	}
+	for _, sql := range []string{
+		`UPDATE codex_thread_events SET created_at=now()-interval '40 days' WHERE store_id=$1`,
+		`UPDATE codex_thread_projections SET updated_at=now()-interval '40 days' WHERE store_id=$1`,
+	} {
+		if _, err := pool.Exec(ctx, sql, storeID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	views := serverviews.New(pool)
+	for id := range threads {
+		if complete, err := views.IndexCodexThread(ctx, storeID, id, time.Time{}); err != nil || !complete {
+			t.Fatalf("index: %v %v", complete, err)
+		}
+	}
+	objects := &flakyObjects{coldTestObjects: coldTestObjects{objects: map[string][]byte{}}}
+	objects.failures.Store(2)
+	freezer := coldstore.NewFreezer(pool, objects, coldstore.FreezerOptions{FreezeAfter: 24 * time.Hour, MinBytes: 4 << 10, UploadConcurrency: 1})
+	first, err := freezer.FreezePass(ctx, 10)
+	if err != nil {
+		t.Fatalf("a failed upload aborted the pass: %v", err)
+	}
+	if first.Skipped != 2 || first.Rows != 7 {
+		t.Fatalf("first pass %+v", first)
+	}
+	second, err := freezer.FreezePass(ctx, 10)
+	if err != nil || second.Rows != 2 || second.Skipped != 0 {
+		t.Fatalf("second pass %+v %v", second, err)
+	}
+	var hot int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM codex_thread_events WHERE store_id=$1 AND cold_sha256 IS NULL AND pg_column_size(payload)>=4096`, storeID).Scan(&hot); err != nil || hot != 0 {
+		t.Fatalf("rows left hot: %d %v", hot, err)
+	}
+	if third, err := freezer.FreezePass(ctx, 10); err != nil || third.Threads != 0 {
+		t.Fatalf("finished conversations rescanned: %+v %v", third, err)
 	}
 }
