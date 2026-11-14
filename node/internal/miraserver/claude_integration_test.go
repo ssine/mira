@@ -678,6 +678,8 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var background, backgroundPhase, backgroundDone atomic.Bool
 	var backgroundAPIError, recoveryHold, recoverySteerSeen atomic.Bool
 	var backgroundErrorsSent atomic.Int32
+	var bashPhase, bashStart, bashSteerSeen atomic.Bool
+	bashRelease := filepath.Join(workspace, "release-background-bash")
 	recoveryHeld, recoveryRelease := make(chan struct{}, 1), make(chan struct{}, 1)
 	backgroundStarted := make(chan struct{}, 1)
 	backgroundRelease := make(chan struct{})
@@ -816,6 +818,24 @@ func TestClaudeManagedSDK(t *testing.T) {
 		if background.CompareAndSwap(true, false) {
 			block = map[string]any{"type": "tool_use", "id": "tool_" + uuidClaude(), "name": "Agent", "input": map[string]any{"description": "Delayed background validation", "prompt": "BACKGROUND_CHILD_REQUEST: reply with the final marker", "subagent_type": "general-purpose", "run_in_background": true}}
 			stop = "tool_use"
+		}
+		if bashPhase.Load() {
+			text := "BACKGROUND_BASH_WAIT"
+			if strings.Contains(string(bytes), "BACKGROUND_BASH_STEER") {
+				bashSteerSeen.Store(true)
+			}
+			if _, err := os.Stat(bashRelease); err == nil {
+				text = "BACKGROUND_BASH_FINAL"
+			}
+			block = map[string]any{"type": "text", "text": text}
+			stop = "end_turn"
+			if bashStart.CompareAndSwap(true, false) {
+				block = map[string]any{"type": "tool_use", "id": "tool_" + uuidClaude(), "name": "Bash", "input": map[string]any{
+					"command":     fmt.Sprintf("until test -f %q; do sleep 0.05; done; echo BACKGROUND_BASH_DONE", bashRelease),
+					"description": "Wait for background Bash release", "run_in_background": true,
+				}}
+				stop = "tool_use"
+			}
 		}
 		usage := map[string]any{"input_tokens": 10, "output_tokens": 4}
 		message := map[string]any{"id": "msg_" + uuidClaude(), "type": "message", "role": "assistant", "model": b["model"], "content": []any{block}, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
@@ -1090,6 +1110,39 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if _, err = f.server.pool.Exec(ctx, `UPDATE codex_nodes SET capabilities=capabilities||'{"claudeSteerV1":true}' WHERE node_id=$1`, f.nodeID); err != nil {
 		t.Fatal(err)
 	}
+	// Native foreground idle can precede the end of a background Bash command.
+	// Keep accepting messages during that idle period, then consume the task's
+	// notification and final response before releasing the Mira turn.
+	bashPhase.Store(true)
+	bashStart.Store(true)
+	bashTurn := runTurn("Start a background Bash command and wait for its completion.")
+	wait("foreground idle with background Bash", 30*time.Second, func() bool {
+		var idle bool
+		_ = f.server.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mira_claude_events
+ WHERE turn_id=$1 AND event_type='system' AND payload->>'subtype'='session_state_changed'
+ AND payload->>'state'='idle')`, bashTurn).Scan(&idle)
+		return idle
+	})
+	if f.call("GET", route, nil)["activeTurn"] != bashTurn {
+		t.Fatal("foreground idle released the turn while background Bash was still running")
+	}
+	bashSteer := map[string]any{"requestId": uuidClaude(), "expectedTurnId": bashTurn, "text": "BACKGROUND_BASH_STEER"}
+	f.call("POST", route+"/steer", bashSteer)
+	f.call("POST", route+"/steer", bashSteer)
+	wait("message consumed while background Bash waits", 30*time.Second, bashSteerSeen.Load)
+	if err = os.WriteFile(bashRelease, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	wait("background Bash continuation", 45*time.Second, completed)
+	var bashSteers int
+	if err = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_events WHERE turn_id=$1 AND event_type='mira_steer'`, bashTurn).Scan(&bashSteers); err != nil || bashSteers != 1 {
+		t.Fatalf("retried background steer was not deduplicated: %d %v", bashSteers, err)
+	}
+	if err = f.server.pool.QueryRow(ctx, `SELECT payload->>'result' FROM mira_claude_events WHERE turn_id=$1 AND event_type='result' ORDER BY seq DESC LIMIT 1`, bashTurn).Scan(&final); err != nil || final != "BACKGROUND_BASH_FINAL" {
+		t.Fatalf("background Bash continuation was lost: %q %v", final, err)
+	}
+	bashPhase.Store(false)
+
 	for _, tool := range []bool{true, false} {
 		steerSeen.Store(false)
 		steerTool.Store(tool)

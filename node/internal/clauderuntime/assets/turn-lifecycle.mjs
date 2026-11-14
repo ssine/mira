@@ -1,7 +1,8 @@
 // A result ends one foreground response, while a completed background task may
 // already have queued another response. Its task snapshot is empty at that point
 // and queued_turn_count counts only user input. The pinned CLI's native idle
-// event is the turn-over signal; do not close stdin at an intermediate result.
+// event ends foreground work, but a non-ambient task can still wake it again.
+// Keep input open until both foreground and background work have finished.
 // Older explicit CLI overrides retain the result/background snapshot fallback.
 //
 // An accepted steer also keeps input open: one queued during the final answer
@@ -24,7 +25,7 @@ export class TurnLifecycle {
     if (event.type === "system" && event.subtype === "session_state_changed") {
       this.stateEvents = true;
       if (event.state === "running") this.responseEnded = false;
-      if (event.state === "idle" && this.responseEnded && !this.steers.size)
+      if (event.state === "idle" && this.responseEnded && !this.background && !this.steers.size)
         this.finished = true;
     }
     if (event.type === "system" && event.subtype === "background_tasks_changed") {

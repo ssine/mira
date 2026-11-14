@@ -263,9 +263,12 @@ JSON field extraction itself can reject escaped NUL anywhere in a raw object.
 - A foreground `result`, including an API error, is not the end of a Mira turn
   while a background notification can still wake the parent. The pinned CLI
   enables `CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS`; keep streaming input open until
-  its `session_state_changed: idle` event follows the last response and accepted
-  steers have been consumed. An empty task snapshot and `queued_turn_count: 0`
-  cannot prove completion: the latter excludes system-generated notifications.
+  its `session_state_changed: idle` event follows the last response, non-ambient
+  background tasks have ended, and accepted steers have been consumed. Native idle
+  can occur while a background Bash command is still running; input remains open
+  for added messages and the task's eventual continuation. An empty task snapshot
+  and `queued_turn_count: 0` cannot prove completion: the latter excludes
+  system-generated notifications.
   Older explicit CLI overrides without state events retain the result/background
   snapshot fallback. Final status reflects the last response, so an API error
   recovered by a later response does not make the whole turn fail.
@@ -411,6 +414,9 @@ instance remains reserved instead of being mistaken for a stopped process.
 The delayed-background regression holds a native child until the parent has
 emitted an interim result, then verifies that its completion wakes the parent
 and produces a final synthesis before Mira releases turn ownership.
+The background Bash regression waits for native foreground idle, adds a message
+while the command is still waiting, and verifies deduplication and the final
+continuation after the command completes.
 
 Browser acceptance covers creating/sending a conversation through the Web UI,
 restoring drafts after reload, native history/images/child selection, and the
