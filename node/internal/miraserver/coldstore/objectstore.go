@@ -11,10 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -28,6 +30,10 @@ type ObjectConfig struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	PathStyle       bool
+	// TCPCongestion optionally selects the congestion control algorithm
+	// (for example "bbr") for this client's sockets only. Lossy long paths
+	// collapse under loss-based algorithms; the host default stays unchanged.
+	TCPCongestion string
 }
 
 // ErrObjectNotFound reports a missing object without exposing provider details.
@@ -60,7 +66,24 @@ func NewS3(config ObjectConfig, client *http.Client) (ObjectStore, error) {
 		return nil, fmt.Errorf("cold storage bucket, region and credentials are required")
 	}
 	if client == nil {
-		client = &http.Client{Timeout: 2 * time.Minute}
+		congestion := config.TCPCongestion
+		dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+		if congestion != "" {
+			dialer.Control = func(_, _ string, raw syscall.RawConn) error {
+				var setErr error
+				if err := raw.Control(func(fd uintptr) { setErr = setCongestion(fd, congestion) }); err != nil {
+					return err
+				}
+				return setErr
+			}
+		}
+		// Keep enough idle connections for parallel uploads; each new TLS
+		// connection costs several round trips on a long path.
+		client = &http.Client{Timeout: 10 * time.Minute, Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment, DialContext: dialer.DialContext, ForceAttemptHTTP2: true,
+			MaxIdleConns: 128, MaxIdleConnsPerHost: 64, IdleConnTimeout: 90 * time.Second,
+			TLSHandshakeTimeout: 20 * time.Second, ExpectContinueTimeout: time.Second,
+		}}
 	}
 	return &s3Client{config: config, endpoint: endpoint, http: client, now: time.Now}, nil
 }

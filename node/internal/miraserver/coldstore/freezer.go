@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +24,10 @@ type FreezerOptions struct {
 	StartDelay time.Duration
 	// OrphanGrace is how long an unreferenced object is kept before deletion.
 	OrphanGrace time.Duration
+	// UploadConcurrency bounds parallel object uploads (and the
+	// conversations scanned at once). Long, lossy paths need several
+	// streams; the default stays modest for small hosts.
+	UploadConcurrency int
 	// ClaudeIndexVersion is the conversation index projector version; a
 	// Claude session freezes only once its index is current.
 	ClaudeIndexVersion int
@@ -39,6 +44,12 @@ func (options *FreezerOptions) normalize() {
 	if options.StartDelay < 0 {
 		options.StartDelay = 0
 	}
+	if options.UploadConcurrency <= 0 {
+		options.UploadConcurrency = 4
+	}
+	if options.UploadConcurrency > 64 {
+		options.UploadConcurrency = 64
+	}
 	if options.OrphanGrace <= 0 {
 		options.OrphanGrace = 24 * time.Hour
 	}
@@ -52,11 +63,23 @@ type Freezer struct {
 	pool    *pgxpool.Pool
 	objects ObjectStore
 	options FreezerOptions
+	uploads chan struct{}
 }
 
 func NewFreezer(pool *pgxpool.Pool, objects ObjectStore, options FreezerOptions) *Freezer {
 	options.normalize()
-	return &Freezer{pool: pool, objects: objects, options: options}
+	return &Freezer{pool: pool, objects: objects, options: options, uploads: make(chan struct{}, options.UploadConcurrency)}
+}
+
+// statsMu guards FreezeStats updated by concurrent row workers.
+var statsMu sync.Mutex
+
+func (stats *FreezeStats) add(rows int, raw, stored int64) {
+	statsMu.Lock()
+	stats.Rows += rows
+	stats.RawBytes += raw
+	stats.StoredBytes += stored
+	statsMu.Unlock()
 }
 
 // FreezeStats summarizes one pass.
@@ -170,18 +193,57 @@ func (freezer *Freezer) FreezePass(ctx context.Context, limit int) (FreezeStats,
 	if err := rows.Err(); err != nil {
 		return stats, err
 	}
-	for _, thread := range threads {
-		if err := freezer.freezeThread(ctx, thread, cutoff, &stats); err != nil {
-			return stats, fmt.Errorf("conversation %s: %w", thread.thread, err)
+	// Conversations are scanned concurrently; a conversation's scan mark is
+	// written only after all of its rows have been processed.
+	passContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var group sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+	fail := func(err error) {
+		errMu.Lock()
+		if firstErr == nil {
+			firstErr = err
+			cancel()
 		}
-		stats.Threads++
-		if _, err := freezer.pool.Exec(ctx, `INSERT INTO mira_cold_thread_scans(store_id,thread_id,generation,item_count,scanned_at)
+		errMu.Unlock()
+	}
+	work := make(chan candidateThread)
+	for range min(freezer.options.UploadConcurrency, len(threads)) {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for thread := range work {
+				if err := freezer.freezeThread(passContext, thread, cutoff, &stats); err != nil {
+					fail(fmt.Errorf("conversation %s: %w", thread.thread, err))
+					continue
+				}
+				if _, err := freezer.pool.Exec(passContext, `INSERT INTO mira_cold_thread_scans(store_id,thread_id,generation,item_count,scanned_at)
  VALUES($1,$2,$3,$4,now()) ON CONFLICT(store_id,thread_id) DO UPDATE SET generation=EXCLUDED.generation,item_count=EXCLUDED.item_count,scanned_at=now()`,
-			thread.store, thread.thread, thread.generation, thread.count); err != nil {
-			return stats, err
+					thread.store, thread.thread, thread.generation, thread.count); err != nil {
+					fail(err)
+					continue
+				}
+				statsMu.Lock()
+				stats.Threads++
+				statsMu.Unlock()
+			}
+		}()
+	}
+feed:
+	for _, thread := range threads {
+		select {
+		case work <- thread:
+		case <-passContext.Done():
+			break feed
 		}
 	}
-	return stats, nil
+	close(work)
+	group.Wait()
+	if firstErr != nil {
+		return stats, firstErr
+	}
+	return stats, ctx.Err()
 }
 
 type candidateRow struct {
@@ -216,28 +278,47 @@ func (freezer *Freezer) freezeThread(ctx context.Context, thread candidateThread
 		if len(batch) == 0 {
 			return nil
 		}
+		after = batch[len(batch)-1].seq
+		// Rows of one batch upload in parallel, bounded by the shared slots.
+		var group sync.WaitGroup
+		errs := make(chan error, len(batch))
 		for _, row := range batch {
-			after = row.seq
 			stub, sha, ok := Freezable(row.raw)
 			if !ok {
 				continue
 			}
-			stored, ready, err := freezer.ensureObject(ctx, sha, row.raw)
-			if err != nil {
-				return err
+			select {
+			case freezer.uploads <- struct{}{}:
+			case <-ctx.Done():
+				group.Wait()
+				return ctx.Err()
 			}
-			if !ready {
-				continue
-			}
-			frozen, err := freezer.replace(ctx, thread, row, stub, sha)
-			if err != nil {
-				return err
-			}
-			if frozen {
-				stats.Rows++
-				stats.RawBytes += int64(len(row.raw))
-				stats.StoredBytes += stored
-			}
+			group.Add(1)
+			go func(row candidateRow) {
+				defer group.Done()
+				defer func() { <-freezer.uploads }()
+				stored, ready, err := freezer.ensureObject(ctx, sha, row.raw)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if !ready {
+					return
+				}
+				frozen, err := freezer.replace(ctx, thread, row, stub, sha)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if frozen {
+					stats.add(1, int64(len(row.raw)), stored)
+				}
+			}(row)
+		}
+		group.Wait()
+		close(errs)
+		if err := <-errs; err != nil {
+			return err
 		}
 	}
 }

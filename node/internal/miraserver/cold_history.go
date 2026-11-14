@@ -18,6 +18,7 @@ func configureColdHistory(configuration Config) (coldstore.ObjectStore, error) {
 	objects, err := coldstore.NewS3(coldstore.ObjectConfig{
 		Endpoint: cold.Endpoint, Region: cold.Region, Bucket: cold.Bucket, Prefix: cold.Prefix,
 		AccessKeyID: cold.AccessKeyID, SecretAccessKey: cold.SecretAccessKey, PathStyle: cold.PathStyle,
+		TCPCongestion: cold.TCPCongestion,
 	}, nil)
 	if err != nil {
 		return nil, err

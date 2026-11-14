@@ -182,7 +182,7 @@ func TestColdHistoryRoundTrip(t *testing.T) {
 	}
 	coldstore.SetDefault(store)
 	defer coldstore.SetDefault(nil)
-	freezer := coldstore.NewFreezer(pool, objects, coldstore.FreezerOptions{FreezeAfter: 24 * time.Hour, MinBytes: 4 << 10, OrphanGrace: time.Hour})
+	freezer := coldstore.NewFreezer(pool, objects, coldstore.FreezerOptions{FreezeAfter: 24 * time.Hour, MinBytes: 4 << 10, OrphanGrace: time.Hour, UploadConcurrency: 8})
 	// Until the conversation index covers the conversation, nothing moves.
 	if _, err := pool.Exec(ctx, `DELETE FROM mira_conversation_index_state WHERE store_id=$1`, storeID); err != nil {
 		t.Fatal(err)
@@ -284,5 +284,88 @@ func TestColdHistoryRoundTrip(t *testing.T) {
 	var tracked int
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mira_cold_objects`).Scan(&tracked); err != nil || tracked != 0 {
 		t.Fatalf("tracked objects: %d %v", tracked, err)
+	}
+}
+
+// Parallel freezing across many conversations uploads each distinct body
+// once, freezes every eligible row and leaves bodies byte-identical.
+func TestColdHistoryParallelFreeze(t *testing.T) {
+	pool := accountTestDatabase(t)
+	ctx := context.Background()
+	uuid := func() string {
+		id, err := randomUUID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	storeID := "cold-parallel-" + uuid()
+	shared := randomText(t, 24<<10)
+	threads := map[string]any{}
+	histories := map[string]any{}
+	for range 12 {
+		id := uuid()
+		threads[id] = map[string]any{"thread_id": id}
+		items := []any{map[string]any{"type": "session_meta", "payload": map[string]any{"id": id}}}
+		for range 6 {
+			items = append(items, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "output": randomText(t, 24<<10)}})
+		}
+		items = append(items, map[string]any{"type": "response_item", "payload": map[string]any{"type": "function_call_output", "output": shared}})
+		histories[id] = items
+	}
+	created, err := PutSnapshot(ctx, pool, storeID, map[string]any{"expectedVersion": 0, "snapshot": map[string]any{
+		"created_threads": threads, "histories": histories,
+	}}, http.Header{"X-Codex-Operation-Id": []string{uuid()}})
+	if err != nil || created.Status != 200 {
+		t.Fatalf("create: %+v %v", created, err)
+	}
+	for _, sql := range []string{
+		`UPDATE codex_thread_events SET created_at=now()-interval '40 days' WHERE store_id=$1`,
+		`UPDATE codex_thread_projections SET updated_at=now()-interval '40 days' WHERE store_id=$1`,
+	} {
+		if _, err := pool.Exec(ctx, sql, storeID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	views := serverviews.New(pool)
+	before := map[string]string{}
+	for id := range threads {
+		if complete, err := views.IndexCodexThread(ctx, storeID, id, time.Time{}); err != nil || !complete {
+			t.Fatalf("index: %v %v", complete, err)
+		}
+		history, err := GetThreadHistory(ctx, pool, storeID, id, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(history.Body)
+		before[id] = string(raw)
+	}
+	objects := &coldTestObjects{objects: map[string][]byte{}}
+	store, err := coldstore.New(objects, coldstore.Options{CacheDir: t.TempDir(), CacheBytes: 64 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldstore.SetDefault(store)
+	defer coldstore.SetDefault(nil)
+	stats, err := coldstore.NewFreezer(pool, objects, coldstore.FreezerOptions{FreezeAfter: 24 * time.Hour, MinBytes: 4 << 10, UploadConcurrency: 16}).FreezePass(ctx, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Threads != 12 || stats.Rows != 12*7 || objects.count() != 12*6+1 {
+		t.Fatalf("stats %+v objects %d", stats, objects.count())
+	}
+	var scanned int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM mira_cold_thread_scans WHERE store_id=$1`, storeID).Scan(&scanned); err != nil || scanned != 12 {
+		t.Fatalf("scan marks: %d %v", scanned, err)
+	}
+	for id, want := range before {
+		history, err := GetThreadHistory(ctx, pool, storeID, id, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := json.Marshal(history.Body)
+		if string(raw) != want {
+			t.Fatalf("history %s differs after parallel freezing", id)
+		}
 	}
 }
