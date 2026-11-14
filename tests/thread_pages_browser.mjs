@@ -55,8 +55,16 @@ try {
  const direct=family.locator(':scope > .thread-subagent-threads > [data-thread-row]');
  // Expanding is one action: every child page is read before the first paint, so
  // there is no intermediate 50-row state and no load-more step to click.
+ // The 5 most recently active children show first; the rest wait for one click.
+ const showAll=family.locator('[data-subagent-show-all]');
+ await page.waitForFunction(()=>document.querySelectorAll('.thread-subagent-threads > [data-thread-row]').length===5);
+ assert.equal(await showAll.textContent(),'显示全部 121 个子 Agent');
+ assert.equal(await direct.count(),5,'only the 5 most recent children before showing all');
+ assert.deepEqual(await direct.evaluateAll(rows=>rows.map(row=>row.dataset.threadRow)),[1000,1001,1002,1003,1004].map(id),'newest first');
+ await showAll.click();
  await page.waitForFunction(()=>document.querySelectorAll('.thread-subagent-threads > [data-thread-row]').length===121);
  assert.equal(await direct.count(),121);
+ assert.equal(await family.locator('[data-subagent-show-all]').count(),0,'showing all removes the button');
  assert.equal(await family.locator('.thread-page-more').count(),0,'a complete expansion renders no paging control');
  const childOrder=await direct.evaluateAll(rows=>rows.map(row=>row.dataset.threadRow));
  assert.equal(childOrder[0],id(1000),'children stay newest first across every page');

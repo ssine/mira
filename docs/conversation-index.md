@@ -130,7 +130,12 @@ fall back to paged history while a very large conversation is still indexing.
   while a query is present. Clicking a hit opens the conversation and scrolls to
   that message (Codex by `item_seq`, Claude by event sequence).
 - **Timeline.** The desktop timeline button, or the menu's switch on touch
-  devices, pins a non-modal panel to the top of the conversation; the transcript keeps scrolling underneath, and jumps land
+  devices, pins a compact non-modal panel to the top of the conversation: one
+  header row (summary, range, zoom, ⓘ for counts and legend, ×), a one-row
+  axis and 12 px lanes. Every subagent has a lane, newest activity first under
+  its parent. Dragging the bottom edge (a grip shown on hover) sets a remembered height (double-click
+  restores the automatic one); the panel scrolls inside. The transcript keeps
+  scrolling underneath, and jumps land
   below the panel. Pinning is a remembered preference across conversations
   (closed by its ×, the button or the switch; the button turns blue while
   pinned). Nothing is read while it is hidden. Activity of the whole

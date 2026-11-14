@@ -245,8 +245,10 @@
             </div>
             <div class="conversation-notices">
             <section id="conversationTimeline" class="conversation-timeline" aria-label="会话时间线" hidden>
-              <header class="timeline-head"><strong>时间线</strong><span data-timeline-summary class="timeline-summary"></span><button type="button" class="chat-icon-button" data-timeline-close aria-label="收起时间线" title="收起">×</button></header>
+              <header class="timeline-head"><strong>时间线</strong><span data-timeline-summary class="timeline-summary"></span><span data-timeline-controls class="timeline-controls"></span><button type="button" class="chat-icon-button" data-timeline-close aria-label="收起时间线" title="收起">×</button></header>
+              <div data-timeline-info class="timeline-info" hidden></div>
               <div data-timeline-body class="timeline-body"></div>
+              <div data-timeline-resize class="timeline-resize" role="separator" aria-orientation="horizontal" aria-label="拖动调整时间线高度" title="拖动调整高度，双击恢复自动" tabindex="0"></div>
             </section>
             <div id="conversationNotice" class="workspace-notice hidden" role="status"></div>
             <div id="resumeProgress" class="workspace-notice hidden" role="status" aria-live="polite">
