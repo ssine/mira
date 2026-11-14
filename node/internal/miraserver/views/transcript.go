@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 var tailCursorPattern = regexp.MustCompile(`^t2:(\d+):(\d+):(\d+)$`)
@@ -87,7 +88,7 @@ func (service *Service) getTranscriptLegacy(ctx context.Context, storeID, thread
 	if err != nil {
 		return Result{}, err
 	}
-	rows, err := service.pool.Query(ctx, `SELECT payload FROM codex_thread_events_versioned
+	rows, err := service.pool.Query(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned
 		WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND store_event_seq<=$4 ORDER BY item_seq`, storeID, threadID, generation, version)
 	if err != nil {
 		return Result{}, err
@@ -95,7 +96,12 @@ func (service *Service) getTranscriptLegacy(ctx context.Context, storeID, thread
 	items := []map[string]any{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var cold *string
+		if err := rows.Scan(&raw, &cold); err != nil {
+			rows.Close()
+			return Result{}, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			rows.Close()
 			return Result{}, err
 		}
@@ -158,7 +164,7 @@ func parseTailCursor(value *string) (generation, end, snapshot int64, valid bool
 }
 
 func (service *Service) queryTranscriptRows(ctx context.Context, storeID, threadID string, generation, end int64, limit int) ([]transcriptRow, error) {
-	rows, err := service.pool.Query(ctx, `SELECT events.item_seq::text,events.payload,events.created_at FROM codex_thread_events AS events
+	rows, err := service.pool.Query(ctx, `SELECT events.item_seq::text,events.payload,events.created_at,events.cold_sha256 FROM codex_thread_events AS events
 		WHERE events.store_id=$1 AND events.thread_id=$2 AND events.generation=$3 AND events.item_seq<$4
 		ORDER BY events.item_seq DESC LIMIT $5`, storeID, threadID, generation, end, limit)
 	if err != nil {
@@ -170,11 +176,15 @@ func (service *Service) queryTranscriptRows(ctx context.Context, storeID, thread
 		var seq string
 		var raw []byte
 		var created time.Time
-		if err := rows.Scan(&seq, &raw, &created); err != nil {
+		var cold *string
+		if err := rows.Scan(&seq, &raw, &created, &cold); err != nil {
 			return nil, err
 		}
 		sequence, err := postgresTextInt(seq)
 		if err != nil {
+			return nil, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return nil, err
 		}
 		payload, err := decodeObject(raw)

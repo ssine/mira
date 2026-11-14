@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 	serverimports "github.com/ssine/mira/node/internal/miraserver/imports"
 )
 
@@ -51,7 +52,7 @@ func (store *importThreadStore) History(ctx context.Context, storeID, threadID s
 	if !found || entry.Generation != generation {
 		return nil, &HTTPError{Status: http.StatusNotFound, Code: "not_found", Message: "thread history not found"}
 	}
-	rows, err := store.pool.Query(ctx, `SELECT payload FROM codex_thread_events_versioned
+	rows, err := store.pool.Query(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned
 		WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND store_event_seq<=$4 ORDER BY item_seq`, storeID, threadID, generation, version)
 	if err != nil {
 		return nil, err
@@ -60,7 +61,11 @@ func (store *importThreadStore) History(ctx context.Context, storeID, threadID s
 	items := []json.RawMessage{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var cold *string
+		if err := rows.Scan(&raw, &cold); err != nil {
+			return nil, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return nil, err
 		}
 		items = append(items, append(json.RawMessage(nil), raw...))
@@ -426,7 +431,7 @@ func importSourceBatch(ctx context.Context, query dbtx, segments []serverimports
 }
 
 func importExistingBatch(ctx context.Context, query dbtx, storeID, threadID string, generation, version, after, limit int64) ([]json.RawMessage, error) {
-	rows, err := query.Query(ctx, `SELECT payload FROM codex_thread_events_versioned
+	rows, err := query.Query(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned
 		WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4
 		AND store_event_seq<=$5 ORDER BY item_seq LIMIT $6`, storeID, threadID, generation, after, version, limit)
 	if err != nil {
@@ -436,7 +441,11 @@ func importExistingBatch(ctx context.Context, query dbtx, storeID, threadID stri
 	result := []json.RawMessage{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var cold *string
+		if err := rows.Scan(&raw, &cold); err != nil {
+			return nil, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return nil, err
 		}
 		result = append(result, append(json.RawMessage(nil), raw...))

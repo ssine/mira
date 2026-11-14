@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 const eventFormatVersion = 1
@@ -235,7 +236,7 @@ func canonicalStore(ctx context.Context, query dbtx, storeID string) (storeHead,
 	}
 	histories := map[string][]any{}
 	for threadID, entry := range head.HistoryManifest {
-		rows, err := query.Query(ctx, `SELECT payload FROM codex_thread_events_versioned
+		rows, err := query.Query(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned
         WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND store_event_seq<=$4 ORDER BY item_seq`, storeID, threadID, entry.Generation, head.Version)
 		if err != nil {
 			return storeHead{}, nil, err
@@ -243,7 +244,12 @@ func canonicalStore(ctx context.Context, query dbtx, storeID string) (storeHead,
 		items := []any{}
 		for rows.Next() {
 			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
+			var cold *string
+			if err := rows.Scan(&raw, &cold); err != nil {
+				rows.Close()
+				return storeHead{}, nil, err
+			}
+			if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 				rows.Close()
 				return storeHead{}, nil, err
 			}

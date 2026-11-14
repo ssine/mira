@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/ssine/mira/node/internal/miraserver/accountsampler"
 	serverchannel "github.com/ssine/mira/node/internal/miraserver/channel"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	serverimports "github.com/ssine/mira/node/internal/miraserver/imports"
 	miranodes "github.com/ssine/mira/node/internal/miraserver/nodes"
@@ -60,6 +61,7 @@ type Server struct {
 	stopErasure           func()
 	stopAccountCosts      func()
 	stopConversationIndex func()
+	stopColdHistory       func()
 	stopClaudeUsage       func()
 	closeOnce             sync.Once
 }
@@ -92,6 +94,11 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 		Database: pool, Nodes: nodeService, Auth: auth, TrustProxyHeaders: configuration.Foundation.TrustProxyHeaders,
 		SiteStreamBudget: configuration.Foundation.SiteStreamBudget,
 	})
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	coldObjects, err := configureColdHistory(configuration)
 	if err != nil {
 		pool.Close()
 		return nil, err
@@ -139,6 +146,12 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	server.stopErasure = StartThreadErasureWorker(ctx, pool, configuration.Logger)
 	server.stopAccountCosts = viewService.StartAccountCostProjector(ctx, configuration.Logger)
 	server.stopConversationIndex = viewService.StartConversationIndexer(ctx, configuration.Logger)
+	if coldObjects != nil && configuration.Foundation.ColdStorage.Freeze {
+		server.stopColdHistory = coldstore.NewFreezer(pool, coldObjects, coldstore.FreezerOptions{
+			FreezeAfter: configuration.Foundation.ColdStorage.FreezeAfter, MinBytes: configuration.Foundation.ColdStorage.MinBytes,
+			StartDelay: 10 * time.Minute, Logger: configuration.Logger,
+		}).Start(ctx)
+	}
 	server.stopPush = server.startPushWorker(ctx)
 	server.stopNodeNotifications = server.startNodeNotificationWorker(ctx)
 	server.sampler.Start(ctx)
@@ -200,6 +213,9 @@ func (server *Server) Shutdown(ctx context.Context) error {
 		server.accountCosts.Close()
 		if server.stopAccountCosts != nil {
 			server.stopAccountCosts()
+		}
+		if server.stopColdHistory != nil {
+			server.stopColdHistory()
 		}
 		if server.stopConversationIndex != nil {
 			server.stopConversationIndex()

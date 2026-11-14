@@ -7,6 +7,7 @@ import (
 	"net/url"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 type historyImage struct {
@@ -64,17 +65,21 @@ func (service *Service) GetTranscriptImage(ctx context.Context, storeID, threadI
 		return errorResult(400, "invalid image reference", "invalid_request"), nil
 	}
 	var raw []byte
-	err := service.pool.QueryRow(ctx, `SELECT events.payload FROM codex_thread_events events
+	var cold *string
+	err := service.pool.QueryRow(ctx, `SELECT events.payload,events.cold_sha256 FROM codex_thread_events events
   JOIN codex_thread_projections projections ON projections.store_id=events.store_id AND projections.thread_id=events.thread_id
    AND projections.active_generation=events.generation
   WHERE events.store_id=$1 AND events.thread_id=$2 AND events.generation=$3 AND events.item_seq=$4
    AND events.item_seq<=projections.item_count
    AND NOT EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$2 AND action='delete')`,
-		storeID, threadID, generation, sequence).Scan(&raw)
+		storeID, threadID, generation, sequence).Scan(&raw, &cold)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return errorResult(404, "history image not found", "not_found"), nil
 	}
 	if err != nil {
+		return Result{}, err
+	}
+	if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 		return Result{}, err
 	}
 	record, err := decodeObject(raw)

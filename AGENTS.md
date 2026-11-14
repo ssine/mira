@@ -17,7 +17,9 @@ The desired user experience is:
 4. That Codex Agent can use centrally injected `dynamicTools` to inspect or operate any authorized
    online node.
 5. The same thread can be opened from different clients and resumed on a different execution node.
-6. PostgreSQL on the user's Home Server remains the only durable source of truth for conversations.
+6. PostgreSQL on the user's Home Server remains the authority for conversations: every history row,
+   its ordering, metadata and hot bodies. Optional cold history keeps immutable, hash-addressed
+   bodies of idle conversations in an S3-compatible bucket (see `docs/cold-history.md`).
 
 Android participates as a device node for files, processes, screen capture and input. It does not
 need to run Codex itself.
@@ -125,7 +127,14 @@ Static file previews retain their own transient grants. See `protocol/port-sites
 
 ## Persistence decisions
 
-PostgreSQL is the sole durable source of truth for Codex thread state and history.
+PostgreSQL is the durable authority for Codex thread state and history. The user explicitly
+accepted (2026-11-14) that large, display-oriented bodies of conversations idle for 30 days may
+move to an S3-compatible bucket. Every row stays in `codex_thread_events` with its ordering, commit,
+hash and a typed placeholder; `cold_sha256` addresses the exact original bytes. Readers of
+canonical bodies hydrate through `coldstore.Hydrate` and fail explicitly rather than return a
+placeholder or partial history. Rows that a metadata view's SQL text predicate can select, assistant
+messages and session/turn metadata never freeze, so those views read identical bytes. Objects are
+immutable and deleted only after a grace period without references. See `docs/cold-history.md`.
 
 - A node-local `CODEX_HOME`, JSONL file or UI cache must not become an authoritative history store.
 - Store canonical raw rollout/thread items without discarding unknown fields. This preserves forward

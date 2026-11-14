@@ -14,8 +14,12 @@ import (
 // A descendant that outlives the wrapper (like the CLI saving a rotated OAuth
 // token) gets SIGTERM and time to finish; a stuck one is killed at the deadline.
 func TestSettleProcessGroupLetsDescendantsFinish(t *testing.T) {
-	saved := filepath.Join(t.TempDir(), "saved")
-	cmd := exec.Command("sh", "-c", `(trap 'sleep 0.3; touch "$0"; exit 0' TERM; while :; do sleep 0.05; done) & exit 0`, saved)
+	// Each descendant installs its trap and reports readiness before the
+	// wrapper exits, so SIGTERM never races the trap.
+	dir := t.TempDir()
+	saved, ready := filepath.Join(dir, "saved"), filepath.Join(dir, "ready")
+	cmd := exec.Command("sh", "-c", `(trap 'sleep 0.3; touch "$0"; exit 0' TERM; touch "$1"; while :; do sleep 0.05; done) &
+while [ ! -e "$1" ]; do sleep 0.01; done; exit 0`, saved, ready)
 	configureCommand(cmd)
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
@@ -29,7 +33,9 @@ func TestSettleProcessGroupLetsDescendantsFinish(t *testing.T) {
 		t.Fatalf("group still alive or settle waited too long (%s)", time.Since(started))
 	}
 
-	stuck := exec.Command("sh", "-c", `(trap '' TERM; while :; do sleep 0.05; done) & exit 0`)
+	stuckReady := filepath.Join(dir, "stuck-ready")
+	stuck := exec.Command("sh", "-c", `(trap '' TERM; touch "$0"; while :; do sleep 0.05; done) &
+while [ ! -e "$0" ]; do sleep 0.01; done; exit 0`, stuckReady)
 	configureCommand(stuck)
 	if err := stuck.Run(); err != nil {
 		t.Fatal(err)
