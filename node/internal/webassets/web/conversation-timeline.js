@@ -8,9 +8,10 @@ export const idleBreakMs = 10 * 60 * 1000;
 const breakWidth = 60;
 const chartPad = 10;
 const minSegmentWidth = 28;
-const laneHeight = 22;
-const axisHeight = 26;
-const labelWidth = 150;
+const laneHeight = 14;
+const axisHeight = 16;
+const labelWidth = () => matchMedia("(max-width: 640px)").matches ? 56 : 72;
+const heightKey = "mira.timeline.height";
 const tickSteps = [1e3, 5e3, 15e3, 30e3, 60e3, 5 * 60e3, 15 * 60e3, 30 * 60e3, 3600e3, 2 * 3600e3, 6 * 3600e3, 12 * 3600e3, 86400e3];
 
 export function formatDuration(ms) {
@@ -136,9 +137,36 @@ export function hourWindow(lanes, now, running) {
 export function timelineSummary(data) {
   const segments = activitySegments(data.lanes ?? []);
   const active = segments.reduce((sum, segment) => sum + segment.end - segment.start, 0);
+  return `${segments.length} 段 · 活跃 ${formatDuration(active)}`;
+}
+
+// Tool and subagent counts live in the info popover to keep the header short.
+export function timelineDetails(data) {
   const tools = (data.lanes ?? []).reduce((sum, lane) => sum + (lane.tools?.length ?? 0), 0);
   const children = Math.max(0, (data.lanes?.length ?? 1) - 1);
-  return [`${segments.length} 段`, `活跃 ${formatDuration(active)}`, `工具 ${tools} 次`, children ? `子 Agent ${children}` : ""].filter(Boolean).join(" · ");
+  return [`工具 ${tools} 次`, children ? `子 Agent ${children} 个` : ""].filter(Boolean).join(" · ");
+}
+
+const lastActivity = lane => Math.max(0, ...(lane.turns ?? []).map(turn => turn.end), ...(lane.tools ?? []).map(tool => tool.end),
+  ...(lane.messages ?? []).map(message => message.at));
+
+// Root first, then each agent's children newest first (by latest activity),
+// each followed by its own descendants.
+export function orderLanes(lanes) {
+  const ids = new Set(lanes.map(lane => lane.threadId));
+  const children = new Map();
+  const roots = [];
+  for (const lane of lanes) {
+    const parent = lane.parentThreadId && ids.has(lane.parentThreadId) && lane.depth > 0 ? lane.parentThreadId : null;
+    if (parent) children.set(parent, [...(children.get(parent) ?? []), lane]); else roots.push(lane);
+  }
+  const ordered = [];
+  const visit = lane => {
+    ordered.push(lane);
+    for (const child of (children.get(lane.threadId) ?? []).sort((a, b) => lastActivity(b) - lastActivity(a))) visit(child);
+  };
+  roots.forEach(visit);
+  return ordered;
 }
 
 export class ConversationTimeline {
@@ -154,6 +182,10 @@ export class ConversationTimeline {
     this.onOpenThread = onOpenThread;
     this.summary = root.querySelector("[data-timeline-summary]");
     this.body = root.querySelector("[data-timeline-body]");
+    this.controls = root.querySelector("[data-timeline-controls]");
+    this.info = root.querySelector("[data-timeline-info]");
+    this.resizer = root.querySelector("[data-timeline-resize]");
+    this.installResize();
     this.threadId = null;
     this.data = null;
     this.zoom = 1;
@@ -169,7 +201,9 @@ export class ConversationTimeline {
       event.preventDefault(); event.stopPropagation();
       this.setPinned(false); this.returnFocus?.();
     });
-    this.body.addEventListener("click", event => {
+    root.addEventListener("click", event => {
+      const info = event.target.closest("[data-timeline-info-toggle]");
+      if (info) { this.info.hidden = !this.info.hidden; info.setAttribute("aria-expanded", String(!this.info.hidden)); return; }
       const zoom = event.target.closest("[data-timeline-zoom]");
       if (zoom) { this.setZoom(zoom.dataset.timelineZoom); return; }
       const mode = event.target.closest("[data-timeline-mode]");
@@ -193,6 +227,54 @@ export class ConversationTimeline {
   }
 
   get open() { return !this.root.hidden; }
+
+  // Drag the bottom edge to choose the panel height (remembered); double-click
+  // or Home returns to the automatic height that fits all lanes.
+  installResize() {
+    if (!this.resizer) return;
+    const apply = height => {
+      if (height == null) { this.root.style.height = ""; this.root.dataset.sized = "false"; return; }
+      const max = Math.round(innerHeight * 0.8);
+      const value = Math.max(64, Math.min(max, Math.round(height)));
+      this.root.style.height = `${value}px`;
+      this.root.dataset.sized = "true";
+      this.resizer.setAttribute("aria-valuenow", String(value));
+      return value;
+    };
+    const save = value => { try { if (value == null) localStorage.removeItem(heightKey); else localStorage.setItem(heightKey, String(value)); } catch { /* Preference only. */ } };
+    let saved = null;
+    try { saved = Number(localStorage.getItem(heightKey)) || null; } catch { saved = null; }
+    apply(saved);
+    let drag = null;
+    this.resizer.addEventListener("pointerdown", event => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      drag = { id: event.pointerId, y: event.clientY, height: this.root.getBoundingClientRect().height };
+      this.resizer.setPointerCapture?.(event.pointerId);
+      this.root.dataset.resizing = "true";
+    });
+    this.resizer.addEventListener("pointermove", event => {
+      if (drag?.id === event.pointerId) apply(drag.height + event.clientY - drag.y);
+    });
+    const end = event => {
+      if (drag?.id !== event.pointerId) return;
+      drag = null;
+      delete this.root.dataset.resizing;
+      save(this.root.dataset.sized === "true" ? Math.round(this.root.getBoundingClientRect().height) : null);
+    };
+    this.resizer.addEventListener("pointerup", end);
+    this.resizer.addEventListener("pointercancel", end);
+    this.resizer.addEventListener("dblclick", () => { apply(null); save(null); });
+    this.resizer.addEventListener("keydown", event => {
+      const step = event.shiftKey ? 48 : 16;
+      const current = this.root.getBoundingClientRect().height;
+      if (event.key === "ArrowDown") save(apply(current + step));
+      else if (event.key === "ArrowUp") save(apply(current - step));
+      else if (event.key === "Home") { apply(null); save(null); }
+      else return;
+      event.preventDefault();
+    });
+  }
 
   setPinned(pinned) {
     this.pinned = !!pinned;
@@ -282,19 +364,19 @@ export class ConversationTimeline {
     // The hour view is one real-time segment: idle time is shown, not folded.
     const segments = range ? [range] : all;
     const visible = item => !range || item.end >= range.start && item.start <= range.end;
-    this.summary.textContent = all.length ? `${hour ? "最近 1 小时 · " : ""}${timelineSummary({ ...data, lanes })}` : "";
+    this.summary.textContent = all.length ? (hour ? "最近 1 小时" : timelineSummary({ ...data, lanes })) : "";
     if (!segments.length) {
       this.body.replaceChildren(Object.assign(document.createElement("p"), { className: "timeline-status", textContent: "还没有可显示的活动。" }));
       return;
     }
     const scroll = this.body.querySelector(".timeline-scroll");
     const previousScroll = scroll?.scrollLeft ?? null;
-    const available = Math.max(240, (this.body.clientWidth || this.root.clientWidth || 720) - labelWidth - chartPad * 2 - 2);
+    const labelsWidth = labelWidth();
+    const available = Math.max(200, (this.body.clientWidth || this.root.clientWidth || 720) - labelsWidth - chartPad * 2 - 2);
     const layout = timelineLayout(segments, available, this.zoom);
-    const height = axisHeight + lanes.length * laneHeight + 4;
+    const ordered = orderLanes(lanes);
+    const height = axisHeight + ordered.length * laneHeight + 2;
 
-    const toolbar = document.createElement("div");
-    toolbar.className = "timeline-toolbar";
     const legend = document.createElement("ul");
     legend.className = "timeline-legend";
     const modes = document.createElement("div");
@@ -328,26 +410,41 @@ export class ConversationTimeline {
       if (value === "out" || value === "fit") button.disabled = this.zoom === 1;
       zoom.append(button);
     }
-    toolbar.append(modes, legend, zoom);
+    const infoToggle = document.createElement("button");
+    infoToggle.type = "button";
+    infoToggle.className = "chat-icon-button timeline-info-toggle";
+    infoToggle.dataset.timelineInfoToggle = "";
+    infoToggle.innerHTML = '<svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="10" r="7"></circle><path d="M10 9v4.5M10 6.6v.1"></path></svg>';
+    infoToggle.title = "图例与统计";
+    infoToggle.setAttribute("aria-label", "时间线图例与统计");
+    infoToggle.setAttribute("aria-expanded", String(!this.info.hidden));
+    if (data.partial) infoToggle.dataset.partial = "true";
+    this.controls.replaceChildren(modes, zoom, infoToggle);
+    const details = document.createElement("p");
+    details.className = "timeline-details";
+    details.textContent = [hour ? timelineSummary({ ...data, lanes }) : "", timelineDetails({ ...data, lanes })].filter(Boolean).join(" · ");
+    const infoChildren = [details, legend];
     if (data.partial) {
-      const note = document.createElement("span");
+      const note = document.createElement("p");
       note.className = "timeline-partial";
       note.textContent = "部分历史仍在建立索引";
-      toolbar.append(note);
+      infoChildren.push(note);
     }
+    this.info.replaceChildren(...infoChildren);
 
     const grid = document.createElement("div");
     grid.className = "timeline-grid";
+    grid.style.gridTemplateColumns = `${labelsWidth}px minmax(0, 1fr)`;
     const labels = document.createElement("div");
     labels.className = "timeline-labels";
     labels.style.height = `${height}px`;
     const axisLabel = document.createElement("div");
     axisLabel.className = "timeline-axis-label";
     labels.append(axisLabel);
-    for (const lane of lanes) {
+    for (const lane of ordered) {
       const label = document.createElement(lane.depth > 0 ? "button" : "div");
       label.className = "timeline-lane-label";
-      label.style.paddingInlineStart = `${8 + Math.min(lane.depth, 6) * 12}px`;
+      label.style.paddingInlineStart = `${6 + Math.min(lane.depth, 4) * 6}px`;
       label.textContent = lane.depth > 0 ? (lane.title || "子 Agent") : (lane.title || "本对话");
       label.title = label.textContent;
       if (lane.depth > 0 && data.engine === "codex") {
@@ -371,6 +468,7 @@ export class ConversationTimeline {
       const left = chartPad + segment.x, right = left + segment.width;
       axis.append(svg("line", { x1: left, x2: right, y1: axisHeight - 1, y2: axisHeight - 1, class: "timeline-axis-line" }));
       const startDay = day(segment.start);
+      // One row: the bold segment start, then ticks clear of it.
       const startLabel = svg("text", { x: left, y: 11, class: "timeline-axis-start" });
       startLabel.textContent = `${startDay !== previousDay ? `${startDay} ` : ""}${clock(segment.start)}`;
       previousDay = startDay;
@@ -378,9 +476,10 @@ export class ConversationTimeline {
       for (let at = Math.ceil(segment.start / step) * step; at <= segment.end; at += step) {
         const position = x(at);
         // Keep tick labels clear of the segment's start label and its break.
-        if (position - left < 64 || right - position < 24) continue;
-        axis.append(svg("line", { x1: position, x2: position, y1: axisHeight - 5, y2: axisHeight - 1, class: "timeline-axis-tick" }));
-        const label = svg("text", { x: position, y: 22, class: "timeline-axis-text", "text-anchor": "middle" });
+        const startWidth = (startDay !== day(layout.segments[index - 1]?.start ?? 0) ? 72 : 40);
+        if (position - left < startWidth + 18 || right - position < 22) continue;
+        axis.append(svg("line", { x1: position, x2: position, y1: axisHeight - 4, y2: axisHeight - 1, class: "timeline-axis-tick" }));
+        const label = svg("text", { x: position, y: 11, class: "timeline-axis-text", "text-anchor": "middle" });
         label.textContent = clock(at, step < 60e3);
         axis.append(label);
       }
@@ -392,14 +491,14 @@ export class ConversationTimeline {
         for (let y = axisHeight; y < height; y += 8) zig.push(`${right + breakWidth / 2 - 3},${y} ${right + breakWidth / 2 + 3},${y + 4}`);
         gap.append(svg("polyline", { points: zig.join(" "), class: "timeline-break-zigzag" }));
         // The gap length sits on the tick row; segment start labels use the row above.
-        const text = svg("text", { x: right + breakWidth / 2, y: 22, class: "timeline-break-text", "text-anchor": "middle" });
+        const text = svg("text", { x: right + breakWidth / 2, y: 11, class: "timeline-break-text", "text-anchor": "middle" });
         text.textContent = compactDuration(next.start - segment.end);
         gap.append(text);
         axis.append(gap);
       }
     });
     chart.append(axis);
-    lanes.forEach((lane, index) => {
+    ordered.forEach((lane, index) => {
       const top = axisHeight + index * laneHeight;
       const row = svg("g", { class: "timeline-lane", "data-thread-id": lane.threadId });
       row.append(svg("rect", { x: 0, y: top, width: layout.width + chartPad * 2, height: laneHeight, class: index % 2 ? "timeline-row odd" : "timeline-row" }));
@@ -409,23 +508,23 @@ export class ConversationTimeline {
       }
       for (const [start, end] of modelPhases(lane).filter(([start, end]) => visible({ start, end }))) {
         const growing = (lane.turns ?? []).some(turn => turn.live && end === turn.end);
-        row.append(svg("rect", { x: x(start), y: top + 6, width: Math.max(1, x(end) - x(start)), height: laneHeight - 12, class: `timeline-span model${growing ? " live" : ""}` },
+        row.append(svg("rect", { x: x(start), y: top + 3, width: Math.max(1, x(end) - x(start)), height: laneHeight - 6, class: `timeline-span model${growing ? " live" : ""}` },
           `模型阶段 · ${formatDuration(end - start)}${growing ? " · 进行中" : ""}（按工具边界归因）`));
       }
       for (const tool of (lane.tools ?? []).filter(visible)) {
-        row.append(svg("rect", { x: x(tool.start), y: top + 5, width: Math.max(2, x(tool.end) - x(tool.start)), height: laneHeight - 10,
+        row.append(svg("rect", { x: x(tool.start), y: top + 2, width: Math.max(2, x(tool.end) - x(tool.start)), height: laneHeight - 4,
           class: `timeline-span ${tool.kind === "wait" ? "wait" : "tool"}${tool.live ? " live" : tool.open ? " open" : ""}` },
           `${tool.name} · ${clock(tool.start, true)} · ${formatDuration(tool.end - tool.start)}${tool.live ? " · 进行中" : tool.open ? " · 未观测到返回" : ""}`));
       }
       for (const message of (lane.messages ?? []).filter(message => visible({ start: message.at, end: message.at }))) {
         const cx = x(message.at);
         if (message.role === "user") {
-          const marker = svg("path", { d: `M${cx} ${top + 4} l5 7 l-5 7 l-5 -7 z`, class: "timeline-message user", tabindex: 0, role: "button",
+          const marker = svg("path", { d: `M${cx} ${top + 1} l4 6 l-4 6 l-4 -6 z`, class: "timeline-message user", tabindex: 0, role: "button",
             "data-timeline-seq": message.seq, "data-timeline-thread": lane.threadId, "data-timeline-role": "user",
             "aria-label": `跳到你的消息：${message.preview}` }, `${clock(message.at, true)} · ${message.preview}`);
           row.append(marker);
         } else {
-          row.append(svg("line", { x1: cx, x2: cx, y1: top + 4, y2: top + laneHeight - 4, class: "timeline-message assistant",
+          row.append(svg("line", { x1: cx, x2: cx, y1: top + 2, y2: top + laneHeight - 2, class: "timeline-message assistant",
             "data-timeline-seq": message.seq, "data-timeline-thread": lane.threadId, "data-timeline-role": "assistant" }, `回复 · ${clock(message.at, true)} · ${message.preview}`));
         }
       }
@@ -433,7 +532,7 @@ export class ConversationTimeline {
     });
     scroller.append(chart);
     grid.append(labels, scroller);
-    this.body.replaceChildren(toolbar, grid);
+    this.body.replaceChildren(grid);
     // Zoomed views follow the growing end unless the reader scrolled away.
     const following = scroll && scroll.scrollLeft + scroll.clientWidth >= scroll.scrollWidth - 4;
     if (previousScroll !== null && !(live && following)) scroller.scrollLeft = previousScroll;

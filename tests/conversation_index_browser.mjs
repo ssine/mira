@@ -33,6 +33,9 @@ const timeline = { engine: "codex", rootThreadId: main, partial: false, truncate
   { threadId: child, parentThreadId: main, title: "Subagent", depth: 1,
     turns: [{ id: "child-turn", start: start + 121 * minute, end: start + 124 * minute, status: "completed" }],
     tools: [{ id: "cc", name: "exec_command", start: start + 122 * minute, end: start + 123 * minute, kind: "tool", seq: 2 }], messages: [] },
+  // An older subagent: lanes list the newest subagent first.
+  { threadId: "30000000-0000-4000-8000-000000000004", parentThreadId: main, title: "Older subagent", depth: 1,
+    turns: [{ id: "old-turn", start: start + 2 * minute, end: start + 3 * minute, status: "completed" }], tools: [], messages: [] },
 ] };
 const requests = { outline: [], timeline: 0, search: [], toolRanges: [] };
 
@@ -159,9 +162,31 @@ try {
   await page.waitForFunction(top => document.querySelector("#conversationScroll").scrollTop < top - 100, scrollBefore);
   assert.equal(await panel.isVisible(), true, "scrolling keeps the timeline pinned");
   assert.equal(requests.timeline, 1);
-  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^2 段 · 活跃 15 分 · 工具 3 次 · 子 Agent 1$/);
-  assert.equal(await panel.locator(".timeline-lane-label").count(), 2, "one lane per agent");
-  assert.equal(await panel.locator("button.timeline-lane-label").getAttribute("data-timeline-open"), child, "subagent lanes open their conversation");
+  // Compact header: the short summary; counts and legend behind ⓘ.
+  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^2 段 · 活跃 15 分$/);
+  assert.equal(await panel.locator("[data-timeline-info]").isVisible(), false, "the legend starts hidden");
+  await panel.locator("[data-timeline-info-toggle]").click();
+  assert.match(await panel.locator(".timeline-details").textContent(), /^工具 3 次 · 子 Agent 2 个$/);
+  assert.equal(await panel.locator(".timeline-legend li").count() >= 4, true);
+  await panel.locator("[data-timeline-info-toggle]").click();
+  assert.equal(await panel.locator("[data-timeline-info]").isVisible(), false);
+  assert.deepEqual(await panel.locator(".timeline-lane-label").allTextContents(), ["Index browser", "Subagent", "Older subagent"], "subagents expanded, newest first");
+  assert.equal(await panel.locator("button.timeline-lane-label").first().getAttribute("data-timeline-open"), child, "subagent lanes open their conversation");
+  const compact = await panel.evaluate(element => ({ height: element.getBoundingClientRect().height,
+    axisRows: new Set([...element.querySelectorAll(".timeline-axis text")].map(text => text.getAttribute("y"))).size }));
+  assert.ok(compact.height < 120 && compact.axisRows === 1, `compact panel with a one-row axis: ${JSON.stringify(compact)}`);
+  // Drag the bottom edge to choose the height; double-click returns to automatic.
+  const handle = await panel.locator("[data-timeline-resize]").boundingBox();
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2 + 120, { steps: 5 });
+  await page.mouse.up();
+  const resized = (await panel.boundingBox()).height;
+  assert.ok(Math.abs(resized - compact.height - 120) < 6, `dragged to ${resized} from ${compact.height}`);
+  assert.equal(Number(await page.evaluate(() => localStorage.getItem("mira.timeline.height"))), Math.round(resized));
+  await panel.locator("[data-timeline-resize]").dblclick();
+  assert.ok(Math.abs((await panel.boundingBox()).height - compact.height) < 2, "double-click restores the automatic height");
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.height")), null);
   assert.equal(await panel.locator(".timeline-break").count(), 1, "the two-hour idle gap becomes one break");
   assert.match(await panel.locator(".timeline-break title").textContent(), /空闲 1 小时 55 分/);
   // Broken axis: both segments together occupy the available width, not 135 minutes of it.
@@ -179,7 +204,7 @@ try {
   await panel.locator('[data-timeline-mode="hour"]').click();
   assert.equal(await panel.locator('[data-timeline-mode="hour"]').getAttribute("aria-pressed"), "true");
   assert.equal(await panel.locator(".timeline-break").count(), 0, "no breaks in the hour view");
-  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^最近 1 小时 · /);
+  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^最近 1 小时$/);
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.mode")), "hour");
   assert.equal(await panel.locator('.timeline-message.user[data-timeline-seq="1"]').count(), 0, "messages outside the hour are hidden");
   assert.equal(await panel.locator(`.timeline-message.user[data-timeline-seq="${userSeq(4)}"]`).count(), 1);

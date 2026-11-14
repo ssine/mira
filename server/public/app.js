@@ -234,6 +234,8 @@ const agent = {
   projectOpen: new Map(),
   projectHistoryOpen: new Map(),
   subagentOpen: new Map(),
+  // Parents whose subagent list shows every child, not just the 5 most recent.
+  subagentShowAll: new Set(),
   draftProject: null,
   menuThreadId: null,
   rename: null,
@@ -5530,6 +5532,8 @@ function renderAgentThreadRow(thread) {
   return row;
 }
 
+const subagentPreviewCount = 5;
+
 function renderAgentThreadBranch(entry, selectedAncestors) {
   const branch = document.createDocumentFragment();
   branch.append(renderAgentThreadRow(entry.thread));
@@ -5548,8 +5552,25 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
   const populate = () => {
     clear(list);
     if (paged && !children.open) return;
-    for (const child of entry.children) list.append(renderAgentThreadBranch(child, selectedAncestors));
-    if (paged) {
+    // The 5 most recently active children, plus a selected one, until the user
+    // asks for the rest (children are already sorted by recency).
+    const all = agent.subagentShowAll.has(entry.threadId);
+    const shown = all ? entry.children : entry.children.filter((child, index) => index < subagentPreviewCount ||
+      child.threadId === agent.threadId || selectedAncestors.has(child.threadId));
+    for (const child of shown) list.append(renderAgentThreadBranch(child, selectedAncestors));
+    const total = Math.max(entry.children.length, entry.thread.childCount ?? 0);
+    if (!all && total > shown.length) {
+      const more = element("button", "ghost thread-page-more thread-subagents-more", `显示全部 ${total} 个子 Agent`);
+      more.type = "button";
+      more.dataset.subagentShowAll = entry.threadId;
+      more.addEventListener("click", () => {
+        agent.subagentShowAll.add(entry.threadId);
+        populate();
+        list.querySelectorAll("button[data-thread-id]")[subagentPreviewCount]?.focus({ preventScroll: true });
+      });
+      list.append(more);
+    }
+    if (paged && all) {
       const more = threadPageFallback("children", entry.threadId);
       if (more) list.append(more);
     }

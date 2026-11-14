@@ -44,7 +44,10 @@ drains every remaining page for that view and key, then paints once, so the user
 never steps through a per-page control and already-visible rows never reorder
 between intermediate renders. Expansion stops at a bounded page cap and on
 failure; only then does a manual retry control appear. Filter epochs discard old
-responses. Collapsed children have no descendant DOM.
+responses. Collapsed children have no descendant DOM. An open subagent disclosure lists
+the 5 most recently active children (plus the selected conversation and its
+ancestry); a "显示全部 N 个子 Agent" button reveals the rest, remembered for that
+parent until the page reloads.
 Polling refreshes the current conversation and visible sidebar rows, with root
 head discovery every 10 seconds and at most two expanded child-head checks per
 poll. It does not repeatedly reload all previously visited pages. Structural
