@@ -4354,6 +4354,7 @@ function resetAgentTranscript(threadId = null) {
   agent.transcriptActivityCount = null;
   agent.transcriptGap = null;
   agent.transcriptOutline = false;
+  agent.transcriptFilling = false;
   messageRail.clear();
   conversationTimeline.select(threadId);
 }
@@ -5033,6 +5034,49 @@ async function openConversationAt(threadId, seq, role) {
   if (!card) { toast("没有找到这条消息，它可能已被压缩或删除"); return; }
   revealCard(card, traceScroller(), { offset: readingOffset() });
   messageRail.schedule();
+}
+
+// After a conversation opens, read every older page in the background so the
+// message rail, search jumps and the timeline see the whole conversation.
+// Prose renders only near the viewport, so a long history stays cheap. A
+// Codex outline is already complete; Claude pages are fetched without
+// painting and rendered once; paged Codex history (index still building)
+// reuses the ordinary older-page reads.
+async function fillTranscriptHistory(threadId) {
+  const epoch = agent.selectionEpoch;
+  const current = () => agent.threadId === threadId && agent.selectionEpoch === epoch;
+  if (!current() || agent.transcriptCursor === null || agent.transcriptFilling) return;
+  agent.transcriptFilling = true;
+  try {
+    if (engineOf(threadId) === "claude") {
+      const thread = agent.threads.find(item => item.threadId === threadId);
+      if (!thread || claudeRuntime.id !== threadId) return;
+      agent.transcriptLoadingOlder = true;
+      updateHistoryLoader();
+      try {
+        await claudeRuntime.loadAllOlder(thread, { cancelled: () => !current() });
+      } finally {
+        if (current()) agent.transcriptLoadingOlder = false;
+      }
+      if (!current()) return;
+      const activeTurn = thread.subpath ? null : agent.activeTurns.get(threadId) ?? null;
+      const result = { ...claudeRuntime.trace(thread, activeTurn), session: claudeRuntime.session ?? { activeTurn },
+        nextCursor: claudeRuntime.earliest };
+      paintClaudeTranscript(threadId, thread, result, { prepend: true });
+      updateHistoryLoader();
+      saveOpenTranscript();
+      return;
+    }
+    for (let pages = 0; current() && agent.transcriptCursor !== null && pages < 500; pages++) {
+      if (agent.transcriptLoadingOlder) { await new Promise(resolve => setTimeout(resolve, 100)); continue; }
+      await loadOlderAgentTranscript();
+      if (agent.transcriptOlderError) break;
+    }
+  } catch (error) {
+    if (current()) { agent.transcriptOlderError = error.message; updateHistoryLoader(); }
+  } finally {
+    if (current()) agent.transcriptFilling = false;
+  }
 }
 
 async function loadOlderAgentTranscript() {
@@ -6877,6 +6921,7 @@ async function resumeAgentThread(threadId, { updateRoute = true } = {}) {
   const restored = restoreCachedTranscript(threadId, projected, cached);
   if (restored && projected?.engine !== "claude") await syncPersistedTranscript(threadId);
   else await loadAgentTranscript(threadId, null, { restored });
+  void fillTranscriptHistory(threadId);
 }
 
 async function prepareEditedThread(threadId, epoch) {

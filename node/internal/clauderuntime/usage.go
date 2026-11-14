@@ -186,7 +186,9 @@ func (m *Manager) usage(accountID string) (any, error) {
 	cmd.WaitDelay = 5 * time.Second
 	output := &boundedOutput{limit: 1024 * 1024}
 	cmd.Stdout = output
-	if err = cmd.Run(); err != nil {
+	err = cmd.Run()
+	settleProcessGroup(cmd, processSettleGrace) // Before the deferred egress release.
+	if err != nil {
 		return nil, errors.New("Could not read Claude plan usage")
 	}
 	var raw map[string]any

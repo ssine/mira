@@ -104,11 +104,19 @@ fall back to paged history while a very large conversation is still indexing.
   in the browser cache (see `web-client-cache.md`). Scrolling never pages older
   history; later reads ask only for records after the cached count. Tool bodies
   still load on expansion. Turn costs are read newest first in batches of 50.
+- **Whole history on open.** After a conversation opens, the remaining history
+  loads in the background without scrolling: Claude pages are read without
+  painting and rendered once; paged Codex history (index still building) reads
+  its older pages. Prose renders only near the viewport, so long histories stay
+  cheap; the reader keeps the latest reply in view.
 - **Message rail.** A vertical rail at the right edge of the reading surface has
-  one tick per user message. Hover or focus previews the message; click or
-  Enter scrolls to it below the floating header/timeline. The tick of the
-  message being read is highlighted. Hidden on phones and when a conversation
-  has fewer than two messages.
+  one tick per user message. It spans the reading area minus 10% above and
+  below; ticks share that height (compact for short conversations, compressed
+  for long ones, scrolling only below a 3 px pitch). Hover or focus previews
+  the message; click or Enter scrolls to it below the floating header/timeline;
+  pressing and dragging scrubs through messages like a scrollbar. The active
+  tick is the last message starting at or above the top of the reading area.
+  Hidden on phones and when a conversation has fewer than two messages.
 - **Search.** A search box above the sidebar list replaces the list with results
   while a query is present. Clicking a hit opens the conversation and scrolls to
   that message (Codex by `item_seq`, Claude by event sequence).
@@ -124,7 +132,6 @@ fall back to paged history while a very large conversation is still indexing.
 ## Limits
 
 - Tool outputs and commands are not searchable.
-- Claude transcripts still load in pages; search, rail and timeline work on them.
 - Times are persisted (or restored import) times, not runtime spans; see
   `agent-timeline-design.md` for the planned execution observations.
 - Parallel tools in one lane overlap rather than stacking into sub-tracks.

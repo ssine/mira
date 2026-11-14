@@ -289,7 +289,21 @@ export class ClaudeRuntime {
     }
     return { defaultModel: provider.model || models[0]?.model, configuredReasoningEffort: provider.effort || null, models };
   }
-  async history(thread, { older = false, poll = false } = {}) {
+  // Reads every older page into rows without building the transcript; the
+  // caller paints once. Stops on a selection change (epoch) or `cancelled()`.
+  async loadAllOlder(thread, { cancelled = () => false, onPage = () => {} } = {}) {
+    const epoch = this.epoch;
+    let pages = 0;
+    while (this.earliest !== null && this.id === thread.threadId && epoch === this.epoch && !cancelled()) {
+      const before = this.earliest;
+      const result = await this.history(thread, { older: true, trace: false });
+      if (!result || epoch !== this.epoch) return false;
+      onPage(++pages);
+      if (this.earliest === before) break; // No progress: never spin.
+    }
+    return epoch === this.epoch && this.earliest === null;
+  }
+  async history(thread, { older = false, poll = false, trace = true } = {}) {
     if (this.id !== thread.threadId) this.reset(thread.threadId);
     const epoch = this.epoch;
     const query = new URLSearchParams({ subpath: thread.subpath || "" });
@@ -316,6 +330,7 @@ export class ClaudeRuntime {
     if (!older) this.cursor = Math.max(this.cursor, result.cursor || 0);
     if (!poll) this.earliest = earliest;
     pruneCompletedStreams(this.rows);
+    if (!trace) return { session: result.session, nextCursor: this.earliest, changed: result.data.length > 0 };
     return { ...this.trace(thread, result.session?.activeTurn), session: result.session,
       nextCursor: this.earliest, changed: result.data.length > 0, more: poll && result.more === true };
   }

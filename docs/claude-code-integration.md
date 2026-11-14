@@ -152,6 +152,16 @@ Logout runs `claude auth logout` through the account environment and removes the
 local credential file. Login and logout are rejected while the account has an
 active turn.
 
+Refresh tokens rotate: the token endpoint invalidates the old refresh token when
+it returns a new pair, and the CLI writes that pair while exiting. Every worker
+that runs the CLI (turns, titles, plan usage) therefore settles its process
+group before Mira kills it and before it releases the account egress: SIGTERM,
+up to five seconds for the group to exit, then SIGKILL (Unix; Windows job
+objects are unchanged). Killing the CLI, or closing its proxy, between the token
+response and that write used to leave a dead refresh token on disk. The account
+still looked configured while every later turn failed with "OAuth access token
+has expired" until the user logged in again (seen after Node updates).
+
 ### Claude.ai plan usage
 
 Subscription accounts show their claude.ai plan windows in the Web sidebar the
