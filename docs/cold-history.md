@@ -141,6 +141,11 @@ abort multipart upload and list parts. It does not need to delete object version
 - **Large migrations.** Schema 49 indexes `codex_thread_events`; on a large table this can exceed
   the Supervisor's candidate health deadline and roll the update back. Apply the identical released
   SQL and its ledger row while the previous Server runs (it is expand-only), then update.
+- **Transient failures.** Object requests retry dropped connections, request timeouts, throttling
+  and 5xx responses up to four times with exponential backoff (objects are immutable and uploads carry
+  `Content-MD5`). A row whose upload still fails stays hot and only its conversation is left
+  unscanned for the next pass, which starts after one minute instead of the ten-minute idle wait;
+  database errors still stop the pass.
 - **Long, lossy paths.** Beta-SG uploads to a Beijing bucket over a cross-border path with about
   16% retransmission: one CUBIC stream reached 13 KB/s, one BBR stream 148 KB/s and eight BBR streams
   932 KB/s (2026-11-14). Set `UPLOAD_CONCURRENCY` and `TCP_CONGESTION=bbr` there; unprivileged

@@ -56,11 +56,15 @@ SELECT c.session_id::text,c.event_seq,c.entry_seq FROM candidates c
 		return stats, err
 	}
 	for _, session := range sessions {
+		skippedBefore := stats.Skipped
 		if err := freezer.freezeClaudeEvents(ctx, session, &stats); err != nil {
 			return stats, fmt.Errorf("Claude session %s events: %w", session.id, err)
 		}
 		if err := freezer.freezeClaudeEntries(ctx, session, &stats); err != nil {
 			return stats, fmt.Errorf("Claude session %s transcript: %w", session.id, err)
+		}
+		if stats.Skipped > skippedBefore {
+			continue // retried by a later pass
 		}
 		stats.Threads++
 		if _, err := freezer.pool.Exec(ctx, `INSERT INTO mira_cold_claude_scans(session_id,events_seq,entries_seq,scanned_at)
@@ -161,6 +165,11 @@ func (freezer *Freezer) freezeClaudeRow(ctx context.Context, raw []byte, stats *
 		return nil
 	}
 	stored, ready, err := freezer.ensureObject(ctx, sha, raw)
+	var upload *UploadError
+	if errors.As(err, &upload) && ctx.Err() == nil {
+		stats.Skipped++
+		return nil
+	}
 	if err != nil || !ready {
 		return err
 	}
