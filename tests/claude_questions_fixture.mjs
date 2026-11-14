@@ -116,6 +116,8 @@ export async function startQuestionFixture({ cacheHistory = false, images = fals
       if (session.historyAcknowledgementRequired && !body.continueAcknowledgedHistory) return json({ error: "History acknowledgement required" }, 409);
       if (body.continueAcknowledgedHistory) session.historyAcknowledgementRequired = false;
       turns.push(body); session.activeTurn = body.requestId;
+      // The Server records the prompt as a durable mira_user event (long-history fixture only).
+      if (longHistory) emit({ type: "mira_user", text: body.text });
       return json({ turnId: body.requestId });
     }
     if (path.endsWith("/costs")) return json({ generation: 1, turnCostEstimates: {} });

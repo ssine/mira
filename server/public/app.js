@@ -4672,7 +4672,7 @@ function traceCardsInOrder(trace) {
 }
 
 function renderTranscript(fallbackThread, options = {}) {
-  queueMicrotask(updateMessageRail);
+  scheduleMessageRailUpdate();
   const existingTrace = $("#conversationTrace");
   const visibleItems = agent.transcriptItems;
   const summaryKeys = compactionSummaryKeys(visibleItems);
@@ -5001,13 +5001,31 @@ function transcriptCardForKey(key, materialize = true) {
   return $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`) ?? (materialize ? traceCard(key) : null);
 }
 
+// The rail lists the user messages the transcript shows, in page order. Cards
+// come from full renders, Claude poll patches, live notifications and the
+// optimistic card of a message just sent, so read them from the page rather
+// than only from the persisted transcript items.
 function updateMessageRail() {
-  if (!agent.threadId || agent.transcriptThreadId !== agent.threadId) { messageRail.clear(); return; }
-  const hidden = compactionSummaryKeys(agent.transcriptItems);
-  messageRail.update(agent.transcriptItems
-    .filter(item => item.kind === "user" && item.body?.trim() && !hidden.has(item.key))
-    .map(item => ({ key: transcriptCardKey(item), body: item.body, at: item.completedAt })));
+  if (!agent.threadId) { messageRail.clear(); return; }
+  const persisted = new Map(agent.transcriptThreadId === agent.threadId ? agent.transcriptItems
+    .filter(item => item.kind === "user").map(item => [transcriptCardKey(item), item]) : []);
+  const entries = [];
+  for (const card of $("#conversationTrace").querySelectorAll(":scope > .trace-card.user[data-trace-key]")) {
+    const item = persisted.get(card.dataset.traceKey);
+    const body = item?.body ?? card.querySelector(".trace-body")?._miraSource ?? "";
+    if (!String(body).trim()) continue;
+    entries.push({ key: card.dataset.traceKey, body, at: item?.completedAt ?? card._miraCompletedAt });
+  }
+  messageRail.update(entries);
 }
+
+let messageRailFrame = null;
+function scheduleMessageRailUpdate() {
+  if (messageRailFrame !== null) return;
+  messageRailFrame = requestAnimationFrame(() => { messageRailFrame = null; updateMessageRail(); });
+}
+// Top-level children only: user cards are never inside tool groups.
+new MutationObserver(scheduleMessageRailUpdate).observe($("#conversationTrace"), { childList: true });
 
 // Search hits and timeline markers name canonical sequences: Codex rollout
 // item_seq, or a Claude event seq. Paired records (a user_message event and
