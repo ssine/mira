@@ -153,11 +153,18 @@ func (store *Store) Payload(ctx context.Context, sha string) ([]byte, error) {
 	existing, loaded := store.flights.LoadOrStore(sha, created)
 	current := existing.(*flight)
 	if !loaded {
-		// Other readers may share this download; one caller's cancellation
-		// must not fail theirs.
-		fetchContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		current.value, current.err = store.fetch(fetchContext, sha)
-		cancel()
+		// A flight that finished between the cache check above and
+		// LoadOrStore has already cached the value (fetch remembers before
+		// the flight is removed); reuse it instead of downloading again.
+		if value, ok := store.cached(sha); ok {
+			current.value = value
+		} else {
+			// Other readers may share this download; one caller's cancellation
+			// must not fail theirs.
+			fetchContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+			current.value, current.err = store.fetch(fetchContext, sha)
+			cancel()
+		}
 		store.flights.Delete(sha)
 		close(current.done)
 	}
