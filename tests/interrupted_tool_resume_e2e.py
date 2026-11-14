@@ -97,8 +97,13 @@ class Runtime:
             if os.name == "nt":
                 result = subprocess.run(["taskkill", "/PID", str(self.process.pid), "/T", "/F"],
                                         capture_output=True, text=True, timeout=15)
-                if result.returncode and self.process.poll() is None:
-                    raise RuntimeError(f"fixture process tree cleanup failed: {result.stderr}")
+                # taskkill also fails when a child exits between enumeration and
+                # termination; that is only an error if the launcher survives.
+                if result.returncode:
+                    try:
+                        self.process.wait(timeout=15)
+                    except subprocess.TimeoutExpired:
+                        raise RuntimeError(f"fixture process tree cleanup failed: {result.stderr}") from None
             else:
                 try:
                     os.killpg(self.process.pid, signal.SIGTERM)
