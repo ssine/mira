@@ -60,7 +60,7 @@ jobs:
       # this, System32\bash.exe (the WSL launcher) would run every bash step,
       # including those inside composite actions. Host paths are documented in
       # docs/codex-build-runners.md.
-      - name: Use Git Bash, Python 3.13 and D:\ Rust homes on Windows
+      - name: Use Git Bash, Python 3.13 and Dev Drive homes on Windows
         if: runner.os == 'Windows'
         shell: powershell
         run: |
@@ -69,8 +69,15 @@ jobs:
             if (-not (Test-Path $dir)) { throw "Missing build prerequisite: $dir" }
             Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value $dir
           }
-          Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value 'CARGO_HOME=D:\actions-runner\cargo'
-          Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value 'RUSTUP_HOME=D:\actions-runner\rustup'
+          # Keep Cargo, Rustup and temporary files beside the work folder on the
+          # runner's Dev Drive instead of the NetworkService profile on C:.
+          $work = Split-Path -Parent (Split-Path -Parent $env:RUNNER_TOOL_CACHE)
+          $temp = Join-Path $work 'tmp'
+          New-Item -ItemType Directory -Force $temp | Out-Null
+          Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value (Join-Path $work 'cargo\bin')
+          foreach ($line in "CARGO_HOME=$work\cargo", "RUSTUP_HOME=$work\rustup", "TEMP=$temp", "TMP=$temp") {
+            Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value $line
+          }
 
       - uses: actions/checkout@v7
 
