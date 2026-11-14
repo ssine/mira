@@ -115,7 +115,7 @@ turn. Reads scan the small usage projection, never the raw conversation history.
 The Go Server and normal Node install remain independent of Node.js and Claude.
 An execution Node needs **Node.js 22+ and npm** when Claude is selected. Mira runs
 `npm ci --ignore-scripts` against an embedded lockfile only on demand. SDK
-**0.3.319**, bundled Claude Code **2.1.319**, and MCP SDK **1.30.0** are pinned.
+**0.3.325**, bundled Claude Code **2.1.325**, and MCP SDK **1.30.0** are pinned.
 The cache lives under `<identity-directory>/runtimes/claude/<asset-hash>/`; a
 completed installation is reused offline. Partial installs are staged and removed.
 A Node runs at most eight active Claude turn processes. Preparation is asynchronous
@@ -213,7 +213,7 @@ password-present flag. The sing-box executable is selected by
 
 Claude account environments also disable telemetry, error reporting, feedback
 surveys, feature flags and official marketplace auto-install. SDK 2.1.317+
-enables the built-in `cc-plugin-privacy` mod by default; 0.3.319 contains that
+enables the built-in `cc-plugin-privacy` mod by default; 0.3.319 and later contain that
 fix. Mira adds a second privacy prompt and a generic Git author identity so new
 commits do not expose the host user's email.
 
