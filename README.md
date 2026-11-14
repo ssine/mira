@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.122 新增 `mira claude` 并重做 `mira codex`：先从本机已配置的账号中选择（菜单、`--account`，回车重复上次选择），再用该账号的配置目录、凭据和代理启动；Mira Server 不可用时也能运行，Codex 会话此时只保存在账号本地（见[本机账号启动器](docs/local-account-launchers.md)），`mira accounts` 可离线列出账号。Claude 附件（含图片）改为以文件路径交给 Agent，对话中显示模型实际收到的消息；Claude Agent SDK 升级到 0.3.325。离线菜单显示账号名称需同时升级 Server 和 Node。
+
 1.0.121 冷历史上传在丢包线路上更稳：对象请求遇到断连、超时、限流或 5xx 会自动退避重试，单个对象仍失败只延后这一条，不再让整轮冻结作废并空等 10 分钟。只需升级 Server。
 
 1.0.120 对话时间线更紧凑：坐标轴压成一行，每个 Agent 一行细条，子 Agent 默认展开、最近活跃的在上；拖动下边缘可调高度（双击恢复自动），统计和图例收进 ⓘ。左侧栏每个对话默认只显示最近活跃的 5 个子 Agent，其余点"显示全部"展开。只需升级 Server。
@@ -231,13 +233,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.121
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.122
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.121'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.122'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
