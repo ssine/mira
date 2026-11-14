@@ -71,7 +71,7 @@ jobs:
           }
           # Keep Cargo, Rustup and temporary files beside the work folder on the
           # runner's Dev Drive instead of the NetworkService profile on C:.
-          $work = Split-Path -Parent (Split-Path -Parent $env:RUNNER_TOOL_CACHE)
+          $work = Split-Path -Parent $env:RUNNER_TOOL_CACHE
           $temp = Join-Path $work 'tmp'
           New-Item -ItemType Directory -Force $temp | Out-Null
           Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value (Join-Path $work 'cargo\bin')
