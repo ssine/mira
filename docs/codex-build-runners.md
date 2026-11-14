@@ -52,6 +52,15 @@ upstream digests every run. Deleting these directories is always safe.
   under the work folder; the runner's `.path`/`.env` files are not used.
 - Rust 1.95.0, Node.js 22 and Zig are installed by the workflow actions.
 
+The Windows job lowers its worker to below-normal CPU priority and low memory
+priority; cargo, rustc and link inherit the CPU priority class, so Windows trims build
+memory before interactive programs. The system-wide Segment Heap
+(`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Segment Heap`, `Enabled=1`)
+is enabled on the Desktop, as in upstream Codex CI: with the default NT heap the final
+LTO step of `codex.exe` ran at about one core for roughly 40 minutes; with the Segment
+Heap it used five to eight cores and finished in about 16 minutes. Deleting the value
+restores the default heap for newly started processes.
+
 Builds queue while the Desktop is off or asleep. Both runners share one physical CPU,
 so the Linux and Windows builds run concurrently but each is slower than alone.
 

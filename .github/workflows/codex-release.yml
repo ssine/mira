@@ -65,6 +65,20 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          # The build shares the owner's desktop. Run the job's worker, and therefore
+          # every later step (cargo, rustc, link), at below-normal CPU priority and
+          # low memory priority so Windows trims build memory before UI processes.
+          Add-Type -Namespace Mira -Name Priority -MemberDefinition @'
+          [DllImport("kernel32.dll", SetLastError = true)]
+          public static extern bool SetProcessInformation(IntPtr process, int infoClass, ref uint info, uint size);
+          '@
+          $worker = Get-Process -Id (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId
+          $worker.PriorityClass = 'BelowNormal'
+          $low = [uint32]2  # MEMORY_PRIORITY_LOW
+          if (-not [Mira.Priority]::SetProcessInformation($worker.Handle, 0, [ref]$low, 4)) {
+            throw "Could not lower the memory priority of $($worker.ProcessName)"
+          }
+          Write-Output "Lowered $($worker.ProcessName) ($($worker.Id)) to BelowNormal CPU and low memory priority"
           foreach ($dir in 'C:\Program Files\Python313\Scripts', 'C:\Program Files\Python313', 'C:\Program Files\Git\bin') {
             if (-not (Test-Path $dir)) { throw "Missing build prerequisite: $dir" }
             Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value $dir
