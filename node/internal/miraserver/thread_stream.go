@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 // Rows pass through a small output buffer instead of a whole-response buffer.
@@ -225,6 +226,11 @@ func (server *Server) streamThreadHistory(ctx context.Context, response http.Res
 	if err := addInputRecovery(ctx, tx, request, storeID, threadID, &result); err != nil {
 		return err
 	}
+	// Fetch frozen payloads before the first byte is written, so an
+	// unavailable bucket produces a clean error instead of a truncated body.
+	if err := prefetchColdHistory(ctx, tx, storeID, threadID, result.Body["generation"], version); err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, threadHistoryItemsSQL, storeID, threadID, result.Body["generation"], version)
 	if err != nil {
 		return err
@@ -240,7 +246,11 @@ func (server *Server) streamThreadHistory(ctx context.Context, response http.Res
 		var count int64
 		for rows.Next() {
 			var raw []byte
-			if err := rows.Scan(&raw); err != nil {
+			var cold *string
+			if err := rows.Scan(&raw, &cold); err != nil {
+				return err
+			}
+			if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 				return err
 			}
 			if count > 0 {

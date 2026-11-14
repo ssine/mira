@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 // ConversationIndexVersion identifies the record slimming and message
@@ -381,7 +382,7 @@ func (service *Service) indexCodexBatch(ctx context.Context, storeID, threadID s
 	limit := min(itemCount, indexed+indexWriteBatch)
 	for next < limit {
 		end := min(limit, next+indexReadChunk)
-		rows, err := service.pool.Query(ctx, `SELECT item_seq,payload,created_at FROM codex_thread_events
+		rows, err := service.pool.Query(ctx, `SELECT item_seq,payload,created_at,cold_sha256 FROM codex_thread_events
 		  WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq>$4 AND item_seq<=$5 ORDER BY item_seq`, storeID, threadID, generation, next, end)
 		if err != nil {
 			return false, err
@@ -391,7 +392,12 @@ func (service *Service) indexCodexBatch(ctx context.Context, storeID, threadID s
 			var sequence int64
 			var raw []byte
 			var created time.Time
-			if err := rows.Scan(&sequence, &raw, &created); err != nil {
+			var cold *string
+			if err := rows.Scan(&sequence, &raw, &created, &cold); err != nil {
+				rows.Close()
+				return false, err
+			}
+			if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 				rows.Close()
 				return false, err
 			}

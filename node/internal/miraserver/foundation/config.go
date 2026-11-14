@@ -33,6 +33,7 @@ type Config struct {
 	MaxBodyBytes       int64
 	PoolSize           int32
 	SiteStreamBudget   int
+	ColdStorage        ColdStorageConfig
 }
 
 func LoadConfig() (Config, error) {
@@ -82,7 +83,12 @@ func ConfigFromLookup(lookup func(string) (string, bool)) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	coldStorage, err := parseColdStorage(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
+		ColdStorage:   coldStorage,
 		PreviewDomain: previewDomain, PreviewIngresses: previewIngresses,
 		ListenHost: host, ListenPort: port, DatabaseURL: databaseURL,
 		CodexStoreEndpoint: endpoint,

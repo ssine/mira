@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 type Database interface {
@@ -124,11 +125,15 @@ func (repository *PostgresRepository) ImportedThreadKeys(ctx context.Context) ([
 
 func (repository *PostgresRepository) FirstHistoryItem(ctx context.Context, storeID, threadID string, generation, version int64) (json.RawMessage, bool, error) {
 	var value []byte
-	err := repository.Pool.QueryRow(ctx, `SELECT payload FROM codex_thread_events_versioned
+	var cold *string
+	err := repository.Pool.QueryRow(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned
       WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND store_event_seq<=$4 AND item_seq=1`,
-		storeID, threadID, generation, version).Scan(&value)
+		storeID, threadID, generation, version).Scan(&value, &cold)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, false, nil
+	}
+	if err == nil {
+		value, err = coldstore.Hydrate(ctx, value, cold)
 	}
 	return json.RawMessage(value), err == nil, err
 }

@@ -8,6 +8,7 @@ import (
 	"regexp"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 	"github.com/ssine/mira/node/internal/miraserver/nodes"
 )
@@ -107,7 +108,7 @@ func (server *Server) inputRecoveryPlan(ctx context.Context, storeID, threadID s
 	if err != nil {
 		return plan, err
 	}
-	rows, err := server.pool.Query(ctx, `SELECT payload FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq<=$4 ORDER BY item_seq`, storeID, threadID, plan.Generation, plan.ThroughItemSeq)
+	rows, err := server.pool.Query(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND item_seq<=$4 ORDER BY item_seq`, storeID, threadID, plan.Generation, plan.ThroughItemSeq)
 	if err != nil {
 		return plan, err
 	}
@@ -116,7 +117,11 @@ func (server *Server) inputRecoveryPlan(ctx context.Context, storeID, threadID s
 	count := int64(0)
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var cold *string
+		if err := rows.Scan(&raw, &cold); err != nil {
+			return plan, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return plan, err
 		}
 		var record map[string]any

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 var operationIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -192,7 +193,7 @@ func activeHistoryItems(ctx context.Context, query dbtx, storeID, threadID strin
 	if limit == 0 {
 		return []any{}, nil
 	}
-	rows, err := query.Query(ctx, `SELECT payload FROM codex_thread_events_versioned
+	rows, err := query.Query(ctx, `SELECT payload,cold_sha256 FROM codex_thread_events_versioned
       WHERE store_id=$1 AND thread_id=$2 AND generation=$3 AND store_event_seq<=$4 AND item_seq>$5
       ORDER BY item_seq ASC LIMIT $6`, storeID, threadID, generation, version, after, limit)
 	if err != nil {
@@ -202,7 +203,11 @@ func activeHistoryItems(ctx context.Context, query dbtx, storeID, threadID strin
 	items := []any{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var cold *string
+		if err := rows.Scan(&raw, &cold); err != nil {
+			return nil, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return nil, err
 		}
 		var value any

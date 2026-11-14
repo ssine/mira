@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 func prepareThreadHistory(ctx context.Context, query dbtx, storeID, threadID string, generation, throughVersion *int64) (operationResponse, int64, error) {
@@ -63,7 +64,7 @@ func prepareThreadHistory(ctx context.Context, query dbtx, storeID, threadID str
 	return operationResponse{Status: 200, Body: map[string]any{"threadId": threadID, "generation": selected, "itemCount": count}}, version, nil
 }
 
-const threadHistoryItemsSQL = `SELECT payload FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3
+const threadHistoryItemsSQL = `SELECT payload,cold_sha256 FROM codex_thread_events_versioned WHERE store_id=$1 AND thread_id=$2 AND generation=$3
  AND store_event_seq<=$4 ORDER BY item_seq`
 
 // Compatibility helper for in-process consumers. HTTP uses streamThreadHistory
@@ -78,6 +79,9 @@ func GetThreadHistory(ctx context.Context, pool *pgxpool.Pool, storeID, threadID
 	if err != nil || result.Status != 200 {
 		return result, err
 	}
+	if err := prefetchColdHistory(ctx, tx, storeID, threadID, result.Body["generation"], version); err != nil {
+		return operationResponse{}, err
+	}
 	rows, err := tx.Query(ctx, threadHistoryItemsSQL, storeID, threadID, result.Body["generation"], version)
 	if err != nil {
 		return operationResponse{}, err
@@ -86,7 +90,11 @@ func GetThreadHistory(ctx context.Context, pool *pgxpool.Pool, storeID, threadID
 	items := []any{}
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil {
+		var cold *string
+		if err := rows.Scan(&raw, &cold); err != nil {
+			return operationResponse{}, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return operationResponse{}, err
 		}
 		var value any
@@ -147,7 +155,7 @@ func ListThreadEvents(ctx context.Context, pool *pgxpool.Pool, storeID, threadID
 		clause = "AND generation=$5"
 	}
 	rows, err := pool.Query(ctx, `SELECT events.generation,events.item_seq,events.store_event_seq,events.event_format_version,
-      events.codex_version,events.payload,events.payload_sha256,events.created_at
+      events.codex_version,events.payload,events.payload_sha256,events.created_at,events.cold_sha256
       FROM codex_thread_events_versioned AS events
       WHERE events.store_id=$1 AND events.thread_id=$2 AND events.item_seq>$3
         AND NOT EXISTS(SELECT 1 FROM mira_thread_actions WHERE store_id=$1 AND thread_id=$2 AND action='delete') `+clause+`
@@ -164,7 +172,11 @@ func ListThreadEvents(ctx context.Context, pool *pgxpool.Pool, storeID, threadID
 		var raw []byte
 		var hash string
 		var created time.Time
-		if err := rows.Scan(&generationValue, &itemSeq, &eventSeq, &format, &codex, &raw, &hash, &created); err != nil {
+		var cold *string
+		if err := rows.Scan(&generationValue, &itemSeq, &eventSeq, &format, &codex, &raw, &hash, &created, &cold); err != nil {
+			return nil, err
+		}
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return nil, err
 		}
 		var payload any
