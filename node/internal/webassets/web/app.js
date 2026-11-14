@@ -5514,9 +5514,12 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
     if (paged && !children.open) return;
     for (const child of entry.children) list.append(renderAgentThreadBranch(child, selectedAncestors));
     if (paged) {
-      const more = threadPageButton("children", entry.threadId, entry.children.length, entry.thread.childCount);
+      const more = threadPageFallback("children", entry.threadId);
       if (more) list.append(more);
     }
+    // An already-open disclosure (selected ancestry or restored state) reads its
+    // whole child list once, exactly like a user opening it.
+    if (paged && children.open) expandThreadPages("children", entry.threadId);
   };
   populate();
   children.addEventListener("toggle", () => {
@@ -5524,10 +5527,7 @@ function renderAgentThreadBranch(entry, selectedAncestors) {
     agent.subagentOpen.set(entry.threadId, children.open);
     if (paged) {
       populate();
-      const state = threadPager().state("children", entry.threadId);
-      if (children.open && !state.started && !state.loading && !state.error) {
-        void threadPager().load("children", entry.threadId).catch(() => {});
-      }
+      if (children.open) expandThreadPages("children", entry.threadId);
     }
     renderThreadStates();
   });
@@ -5633,17 +5633,15 @@ function renderAgentThreads(revealSelection = false) {
       const historyThreads = element("div", "thread-project-history-threads");
       for (const entry of hidden) historyThreads.append(renderAgentThreadBranch(entry, selectedAncestors));
       if (paged) {
-        const more = threadPageButton("roots", group.key, group.threads.length, total);
+        const more = threadPageFallback("roots", group.key);
         if (more) historyThreads.append(more);
+        if (history.open) expandThreadPages("roots", group.key);
       }
       history.addEventListener("toggle", () => {
         if (!history.isConnected) return;
         agent.projectHistoryOpen.set(historyKey, history.open);
         updateHistoryLabel();
-        if (paged && history.open && !group.threads.length) {
-          const state = threadPager().state("roots", group.key);
-          if (!state.started && !state.loading && !state.error) void threadPager().load("roots", group.key).catch(() => {});
-        }
+        if (paged && history.open) expandThreadPages("roots", group.key);
         scheduleSidebarCosts();
       });
       history.append(historySummary, historyThreads);
@@ -6430,28 +6428,29 @@ async function loadAgentThreads() {
   scheduleThreadActivity();
 }
 
-function threadPageButton(view, key, loaded, total) {
-  const pager = threadPager(), state = pager.state(view, key);
-  if (loaded >= total && (!state.started || state.done) && !state.error) return null;
-  const button = element("button", "ghost thread-page-more", state.loading ? "加载中…" : state.error ? "加载失败，重试" : loaded ? "加载更多对话" : "加载对话");
+// Expanding a list is one action: read every remaining page, then render once.
+// `expanded` marks the automatic attempt so later renders do not repeat it; a
+// failed or capped drain keeps a manual control instead of looping.
+function expandThreadPages(view, key = "") {
+  const state = threadPager().state(view, key);
+  if (state.done || state.expanded || state.allPromise || state.loading) return;
+  void threadPager().loadAll(view, key).catch(() => {});
+}
+
+// Expansion owns the normal path, so no control is rendered while it runs or
+// after the cursor is exhausted. It reappears only for a failure or when the
+// bounded drain stopped early, where manual continuation is genuinely required.
+function threadPageFallback(view, key) {
+  const state = threadPager().state(view, key);
+  if (state.done || !state.error && !state.expanded) return null;
+  const draining = Boolean(state.allPromise);
+  const button = element("button", "ghost thread-page-more", draining || state.loading ? "加载中…" : state.error ? "加载失败，重试" : "继续加载对话");
   button.type = "button";
   button.dataset.pageView = view;
   button.dataset.pageKey = key;
-  button.disabled = state.loading;
+  button.disabled = draining || state.loading;
   if (state.error) button.title = state.error;
-  button.addEventListener("click", () => {
-    void (async () => {
-      const previous = new Set(agent.threads.map(thread => thread.threadId));
-      // The global first page may already include this project's first page.
-      // Advance through that overlap within the same user action.
-      let page;
-      const added = new Set();
-      do {
-        page = await pager.load(view, key);
-        for (const thread of page?.data ?? []) if (!previous.has(thread.threadId)) added.add(thread.threadId);
-      } while (page?.nextCursor && added.size < 50);
-    })().catch(() => {});
-  });
+  button.addEventListener("click", () => { void threadPager().loadAll(view, key).catch(() => {}); });
   return button;
 }
 

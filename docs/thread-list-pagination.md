@@ -39,7 +39,12 @@ This is still a linear directory scan when its cache misses; it is not a constan
 cost query for arbitrarily large stores.
 
 The Web initially loads 50 recent roots and merges later project/child pages.
-Filter epochs discard old responses. Collapsed children have no descendant DOM.
+Opening a project history or a subagent disclosure is a single action: the client
+drains every remaining page for that view and key, then paints once, so the user
+never steps through a per-page control and already-visible rows never reorder
+between intermediate renders. Expansion stops at a bounded page cap and on
+failure; only then does a manual retry control appear. Filter epochs discard old
+responses. Collapsed children have no descendant DOM.
 Polling refreshes the current conversation and visible sidebar rows, with root
 head discovery every 10 seconds and at most two expanded child-head checks per
 poll. It does not repeatedly reload all previously visited pages. Structural

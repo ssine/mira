@@ -53,22 +53,24 @@ try {
  assert.equal(requests.some(q=>q.view==='children'),false,'no eager child requests');
  await family.locator(':scope > summary').click();
  const direct=family.locator(':scope > .thread-subagent-threads > [data-thread-row]');
- await page.waitForFunction(()=>document.querySelectorAll('.thread-subagent-threads > [data-thread-row]').length===50);
- assert.equal(await page.locator(`[data-thread-row="${nested.threadId}"]`).count(),0);
- await family.locator(':scope > .thread-subagent-threads > .thread-page-more').click();
- await page.waitForFunction(()=>document.querySelectorAll('.thread-subagent-threads > [data-thread-row]').length===100);
- await family.locator(':scope > .thread-subagent-threads > .thread-page-more').click();
+ // Expanding is one action: every child page is read before the first paint, so
+ // there is no intermediate 50-row state and no load-more step to click.
  await page.waitForFunction(()=>document.querySelectorAll('.thread-subagent-threads > [data-thread-row]').length===121);
  assert.equal(await direct.count(),121);
+ assert.equal(await family.locator('.thread-page-more').count(),0,'a complete expansion renders no paging control');
+ const childOrder=await direct.evaluateAll(rows=>rows.map(row=>row.dataset.threadRow));
+ assert.equal(childOrder[0],id(1000),'children stay newest first across every page');
+ assert.equal(new Set(childOrder).size,121,'no duplicate or dropped children after expansion');
  await family.locator(':scope > summary').click();
  await page.waitForFunction(()=>document.querySelectorAll('.thread-subagent-threads > [data-thread-row]').length===0);
  assert.equal(await direct.count(),0,'collapse releases descendant DOM');
  const project=page.locator('.thread-project').filter({has:page.locator('.thread-project-identity strong',{hasText:/^pages$/})});
  await project.locator('.thread-project-history-summary').click();
- await project.locator('.thread-project-history-threads > .thread-page-more').click();
- await page.waitForFunction(()=>document.querySelectorAll('[data-thread-row]').length===100);
- await project.locator('.thread-project-history-threads > .thread-page-more').click();
  await page.waitForFunction(()=>document.querySelectorAll('[data-thread-row]').length===130);
+ assert.equal(await project.locator('.thread-page-more').count(),0,'expanding a project history needs no second step');
+ const projectOrder=await project.locator('.thread-project-threads [data-thread-row]').evaluateAll(rows=>rows.map(row=>row.dataset.threadRow));
+ assert.equal(projectOrder[0],id(1),'expanded projects keep the server recency order from the first row');
+ assert.equal(projectOrder.length,130);
  // Activity polling and head discovery must retain the older loaded pages.
  await page.waitForTimeout(11000);
  assert.equal(await project.locator('[data-thread-row]').count(),130);

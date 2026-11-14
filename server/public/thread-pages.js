@@ -17,7 +17,7 @@ export class ThreadPager {
   }
   state(view, key = "") {
     const id = JSON.stringify([view, key]);
-    if (!this.pages.has(id)) this.pages.set(id, { cursor: null, started: false, done: false, loading: false, checkedAt: 0 });
+    if (!this.pages.has(id)) this.pages.set(id, { cursor: null, started: false, done: false, loading: false, checkedAt: 0, allPromise: null, quiet: false, expanded: false });
     return this.pages.get(id);
   }
   load(view, key = "", head = false) {
@@ -62,12 +62,48 @@ export class ThreadPager {
       } finally {
         if (!head) state.loading = false;
         state[slot] = null;
-        if (epoch === this.epoch && needsRender) this.changed();
+        // A bulk expansion paints once when the last page lands, so rows already
+        // on screen never jump between intermediate renders.
+        if (epoch === this.epoch && needsRender && !state.quiet) this.changed();
       }
     })();
     state[slot] = operation;
-    if (!head) this.changed();
+    if (!head && !state.quiet) this.changed();
     return operation;
+  }
+  // Expanding is one user action, not a paging session: drain every remaining
+  // page for this view/key, then paint the complete list exactly once. The cap
+  // keeps a pathologically large list bounded; the caller keeps a manual
+  // control for that case and for a failed drain.
+  loadAll(view, key = "", maxPages = 20) {
+    const state = this.state(view, key);
+    if (state.allPromise) return state.allPromise;
+    if (state.done) return Promise.resolve();
+    const epoch = this.epoch;
+    // Mark the attempt and gate intermediate paints synchronously, so the
+    // paint below cannot start a second drain and pages never reorder on screen.
+    state.expanded = true;
+    state.error = null;
+    state.quiet = true;
+    const drain = (async () => {
+      // Paint once the shared promise is visible to the renderer, so a control
+      // reflects an expansion in flight rather than a finished list.
+      await null;
+      if (epoch !== this.epoch) return;
+      this.changed();
+      try {
+        for (let page = 0; page < maxPages && !state.done && !state.error; page++) {
+          await this.load(view, key);
+          if (epoch !== this.epoch) return;
+        }
+      } finally {
+        state.allPromise = null;
+        state.quiet = false;
+        if (epoch === this.epoch) this.changed();
+      }
+    })();
+    state.allPromise = drain;
+    return drain;
   }
 }
 

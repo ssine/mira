@@ -48,6 +48,62 @@ test('failed loads retain cursor and can be retried', async () => {
   await pager.load('children', 'parent');
   assert.equal(pager.state('children', 'parent').error, null);
 });
+test('expanding drains every page and renders once', async () => {
+  const calls = [];
+  let changed = 0, rows = [];
+  const pager = new ThreadPager(async query => {
+    calls.push(query.get('cursor'));
+    const offset = Number(query.get('cursor') ?? 0);
+    return page([`row-${offset}`, `row-${offset + 1}`], offset + 2 < 6 ? String(offset + 2) : null);
+  }, result => rows = mergeThreadPages(rows, result.data), () => changed++);
+  await pager.loadAll('children', 'parent');
+  assert.deepEqual(rows.map(row => row.threadId), ['row-0', 'row-1', 'row-2', 'row-3', 'row-4', 'row-5']);
+  assert.equal(calls.length, 3, 'one request per page; the final page reports no cursor');
+  assert.equal(pager.state('children', 'parent').done, true);
+  assert.equal(pager.state('children', 'parent').loading, false);
+  assert.equal(pager.state('children', 'parent').quiet, false);
+  assert.equal(changed, 2, 'a start paint for feedback and one completion paint, never one per page');
+  await pager.loadAll('children', 'parent');
+  assert.equal(calls.length, 3, 'a finished list is not read again');
+});
+
+test('expansion is coalesced and bounded', async () => {
+  let requests = 0, resolveFirst;
+  const pager = new ThreadPager(query => {
+    requests++;
+    if (requests === 1) return new Promise(done => resolveFirst = done);
+    return Promise.resolve(page(['row'], 'next'));
+  }, () => false, () => {});
+  const first = pager.loadAll('roots', 'project');
+  assert.equal(pager.loadAll('roots', 'project'), first, 'concurrent expansions share one drain');
+  await null;
+  await null;
+  resolveFirst(page(['row'], 'next'));
+  await first;
+  assert.equal(pager.state('roots', 'project').expanded, true);
+  const bounded = new ThreadPager(async () => page(['row'], 'always'), () => false, () => {});
+  await bounded.loadAll('roots', 'project', 3);
+  assert.equal(bounded.state('roots', 'project').done, false, 'the cap leaves the cursor resumable');
+  assert.equal(bounded.state('roots', 'project').cursor, 'always');
+});
+
+test('a failed drain keeps the cursor and can be retried', async () => {
+  let fail = false;
+  const pager = new ThreadPager(async query => {
+    if (fail) throw new Error('offline');
+    return page(['first'], query.has('cursor') ? null : 'cursor');
+  }, () => true, () => {});
+  fail = true;
+  await assert.rejects(pager.loadAll('roots', 'project'), /offline/);
+  assert.equal(pager.state('roots', 'project').quiet, false, 'a failure always releases the paint gate');
+  assert.equal(pager.state('roots', 'project').allPromise, null);
+  assert.equal(pager.state('roots', 'project').error, 'offline');
+  fail = false;
+  await pager.loadAll('roots', 'project');
+  assert.equal(pager.state('roots', 'project').error, null, 'a retry clears the previous failure');
+  assert.equal(pager.state('roots', 'project').done, true);
+});
+
 test('refresh removes explicit rows and refuses older history generations', () => {
   const before = [{ threadId: 'parent', generation: 2, itemCount: 1, childCount: 100 }, {threadId:'removed'}];
   const after = mergeThreadPages(before, [{threadId:'parent',generation:1,itemCount:100}], ['removed']);
