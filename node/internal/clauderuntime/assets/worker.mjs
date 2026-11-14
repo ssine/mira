@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import { createInterface } from "node:readline";
-import { readFile, stat } from "node:fs/promises";
 import { createMiraTools } from "./mira-tools.mjs";
 import { serverClient } from "./store.mjs";
 import { TurnLifecycle } from "./turn-lifecycle.mjs";
@@ -39,36 +38,24 @@ async function* prompts() {
     if (input.length) yield input.shift();
   }
 }
+// Attachments stay files on this execution Node: the message lists their paths
+// and the agent opens them with its own tools, images included. The Web renders
+// exactly this message, so users see what the model received.
+function attachmentText(attachments) {
+  if (!attachments?.length) return "";
+  const quote = (value) => String(value ?? "").replaceAll("`", "'");
+  return [
+    "已附加文件（暂存在当前运行节点）：",
+    ...attachments.map((file) => `- \`${quote(file.name || file.path)}\`：\`${quote(file.path)}\``),
+  ].join("\n");
+}
 async function message(spec, text, attachments = []) {
-  const content = [{ type: "text", text }];
-  for (const file of attachments ?? []) {
-    if (
-      ["image/png", "image/jpeg", "image/gif", "image/webp"].includes(file.mime)
-    ) {
-      const info = await stat(file.path);
-      if (!info.isFile() || info.size > 32 * 1024 * 1024)
-        throw new Error(
-          "Inline images must be regular files of at most 32 MiB; attach larger files as ordinary files",
-        );
-      content.push({
-        type: "image",
-        source: {
-          type: "base64",
-          media_type: file.mime,
-          data: (await readFile(file.path)).toString("base64"),
-        },
-      });
-    } else
-      content.push({
-        type: "text",
-        text: `Attached file on this execution Node: ${file.path}`,
-      });
-  }
+  const body = [text, attachmentText(attachments)].filter(Boolean).join("\n\n");
   return {
     type: "user",
     session_id: spec.sessionId,
     parent_tool_use_id: null,
-    message: { role: "user", content },
+    message: { role: "user", content: [{ type: "text", text: body }] },
   };
 }
 let spec;

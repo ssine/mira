@@ -18,7 +18,8 @@ Use Mira's existing administrator session; mutations require `X-Mira-CSRF`.
 - `PATCH sessions/{id}`: `{title?,archived?}`.
 - `POST sessions/{id}/turns`: `{requestId,text,nodeId?,cwd?,model?,effort?,attachments?,
   continueAcknowledgedHistory?}`. Attachment entries have native `path`, `name`,
-  and `mime`. Request ID is the durable turn ID. Exact replay returns that ID,
+  and `mime`. The worker appends their names and paths to the user text; it does
+  not inline file contents, so the agent reads attachments with its own tools. Request ID is the durable turn ID. Exact replay returns that ID,
   including after worker exit; it never dispatches again. Active turns conflict.
 - `POST sessions/{id}/steer`: `{requestId,expectedTurnId,text,attachments?}` adds
   input to the running turn (see [Adding input to a running turn](#adding-input-to-a-running-turn)).
@@ -322,7 +323,7 @@ The Server forwards it to the worker that owns `expectedTurnId` and returns
   the same current-state check. The reconcile endpoint also returns this code
   when it lacks evidence; upgrading cannot recreate an older runtime's receipt.
 - `409 steer_unsupported`: the owning Node lacks `claudeSteerV1`.
-- `400`: invalid request, or input the worker could not read (such as an image).
+- `400`: invalid request, or input the worker could not prepare.
 - `503`: the worker could not record the input, so it will not join this turn.
   The worker keeps this verdict for the request ID; after the turn ends, a retry
   returns `turn_not_steerable`.

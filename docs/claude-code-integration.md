@@ -20,9 +20,11 @@ Implemented:
   reasoning/tool details, interruption, reconnect/readback, rename and archive.
 - Node selection, workspace selection, native model discovery, model/effort input,
   browser-local drafts and chunked file uploads with progress and cancellation.
-- Images become native typed image inputs; other attachments remain files on the
-  selected Node. Uploads do not buffer whole files in the browser. Individual
-  inline images are bounded to 32 MiB; ordinary files use bounded chunks.
+- Every attachment, images included, remains a file on the selected Node. The
+  user message lists each name and absolute path and the agent opens the files
+  with its own tools. The transcript shows that recorded message verbatim; older
+  records with inline images still render them. Uploads use bounded chunks and
+  never buffer whole files in the browser.
 - Native `AskUserQuestion` prompts appear in the conversation and answers return
   to the waiting SDK invocation. Ordinary tools use the same unrestricted OS-user
   execution policy as Mira's default Codex configuration.
