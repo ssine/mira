@@ -131,8 +131,8 @@ export class MessageRail {
   // of the reading area (so a jumped-to message is the active one); at the
   // end of the conversation, the last one in view.
   // Cards are in document order, so binary search suffices.
-  sync() {
-    if (!this.entries.length) return;
+  currentIndex() {
+    if (!this.entries.length) return -1;
     const viewport = this.scroller.getBoundingClientRect();
     const top = viewport.top + this.readingOffset();
     const atEnd = this.scroller.scrollHeight - this.scroller.clientHeight - this.scroller.scrollTop <= 2;
@@ -145,6 +145,12 @@ export class MessageRail {
       if (card.getBoundingClientRect().top <= line) { active = middle; low = middle + 1; }
       else high = middle - 1;
     }
+    return active;
+  }
+
+  sync() {
+    if (!this.entries.length) return;
+    const active = this.currentIndex();
     if (active === this.active) return;
     this.list.querySelector('[aria-current="true"]')?.removeAttribute("aria-current");
     this.active = active;
@@ -198,5 +204,106 @@ export class MessageRail {
     if (!entry) return;
     revealCard(this.resolveCard(entry.key, true), this.scroller, { offset: this.readingOffset(), flash });
     this.schedule();
+  }
+}
+
+const timeLabel = value => {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return "";
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  return sameDay ? date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false })
+    : date.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
+};
+
+// One header button for conversation navigation. Its popover holds the
+// pinned-timeline switch and the list of the user's own messages; picking a
+// message jumps there and closes the menu. Nothing is shown until opened, so
+// reading and system scroll screenshots are never covered.
+export class NavigationMenu {
+  constructor({ toggle, menu, rail, timeline, scroller, readingOffset }) {
+    Object.assign(this, { toggle, menu, rail, timeline, scroller, readingOffset });
+    this.list = menu.querySelector("[data-nav-list]");
+    this.count = menu.querySelector("[data-nav-count]");
+    this.empty = menu.querySelector("[data-nav-empty]");
+    this.switchButton = menu.querySelector("[data-nav-timeline]");
+    this.prev = menu.querySelector("[data-nav-prev]");
+    this.next = menu.querySelector("[data-nav-next]");
+    this.active = -1;
+    toggle.addEventListener("click", () => this.menu.togglePopover());
+    // beforetoggle is synchronous: the list and aria state are ready as soon
+    // as the popover shows (light dismiss and Escape also pass through here).
+    menu.addEventListener("beforetoggle", event => {
+      const open = event.newState === "open";
+      toggle.setAttribute("aria-expanded", String(open));
+      if (open) queueMicrotask(() => this.render());
+    });
+    this.switchButton.addEventListener("click", () => {
+      this.timeline.setPinned(!this.timeline.pinned);
+      this.menu.hidePopover();
+    });
+    this.list.addEventListener("click", event => {
+      const item = event.target.closest("[data-nav-index]");
+      if (!item) return;
+      this.menu.hidePopover();
+      this.jump(Number(item.dataset.navIndex));
+    });
+    this.prev.addEventListener("click", () => this.jump(this.active - 1, { keepOpen: true }));
+    this.next.addEventListener("click", () => this.jump(this.active + 1, { keepOpen: true }));
+    scroller.addEventListener("scroll", () => { if (this.isOpen) this.mark(this.rail.currentIndex(), false); }, { passive: true });
+    this.reflectPinned(timeline.pinned);
+  }
+
+  get isOpen() { return this.menu.matches(":popover-open"); }
+
+  reflectPinned(pinned) {
+    this.toggle.dataset.timelinePinned = String(pinned);
+    this.switchButton.setAttribute("aria-checked", String(pinned));
+  }
+
+  // The rail's entries are the transcript's user messages in order.
+  render() {
+    const entries = this.rail.entries;
+    this.count.textContent = entries.length ? ` · ${entries.length} 条` : "";
+    this.empty.hidden = entries.length > 0;
+    const items = entries.map((entry, index) => {
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.navIndex = String(index);
+      const number = document.createElement("span");
+      number.className = "nav-item-index";
+      number.textContent = String(index + 1);
+      const text = document.createElement("span");
+      text.className = "nav-item-text";
+      text.textContent = messagePreview(entry.body, 240);
+      const time = document.createElement("span");
+      time.className = "nav-item-time";
+      time.textContent = timeLabel(entry.at);
+      button.append(number, text, time);
+      row.append(button);
+      return row;
+    });
+    this.list.replaceChildren(...items);
+    this.mark(this.rail.currentIndex(), true);
+  }
+
+  mark(index, reveal) {
+    this.active = index;
+    for (const button of this.list.querySelectorAll("[data-nav-index]")) {
+      const current = Number(button.dataset.navIndex) === index;
+      if (current) button.setAttribute("aria-current", "true"); else button.removeAttribute("aria-current");
+    }
+    this.prev.disabled = index <= 0;
+    this.next.disabled = index < 0 || index >= this.rail.entries.length - 1;
+    if (reveal && index >= 0) this.list.querySelector(`[data-nav-index="${index}"]`)?.scrollIntoView({ block: "center" });
+  }
+
+  jump(index, { keepOpen = false } = {}) {
+    const entry = this.rail.entries[index];
+    if (!entry) return;
+    revealCard(this.rail.resolveCard(entry.key, true), this.scroller, { offset: this.readingOffset() });
+    if (keepOpen) this.mark(index, true);
+    this.rail.schedule();
   }
 }
