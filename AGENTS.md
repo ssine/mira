@@ -105,8 +105,9 @@ it does not elevate beyond the Mira Node process' operating-system identity.
 The `mira codex` wrapper applies the same defaults as early `-c` overrides, before user arguments, so
 later explicit Codex CLI/config arguments retain precedence.
 `mira codex` and `mira claude` select a Node-local account (menu, `--account`, never an implicit
-default) and launch it with that account's home, credentials and egress, reusing a healthy Node-owned
-gateway instead of binding its port twice. They read only local files plus a disposable
+default) and launch it with that account's home, credentials and egress. Node gateways are
+reference-counted by managed turns and stop when idle, so a launcher never borrows their listener: it
+runs a private gateway on its own loopback port for its lifetime. They read only local files plus a disposable
 `accounts/local-index.json` cache of Server desired state, so they work while Mira Server is down.
 Codex falls back to the account's local rollouts only when the Server is unreachable (or `--offline`);
 Claude CLI sessions are always native local transcripts. These are emergency paths, not a second

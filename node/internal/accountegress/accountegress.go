@@ -207,10 +207,9 @@ type Manager struct {
 	entries      map[string]*entry
 	closed       bool
 	closeOnce    sync.Once
-	// reuseExisting lets a foreground offline command share a healthy gateway
-	// that the Node worker already serves on the account's stored listener.
-	reuseExisting bool
-	probeExisting func(context.Context, storedConfig) bool
+	// sourceRoot is set for a foreground CLI manager. It reads the Node's
+	// account configurations there but runs private gateways under root.
+	sourceRoot string
 }
 
 // New creates a manager rooted in one Node identity directory.
@@ -222,37 +221,50 @@ func New(identityDir string) *Manager {
 	return &Manager{root: filepath.Join(identityDir, "account-egress"), binary: binary, checkHealth: checkGatewayHealth, entries: map[string]*entry{}}
 }
 
-// NewOffline creates a manager for one foreground CLI command. It first reuses a
-// healthy gateway already listening on the account's stored loopback port, such
-// as one owned by a running Node worker, and otherwise starts its own process.
-// binary overrides MIRA_NODE_SING_BOX when non-empty.
-func NewOffline(identityDir, binary string) *Manager {
+// NewOffline creates a manager for one foreground CLI command. Node gateways
+// are reference-counted by managed turns and stop when idle, so a command never
+// borrows their listener. It stages each account's stored configuration with a
+// fresh loopback port in a private directory and runs its own gateway; Close
+// stops it and removes the directory. binary overrides MIRA_NODE_SING_BOX.
+func NewOffline(identityDir, binary string) (*Manager, error) {
+	source := filepath.Join(identityDir, "account-egress")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		return nil, err
+	}
+	private, err := os.MkdirTemp(source, ".cli-")
+	if err != nil {
+		return nil, err
+	}
 	manager := New(identityDir)
+	manager.root, manager.sourceRoot = private, source
 	if binary != "" {
 		manager.binary = binary
 	}
-	manager.reuseExisting = true
-	manager.probeExisting = probeExistingGateway
-	return manager
+	return manager, nil
+}
+
+func (manager *Manager) configRoot() string {
+	if manager.sourceRoot != "" {
+		return manager.sourceRoot
+	}
+	return manager.root
 }
 
 // Configured reports whether an account has a local egress configuration.
 func (manager *Manager) Configured(id string) bool {
-	root, err := manager.accountRoot(id)
-	if err != nil {
+	if !accountIDPattern.MatchString(id) {
 		return false
 	}
-	_, err = readStored(filepath.Join(root, "config.json"))
+	_, err := readStored(filepath.Join(manager.configRoot(), id, "config.json"))
 	return err == nil
 }
 
 // PublicConfig returns the redacted local configuration, if any.
 func (manager *Manager) PublicConfig(id string) (*PublicSpec, error) {
-	root, err := manager.accountRoot(id)
-	if err != nil {
-		return nil, err
+	if !accountIDPattern.MatchString(id) {
+		return nil, errors.New("invalid account ID")
 	}
-	stored, err := readStored(filepath.Join(root, "config.json"))
+	stored, err := readStored(filepath.Join(manager.configRoot(), id, "config.json"))
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
@@ -263,32 +275,31 @@ func (manager *Manager) PublicConfig(id string) (*PublicSpec, error) {
 	return &public, nil
 }
 
-func probeExistingGateway(ctx context.Context, config storedConfig) bool {
-	address := fmt.Sprintf("127.0.0.1:%d", config.ListenPort)
-	connection, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
+// stageLocked copies one account's Node configuration into the private root
+// with its own listener. It never modifies the Node's files.
+func (manager *Manager) stageLocked(id string) error {
+	root, err := manager.accountRoot(id)
 	if err != nil {
-		return false
+		return err
 	}
-	connection.Close()
-	profile := profileFor(config.Spec.Profile)
-	if profile == nil {
-		return false
+	if _, err := os.Stat(filepath.Join(root, "config.json")); err == nil {
+		return nil
 	}
-	proxy, _ := url.Parse("http://" + address)
-	client := &http.Client{
-		Timeout:       5 * time.Second,
-		Transport:     &http.Transport{Proxy: http.ProxyURL(proxy)},
-		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
-	}
-	defer client.CloseIdleConnections()
-	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, profile.healthURL, nil)
-	response, err := client.Do(request)
+	stored, err := readStored(filepath.Join(manager.sourceRoot, id, "config.json"))
 	if err != nil {
-		return false
+		return err
 	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-	response.Body.Close()
-	return profile.expected[response.StatusCode]
+	if stored.ListenPort, err = freeLoopbackPort(); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(root, 0700); err != nil {
+		return err
+	}
+	encoded, _ := json.Marshal(stored)
+	if err := writeAtomic(filepath.Join(root, "config.json"), encoded, 0600); err != nil {
+		return err
+	}
+	return writeAtomic(filepath.Join(root, "sing-box.json"), manager.singBoxConfig(stored), 0600)
 }
 
 func (manager *Manager) accountRoot(id string) (string, error) {
@@ -425,6 +436,16 @@ func (manager *Manager) Acquire(id string) (map[string]string, func(), error) {
 		manager.mu.Unlock()
 		return nil, nil, err
 	}
+	if manager.sourceRoot != "" {
+		if _, err := os.Stat(filepath.Join(manager.sourceRoot, id, "config.json")); os.IsNotExist(err) {
+			manager.mu.Unlock()
+			return nil, func() {}, nil
+		}
+		if err := manager.stageLocked(id); err != nil {
+			manager.mu.Unlock()
+			return nil, nil, err
+		}
+	}
 	if _, err := os.Stat(filepath.Join(root, "config.json")); os.IsNotExist(err) {
 		manager.mu.Unlock()
 		return nil, func() {}, nil
@@ -433,26 +454,6 @@ func (manager *Manager) Acquire(id string) (map[string]string, func(), error) {
 	if err != nil {
 		manager.mu.Unlock()
 		return nil, nil, err
-	}
-	if manager.reuseExisting && value.cancel == nil {
-		// Never start a second gateway on a listener another process serves.
-		config := value.config
-		manager.mu.Unlock()
-		probeCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
-		healthy := manager.probeExisting(probeCtx, config)
-		cancel()
-		if healthy {
-			return manager.environment(valueFor(config)), func() {}, nil
-		}
-		manager.mu.Lock()
-		if manager.closed {
-			manager.mu.Unlock()
-			return nil, nil, errors.New("account egress manager is closed")
-		}
-		if value, err = manager.loadLocked(id); err != nil {
-			manager.mu.Unlock()
-			return nil, nil, err
-		}
 	}
 	value.refs++
 	if value.cancel == nil {
@@ -697,6 +698,9 @@ func (manager *Manager) Close() {
 				case <-time.After(3 * time.Second):
 				}
 			}
+		}
+		if manager.sourceRoot != "" {
+			_ = os.RemoveAll(manager.root)
 		}
 	})
 }

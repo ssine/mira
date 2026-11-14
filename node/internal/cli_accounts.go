@@ -480,7 +480,12 @@ func runClaudeLauncher(ctx context.Context, options cliOptions, args []string, s
 	if err != nil {
 		return err
 	}
-	manager := clauderuntime.NewWithEgress(dir, accountegress.NewOffline(dir, singBoxBinary()))
+	egress, err := accountegress.NewOffline(dir, singBoxBinary())
+	if err != nil {
+		return err
+	}
+	defer egress.Close()
+	manager := clauderuntime.NewWithEgress(dir, egress)
 	session, err := manager.OfflineSession(choice.ID, launch.args)
 	if err != nil {
 		return err
@@ -529,7 +534,11 @@ func runCodexLauncher(ctx context.Context, options cliOptions, args []string, st
 	if err != nil {
 		return err
 	}
-	egress := accountegress.NewOffline(dir, singBoxBinary())
+	egress, err := accountegress.NewOffline(dir, singBoxBinary())
+	if err != nil {
+		return err
+	}
+	defer egress.Close()
 	choices, err := listLocalCodexAccounts(options.Identity, egress)
 	if err != nil {
 		return err
