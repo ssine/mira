@@ -1201,6 +1201,12 @@ progress { width: 100%; accent-color: var(--accent); }
 /* Conversation timeline: collapsed by default, a floating panel when open. */
 .conversation-timeline-toggle { grid-area: conversation-head; justify-self: end; align-self: start; z-index: 3; margin: 6px 93px 0 0; background: var(--glass-header); box-shadow: inset 0 1px var(--glass-highlight); backdrop-filter: var(--glass-header-filter); -webkit-backdrop-filter: var(--glass-header-filter); }
 .conversation-timeline-toggle[aria-expanded="true"] { color: var(--accent); }
+/* Same row as the menu and details buttons below a full-screen status bar
+   (installed PWA, touch devices and the Android app's edge-to-edge WebView). */
+@media (display-mode: standalone), (pointer: coarse) {
+  .conversation-timeline-toggle { margin-top: calc(4px + var(--safe-area-top)); }
+}
+.android-app .conversation-timeline-toggle { margin-top: calc(4px + var(--safe-area-top)); margin-right: 97px; }
 /* Floats over the reading surface: opening or closing it never changes the
    transcript's top padding (only the in-flow notices do), so text stays put. */
 .conversation-notices { position: relative; }

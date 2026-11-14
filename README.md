@@ -6,7 +6,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
-1.0.114 增加可选的冷历史：闲置 30 天以上对话里的大工具输出、截图和压缩记录可移到 S3 兼容对象存储（如阿里云 OSS），PostgreSQL 保留每一行和占位，读取时按需取回并校验。默认关闭，只需升级 Server；配置见 [冷历史](docs/cold-history.md)。
+1.0.115 增加可选的冷历史：闲置 30 天以上对话里的大工具输出、截图和压缩记录可移到 S3 兼容对象存储（如阿里云 OSS），PostgreSQL 保留每一行和占位，读取时按需取回并校验。默认关闭，只需升级 Server；配置见 [冷历史](docs/cold-history.md)。
 
 1.0.113 修复使用非默认账号运行的 Codex 对话在节点默认 App Server 停止或已删除后被误判为「运行环境已停止或重启，状态待确认」的问题。只需升级 Server。
 
@@ -219,13 +219,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.114
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.115
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.114'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.115'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
