@@ -397,25 +397,18 @@ is refused. Codex is always published with `--latest=false`. Nodes must still pa
 platform-specific acceptance and an idle check before activation. This workflow
 does not deploy nodes, rebuild clients or change any production configuration.
 
-Compiler objects are not uploaded individually to GHA. The initial warmup observed
-hundreds of failed cache writes and repeated minutes with about 200 created entries,
-matching GitHub's [per-repository cache upload limit](https://docs.github.com/en/actions/reference/limits).
-Instead, sccache stores up to 2 GiB locally per target and CI restores/saves that directory
-as one immutable archive per run/attempt. Compatible fallback snapshots are safe because
-sccache still validates compiler/source/command inputs; direct preprocessor shortcuts are
-disabled. A new snapshot can preserve partial compiler work after failure without making
-that build publishable. Statistics are captured before stopping the daemon and archiving.
-The build step has an earlier deadline than the job so ordinary build timeouts leave room
-for cache saving; abrupt runner loss can still lose unsaved work. Cache save/restore failures
-do not bypass compilation or release checks. No account storage/billing limit is increased.
-The first batched run uses a new cache namespace and must warm it; old per-object GHA
-entries are not copied into the local cache. Existing entries are left to normal eviction.
+Native Codex builds run on the owner's self-hosted Desktop WSL and Windows runners
+(`docs/codex-build-runners.md`), not on GitHub-hosted machines. Only the owner's own
+pushes and dispatches can schedule them; there is no `pull_request` trigger and
+fork pull requests require approval. Each runner keeps the patched upstream tree and
+a Cargo target directory per target and toolchain outside the checkout. Cargo
+fingerprints key artifacts by toolchain, source and flags; final binaries are deleted
+before every build so each package is freshly linked, versioned and verified. A
+cache above 80 GiB is discarded rather than pruned piecemeal.
 Completed canonical candidate packages are retained as diagnostic artifacts even
 when subsequent acceptance fails. A retained candidate from a failed run is not a
 release: packaging/promotion still require all platform jobs to pass. This avoids
 losing the evidence needed to diagnose a post-compilation failure.
-`tests/compiler_cache_snapshot_e2e.mjs` verifies a cold native compile, an archived-cache
-restore hit and invalidation after a header change (GCC on Linux, MSVC on Windows).
 
 ## Managed Codex memory residency
 

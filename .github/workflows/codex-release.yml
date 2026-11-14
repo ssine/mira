@@ -12,7 +12,6 @@ on:
       - patches/codex/**
       - node/internal/codex-runtime.json
       - tests/runtime_fixture_cleanup*.mjs
-      - tests/compiler_cache_snapshot_e2e.mjs
       - tests/interrupted_tool_resume_e2e.py
       - tests/encrypted_context_runtime_e2e.py
       - tests/plaintext_context_runtime_e2e.py
@@ -27,40 +26,35 @@ on:
         description: "Publish the pinned independent runtime (never mark as latest Mira)"
         type: boolean
         default: false
-      codex_release:
-        description: "Optional legacy Mira v0.12.0 package with identical baseline/patch for first split release"
-        type: string
-        default: ""
 
 permissions:
   contents: write
 
 jobs:
   codex:
-    # Leave time to save compiler work even if the long build step times out.
-    timeout-minutes: 120
+    # Native builds run only on the owner's self-hosted machines (Desktop WSL and
+    # Windows; see docs/codex-build-runners.md). They execute with local access, so
+    # only the owner's own pushes and dispatches may schedule them. There is no
+    # pull_request trigger, and fork pull requests always require approval.
+    if: github.repository == 'ssine/mira' && github.actor == 'ssine' && github.triggering_actor == 'ssine'
+    timeout-minutes: 240
+    concurrency:
+      group: mira-codex-build-${{ matrix.target }}
+      cancel-in-progress: false
     env:
-      # Thousands of per-object GHA uploads hit its 200 uploads/minute limit.
-      # Keep content-addressed compilation local; restore/save it as one archive.
-      SCCACHE_GHA_ENABLED: "false"
-      SCCACHE_CACHE_SIZE: "2G"
-      # Preserve the remote backend's full-preprocessor input validation.
-      SCCACHE_DIRECT: "false"
-      SCCACHE_IDLE_TIMEOUT: "0"
       STABLE_GIT_COMMIT: ${{ github.sha }}
+      RUST_TOOLCHAIN: "1.95.0"
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: mira-codex-linux
             target: x86_64-unknown-linux-musl
             package: mira-codex-package-linux-amd64
-          - runner: windows-latest
+          - runner: mira-codex-windows
             target: x86_64-pc-windows-msvc
             package: mira-codex-package-windows-amd64
-    # Copying an existing package is platform-independent; avoid Windows ZIP
-    # attributes/path conversion when no Windows compiler is needed.
-    runs-on: ${{ inputs.codex_release != '' && 'ubuntu-latest' || matrix.runner }}
+    runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
       - uses: actions/checkout@v7
 
@@ -71,160 +65,88 @@ jobs:
       - name: Validate Codex runtime lock
         run: node scripts/check-codex-runtime.mjs
 
-      - name: Reuse an unchanged, checksummed Codex package
-        id: reuse
-        if: inputs.codex_release != ''
+      - name: Check build machine prerequisites
         shell: bash
-        env:
-          REUSE_TAG: ${{ inputs.codex_release }}
-          PACKAGE: ${{ matrix.package }}
-          TARGET: ${{ matrix.target }}
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          [[ "$REUSE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
-          git fetch --no-tags --depth=1 origin "tag" "$REUSE_TAG"
-          git diff --exit-code "$REUSE_TAG" HEAD -- CODEX_VERSION patches/codex/
-          version=${REUSE_TAG#v}
-          platform=linux; extension=tar.gz
-          if [[ "$TARGET" == *windows* ]]; then platform=windows; extension=zip; fi
-          prefix="mira_${version}_${platform}_amd64"
-          asset="$prefix.$extension"
-          cache="$RUNNER_TEMP/mira-reuse-codex"
-          mkdir -p "$cache"
-          gh release download "$REUSE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$cache" \
-            --pattern "$asset" --pattern SHA256SUMS
-          expected=$(awk -v name="$asset" '$2 == name { print $1 }' "$cache/SHA256SUMS")
-          actual=$(sha256sum < "$cache/$asset" | awk '{print $1}')
-          [[ "$expected" =~ ^[a-f0-9]{64}$ && "$actual" == "$expected" ]] || exit 1
-          if [[ "$platform" == windows ]]; then
-            unzip -q "$cache/$asset" -d "$cache"
-          else
-            tar -xf "$cache/$asset" -C "$cache" "$prefix/mira-codex-package"
+          python -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+          python --version; git --version; node --version
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # Actions resolves `bash` from PATH; System32\bash.exe would start WSL instead.
+            [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]
           fi
-          test -f "$cache/$prefix/mira-codex-package/codex-package.json"
-          mv "$cache/$prefix/mira-codex-package" "$PACKAGE"
-          suffix=""; [[ "$platform" == windows ]] && suffix=.exe
-          for required in "bin/codex$suffix" "bin/codex-code-mode-host$suffix" "codex-path/rg$suffix"; do
-            test -s "$PACKAGE/$required" || { echo "Missing reused Codex file: $required" >&2; exit 1; }
-          done
 
-      - name: Prepare patched Codex source and upstream notices
+      # The persistent tree lives outside the checkout, which actions/checkout cleans.
+      # Cargo fingerprints key every artifact by toolchain, source and flags; final
+      # binaries are deleted before each build so every package is freshly linked.
+      - name: Prepare persistent patched Codex source and build cache
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
           codex_version=$(<CODEX_VERSION)
-          git clone --depth 1 --branch "rust-v${codex_version}" https://github.com/openai/codex.git upstream-codex
-          git -C upstream-codex apply "$GITHUB_WORKSPACE/patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch"
+          root="$RUNNER_TOOL_CACHE/mira-codex"
+          [[ "$RUNNER_OS" == Windows ]] && root="$(cygpath -m "$RUNNER_TOOL_CACHE")/mira-codex"
+          src="$root/upstream-codex"
+          target_dir="$root/target-$TARGET-rust$RUST_TOOLCHAIN"
+          mkdir -p "$root"
+          if [[ ! -d "$src/.git" ]]; then
+            git init -q "$src"
+            git -C "$src" config core.autocrlf false
+            git -C "$src" config core.longpaths true
+            git -C "$src" remote add origin https://github.com/openai/codex.git
+          fi
+          git -C "$src" fetch -q --depth 1 --no-tags origin "+refs/tags/rust-v${codex_version}:refs/tags/rust-v${codex_version}"
+          git -C "$src" checkout -q -f --detach "rust-v${codex_version}"
+          git -C "$src" clean -q -ffdx
+          git -C "$src" apply "$GITHUB_WORKSPACE/patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch"
+          # Bound the cache: drop it when it outgrows 80 GiB instead of pruning piecemeal.
+          if [[ -d "$target_dir" ]] && (( $(du -sk "$target_dir" | cut -f1) > 80 * 1024 * 1024 )); then
+            rm -rf "$target_dir"
+          fi
+          rm -rf "$target_dir/cargo-timings"
+          for binary in codex codex-code-mode-host bwrap codex-command-runner codex-windows-sandbox-setup; do
+            rm -f "$target_dir/$TARGET/release/$binary" "$target_dir/$TARGET/release/$binary.exe"
+          done
+          {
+            echo "CODEX_SRC=$src"
+            echo "CARGO_TARGET_DIR=$target_dir"
+            echo "CODEX_RELEASE_DIR=$target_dir/$TARGET/release"
+          } >> "$GITHUB_ENV"
 
       - uses: dtolnay/rust-toolchain@stable
-        if: inputs.codex_release == ''
         with:
-          toolchain: "1.95.0"
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      - name: Cache Cargo downloads (not target binaries)
-        if: inputs.codex_release == ''
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/registry/src
-            ~/.cargo/git/db
-          key: cargo-downloads-v1-${{ runner.os }}-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}
-          restore-keys: cargo-downloads-v1-${{ runner.os }}-
-
-      - uses: actions/setup-python@v6
-        if: inputs.codex_release == ''
-        with:
-          python-version: "3.13"
-
-      - name: Configure local compiler cache path
-        if: inputs.codex_release == ''
-        shell: bash
-        run: |
-          echo "SCCACHE_DIR=$RUNNER_TEMP/mira-sccache" >> "$GITHUB_ENV"
-          mkdir -p "$RUNNER_TEMP/mira-sccache"
-
-      - name: Restore batched compiler cache
-        id: compiler_cache
-        if: inputs.codex_release == ''
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ runner.temp }}/mira-sccache
-          # New snapshots can retain useful work from a failed attempt without
-          # trying to overwrite an immutable cache entry on the next attempt.
-          key: codex-sccache-v1-${{ matrix.target }}-rust1.95-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            codex-sccache-v1-${{ matrix.target }}-rust1.95-${{ hashFiles('upstream-codex/codex-rs/Cargo.lock') }}-
-            codex-sccache-v1-${{ matrix.target }}-rust1.95-
-
-      # Cache compiler outputs rather than the whole multi-gigabyte target tree.
-      - name: Enable local Rust compilation cache
-        id: enable_sccache
-        if: inputs.codex_release == ''
-        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-        with:
-          version: "v0.15.0"
-          # We capture statistics before stopping the daemon for the archive.
-          disable_annotations: true
-
-      - name: Configure Rust compilation cache
-        if: inputs.codex_release == ''
-        shell: bash
-        run: |
-          echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-          rustc --version --verbose
-          sccache --version
-
-      - name: Verify compiler cache snapshot restores and invalidates
-        if: runner.os == 'Linux' && inputs.codex_release == ''
-        shell: bash
-        run: MIRA_SCCACHE_TEST_BINARY="$SCCACHE_PATH" node tests/compiler_cache_snapshot_e2e.mjs
-
-      - if: runner.os == 'Linux' && inputs.codex_release == ''
+      - if: runner.os == 'Linux'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.14.0
           use-cache: false
 
       - name: Install Linux MUSL toolchain
-        if: runner.os == 'Linux' && inputs.codex_release == ''
-        shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils libcap-dev pkg-config
-          bash upstream-codex/.github/scripts/install-musl-build-tools.sh
-
-      - name: Resolve pinned rusty_v8 cache inputs
-        id: v8
-        if: inputs.codex_release == ''
-        shell: bash
-        run: |
-          version=$(python upstream-codex/.github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pinned rusty_v8 downloads
-        if: inputs.codex_release == ''
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/mira-rusty-v8
-          key: rusty-v8-v1-${{ matrix.target }}-ptrcomp_sandbox_release-${{ steps.v8.outputs.version }}
-
-      - name: Configure verified Codex rusty_v8 artifacts
-        if: inputs.codex_release == ''
+        if: runner.os == 'Linux'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          version=$(python upstream-codex/.github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils libcap-dev pkg-config
+          bash "$CODEX_SRC/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Configure verified Codex rusty_v8 artifacts
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version=$(python "$CODEX_SRC/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)
           base_url="https://github.com/openai/codex/releases/download/rusty-v8-v${version}"
-          artifact_dir="${RUNNER_TEMP}/mira-rusty-v8"
+          artifact_dir="$RUNNER_TOOL_CACHE/mira-rusty-v8/${version}"
+          [[ "$RUNNER_OS" == Windows ]] && artifact_dir="$(cygpath -m "$RUNNER_TOOL_CACHE")/mira-rusty-v8/${version}"
           profile=ptrcomp_sandbox_release
           mkdir -p "$artifact_dir"
           if [[ "$TARGET" == *windows* ]]; then
@@ -240,14 +162,14 @@ jobs:
               mv "$artifact_dir/$file.part" "$artifact_dir/$file"
             fi
           done
-          # Re-fetch authoritative digests and verify even on a cache hit.
+          # Re-fetch authoritative digests and verify even when the files are cached.
           curl --retry 5 --retry-all-errors -fsSL "$base_url/$checksums" -o "$artifact_dir/$checksums"
           (cd "$artifact_dir" && tr -d '\r' < "$checksums" | sha256sum -c -)
           echo "RUSTY_V8_ARCHIVE=$artifact_dir/$archive" >> "$GITHUB_ENV"
           echo "RUSTY_V8_SRC_BINDING_PATH=$artifact_dir/$binding" >> "$GITHUB_ENV"
 
       - name: Build Linux sandbox resource
-        if: runner.os == 'Linux' && inputs.codex_release == ''
+        if: runner.os == 'Linux'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -256,16 +178,15 @@ jobs:
           export AWS_LC_SYS_NO_JITTER_ENTROPY=1
           target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${TARGET//-/_}"
           export "$target_no_jitter=1"
-          (cd upstream-codex/codex-rs && cargo build --timings \
+          (cd "$CODEX_SRC/codex-rs" && cargo build --timings \
             --target "$TARGET" --release --locked --bin bwrap)
-          bwrap="upstream-codex/codex-rs/target/${TARGET}/release/bwrap"
+          bwrap="$CODEX_RELEASE_DIR/bwrap"
           strip --strip-debug --strip-unneeded "$bwrap"
           digest=$(sha256sum "$bwrap" | awk '{print $1}')
           echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
 
       - name: Build Mira-compatible Codex
-        timeout-minutes: 105
-        if: inputs.codex_release == ''
+        timeout-minutes: 210
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -281,96 +202,67 @@ jobs:
             export "$target_no_jitter=1"
           fi
           # Build from the workspace so upstream target flags (e.g. static MSVC CRT) apply.
-          (cd upstream-codex/codex-rs && cargo build --timings \
+          (cd "$CODEX_SRC/codex-rs" && cargo build --timings \
             --target "$TARGET" --release --locked "${build_args[@]}")
 
-      - name: Report compiler cache effectiveness
-        if: always() && steps.enable_sccache.outcome == 'success'
-        shell: bash
-        run: |
-          sccache --show-stats | tee "$RUNNER_TEMP/sccache-stats.txt"
-          sccache --show-stats --stats-format=json > "$RUNNER_TEMP/sccache-stats.json"
-          if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
-            echo '### Rust compilation cache' >> "$GITHUB_STEP_SUMMARY"
-            cat "$RUNNER_TEMP/sccache-stats.txt" >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Stop compiler cache before snapshot
-        if: always() && steps.enable_sccache.outcome == 'success'
-        shell: bash
-        run: sccache --stop-server >/dev/null || true
-
-      - name: Save one batched compiler cache snapshot
-        if: always() && steps.enable_sccache.outcome == 'success' && steps.compiler_cache.outputs.cache-primary-key != ''
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/mira-sccache
-          key: ${{ steps.compiler_cache.outputs.cache-primary-key }}
-
-      - name: Preserve build timings and cache statistics
-        if: always() && inputs.codex_release == ''
+      - name: Preserve build timings
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: codex-build-diagnostics-${{ matrix.target }}
-          path: |
-            upstream-codex/codex-rs/target/cargo-timings/
-            ${{ runner.temp }}/sccache-stats.txt
-            ${{ runner.temp }}/sccache-stats.json
+          path: ${{ env.CARGO_TARGET_DIR }}/cargo-timings/
+          if-no-files-found: ignore
           retention-days: 14
 
       - name: Strip Linux release binaries
-        if: runner.os == 'Linux' && inputs.codex_release == ''
+        if: runner.os == 'Linux'
         shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          release_dir="upstream-codex/codex-rs/target/${TARGET}/release"
           for binary in codex codex-code-mode-host; do
-            strip --strip-debug --strip-unneeded "$release_dir/$binary"
+            strip --strip-debug --strip-unneeded "$CODEX_RELEASE_DIR/$binary"
           done
 
       - name: Assemble canonical Codex package
         id: package
-        if: inputs.codex_release == ''
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
           PACKAGE: ${{ matrix.package }}
-          CODEX_REPO_ROOT: ${{ github.workspace }}/upstream-codex
         run: |
           set -euo pipefail
+          export CODEX_REPO_ROOT="$CODEX_SRC"
           codex_version=$(<CODEX_VERSION)
-          release_dir="$GITHUB_WORKSPACE/upstream-codex/codex-rs/target/${TARGET}/release"
+          rm -rf "$GITHUB_WORKSPACE/$PACKAGE"
           suffix=""
           [[ "$TARGET" == *windows* ]] && suffix=".exe"
           arguments=(
             --target "$TARGET"
             --package-version "$codex_version"
             --package-dir "$GITHUB_WORKSPACE/$PACKAGE"
-            --entrypoint-bin "$release_dir/codex${suffix}"
-            --code-mode-host-bin "$release_dir/codex-code-mode-host${suffix}"
+            --entrypoint-bin "$CODEX_RELEASE_DIR/codex${suffix}"
+            --code-mode-host-bin "$CODEX_RELEASE_DIR/codex-code-mode-host${suffix}"
           )
           if [[ "$TARGET" == *windows* ]]; then
             arguments+=(
-              --codex-command-runner-bin "$release_dir/codex-command-runner.exe"
-              --codex-windows-sandbox-setup-bin "$release_dir/codex-windows-sandbox-setup.exe"
+              --codex-command-runner-bin "$CODEX_RELEASE_DIR/codex-command-runner.exe"
+              --codex-windows-sandbox-setup-bin "$CODEX_RELEASE_DIR/codex-windows-sandbox-setup.exe"
             )
           else
-            arguments+=(--bwrap-bin "$release_dir/bwrap")
+            arguments+=(--bwrap-bin "$CODEX_RELEASE_DIR/bwrap")
           fi
-          python upstream-codex/scripts/build_codex_package.py "${arguments[@]}"
+          python "$CODEX_SRC/scripts/build_codex_package.py" "${arguments[@]}"
+          mkdir -p "$GITHUB_WORKSPACE/codex-upstream-notices"
+          cp "$CODEX_SRC/LICENSE" "$CODEX_SRC/NOTICE" "$GITHUB_WORKSPACE/codex-upstream-notices/"
 
       - name: Test runtime fixture cleanup
-        if: runner.os == 'Linux' && inputs.codex_release == ''
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           node --test tests/runtime_fixture_cleanup_test.mjs
 
       - name: Test interrupted tool recovery in the release runtime
-        if: inputs.codex_release == ''
         shell: bash
         env:
           PACKAGE: ${{ matrix.package }}
@@ -382,7 +274,6 @@ jobs:
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/interrupted_tool_resume_e2e.py
 
       - name: Test encrypted context errors and transient retries in the release runtime
-        if: inputs.codex_release == ''
         shell: bash
         env:
           PACKAGE: ${{ matrix.package }}
@@ -394,7 +285,6 @@ jobs:
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/encrypted_context_runtime_e2e.py
 
       - name: Test default plaintext communication and compaction in the release runtime
-        if: inputs.codex_release == ''
         shell: bash
         env:
           PACKAGE: ${{ matrix.package }}
@@ -406,7 +296,6 @@ jobs:
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/plaintext_context_runtime_e2e.py
 
       - name: Test conditional reasoning recovery in the release runtime
-        if: inputs.codex_release == ''
         shell: bash
         env:
           PACKAGE: ${{ matrix.package }}
@@ -418,7 +307,6 @@ jobs:
           CODEX_TEST_BINARY="$GITHUB_WORKSPACE/$PACKAGE/bin/codex${suffix}" python tests/reasoning_recovery_runtime_e2e.py
 
       - name: Test image-count checkpoints in the release runtime
-        if: inputs.codex_release == ''
         shell: bash
         env:
           PACKAGE: ${{ matrix.package }}
@@ -432,7 +320,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         # Retain a completed candidate for diagnosis even if acceptance fails.
         # The release job and promotion validator still require passing jobs.
-        if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success')
+        if: always() && steps.package.outcome == 'success'
         with:
           name: mira-codex-${{ matrix.target }}
           path: ${{ matrix.package }}
@@ -440,12 +328,10 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
-        if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success') && matrix.target == 'x86_64-unknown-linux-musl'
+        if: always() && steps.package.outcome == 'success' && matrix.target == 'x86_64-unknown-linux-musl'
         with:
           name: codex-upstream-notices
-          path: |
-            upstream-codex/LICENSE
-            upstream-codex/NOTICE
+          path: codex-upstream-notices/
           if-no-files-found: error
 
   release:

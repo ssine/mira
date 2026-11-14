@@ -480,6 +480,9 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   filename. Never install system SSH services or mutate user SSH config.
 - Narrow file roots disable native SSH instead of silently widening policy.
 - For release changes, first build native bundles via `node/openssh/build.sh`; then run `scripts/build-release.sh dist` and `node tests/installers_e2e.mjs`. Test linked images with `node/openssh/tests/e2e.mjs`; see the component README for real Windows/Android hooks.
+- Native Codex runtime builds run only on the owner's self-hosted Desktop WSL/Windows runners and only
+  for the owner's own pushes/dispatches (`docs/codex-build-runners.md`). Never add `pull_request` or
+  `pull_request_target` triggers to a workflow that can reach self-hosted labels.
 - `.github/workflows/ci.yml` is the Go Server/Web fast path: it validates native packages,
   PostgreSQL, authentication, Web APIs and Node channels without rebuilding native OpenSSH.
 - `.github/workflows/node-ci.yml` is the unified release-image path: program, installer or SSH transport changes run
