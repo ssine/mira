@@ -123,9 +123,14 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
       } else if (nativeImage(b)) image(k, nativeImage(b), turnId, timing);
     }
   }
+  // Show the recorded model-facing message itself, not a summary rebuilt from
+  // request fields. Older records without one fall back to those fields.
   function userInput(key, e, turnId, extra = {}) {
-    put(key, "user", "你", [e.text, ...(e.attachments || []).map(f => `附件：${f.name || f.path}`)].filter(Boolean).join("\n"), turnId, extra);
-    blocks({ content: (e.message?.content || []).filter(b => b.type === "image") }, `${key}:image`, "user", turnId, e.timestamp);
+    const content = typeof e.message?.content === "string" ? [{ type: "text", text: e.message.content }] : e.message?.content;
+    const text = Array.isArray(content) ? plainText(content)
+      : [e.text, ...(e.attachments || []).map(f => `附件：${f.name || f.path}`)].filter(Boolean).join("\n");
+    put(key, "user", "你", text, turnId, extra);
+    blocks({ content: (content || []).filter(b => b.type === "image") }, `${key}:image`, "user", turnId, e.timestamp);
   }
   // A message added while Claude runs appears where the model read it. Until
   // then it waits below the running turn; a stop or a failed turn drops it unread.

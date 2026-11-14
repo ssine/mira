@@ -351,18 +351,24 @@ test("account model IDs borrow effort levels from the SDK alias and expose the a
  assert.equal((await runtime.models(node({model:"legacy"}))).models.length,3);
 });
 
-test("Claude user images render as Codex-style image cards after the message", () => {
+test("Claude user input shows the recorded model-facing message", () => {
  const png = {type:"image",source:{type:"base64",media_type:"image/png",data:"AAAA"}};
+ const sent = "看图\n\n已附加文件（暂存在当前运行节点）：\n- `a.png`：`/tmp/a.png`";
  const rows = [
+  // Current workers send attachment paths as text; the agent opens the files itself.
   {seq:1,turnId:"turn",payload:{type:"mira_user",text:"看图",attachments:[{name:"a.png",path:"/tmp/a.png"}],
-   message:{role:"user",content:[{type:"text",text:"看图"},png]}}},
+   message:{role:"user",content:[{type:"text",text:sent}]}}},
+  // Older records carried inline images; they still render as image cards.
   {seq:2,turnId:"turn",payload:{type:"mira_steer",steerId:"s",text:"再看",message:{role:"user",content:[{type:"text",text:"再看"},png]}}},
   {seq:3,turnId:"turn",payload:{type:"command_lifecycle",command_uuid:"s",state:"started"}},
+  // Records without a message fall back to the request fields.
+  {seq:4,turnId:"turn",payload:{type:"mira_user",text:"旧",attachments:[{name:"b.txt",path:"/tmp/b.txt"}]}},
  ];
  const trace = claudeTrace(rows,{activeTurn:"turn"}).trace;
  assert.deepEqual(trace.map(x=>[x.kind,x.image?.url ?? x.body]),[
-  ["user","看图\n附件：a.png"],["image","data:image/png;base64,AAAA"],
+  ["user",sent],
   ["user","再看"],["image","data:image/png;base64,AAAA"],
+  ["user","旧\n附件：b.txt"],
  ]);
  // Unsupported or non-inline sources are not rendered.
  const other = claudeTrace([{seq:1,payload:{type:"mira_user",text:"x",message:{content:[{type:"image",source:{type:"url",url:"https://x"}}]}}}]).trace;

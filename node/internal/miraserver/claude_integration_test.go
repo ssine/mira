@@ -667,7 +667,8 @@ func TestClaudeManagedSDK(t *testing.T) {
 	var requests atomic.Int32
 	var modelAuth atomic.Value
 	var systemPrompt atomic.Value
-	var imageSeen atomic.Bool
+	var imageSeen, attachmentPathSeen atomic.Bool
+	var attachmentPath atomic.Value
 	var resumed atomic.Bool
 	var hold atomic.Bool
 	var modelCancelled atomic.Bool
@@ -701,6 +702,9 @@ func TestClaudeManagedSDK(t *testing.T) {
 		bytes, _ := json.Marshal(b["messages"])
 		if strings.Contains(string(bytes), `"type":"image"`) {
 			imageSeen.Store(true)
+		}
+		if path, _ := attachmentPath.Load().(string); path != "" && strings.Contains(string(bytes), path) {
+			attachmentPathSeen.Store(true)
 		}
 		if strings.Contains(string(bytes), "CLAUDE_MIRA_SAVED_MARKER") {
 			resumed.Store(true)
@@ -962,6 +966,7 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if err = os.WriteFile(imagePath, imageData, 0600); err != nil {
 		t.Fatal(err)
 	}
+	attachmentPath.Store(imagePath)
 	var nextAttachments any = []any{map[string]any{"path": imagePath, "mime": "image/png", "name": "attachment.png"}}
 	runTurn := func(text string) string {
 		b := map[string]any{"requestId": uuidClaude(), "text": text, "model": "claude-sonnet-4-6", "attachments": nextAttachments}
@@ -995,8 +1000,8 @@ func TestClaudeManagedSDK(t *testing.T) {
 	if err = f.server.pool.QueryRow(ctx, `SELECT count(*) FROM mira_claude_entries WHERE session_id=$1`, id).Scan(&count); err != nil || count == 0 {
 		t.Fatalf("no raw entries: %v %d", err, count)
 	}
-	if !imageSeen.Load() {
-		t.Fatal("attachment did not become a native typed image")
+	if imageSeen.Load() || !attachmentPathSeen.Load() {
+		t.Fatalf("attachment must reach the model as its absolute path, not an inline image: image=%v path=%v", imageSeen.Load(), attachmentPathSeen.Load())
 	}
 	if !f.replayedLost.Load() {
 		t.Fatal("SDK did not retry the exact committed mirror operation")
