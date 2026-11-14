@@ -1201,7 +1201,10 @@ progress { width: 100%; accent-color: var(--accent); }
 /* Conversation timeline: collapsed by default, a floating panel when open. */
 .conversation-timeline-toggle { grid-area: conversation-head; justify-self: end; align-self: start; z-index: 3; margin: 6px 93px 0 0; background: var(--glass-header); box-shadow: inset 0 1px var(--glass-highlight); backdrop-filter: var(--glass-header-filter); -webkit-backdrop-filter: var(--glass-header-filter); }
 .conversation-timeline-toggle[aria-expanded="true"] { color: var(--accent); }
-.conversation-timeline { display: grid; grid-template-rows: auto minmax(0, 1fr); max-height: min(52vh, 440px); margin: 8px 16px 0; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); box-shadow: var(--shadow-float); }
+/* Floats over the reading surface: opening or closing it never changes the
+   transcript's top padding (only the in-flow notices do), so text stays put. */
+.conversation-notices { position: relative; }
+.conversation-timeline { position: absolute; top: 8px; left: 16px; right: 16px; z-index: 4; display: grid; grid-template-rows: auto minmax(0, 1fr); max-height: min(52vh, 440px); overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); box-shadow: var(--shadow-float); }
 .conversation-timeline[hidden] { display: none; }
 .timeline-head { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px 6px 4px 12px; border-bottom: 1px solid var(--line); font-size: 12px; }
 .timeline-summary { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
@@ -1216,6 +1219,17 @@ progress { width: 100%; accent-color: var(--accent); }
 .timeline-legend [data-kind="wait"]::before { background: var(--timeline-wait); }
 .timeline-legend [data-kind="user"]::before { width: 7px; height: 7px; border-radius: 1px; background: var(--accent); transform: rotate(45deg); }
 .timeline-legend [data-kind="break"]::before { background: repeating-linear-gradient(135deg, var(--line-strong) 0 2px, transparent 2px 4px); }
+.timeline-modes { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-control); overflow: hidden; }
+.timeline-modes button { min-height: 22px; padding: 0 8px; border: 0; background: transparent; color: var(--muted); font: 11px/22px var(--font-ui); cursor: pointer; }
+.timeline-modes button + button { border-left: 1px solid var(--line); }
+.timeline-modes button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-hover); font-weight: 600; }
+.timeline-modes button:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: -2px; }
+.timeline-legend [data-kind="live"]::before { background: repeating-linear-gradient(135deg, var(--timeline-tool) 0 3px, color-mix(in srgb, var(--timeline-tool) 45%, transparent) 3px 6px); }
+/* Unfinished work grows every second; a moving stripe marks it as in progress. */
+.timeline-span.live { animation: timeline-live 1.2s ease-in-out infinite alternate; }
+.timeline-turn.live { fill: var(--accent); }
+@keyframes timeline-live { from { opacity: 1; } to { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .timeline-span.live { animation: none; opacity: .8; } }
 .timeline-zoom { display: flex; gap: 2px; margin-left: auto; }
 .timeline-zoom .chat-icon-button { width: auto; min-width: 26px; height: 24px; padding: 0 6px; font-size: 12px; }
 .timeline-partial { color: var(--warning); font-size: 11px; }
@@ -1244,7 +1258,7 @@ button.timeline-lane-label:disabled { color: var(--text); cursor: default; text-
 .timeline-message.user:hover, .timeline-message.user:focus-visible { fill: var(--accent-hover); outline: none; stroke: var(--text); }
 .timeline-message.assistant { stroke: var(--muted); stroke-width: 1.5; }
 @media (max-width: 640px) {
-  .conversation-timeline { margin: 6px 8px 0; max-height: 60vh; }
+  .conversation-timeline { top: 6px; left: 8px; right: 8px; max-height: 60vh; }
   .timeline-grid { grid-template-columns: 96px minmax(0, 1fr); }
 }
 @media (prefers-reduced-transparency: reduce) { .conversation-timeline-toggle { background: var(--surface-raised); backdrop-filter: none; -webkit-backdrop-filter: none; } }

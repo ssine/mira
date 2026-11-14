@@ -4980,7 +4980,10 @@ async function readCodexTranscript(threadId, options = {}) {
 // a jumped-to message must land below them.
 function readingOffset() {
   const scroller = traceScroller().getBoundingClientRect();
-  return Math.max(12, $(".conversation-card .conversation-notices").getBoundingClientRect().bottom - scroller.top + 8);
+  const timeline = $("#conversationTimeline");
+  const bottom = Math.max($(".conversation-card .conversation-notices").getBoundingClientRect().bottom,
+    timeline.hidden ? 0 : timeline.getBoundingClientRect().bottom);
+  return Math.max(12, bottom - scroller.top + 8);
 }
 
 function transcriptCardKey(item) {
