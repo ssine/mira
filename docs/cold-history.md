@@ -120,6 +120,8 @@ All variables belong to the Server worker.
 | `MIRA_NODE_COLD_STORAGE_FREEZE` | `false` | `true` starts the freezer and collector. |
 | `MIRA_NODE_COLD_STORAGE_FREEZE_AFTER` | `720h` | At least `1h`. |
 | `MIRA_NODE_COLD_STORAGE_MIN_BYTES` | `16384` | At least 4096. |
+| `MIRA_NODE_COLD_STORAGE_UPLOAD_CONCURRENCY` | `4` | Parallel uploads and conversations scanned at once (1–64). |
+| `MIRA_NODE_COLD_STORAGE_TCP_CONGESTION` | (host default) | Linux only: congestion control for this client's sockets, e.g. `bbr`. |
 
 The client speaks AWS Signature Version 4 and works with Aliyun OSS, MinIO, Tencent COS and other
 S3-compatible stores. Give the Server a credential limited to its prefix: Get/Put/Delete object,
@@ -139,6 +141,11 @@ abort multipart upload and list parts. It does not need to delete object version
 - **Large migrations.** Schema 49 indexes `codex_thread_events`; on a large table this can exceed
   the Supervisor's candidate health deadline and roll the update back. Apply the identical released
   SQL and its ledger row while the previous Server runs (it is expand-only), then update.
+- **Long, lossy paths.** Beta-SG uploads to a Beijing bucket over a cross-border path with about
+  16% retransmission: one CUBIC stream reached 13 KB/s, one BBR stream 148 KB/s and eight BBR streams
+  932 KB/s (2026-11-14). Set `UPLOAD_CONCURRENCY` and `TCP_CONGESTION=bbr` there; unprivileged
+  processes may only select an algorithm listed in `net.ipv4.tcp_allowed_congestion_control`, so add
+  `bbr` to that list (and load `tcp_bbr` at boot) without changing the host default.
 - **Cost.** Uploads are free on Aliyun OSS. Reading from outside the provider's network is billed as
   outbound traffic, plus the infrequent-access retrieval fee when used. Reads happen only when a
   frozen body is opened.

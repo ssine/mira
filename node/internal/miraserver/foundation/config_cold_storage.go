@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -21,9 +22,13 @@ type ColdStorageConfig struct {
 	Freeze                           bool
 	FreezeAfter                      time.Duration
 	MinBytes                         int
+	UploadConcurrency                int
+	TCPCongestion                    string
 }
 
 func (config ColdStorageConfig) Enabled() bool { return config.Bucket != "" }
+
+var congestionName = regexp.MustCompile(`^[a-z0-9_]{1,15}$`)
 
 func parseColdStorage(lookup func(string) (string, bool)) (ColdStorageConfig, error) {
 	value := func(name string) string { return strings.TrimSpace(envOr(lookup, "MIRA_NODE_COLD_STORAGE_"+name, "")) }
@@ -32,6 +37,7 @@ func parseColdStorage(lookup func(string) (string, bool)) (ColdStorageConfig, er
 		AccessKeyID: value("ACCESS_KEY_ID"), SecretAccessKey: value("SECRET_ACCESS_KEY"),
 		PathStyle: value("PATH_STYLE") == "true", CacheDir: value("CACHE_DIR"),
 		Freeze: value("FREEZE") == "true", CacheBytes: 2 << 30, FreezeAfter: 30 * 24 * time.Hour, MinBytes: 16 << 10,
+		UploadConcurrency: 4, TCPCongestion: value("TCP_CONGESTION"),
 	}
 	if config.Bucket == "" {
 		for _, name := range []string{"ENDPOINT", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY", "SECRET_ACCESS_KEY_FILE", "FREEZE"} {
@@ -79,6 +85,16 @@ func parseColdStorage(lookup func(string) (string, bool)) (ColdStorageConfig, er
 			return ColdStorageConfig{}, fmt.Errorf("MIRA_NODE_COLD_STORAGE_FREEZE_AFTER must be a duration of at least 1h")
 		}
 		config.FreezeAfter = duration
+	}
+	if text := value("UPLOAD_CONCURRENCY"); text != "" {
+		count, err := strconv.Atoi(text)
+		if err != nil || count < 1 || count > 64 {
+			return ColdStorageConfig{}, fmt.Errorf("MIRA_NODE_COLD_STORAGE_UPLOAD_CONCURRENCY must be an integer between 1 and 64")
+		}
+		config.UploadConcurrency = count
+	}
+	if config.TCPCongestion != "" && !congestionName.MatchString(config.TCPCongestion) {
+		return ColdStorageConfig{}, fmt.Errorf("MIRA_NODE_COLD_STORAGE_TCP_CONGESTION must be a kernel congestion control name such as bbr")
 	}
 	if text := value("MIN_BYTES"); text != "" {
 		bytes, err := strconv.Atoi(text)
