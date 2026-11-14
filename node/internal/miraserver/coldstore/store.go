@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -323,4 +324,28 @@ func (store *Store) sweep() {
 			total -= item.size
 		}
 	}
+}
+
+// PlaceholderBytes returns the original size recorded in a placeholder, or
+// the given length for a hot record.
+func PlaceholderBytes(raw []byte, coldSHA *string) int {
+	if coldSHA == nil {
+		return len(raw)
+	}
+	var placeholder struct {
+		Cold PlaceholderRef `json:"mira_cold_payload"`
+	}
+	if json.Unmarshal(raw, &placeholder) != nil || placeholder.Cold.Bytes <= 0 {
+		return len(raw)
+	}
+	return placeholder.Cold.Bytes
+}
+
+// ContentDigest is the SHA-256 of a record's canonical bytes without
+// downloading a frozen body: for frozen rows it is the content address.
+func ContentDigest(raw []byte, coldSHA *string) string {
+	if coldSHA != nil && *coldSHA != "" {
+		return *coldSHA
+	}
+	return Digest(raw)
 }

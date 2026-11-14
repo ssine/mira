@@ -1,6 +1,7 @@
 # Cold history: idle conversation bodies in object storage
 
-Implemented by schema 49 (Mira 1.0.114). Disabled unless a bucket is configured.
+Implemented by schema 49 (Mira 1.0.114) for Codex and schema 50 (Mira 1.0.116) for Claude.
+Disabled unless a bucket is configured.
 
 ## Why
 
@@ -47,6 +48,23 @@ A row qualifies only when all hold:
 Rule 3 makes every metadata view select the same rows with the same bytes before and after
 freezing, so sidebar enrichment, costs, account cost rebuilds, activity and execution state need no
 cold reads. Search uses `mira_conversation_messages`, which stays in PostgreSQL.
+
+## Claude sessions
+
+Claude history (`mira_claude_events`, `mira_claude_entries`) uses the same bucket, objects and
+collector. Only `type: "user"` records move: they carry tool results such as file contents,
+command output and screenshots, about half of Claude's bytes on the Home Server. Assistant prose,
+results (cost and usage), system, stream and Mira lifecycle records always stay hot, so live usage,
+cost projection, unread state and history-gap checks never read the bucket.
+
+A session freezes when it has no active or running turn, no turn activity and no update within
+`FREEZE_AFTER`, and a current conversation index for its root and every native subagent
+transcript. The placeholder keeps the small top-level fields that cheap filters read (`type`,
+`subtype`, `parent_tool_use_id`, `timestamp`, `uuid`, `parentUuid`, `session_id`, `isSidechain`,
+`agentId`). Event pages, the root view, native transcript streams (prefetched before the first byte),
+timelines and re-indexing hydrate; the native cache prefix protocol compares the content address
+directly, which equals the SHA-256 of the canonical bytes, so it never downloads. Deleting a session
+cascades its rows and the collector removes the orphaned objects after the grace period.
 
 ## Reads
 
@@ -109,14 +127,18 @@ abort multipart upload and list parts. It does not need to delete object version
 
 ## Operations
 
-- **Rollback.** Once rows are frozen, a Server older than 1.0.114 returns placeholders as history.
-  Do not roll back below 1.0.114 after enabling `FREEZE`; keep the bucket configuration on newer
+- **Rollback.** Once rows are frozen, a Server older than 1.0.114 returns placeholders as history
+  (older than 1.0.116 for Claude sessions). Do not roll back below the version that froze them; keep the bucket configuration on newer
   versions. Disabling `FREEZE` stops new freezing; reads still need the bucket.
 - **Backups.** `pg_dump` no longer contains frozen bodies. The bucket is part of the backup: keep
   versioning on and do not expire current object versions.
-- **Disk space.** Freezing frees space inside PostgreSQL's TOAST storage for reuse, but the data
-  files do not shrink. Use `pg_repack` (or `VACUUM FULL` in a maintenance window) to return space to
-  the file system.
+- **Disk space.** Freezing frees space inside each table's TOAST storage, and later writes to the
+  same table reuse it, but the data files do not shrink and freed space is not shared across tables.
+  Use `pg_repack` online (or `VACUUM FULL` in a maintenance window) to return space to the file
+  system.
+- **Large migrations.** Schema 49 indexes `codex_thread_events`; on a large table this can exceed
+  the Supervisor's candidate health deadline and roll the update back. Apply the identical released
+  SQL and its ledger row while the previous Server runs (it is expand-only), then update.
 - **Cost.** Uploads are free on Aliyun OSS. Reading from outside the provider's network is billed as
   outbound traffic, plus the infrequent-access retrieval fee when used. Reads happen only when a
   frozen body is opened.
@@ -128,6 +150,10 @@ abort multipart upload and list parts. It does not need to delete object version
 - `coldstore` unit tests: classification, placeholder shape, integrity, cache tampering, download
   coalescing and SigV4 path encoding. `TestLiveObjectStore` runs against a real bucket when
   `MIRA_COLD_LIVE_*` variables are set.
+- `TestClaudeColdHistoryRoundTrip` and `TestClaudeColdHistoryRoutes` (PostgreSQL): only idle tool
+  results move, running sessions and assistant records stay hot, event pages, root view, native
+  transcript stream and cache prefix responses are byte-identical, one body is shared by event and
+  entry, explicit failure without a bucket, collection after session deletion.
 - `TestColdHistoryRoundTrip` (PostgreSQL): freezes a conversation with screenshots, duplicates,
   compaction and metadata records, then requires byte-identical ThreadStore history and stream, event
   listing, both transcript readers with tool details, transcript images, the thread list and rebuilt

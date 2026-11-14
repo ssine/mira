@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
+	serverviews "github.com/ssine/mira/node/internal/miraserver/views"
 	"io"
 	"log"
 	"net/http"
@@ -1387,4 +1389,110 @@ func TestClaudeManagedSDK(t *testing.T) {
 		}
 	}
 
+}
+
+// Frozen Claude records read back through every storage and view route with
+// the exact canonical bytes, including the native cache prefix protocol.
+func TestClaudeColdHistoryRoutes(t *testing.T) {
+	f := newClaudeFixture(t)
+	ctx := context.Background()
+	id, turn, headers := f.reserved()
+	route := "/v1/claude/sessions/" + id
+	big := "工具输出 " + randomText(t, 48<<10)
+	user := map[string]any{"type": "user", "uuid": uuidClaude(), "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "content": big + "\u0000"}}}}
+	for _, e := range []map[string]any{
+		{"type": "mira_user", "text": "读文件"},
+		user,
+		{"type": "assistant", "parent_tool_use_id": nil, "message": map[string]any{"id": "m1", "role": "assistant", "content": []any{map[string]any{"type": "text", "text": "好了"}}}},
+	} {
+		if status, raw := f.request("POST", route+"/events", map[string]any{"eventId": uuidClaude(), "payload": e}, headers); status != 200 {
+			t.Fatalf("event: %d %s", status, raw)
+		}
+	}
+	entry, _ := json.Marshal(user)
+	batch := string(entry) + "\n" + `{"type":"assistant","uuid":"` + uuidClaude() + `","message":{"content":[]}}` + "\n"
+	if status, raw := f.request("POST", route+"/entries?operationId="+uuidClaude(), batch, headers); status != 200 {
+		t.Fatalf("entries: %d %s", status, raw)
+	}
+	read := func() map[string]string {
+		result := map[string]string{}
+		for _, query := range []string{"/events?after=0", "/events?view=transcript", "/events?view=transcript&scope=root"} {
+			page := f.call("GET", route+query, nil)
+			delete(page, "session")
+			raw, _ := json.Marshal(page)
+			result[query] = string(raw)
+		}
+		for _, query := range []string{"/entries", "/entries?cache=1&after=0"} {
+			status, raw := f.request("GET", route+query, nil, headers)
+			if status != 200 {
+				t.Fatalf("%s: %d", query, status)
+			}
+			result[query] = string(raw)
+		}
+		first := strings.Split(batch, "\n")[0]
+		digest := sha256.Sum256([]byte(first))
+		req, _ := http.NewRequest("GET", f.endpoint+route+"/entries?cache=1&after=1&prefix="+hex.EncodeToString(digest[:]), nil)
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		result["cache-suffix"] = res.Header.Get("X-Mira-Claude-Cache-Start") + "|" + res.Header.Get("X-Mira-Claude-Cache-Prefix") + "|" + string(data)
+		return result
+	}
+	before := read()
+	if !strings.HasPrefix(before["cache-suffix"], "1|") {
+		t.Fatalf("cache prefix not accepted before freezing: %.80s", before["cache-suffix"])
+	}
+
+	// Idle the session, index it, then freeze.
+	for _, sql := range []string{
+		`UPDATE mira_claude_sessions SET active_turn=NULL,updated_at=now()-interval '40 days' WHERE session_id=$1`,
+		`UPDATE mira_claude_turns SET status='completed',created_at=now()-interval '40 days',completed_at=now()-interval '40 days' WHERE session_id=$1`,
+	} {
+		if _, err := f.server.pool.Exec(ctx, sql, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	views := serverviews.New(f.server.pool)
+	if err := views.IndexClaudeTranscript(ctx, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	objects := &coldTestObjects{objects: map[string][]byte{}}
+	store, err := coldstore.New(objects, coldstore.Options{CacheDir: t.TempDir(), CacheBytes: 64 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldstore.SetDefault(store)
+	defer coldstore.SetDefault(nil)
+	stats, err := coldstore.NewFreezer(f.server.pool, objects, coldstore.FreezerOptions{
+		FreezeAfter: 24 * time.Hour, MinBytes: 4 << 10, ClaudeIndexVersion: serverviews.ConversationIndexVersion,
+	}).FreezeClaudePass(ctx, 10)
+	if err != nil || stats.Rows != 2 || objects.count() != 1 {
+		t.Fatalf("freeze: %+v %v objects=%d (event and entry share one body)", stats, err, objects.count())
+	}
+	// Resume the session so the native storage routes accept the turn again.
+	for _, sql := range []string{
+		`UPDATE mira_claude_sessions SET active_turn=$2 WHERE session_id=$1`,
+		`UPDATE mira_claude_turns SET status='running' WHERE turn_id=$2 AND session_id=$1`,
+	} {
+		if _, err := f.server.pool.Exec(ctx, sql, id, turn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := read()
+	for name, value := range before {
+		if after[name] != value {
+			t.Fatalf("%s differs after freezing:\n%.300s\n%.300s", name, value, after[name])
+		}
+	}
+	// Without the bucket, reads fail explicitly instead of returning placeholders.
+	coldstore.SetDefault(nil)
+	if status, raw := f.request("GET", route+"/entries", nil, headers); status == 200 {
+		t.Fatalf("entries without a bucket: %d %.80s", status, raw)
+	}
 }

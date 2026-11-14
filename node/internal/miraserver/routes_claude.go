@@ -19,6 +19,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/ssine/mira/node/internal/clauderuntime"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 	"github.com/ssine/mira/node/internal/miraserver/foundation"
 )
 
@@ -370,17 +371,17 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		if root {
 			limit = claudeRootScanLimit
 		}
-		query := `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND seq>$2 ORDER BY seq LIMIT $3`
+		query := `SELECT seq,payload,turn_id::text,cold_sha256 FROM mira_claude_events WHERE session_id=$1 AND seq>$2 ORDER BY seq LIMIT $3`
 		args := []any{id, cursor, limit + 1}
 		if op == "history" {
-			query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$4 ORDER BY seq LIMIT $3`
+			query = `SELECT seq,payload,NULL::text,cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$4 ORDER BY seq LIMIT $3`
 			args = append(args, r.URL.Query().Get("subpath"))
 		}
 		if backward {
 			args = []any{id, before, limit + 1}
-			query = `SELECT seq,payload,turn_id::text FROM mira_claude_events WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND event_type<>'stream_event' ORDER BY seq DESC LIMIT $3`
+			query = `SELECT seq,payload,turn_id::text,cold_sha256 FROM mira_claude_events WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND event_type<>'stream_event' ORDER BY seq DESC LIMIT $3`
 			if op == "history" {
-				query = `SELECT seq,payload,NULL::text FROM mira_claude_entries WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND subpath=$4 ORDER BY seq DESC LIMIT $3`
+				query = `SELECT seq,payload,NULL::text,cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND ($2::bigint=0 OR seq<$2) AND subpath=$4 ORDER BY seq DESC LIMIT $3`
 				args = append(args, r.URL.Query().Get("subpath"))
 			}
 		}
@@ -390,18 +391,21 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		}
 		defer rows.Close()
 		data := []any{}
+		frozen := map[int]string{}
 		pageBytes, scanned := 0, 0
 		var first, last int64
 		more := false
 		for rows.Next() {
 			var seq int64
 			var raw json.RawMessage
-			var turnID *string
-			if err = rows.Scan(&seq, &raw, &turnID); err != nil {
+			var turnID, cold *string
+			if err = rows.Scan(&seq, &raw, &turnID, &cold); err != nil {
 				return true, err
 			}
+			// Placeholders keep the fields the omission rule reads.
 			omitted := root && claudeRootOmitted(raw)
-			if scanned == limit || !omitted && (len(data) == 200 || len(data) > 0 && pageBytes+len(raw) > 4*1024*1024) {
+			size := coldstore.PlaceholderBytes(raw, cold)
+			if scanned == limit || !omitted && (len(data) == 200 || len(data) > 0 && pageBytes+size > 4*1024*1024) {
 				// Resume at this row on the next page.
 				more = true
 				break
@@ -414,11 +418,31 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 			if omitted {
 				continue
 			}
-			pageBytes += len(raw)
+			pageBytes += size
+			if cold != nil {
+				frozen[len(data)] = *cold
+			}
 			data = append(data, map[string]any{"seq": seq, "payload": raw, "turnId": turnID})
 		}
 		if err = rows.Err(); err != nil {
 			return true, err
+		}
+		rows.Close()
+		if len(frozen) > 0 {
+			shas := make([]string, 0, len(frozen))
+			for _, sha := range frozen {
+				shas = append(shas, sha)
+			}
+			if err = coldstore.Prefetch(ctx, shas); err != nil {
+				return true, err
+			}
+			for index, sha := range frozen {
+				value, err := coldstore.Hydrate(ctx, nil, &sha)
+				if err != nil {
+					return true, err
+				}
+				data[index].(map[string]any)["payload"] = json.RawMessage(value)
+			}
 		}
 		if scanned > 0 && !backward {
 			cursor = last
@@ -877,31 +901,38 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 			if after > end {
 				after = 0
 			}
+			// Digests cover canonical bytes; a frozen row's content address
+			// is that digest, so no download is needed.
 			if after > 0 {
 				var raw []byte
-				if err = tx.QueryRow(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3`, id, subpath, after).Scan(&raw); err != nil {
+				var cold *string
+				if err = tx.QueryRow(ctx, `SELECT payload,cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3`, id, subpath, after).Scan(&raw, &cold); err != nil {
 					return err
 				}
-				digest := sha256.Sum256(raw)
-				if hex.EncodeToString(digest[:]) != r.URL.Query().Get("prefix") {
+				if coldstore.ContentDigest(raw, cold) != r.URL.Query().Get("prefix") {
 					after = 0
 				}
 			}
 			var prefix string
 			if end > 0 {
 				var raw []byte
-				if err = tx.QueryRow(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3`, id, subpath, end).Scan(&raw); err != nil {
+				var cold *string
+				if err = tx.QueryRow(ctx, `SELECT payload,cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3`, id, subpath, end).Scan(&raw, &cold); err != nil {
 					return err
 				}
-				digest := sha256.Sum256(raw)
-				prefix = hex.EncodeToString(digest[:])
+				prefix = coldstore.ContentDigest(raw, cold)
 			}
 			w.Header().Set("X-Mira-Claude-Cache-Version", "1")
 			w.Header().Set("X-Mira-Claude-Cache-Start", strconv.FormatInt(after, 10))
 			w.Header().Set("X-Mira-Claude-Cache-End", strconv.FormatInt(end, 10))
 			w.Header().Set("X-Mira-Claude-Cache-Prefix", prefix)
 		}
-		rows, err := tx.Query(ctx, `SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq>$3 ORDER BY seq`, id, subpath, after)
+		// Fetch frozen bodies before the first byte, so an unavailable
+		// bucket fails the load cleanly instead of truncating the stream.
+		if err = prefetchClaudeEntries(ctx, tx, id, subpath, after); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `SELECT payload,cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq>$3 ORDER BY seq`, id, subpath, after)
 		if err != nil {
 			return err
 		}
@@ -909,7 +940,11 @@ func (server *Server) claudeStorage(ctx context.Context, w http.ResponseWriter, 
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		for rows.Next() {
 			var raw []byte
-			if err = rows.Scan(&raw); err != nil {
+			var cold *string
+			if err = rows.Scan(&raw, &cold); err != nil {
+				return err
+			}
+			if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 				return err
 			}
 			if _, err = w.Write(append(raw, '\n')); err != nil {
@@ -1124,7 +1159,11 @@ func claudeAppendEvent(ctx context.Context, tx pgx.Tx, id, turn, eventID string,
 	if errors.Is(err, pgx.ErrNoRows) {
 		var previous []byte
 		var eventSession, eventTurn string
-		if err = tx.QueryRow(ctx, `SELECT seq,session_id::text,turn_id::text,payload FROM mira_claude_events WHERE event_id=$1`, eventID).Scan(&seq, &eventSession, &eventTurn, &previous); err != nil {
+		var cold *string
+		if err = tx.QueryRow(ctx, `SELECT seq,session_id::text,turn_id::text,payload,cold_sha256 FROM mira_claude_events WHERE event_id=$1`, eventID).Scan(&seq, &eventSession, &eventTurn, &previous, &cold); err != nil {
+			return 0, 0, err
+		}
+		if previous, err = coldstore.Hydrate(ctx, previous, cold); err != nil {
 			return 0, 0, err
 		}
 		if eventSession != id || eventTurn != turn || string(previous) != string(payload) {
@@ -1216,20 +1255,22 @@ func (server *Server) claudeSessionCache(ctx context.Context, s claudeSession, s
 	result["checkedAt"] = time.Now().UTC().Format(time.RFC3339Nano)
 	var end int64
 	var payload []byte
+	var cold *string
 	cursor, _ := integer(observed["cursor"])
 	prefix, _ := observed["prefix"].(string)
 	err = server.pool.QueryRow(ctx, `SELECT coalesce((SELECT next_seq-1 FROM mira_claude_transcripts WHERE session_id=$1 AND subpath=$2),0),
-		(SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3)`, s.ID, subpath, cursor).Scan(&end, &payload)
+		(SELECT payload FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3),
+		(SELECT cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq=$3)`, s.ID, subpath, cursor).Scan(&end, &payload, &cold)
 	if err != nil {
 		return nil, err
 	}
-	digest := sha256.Sum256(payload)
+	digest := coldstore.ContentDigest(payload, cold)
 	switch {
 	case observed["state"] == "disabled":
 		result["state"], result["message"] = "unloaded", "节点已关闭 Claude 会话缓存，继续执行时从服务器完整加载"
 	case observed["state"] != "cached":
 		result["state"], result["message"] = "unloaded", "节点没有可用缓存，继续执行时从服务器完整加载"
-	case payload == nil || cursor > end || hex.EncodeToString(digest[:]) != prefix:
+	case payload == nil || cursor > end || digest != prefix:
 		result["state"], result["message"] = "unloaded", "节点缓存已过期，继续执行时从服务器完整加载"
 	default:
 		bytes, _ := integer(observed["bytes"])
