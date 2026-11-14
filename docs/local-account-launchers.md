@@ -33,8 +33,10 @@ mira codex --account <selector> --offline exec "..."
 | 默认参数 | 与 `mira codex` 原有一致：1000 subagent、`never`、`danger-full-access` | 账号 model、effort |
 | 代理 | 账号 egress | 账号 egress |
 
-账号配置了 egress 时，启动器先探测该账号保存的本机监听端口：Node worker 正在运行且健康的网关
-会被直接复用，不会再启动一个争抢同一端口的进程；否则启动器自己运行 sing-box，并在引擎退出时停止。
+账号配置了 egress 时，启动器用同一份代理配置在**自己的随机本机端口**上运行一个私有 sing-box，
+引擎退出时停止并删除临时配置（`account-egress/.cli-*`）。它不复用 Node 的网关：Node 的网关按托管
+会话引用计数，空闲时会关闭，借用它会在网页会话结束时让 CLI 断网（ECONNREFUSED）；反过来占用
+Node 的固定端口也会让之后的托管会话依赖 CLI 的生命周期。
 sing-box 路径依次取 `MIRA_NODE_SING_BOX`、Supervisor 状态目录的 `mira.env`，最后是 `PATH`。
 
 Claude Code 可执行文件依次取 `MIRA_NODE_CLAUDE_BINARY`、Node 为当前版本准备的 SDK、其他已准备的

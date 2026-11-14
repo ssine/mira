@@ -350,9 +350,9 @@ func runEgressHelper() {
 	_ = server.Serve(listener)
 }
 
-func TestOfflineManagerReusesRunningGatewayOrStartsItsOwn(t *testing.T) {
+func TestOfflineManagerRunsPrivateGatewayIndependentOfNode(t *testing.T) {
 	node, id := testManager(t)
-	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileClaude}
+	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Username: "u", Password: "secret", Profile: ProfileClaude}
 	if _, err := node.Configure(id, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -360,52 +360,47 @@ func TestOfflineManagerReusesRunningGatewayOrStartsItsOwn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	testProfile := &routeProfile{healthURL: "http://account-egress.test/health", expected: map[int]bool{http.StatusNotFound: true}}
-	offline := NewOffline(filepath.Dir(node.root), "")
-	t.Cleanup(offline.Close)
-	probes := 0
-	offline.probeExisting = func(ctx context.Context, config storedConfig) bool {
-		probes++
-		return waitHealthyOnce(ctx, config, testProfile)
-	}
-	offline.checkHealth = func(ctx context.Context, config storedConfig) error {
-		return waitHealthy(ctx, config, testProfile)
-	}
-	if !offline.Configured(id) {
-		t.Fatal("offline manager did not see the Node's egress configuration")
-	}
-	shared, releaseShared, err := offline.Acquire(id)
+	offline, err := NewOffline(filepath.Dir(node.root), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shared["HTTPS_PROXY"] != nodeEnv["HTTPS_PROXY"] || probes != 1 {
-		t.Fatalf("offline launch did not reuse the running gateway: %v vs %v (probes %d)", shared, nodeEnv, probes)
-	}
-	if status, _ := offline.Status(id); status["running"] != false || status["refs"] != 0 {
-		t.Fatalf("offline manager started a competing gateway: %#v", status)
-	}
-	releaseShared()
-	releaseNode()
-
-	own, releaseOwn, err := offline.Acquire(id)
-	if err != nil {
-		t.Fatalf("offline manager could not start its own gateway: %v", err)
-	}
-	defer releaseOwn()
-	if own["HTTPS_PROXY"] != nodeEnv["HTTPS_PROXY"] {
-		t.Fatalf("offline gateway used another listener: %v", own)
-	}
-	if status, _ := offline.Status(id); status["running"] != true || status["refs"] != 1 {
-		t.Fatalf("offline gateway status: %#v", status)
+	offline.checkHealth = node.checkHealth
+	if !offline.Configured(id) {
+		t.Fatal("offline manager did not see the Node's egress configuration")
 	}
 	public, err := offline.PublicConfig(id)
-	if err != nil || public == nil || public.Server != "proxy.example" || public.HasPassword {
+	if err != nil || public == nil || public.Server != "proxy.example" || !public.HasPassword {
 		t.Fatalf("public config: %#v %v", public, err)
 	}
-}
-
-func waitHealthyOnce(ctx context.Context, config storedConfig, profile *routeProfile) bool {
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
-	return waitHealthy(ctx, config, profile) == nil
+	own, releaseOwn, err := offline.Acquire(id)
+	if err != nil {
+		t.Fatalf("offline gateway: %v", err)
+	}
+	if own["HTTPS_PROXY"] == nodeEnv["HTTPS_PROXY"] {
+		t.Fatalf("offline gateway borrowed the Node listener %v", own)
+	}
+	// The Node stopping its idle gateway must not affect the CLI's gateway.
+	releaseNode()
+	if status, _ := node.Status(id); status["running"] != false {
+		t.Fatalf("Node gateway still running: %#v", status)
+	}
+	proxyURL := strings.TrimPrefix(own["HTTPS_PROXY"], "http://")
+	connection, err := net.DialTimeout("tcp", proxyURL, time.Second)
+	if err != nil {
+		t.Fatalf("CLI gateway stopped with the Node's: %v", err)
+	}
+	connection.Close()
+	stored, err := readStored(filepath.Join(node.root, id, "config.json"))
+	if err != nil || "http://127.0.0.1:"+strconv.Itoa(stored.ListenPort) != nodeEnv["HTTPS_PROXY"] || stored.Spec.Password != "secret" {
+		t.Fatalf("Node configuration was modified: %#v %v", stored, err)
+	}
+	private := offline.root
+	releaseOwn()
+	offline.Close()
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Fatalf("private gateway directory remains: %v", err)
+	}
+	if _, err := net.DialTimeout("tcp", proxyURL, 200*time.Millisecond); err == nil {
+		t.Fatal("CLI gateway still listening after Close")
+	}
 }
