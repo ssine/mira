@@ -53,3 +53,26 @@ func prefetchColdHistory(ctx context.Context, query dbtx, storeID, threadID stri
 	}
 	return coldstore.Prefetch(ctx, shas)
 }
+
+// prefetchClaudeEntries downloads the frozen bodies of one native transcript
+// suffix before it is streamed.
+func prefetchClaudeEntries(ctx context.Context, query dbtx, sessionID, subpath string, after int64) error {
+	rows, err := query.Query(ctx, `SELECT cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND subpath=$2 AND seq>$3 AND cold_sha256 IS NOT NULL`, sessionID, subpath, after)
+	if err != nil {
+		return err
+	}
+	shas := []string{}
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			rows.Close()
+			return err
+		}
+		shas = append(shas, sha)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return coldstore.Prefetch(ctx, shas)
+}

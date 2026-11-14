@@ -149,7 +149,7 @@ func New(ctx context.Context, configuration Config) (*Server, error) {
 	if coldObjects != nil && configuration.Foundation.ColdStorage.Freeze {
 		server.stopColdHistory = coldstore.NewFreezer(pool, coldObjects, coldstore.FreezerOptions{
 			FreezeAfter: configuration.Foundation.ColdStorage.FreezeAfter, MinBytes: configuration.Foundation.ColdStorage.MinBytes,
-			StartDelay: 10 * time.Minute, Logger: configuration.Logger,
+			StartDelay: 10 * time.Minute, ClaudeIndexVersion: serverviews.ConversationIndexVersion, Logger: configuration.Logger,
 		}).Start(ctx)
 	}
 	server.stopPush = server.startPushWorker(ctx)

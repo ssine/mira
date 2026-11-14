@@ -517,7 +517,7 @@ func (service *Service) indexCodexBatch(ctx context.Context, storeID, threadID s
 // transcript thread ID, matching the Web conversation identity.
 func (service *Service) IndexClaudeTranscript(ctx context.Context, sessionID, subpath string) error {
 	threadID := sessionID
-	query := `SELECT seq,payload FROM mira_claude_events WHERE session_id=$1 AND seq>$2 AND event_type<>'stream_event' ORDER BY seq LIMIT $3`
+	query := `SELECT seq,payload,cold_sha256 FROM mira_claude_events WHERE session_id=$1 AND seq>$2 AND event_type<>'stream_event' ORDER BY seq LIMIT $3`
 	if subpath != "" {
 		if err := service.pool.QueryRow(ctx, `SELECT thread_id::text FROM mira_claude_transcripts WHERE session_id=$1 AND subpath=$2`, sessionID, subpath).Scan(&threadID); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -525,7 +525,7 @@ func (service *Service) IndexClaudeTranscript(ctx context.Context, sessionID, su
 			}
 			return err
 		}
-		query = `SELECT seq,payload FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$4 ORDER BY seq LIMIT $3`
+		query = `SELECT seq,payload,cold_sha256 FROM mira_claude_entries WHERE session_id=$1 AND seq>$2 AND subpath=$4 ORDER BY seq LIMIT $3`
 	}
 	var indexed int64
 	var version int
@@ -555,11 +555,16 @@ func (service *Service) IndexClaudeTranscript(ctx context.Context, sessionID, su
 		for rows.Next() {
 			var sequence int64
 			var raw []byte
-			if err := rows.Scan(&sequence, &raw); err != nil {
+			var cold *string
+			if err := rows.Scan(&sequence, &raw, &cold); err != nil {
 				rows.Close()
 				return err
 			}
 			last = sequence
+			if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
+				rows.Close()
+				return err
+			}
 			event, err := decodeObject(raw)
 			if err != nil {
 				continue // Unparseable native records stay authoritative and unindexed.

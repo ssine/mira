@@ -856,4 +856,5 @@ CREATE INDEX codex_thread_events_provider_idx
 	{Version: 47, Name: "claude-plan-usage", SQL: claudePlanUsageSQL, Checksum: "24d2f80578dd0a5fd2a3f77e4d6a6a32cd09746b8769f47811adde95d819c7b5"},
 	{Version: 48, Name: "conversation-index", SQL: conversationIndexSQL, Checksum: "d164d1e91c8d18ebcbd901d39a289dc5069a557bb2753e1dd555526483b0e73f"},
 	{Version: 49, Name: "cold-history", SQL: coldHistorySQL, Checksum: "c543b972d1070ccfa71afaa17192a8090c657f5555c060330581c689ccf5edf3"},
+	{Version: 50, Name: "claude-cold-history", SQL: claudeColdHistorySQL, Checksum: "b7714018badab76c89a1a9e2af066c7d8c9c7ad28a665abc2ed62014e862df7a"},
 }

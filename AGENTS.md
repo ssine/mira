@@ -133,7 +133,8 @@ move to an S3-compatible bucket. Every row stays in `codex_thread_events` with i
 hash and a typed placeholder; `cold_sha256` addresses the exact original bytes. Readers of
 canonical bodies hydrate through `coldstore.Hydrate` and fail explicitly rather than return a
 placeholder or partial history. Rows that a metadata view's SQL text predicate can select, assistant
-messages and session/turn metadata never freeze, so those views read identical bytes. Objects are
+messages and session/turn metadata never freeze, so those views read identical bytes. Claude sessions
+(schema 50) freeze only `user` tool-result records of idle, fully indexed sessions. Objects are
 immutable and deleted only after a grace period without references. See `docs/cold-history.md`.
 
 - A node-local `CODEX_HOME`, JSONL file or UI cache must not become an authoritative history store.

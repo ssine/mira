@@ -23,7 +23,10 @@ type FreezerOptions struct {
 	StartDelay time.Duration
 	// OrphanGrace is how long an unreferenced object is kept before deletion.
 	OrphanGrace time.Duration
-	Logger      *log.Logger
+	// ClaudeIndexVersion is the conversation index projector version; a
+	// Claude session freezes only once its index is current.
+	ClaudeIndexVersion int
+	Logger             *log.Logger
 }
 
 func (options *FreezerOptions) normalize() {
@@ -81,6 +84,18 @@ func (freezer *Freezer) Start(ctx context.Context) func() {
 			} else if stats.Rows > 0 {
 				freezer.options.Logger.Printf("cold history froze %d payloads in %d conversations (%d raw bytes, %d stored)",
 					stats.Rows, stats.Threads, stats.RawBytes, stats.StoredBytes)
+			}
+			claude, claudeErr := freezer.FreezeClaudePass(runContext, 32)
+			if claudeErr != nil && runContext.Err() == nil {
+				freezer.options.Logger.Printf("cold history Claude freeze pass failed: %v", claudeErr)
+			} else if claude.Rows > 0 {
+				freezer.options.Logger.Printf("cold history froze %d Claude payloads in %d sessions (%d raw bytes, %d stored)",
+					claude.Rows, claude.Threads, claude.RawBytes, claude.StoredBytes)
+			}
+			if claudeErr == nil {
+				stats.Threads += claude.Threads
+			} else if err == nil {
+				err = claudeErr
 			}
 			if time.Since(lastCollect) >= time.Hour {
 				if deleted, err := freezer.Collect(runContext); err != nil && runContext.Err() == nil {
@@ -303,12 +318,16 @@ func (freezer *Freezer) replace(ctx context.Context, thread candidateThread, row
 // period, for example after a conversation was permanently deleted.
 func (freezer *Freezer) Collect(ctx context.Context) (int, error) {
 	if _, err := freezer.pool.Exec(ctx, `UPDATE mira_cold_objects o SET orphaned_at=NULL
- WHERE orphaned_at IS NOT NULL AND NOT deleting AND EXISTS(SELECT 1 FROM codex_thread_events e WHERE e.cold_sha256=o.sha256)`); err != nil {
+ WHERE orphaned_at IS NOT NULL AND NOT deleting AND (EXISTS(SELECT 1 FROM codex_thread_events e WHERE e.cold_sha256=o.sha256)
+   OR EXISTS(SELECT 1 FROM mira_claude_events c WHERE c.cold_sha256=o.sha256)
+   OR EXISTS(SELECT 1 FROM mira_claude_entries n WHERE n.cold_sha256=o.sha256))`); err != nil {
 		return 0, err
 	}
 	if _, err := freezer.pool.Exec(ctx, `UPDATE mira_cold_objects o SET orphaned_at=now()
  WHERE orphaned_at IS NULL AND NOT deleting AND created_at<now()-interval '1 hour'
-   AND NOT EXISTS(SELECT 1 FROM codex_thread_events e WHERE e.cold_sha256=o.sha256)`); err != nil {
+   AND NOT (EXISTS(SELECT 1 FROM codex_thread_events e WHERE e.cold_sha256=o.sha256)
+   OR EXISTS(SELECT 1 FROM mira_claude_events c WHERE c.cold_sha256=o.sha256)
+   OR EXISTS(SELECT 1 FROM mira_claude_entries n WHERE n.cold_sha256=o.sha256))`); err != nil {
 		return 0, err
 	}
 	if _, err := freezer.pool.Exec(ctx, `DELETE FROM mira_cold_thread_scans s WHERE NOT EXISTS(
@@ -320,7 +339,9 @@ func (freezer *Freezer) Collect(ctx context.Context) (int, error) {
 	for {
 		rows, err := freezer.pool.Query(ctx, `UPDATE mira_cold_objects o SET deleting=true
  WHERE sha256 IN (SELECT sha256 FROM mira_cold_objects WHERE deleting OR orphaned_at<$1 LIMIT 64)
-   AND (deleting OR (orphaned_at<$1 AND NOT EXISTS(SELECT 1 FROM codex_thread_events e WHERE e.cold_sha256=o.sha256)))
+   AND (deleting OR (orphaned_at<$1 AND NOT (EXISTS(SELECT 1 FROM codex_thread_events e WHERE e.cold_sha256=o.sha256)
+   OR EXISTS(SELECT 1 FROM mira_claude_events c WHERE c.cold_sha256=o.sha256)
+   OR EXISTS(SELECT 1 FROM mira_claude_entries n WHERE n.cold_sha256=o.sha256))))
  RETURNING sha256`, grace)
 		if err != nil {
 			return deleted, err

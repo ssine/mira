@@ -330,7 +330,7 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 	if err := turnRows.Err(); err != nil {
 		return Result{}, err
 	}
-	rows, err := service.pool.Query(ctx, `SELECT seq,turn_id::text,payload FROM mira_claude_events WHERE session_id=$1
+	rows, err := service.pool.Query(ctx, `SELECT seq,turn_id::text,payload,cold_sha256 FROM mira_claude_events WHERE session_id=$1
 	  AND event_type IN ('mira_user','assistant','user') ORDER BY seq`, sessionID)
 	if err != nil {
 		return Result{}, err
