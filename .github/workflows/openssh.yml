@@ -1,10 +1,20 @@
 name: Embedded OpenSSH
 on:
   workflow_call:
+    # Callers may build one platform family per call so dependent jobs can
+    # start as soon as the bundles they consume exist. Both default to true.
+    inputs:
+      linux:
+        type: boolean
+        default: true
+      windows:
+        type: boolean
+        default: true
 permissions:
   contents: read
 jobs:
   linux:
+    if: ${{ inputs.linux }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +65,7 @@ jobs:
           path: ${{ runner.temp }}/openssh-linux-${{ matrix.arch }}.tar.gz
 
   windows-c:
+    if: ${{ inputs.windows }}
     runs-on: windows-2022
     timeout-minutes: 60
     steps:

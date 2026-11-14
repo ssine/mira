@@ -3,6 +3,8 @@ name: Unified Mira CI
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - "node/**"
       - "package.json"
@@ -48,6 +50,15 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes the older run. Runs on main
+# are never cancelled so every merged commit keeps a complete result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Jobs depend only on the native bundles they consume: Go tests start
+# immediately, linked-image SSH tests wait only for Linux bundles, and release
+# archives wait for every platform.
 jobs:
   android-capture-regression:
     runs-on: ubuntu-latest
@@ -66,11 +77,19 @@ jobs:
           python3 tests/android_accessibility_capture_regression.py
           python3 tests/android_input_status_regression.py
 
-  embedded-openssh:
+  embedded-openssh-linux:
     uses: ./.github/workflows/openssh.yml
+    with:
+      linux: true
+      windows: false
 
-  checks:
-    needs: embedded-openssh
+  embedded-openssh-windows:
+    uses: ./.github/workflows/openssh.yml
+    with:
+      linux: false
+      windows: true
+
+  go:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -113,6 +132,26 @@ jobs:
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/mira.exe ./cmd/mira
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o /tmp/mira-android ./cmd/mira
 
+  release-archives:
+    needs: [embedded-openssh-linux, embedded-openssh-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
+      - name: Install JavaScript test dependencies
+        run: npm ci --ignore-scripts
+
       - uses: actions/download-artifact@v4
         with:
           pattern: openssh-*-amd64
@@ -140,6 +179,37 @@ jobs:
 
       - name: Build the Node-free unified Mira image
         run: docker build --build-arg MIRA_VERSION="$(cat VERSION)" -f node/Dockerfile -t mira:ci .
+
+  openssh-e2e:
+    needs: embedded-openssh-linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
+      - name: Install JavaScript test dependencies
+        run: npm ci --ignore-scripts
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: openssh-linux-amd64
+          path: ${{ runner.temp }}/native
+
+      - name: Stage verified Linux native bundle
+        shell: bash
+        run: |
+          mkdir -p node/openssh/out/linux-amd64
+          tar -xzf "$RUNNER_TEMP/native/openssh-linux-amd64.tar.gz" -C node/openssh/out/linux-amd64
 
       - name: Test embedded OpenSSH through the Go Server
         env:
