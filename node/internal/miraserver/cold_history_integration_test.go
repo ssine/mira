@@ -183,6 +183,16 @@ func TestColdHistoryRoundTrip(t *testing.T) {
 	coldstore.SetDefault(store)
 	defer coldstore.SetDefault(nil)
 	freezer := coldstore.NewFreezer(pool, objects, coldstore.FreezerOptions{FreezeAfter: 24 * time.Hour, MinBytes: 4 << 10, OrphanGrace: time.Hour})
+	// Until the conversation index covers the conversation, nothing moves.
+	if _, err := pool.Exec(ctx, `DELETE FROM mira_conversation_index_state WHERE store_id=$1`, storeID); err != nil {
+		t.Fatal(err)
+	}
+	if early, err := freezer.FreezePass(ctx, 10); err != nil || early.Threads != 0 {
+		t.Fatalf("froze before indexing: %+v %v", early, err)
+	}
+	if complete, err := views.IndexCodexThread(ctx, storeID, threadID, time.Time{}); err != nil || !complete {
+		t.Fatalf("index: %v %v", complete, err)
+	}
 	stats, err := freezer.FreezePass(ctx, 10)
 	if err != nil {
 		t.Fatal(err)

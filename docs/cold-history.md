@@ -68,7 +68,8 @@ failure is a clean HTTP error, not a truncated body. The cache is bounded (`CACH
 
 The freezer runs in the Server worker 10 minutes after start, so a Supervisor rollback after a
 failed health check never meets placeholders. It visits idle conversations whose generation or item
-count changed since their last scan, and per row:
+count changed since their last scan and that the conversation index already covers (so the index
+backfill after an upgrade reads hot rows instead of downloading), and per row:
 
 1. compresses the body and verifies the compressed bytes decode to the same SHA-256;
 2. uploads with `Content-MD5` unless an uploaded object with that address exists;

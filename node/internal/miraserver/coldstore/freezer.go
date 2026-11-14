@@ -125,7 +125,8 @@ type candidateThread struct {
 }
 
 // FreezePass processes up to limit idle conversations that changed since
-// their last scan.
+// their last scan. A conversation waits until the conversation index covers
+// it, so the index backfill after an upgrade never downloads frozen bodies.
 func (freezer *Freezer) FreezePass(ctx context.Context, limit int) (FreezeStats, error) {
 	stats := FreezeStats{}
 	cutoff := time.Now().Add(-freezer.options.FreezeAfter)
@@ -134,6 +135,8 @@ func (freezer *Freezer) FreezePass(ctx context.Context, limit int) (FreezeStats,
  LEFT JOIN mira_cold_thread_scans s ON s.store_id=p.store_id AND s.thread_id=p.thread_id
  WHERE p.updated_at<$1 AND p.item_count>0
    AND (s.thread_id IS NULL OR s.generation<>p.active_generation OR s.item_count<>p.item_count)
+   AND EXISTS(SELECT 1 FROM mira_conversation_index_state i WHERE i.store_id=p.store_id AND i.thread_id=p.thread_id
+     AND i.generation=p.active_generation AND i.indexed_count>=p.item_count)
    AND NOT EXISTS(SELECT 1 FROM mira_thread_actions a WHERE a.store_id=p.store_id AND a.thread_id=p.thread_id AND a.action='delete')
  ORDER BY p.updated_at LIMIT $2`, cutoff, limit)
 	if err != nil {
