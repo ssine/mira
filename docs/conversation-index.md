@@ -128,6 +128,12 @@ fall back to paged history while a very large conversation is still indexing.
   time is to scale (shared scale, zoomable). Model phases are turn time not
   covered by tools, attributed by event boundaries, not provider latency. User
   message markers jump to the message; subagent lane labels open the subagent.
+  A remembered "最近 1 小时" mode shows one real-time hour (ending now while the
+  conversation runs, otherwise at its last activity) without folded gaps. While
+  the conversation runs, unfinished turns and tool calls grow to the current
+  time every second (unfinished intervals without evidence for 15 minutes keep
+  their last evidence). The panel floats over the reading surface, so opening
+  or closing it never moves the transcript.
 
 ## Limits
 

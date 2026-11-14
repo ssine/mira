@@ -107,7 +107,7 @@ try {
   const revealed = async seq => page.waitForFunction(seq => {
     const card = document.querySelector(`[data-trace-key="history-${seq}-user"]`);
     const scroller = document.querySelector("#conversationScroll").getBoundingClientRect();
-    const overlay = Math.max(scroller.top, document.querySelector(".conversation-notices").getBoundingClientRect().bottom);
+    const overlay = Math.max(scroller.top, document.querySelector(".conversation-notices").getBoundingClientRect().bottom, document.querySelector("#conversationTimeline").hidden ? 0 : document.querySelector("#conversationTimeline").getBoundingClientRect().bottom);
     if (!card) return false;
     const offset = card.getBoundingClientRect().top - overlay;
     return offset >= 0 && offset < 40;
@@ -136,8 +136,14 @@ try {
   assert.equal(await panel.isVisible(), false, "the timeline starts collapsed");
   assert.equal(await toggle.getAttribute("aria-expanded"), "false");
   assert.equal(requests.timeline, 0, "a collapsed timeline makes no request");
+  // Opening and closing the floating panel never moves the transcript.
+  const readingTop = () => page.evaluate(() => [...document.querySelectorAll("#conversationTrace .trace-card")]
+    .map(card => card.getBoundingClientRect().top).find(top => top > 0));
+  const before = await readingTop();
   await toggle.click();
   await panel.locator(".timeline-chart").waitFor();
+  await page.waitForTimeout(100);
+  assert.equal(await readingTop(), before, "opening the timeline keeps the transcript in place");
   assert.equal(await toggle.getAttribute("aria-expanded"), "true");
   assert.equal(requests.timeline, 1);
   assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^2 段 · 活跃 15 分 · 工具 3 次 · 子 Agent 1$/);
@@ -156,11 +162,24 @@ try {
   assert.equal(await panel.locator(".timeline-span.wait").count(), 1);
   await panel.locator(`.timeline-message.user[data-timeline-seq="${userSeq(4)}"]`).click();
   await revealed(userSeq(4));
+  // The fixed last-hour view shows real time without folded idle gaps, and is remembered.
+  await panel.locator('[data-timeline-mode="hour"]').click();
+  assert.equal(await panel.locator('[data-timeline-mode="hour"]').getAttribute("aria-pressed"), "true");
+  assert.equal(await panel.locator(".timeline-break").count(), 0, "no breaks in the hour view");
+  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^最近 1 小时 · /);
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.mode")), "hour");
+  assert.equal(await panel.locator('.timeline-message.user[data-timeline-seq="1"]').count(), 0, "messages outside the hour are hidden");
+  assert.equal(await panel.locator(`.timeline-message.user[data-timeline-seq="${userSeq(4)}"]`).count(), 1);
+  await panel.locator('[data-timeline-mode="all"]').click();
+  assert.equal(await panel.locator(".timeline-break").count(), 1);
   await panel.locator("[data-timeline-zoom=in]").click();
   assert.ok(Number(await panel.locator(".timeline-chart").getAttribute("width")) > geometry.width, "zooming widens the chart");
+  const beforeClose = await readingTop();
   await panel.locator("[data-timeline-close]").focus();
   await page.keyboard.press("Escape");
   assert.equal(await panel.isVisible(), false);
+  await page.waitForTimeout(100);
+  assert.equal(await readingTop(), beforeClose, "closing the timeline keeps the transcript in place");
   assert.equal(await toggle.getAttribute("aria-expanded"), "false");
 
   // Search replaces the list and jumps to the matching message.

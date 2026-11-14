@@ -40,7 +40,7 @@ try {
   const userCard = index => page.locator("#conversationTrace .trace-card.user").nth(index);
   const near = async index => page.waitForFunction(index => {
     const card = document.querySelectorAll("#conversationTrace .trace-card.user")[index];
-    const overlay = Math.max(document.querySelector("#conversationScroll").getBoundingClientRect().top, document.querySelector(".conversation-notices").getBoundingClientRect().bottom);
+    const overlay = Math.max(document.querySelector("#conversationScroll").getBoundingClientRect().top, document.querySelector(".conversation-notices").getBoundingClientRect().bottom, document.querySelector("#conversationTimeline").hidden ? 0 : document.querySelector("#conversationTimeline").getBoundingClientRect().bottom);
     const offset = card?.getBoundingClientRect().top - overlay;
     return offset >= 0 && offset < 40;
   }, index);

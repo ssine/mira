@@ -115,6 +115,24 @@ function svg(tag, attributes = {}, title) {
   return node;
 }
 
+// While the conversation runs, unfinished turns and tool calls grow to "now".
+// Stale unfinished intervals (no evidence for 15 minutes) keep their last
+// evidence, so an abandoned call never stretches across hours.
+const liveHorizonMs = 15 * 60 * 1000;
+export function liveLanes(lanes, now, running) {
+  if (!running) return lanes;
+  const extend = item => item.open && now >= item.end && now - item.end < liveHorizonMs ? { ...item, end: now, live: true } : item;
+  return lanes.map(lane => ({ ...lane, turns: (lane.turns ?? []).map(extend), tools: (lane.tools ?? []).map(extend) }));
+}
+
+export const hourMs = 60 * 60 * 1000;
+// The fixed window ends now while running, otherwise at the last activity.
+export function hourWindow(lanes, now, running) {
+  const segments = activitySegments(lanes);
+  const end = running ? now : segments.at(-1)?.end ?? now;
+  return { start: end - hourMs, end };
+}
+
 export function timelineSummary(data) {
   const segments = activitySegments(data.lanes ?? []);
   const active = segments.reduce((sum, segment) => sum + segment.end - segment.start, 0);
@@ -137,6 +155,8 @@ export class ConversationTimeline {
     this.zoom = 1;
     this.request = 0;
     this.timer = null;
+    this.ticker = null;
+    try { this.mode = localStorage.getItem("mira.timeline.mode") === "hour" ? "hour" : "all"; } catch { this.mode = "all"; }
     toggle.addEventListener("click", () => this.setOpen(!this.open));
     root.querySelector("[data-timeline-close]")?.addEventListener("click", () => { this.setOpen(false); toggle.focus(); });
     root.addEventListener("keydown", event => {
@@ -148,6 +168,8 @@ export class ConversationTimeline {
     this.body.addEventListener("click", event => {
       const zoom = event.target.closest("[data-timeline-zoom]");
       if (zoom) { this.setZoom(zoom.dataset.timelineZoom); return; }
+      const mode = event.target.closest("[data-timeline-mode]");
+      if (mode) { this.setMode(mode.dataset.timelineMode); return; }
       const message = event.target.closest("[data-timeline-seq]");
       if (message) { this.onJump?.(message.dataset.timelineThread, Number(message.dataset.timelineSeq), message.dataset.timelineRole); return; }
       const lane = event.target.closest("[data-timeline-open]");
@@ -190,7 +212,21 @@ export class ConversationTimeline {
     this.body.replaceChildren();
   }
 
-  stop() { clearTimeout(this.timer); this.timer = null; }
+  stop() { clearTimeout(this.timer); this.timer = null; this.setTicker(false); }
+
+  // Re-render every second while something is growing (or the hour window
+  // slides) and the panel is open; the data itself refreshes every 10 s.
+  setTicker(on) {
+    if (on && !this.ticker && this.open) this.ticker = setInterval(() => { if (this.open) this.render(); else this.setTicker(false); }, 1000);
+    else if (!on && this.ticker) { clearInterval(this.ticker); this.ticker = null; }
+  }
+
+  setMode(mode) {
+    this.mode = mode === "hour" ? "hour" : "all";
+    try { localStorage.setItem("mira.timeline.mode", this.mode); } catch { /* Preference only. */ }
+    this.zoom = 1;
+    this.render();
+  }
 
   // running: keep following an active conversation while expanded.
   async refresh({ running = false } = {}) {
@@ -213,6 +249,7 @@ export class ConversationTimeline {
 
   setRunning(running) {
     this.running = running;
+    if (!running) { this.setTicker(false); if (this.data) this.render(); }
     if (running && this.open && !this.timer) this.timer = setTimeout(() => void this.refresh(), 2_000);
   }
 
@@ -224,9 +261,16 @@ export class ConversationTimeline {
   render() {
     const data = this.data;
     if (!data) return;
-    const lanes = data.lanes ?? [];
-    const segments = activitySegments(lanes);
-    this.summary.textContent = segments.length ? timelineSummary(data) : "";
+    const now = Date.now(), hour = this.mode === "hour";
+    const lanes = liveLanes(data.lanes ?? [], now, this.running);
+    const live = lanes.some(lane => [...(lane.turns ?? []), ...(lane.tools ?? [])].some(item => item.live));
+    this.setTicker(live);
+    const all = activitySegments(lanes);
+    const range = hour && all.length ? hourWindow(lanes, now, this.running) : null;
+    // The hour view is one real-time segment: idle time is shown, not folded.
+    const segments = range ? [range] : all;
+    const visible = item => !range || item.end >= range.start && item.start <= range.end;
+    this.summary.textContent = all.length ? `${hour ? "最近 1 小时 · " : ""}${timelineSummary({ ...data, lanes })}` : "";
     if (!segments.length) {
       this.body.replaceChildren(Object.assign(document.createElement("p"), { className: "timeline-status", textContent: "还没有可显示的活动。" }));
       return;
@@ -241,7 +285,19 @@ export class ConversationTimeline {
     toolbar.className = "timeline-toolbar";
     const legend = document.createElement("ul");
     legend.className = "timeline-legend";
-    for (const [kind, label] of [["model", "模型"], ["tool", "工具"], ["wait", "等待"], ["user", "你的消息"], ["break", "空闲已折叠"]]) {
+    const modes = document.createElement("div");
+    modes.className = "timeline-modes";
+    modes.setAttribute("role", "group");
+    modes.setAttribute("aria-label", "时间范围");
+    for (const [value, text] of [["all", "全部"], ["hour", "最近 1 小时"]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.timelineMode = value;
+      button.textContent = text;
+      button.setAttribute("aria-pressed", String(this.mode === value));
+      modes.append(button);
+    }
+    for (const [kind, label] of [["model", "模型"], ["tool", "工具"], ["wait", "等待"], ["user", "你的消息"], ...(hour ? [] : [["break", "空闲已折叠"]]), ...(live ? [["live", "进行中"]] : [])]) {
       const item = document.createElement("li");
       item.dataset.kind = kind;
       item.textContent = label;
@@ -260,7 +316,7 @@ export class ConversationTimeline {
       if (value === "out" || value === "fit") button.disabled = this.zoom === 1;
       zoom.append(button);
     }
-    toolbar.append(legend, zoom);
+    toolbar.append(modes, legend, zoom);
     if (data.partial) {
       const note = document.createElement("span");
       note.className = "timeline-partial";
@@ -335,20 +391,21 @@ export class ConversationTimeline {
       const top = axisHeight + index * laneHeight;
       const row = svg("g", { class: "timeline-lane", "data-thread-id": lane.threadId });
       row.append(svg("rect", { x: 0, y: top, width: layout.width + chartPad * 2, height: laneHeight, class: index % 2 ? "timeline-row odd" : "timeline-row" }));
-      for (const turn of lane.turns ?? []) {
-        row.append(svg("rect", { x: x(turn.start), y: top + laneHeight / 2 - 1, width: Math.max(1, x(turn.end) - x(turn.start)), height: 2, class: `timeline-turn${turn.open ? " open" : ""}` },
-          `轮次 · ${clock(turn.start, true)} 起 · ${formatDuration(turn.end - turn.start)}${turn.open ? " · 未观测到结束" : turn.status === "aborted" ? " · 已中断" : ""}`));
+      for (const turn of (lane.turns ?? []).filter(visible)) {
+        row.append(svg("rect", { x: x(turn.start), y: top + laneHeight / 2 - 1, width: Math.max(1, x(turn.end) - x(turn.start)), height: 2, class: `timeline-turn${turn.live ? " live" : turn.open ? " open" : ""}` },
+          `轮次 · ${clock(turn.start, true)} 起 · ${formatDuration(turn.end - turn.start)}${turn.live ? " · 进行中" : turn.open ? " · 未观测到结束" : turn.status === "aborted" ? " · 已中断" : ""}`));
       }
-      for (const [start, end] of modelPhases(lane)) {
-        row.append(svg("rect", { x: x(start), y: top + 6, width: Math.max(1, x(end) - x(start)), height: laneHeight - 12, class: "timeline-span model" },
-          `模型阶段 · ${formatDuration(end - start)}（按工具边界归因）`));
+      for (const [start, end] of modelPhases(lane).filter(([start, end]) => visible({ start, end }))) {
+        const growing = (lane.turns ?? []).some(turn => turn.live && end === turn.end);
+        row.append(svg("rect", { x: x(start), y: top + 6, width: Math.max(1, x(end) - x(start)), height: laneHeight - 12, class: `timeline-span model${growing ? " live" : ""}` },
+          `模型阶段 · ${formatDuration(end - start)}${growing ? " · 进行中" : ""}（按工具边界归因）`));
       }
-      for (const tool of lane.tools ?? []) {
+      for (const tool of (lane.tools ?? []).filter(visible)) {
         row.append(svg("rect", { x: x(tool.start), y: top + 5, width: Math.max(2, x(tool.end) - x(tool.start)), height: laneHeight - 10,
-          class: `timeline-span ${tool.kind === "wait" ? "wait" : "tool"}${tool.open ? " open" : ""}` },
-          `${tool.name} · ${clock(tool.start, true)} · ${formatDuration(tool.end - tool.start)}${tool.open ? " · 未观测到返回" : ""}`));
+          class: `timeline-span ${tool.kind === "wait" ? "wait" : "tool"}${tool.live ? " live" : tool.open ? " open" : ""}` },
+          `${tool.name} · ${clock(tool.start, true)} · ${formatDuration(tool.end - tool.start)}${tool.live ? " · 进行中" : tool.open ? " · 未观测到返回" : ""}`));
       }
-      for (const message of lane.messages ?? []) {
+      for (const message of (lane.messages ?? []).filter(message => visible({ start: message.at, end: message.at }))) {
         const cx = x(message.at);
         if (message.role === "user") {
           const marker = svg("path", { d: `M${cx} ${top + 4} l5 7 l-5 7 l-5 -7 z`, class: "timeline-message user", tabindex: 0, role: "button",
@@ -365,7 +422,9 @@ export class ConversationTimeline {
     scroller.append(chart);
     grid.append(labels, scroller);
     this.body.replaceChildren(toolbar, grid);
-    if (previousScroll !== null) scroller.scrollLeft = previousScroll;
+    // Zoomed views follow the growing end unless the reader scrolled away.
+    const following = scroll && scroll.scrollLeft + scroll.clientWidth >= scroll.scrollWidth - 4;
+    if (previousScroll !== null && !(live && following)) scroller.scrollLeft = previousScroll;
     else if (this.zoom > 1) scroller.scrollLeft = scroller.scrollWidth;
   }
 }

@@ -5,7 +5,7 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 `home_nodes` dynamicTools 或 `mira` CLI 操作其他在线设备。PostgreSQL 是 thread 历史唯一的
 持久化事实来源。
 
-1.0.112 修复使用非默认账号运行的 Codex 对话在节点默认 App Server 停止或已删除后被误判为「运行环境已停止或重启，状态待确认」的问题。只需升级 Server。
+1.0.113 修复使用非默认账号运行的 Codex 对话在节点默认 App Server 停止或已删除后被误判为「运行环境已停止或重启，状态待确认」的问题。只需升级 Server。
 
 1.0.108 支持删除已停止的 Codex 账号并保留历史会话；ChatGPT 登录账号可按对话切换 Fast，新对话沿用该账号最近主会话的模型、思考强度和 Fast 设置。Web 账号选择器不再生成 Claude「Node 默认配置」入口。只需升级 Server。
 
@@ -216,13 +216,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.112
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.113
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.112'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.113'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
