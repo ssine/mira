@@ -94,9 +94,14 @@ func (service *Service) Register(ctx context.Context, nodeID string, body map[st
 	if err != nil {
 		return Result{}, err
 	}
+	claudeAccounts, err := service.ClaudeAccountLabels(ctx, nodeID)
+	if err != nil {
+		return Result{}, err
+	}
 	return result(200, map[string]any{
 		"nodeId": returnedNodeID, "desiredAppServer": desired,
 		"codexAccounts":            accounts,
+		"claudeAccounts":           claudeAccounts,
 		"heartbeatIntervalSeconds": 3, "registeredAt": formatTime(registeredAt),
 		"lastSeenAt": formatTime(lastSeenAt),
 	}), nil
@@ -164,7 +169,11 @@ func (service *Service) Heartbeat(ctx context.Context, nodeID string, body map[s
 	if err != nil {
 		return Result{}, err
 	}
-	return result(200, map[string]any{"desiredAppServer": desired, "codexAccounts": accounts, "serverTime": formatTime(serverTime)}), nil
+	claudeAccounts, err := service.ClaudeAccountLabels(ctx, nodeID)
+	if err != nil {
+		return Result{}, err
+	}
+	return result(200, map[string]any{"desiredAppServer": desired, "codexAccounts": accounts, "claudeAccounts": claudeAccounts, "serverTime": formatTime(serverTime)}), nil
 }
 
 // List returns approved Nodes unless includeRevoked is true.

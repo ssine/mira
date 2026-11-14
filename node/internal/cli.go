@@ -818,60 +818,24 @@ func (client *cliClient) runAppServer(ctx context.Context, args []string, stdin 
 	}
 }
 
-func (client *cliClient) runCodex(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
-	if len(args) > 0 && args[0] == "--" {
-		args = args[1:]
-	}
-	candidates := codexCandidatePaths(os.Getenv("CODEX_BINARY"))
-	if os.Getenv("CODEX_BINARY") == "" {
-		store, err := newCodexRuntimeStore(client.options.Identity)
-		if err != nil {
-			return err
-		}
-		binary, err := store.ensure(ctx, stderr)
-		if err != nil {
-			return err
-		}
-		candidates = []string{binary}
-	}
-	codexPath := ""
-	for _, candidate := range candidates {
-		if supportsRemoteThreadStore(ctx, candidate) {
-			codexPath = candidate
-			break
-		}
-	}
-	if codexPath == "" {
-		return fmt.Errorf("selected Codex does not support Mira's remote ThreadStore; check CODEX_BINARY or mira codex-runtime status")
-	}
-	storeID := os.Getenv("MIRA_CODEX_STORE_ID")
-	if storeID == "" {
-		storeID = "personal"
-	}
-	remoteArgs := []string{
-		"-c", codexDefaultSubagentOverride,
-		"-c", `experimental_thread_store.type="remote_http"`,
-		"-c", "experimental_thread_store.endpoint=" + strconv.Quote(client.identity.ServerURL),
-		"-c", "experimental_thread_store.store_id=" + strconv.Quote(storeID),
-		"-c", `approval_policy="never"`,
-		"-c", `sandbox_mode="danger-full-access"`,
-	}
-	stateOverride, err := codexSQLiteOverride(client.options.Identity, codexPath, nil)
-	if err != nil {
-		return err
-	}
-	if stateOverride != "" {
-		remoteArgs = append(remoteArgs, "-c", stateOverride)
-	}
-	command := exec.CommandContext(ctx, codexPath, append(remoteArgs, args...)...)
-	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
-	command.Env = append(os.Environ(), "MIRA_NODE_TOKEN="+client.identity.Token, "MIRA_SERVER_URL="+client.identity.ServerURL)
-	return command.Run()
-}
-
 func requestedCLIHelp(args []string) ([]string, bool) {
 	if len(args) > 0 && args[0] == "help" {
 		return args[1:], true
+	}
+	if len(args) > 0 && (args[0] == "codex" || args[0] == "claude") {
+		// Engine arguments keep their own --help; only a leading one is Mira's.
+		launch, err := parseLauncherArgs(args[1:], true)
+		separated := false
+		for _, arg := range args[1:] {
+			if arg == "--" {
+				separated = true
+				break
+			}
+		}
+		if err == nil && !separated && len(launch.args) > 0 && (launch.args[0] == "--help" || launch.args[0] == "-h") {
+			return args[:1], true
+		}
+		return nil, false
 	}
 	for index, arg := range args {
 		if arg == "--help" || arg == "-h" {
@@ -906,7 +870,9 @@ Commands:
   schedule       Manage scheduled scripts and execution history
   site           Register persistent public sites for Node loopback ports
   app-server     Inspect, start, stop or connect to Codex App Server
-  codex          Run the Mira-managed Codex CLI
+  accounts       List this Node's Codex and Claude accounts (offline)
+  codex          Choose a Codex account and run Codex CLI
+  claude         Choose a Claude account and run Claude Code (offline)
   codex-runtime  Inspect or prepare the pinned Codex runtime
   ssh/scp/sftp   Use native OpenSSH over Mira's relay
 
@@ -1018,9 +984,30 @@ Restart the installed builtin Supervisor, inheriting the current environment.`,
 The installed executable discovers its own state directory. --state-dir is
 available for diagnostics or nonstandard launchers. The old local Supervisor
 continues an accepted update if this CLI, SSH session, Node, or Server exits.`,
-		"codex": `Usage: mira codex [-- Codex arguments...]
+		"accounts": `Usage: mira accounts [list] [--json]
 
-Runs the compatible pinned Codex runtime with Mira's PostgreSQL ThreadStore.`,
+Lists the Codex and Claude accounts configured on this Node from local files,
+without contacting Mira Server. The selector column is accepted by --account.`,
+		"codex": `Usage: mira codex [--account SELECTOR] [--offline|--online] [--] [Codex arguments...]
+
+Runs Codex CLI with one of this Node's Codex accounts: its Codex home, managed
+API profile, environment and account proxy. Without --account an interactive
+menu opens; Enter repeats the last choice. A selector is a Node account UUID or
+unique prefix, "local" or an exact account name.
+
+When Mira Server is reachable the session uses Mira's PostgreSQL ThreadStore.
+Otherwise (or with --offline) Codex keeps its rollouts in the account's local
+Codex home. --online fails instead of falling back. Launcher defaults
+(approval_policy="never", sandbox_mode="danger-full-access") precede your
+arguments, so explicit -c options still win.`,
+		"claude": `Usage: mira claude [--account SELECTOR] [--] [Claude Code arguments...]
+
+Runs Claude Code with one of this Node's Claude accounts: its private config
+directory (subscription login or API key), model, effort and account proxy.
+It never contacts Mira Server. Sessions stay in that account's local Claude
+transcripts and are not mirrored to Mira. A selector is a Node account UUID,
+unique prefix or the subscription's login email. Without --account an
+interactive menu opens; Enter repeats the last choice.`,
 		"codex-runtime": `Usage: mira codex-runtime <status|prepare> [--json]`,
 		"ssh": `Usage: mira ssh [OpenSSH options] <node-id|nodeKey|alias> [-- command...]
 
@@ -1250,6 +1237,42 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		}
 		return 0
 	}
+	if remaining[0] == "codex" || remaining[0] == "claude" {
+		// Account launchers read Node-local files and work without Mira Server.
+		if options.JSON {
+			printCLIError(stderr, options, fmt.Errorf("--json is not supported by the interactive %s launcher", remaining[0]))
+			return 64
+		}
+		launcher := runCodexLauncher
+		if remaining[0] == "claude" {
+			launcher = runClaudeLauncher
+		}
+		if err := launcher(ctx, options, remaining[1:], stdin, stdout, stderr); err != nil {
+			var exitError *exec.ExitError
+			if errors.As(err, &exitError) {
+				return exitError.ExitCode()
+			}
+			fmt.Fprintln(stderr, "mira:", err)
+			return 1
+		}
+		return 0
+	}
+	if remaining[0] == "accounts" {
+		value, err := runLocalAccounts(options, remaining[1:])
+		if err != nil {
+			printCLIError(stderr, options, err)
+			return cliExitCode(err)
+		}
+		if !options.JSON {
+			printLocalAccounts(stdout, value)
+			return 0
+		}
+		if err := printResult(stdout, options, value); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if remaining[0] == "identity" && len(remaining) == 2 && remaining[1] == "show" {
 		state, err := loadIdentity(options.Identity)
 		if err != nil {
@@ -1269,21 +1292,6 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 	if err != nil {
 		printCLIError(stderr, options, err)
 		return cliExitCode(err)
-	}
-	if remaining[0] == "codex" {
-		if options.JSON {
-			printCLIError(stderr, options, fmt.Errorf("--json is not supported by the interactive Codex wrapper"))
-			return 64
-		}
-		if err := client.runCodex(ctx, remaining[1:], stdin, stdout, stderr); err != nil {
-			var exitError *exec.ExitError
-			if errors.As(err, &exitError) {
-				return exitError.ExitCode()
-			}
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		return 0
 	}
 	if remaining[0] == "ssh-proxy" {
 		if err := client.runSSHProxy(ctx, remaining[1:], stdin, stdout); err != nil {

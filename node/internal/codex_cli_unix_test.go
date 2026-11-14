@@ -33,7 +33,12 @@ printf '%s' "$MIRA_NODE_TOKEN" > "$MIRA_TEST_TOKEN"
 	client := &cliClient{identity: &persistedNodeState{
 		ServerURL: "https://mira.example.test", Token: "node-secret",
 	}}
-	if err := client.runCodex(context.Background(), []string{"--", "--version"}, bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+	identityFile := filepath.Join(directory, "identity.json")
+	launch := codexLaunch{client: client, identityFile: identityFile, account: localCodexAccount{
+		Enabled: true, Legacy: true, CodexHome: filepath.Join(directory, "codex-home"),
+		ConfigOverrides: []string{codexDefaultSubagentOverride},
+	}}
+	if err := runCodexAccount(context.Background(), launch, []string{"--version"}, bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 		t.Fatal(err)
 	}
 	arguments, err := os.ReadFile(argumentsFile)
@@ -59,7 +64,7 @@ printf '%s' "$MIRA_NODE_TOKEN" > "$MIRA_TEST_TOKEN"
 		t.Fatalf("Codex did not inherit the Node credential: %q, %v", token, err)
 	}
 	for _, override := range []string{"agents.max_threads=200", "agents.max_concurrent_threads_per_session=200"} {
-		if err := client.runCodex(context.Background(), []string{"-c", override, "--version"}, bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
+		if err := runCodexAccount(context.Background(), launch, []string{"-c", override, "--version"}, bytes.NewReader(nil), &bytes.Buffer{}, &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
 		arguments, err := os.ReadFile(argumentsFile)

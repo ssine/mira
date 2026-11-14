@@ -123,6 +123,27 @@ func (service *Service) DesiredAccounts(ctx context.Context, nodeID string) ([]m
 	return result, nil
 }
 
+// ClaudeAccountLabels returns display metadata only, never provider settings or
+// credentials, so a Node can label its accounts while Mira Server is offline.
+func (service *Service) ClaudeAccountLabels(ctx context.Context, nodeID string) ([]map[string]any, error) {
+	rows, err := service.db.Query(ctx, `SELECT node_account_id::text, name, enabled FROM mira_claude_accounts
+	  WHERE node_id = $1::uuid ORDER BY node_account_id LIMIT 256`, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("list Claude account labels: %w", err)
+	}
+	defer rows.Close()
+	result := []map[string]any{}
+	for rows.Next() {
+		var id, name string
+		var enabled bool
+		if err := rows.Scan(&id, &name, &enabled); err != nil {
+			return nil, err
+		}
+		result = append(result, map[string]any{"nodeAccountId": id, "name": name, "enabled": enabled})
+	}
+	return result, rows.Err()
+}
+
 func (service *Service) ReportAccounts(ctx context.Context, nodeID string, raw any) error {
 	if raw == nil {
 		return nil

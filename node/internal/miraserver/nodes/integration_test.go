@@ -129,6 +129,24 @@ func TestPostgresLifecycle(t *testing.T) {
 		}
 		wantResidency = map[string]any{"effectiveMemoryBytes": json.Number("4294967296")}
 	}
+	if registered.Body.(map[string]any)["claudeAccounts"] == nil {
+		t.Fatalf("registration omitted Claude account labels: %#v", registered.Body)
+	}
+	claudeID := "12345678-1234-4123-8123-0000000000c1"
+	if _, err := pool.Exec(ctx, `INSERT INTO mira_claude_accounts(node_account_id,node_id,name,enabled) VALUES($1,$2::uuid,'Max subscription',false)`, claudeID, nodeID); err != nil {
+		t.Fatal(err)
+	}
+	beat, err := service.Heartbeat(ctx, nodeID, map[string]any{"reportedAppServer": map[string]any{"status": "stopped"}})
+	if err != nil || beat.Status != 200 {
+		t.Fatalf("heartbeat = %#v, %v", beat, err)
+	}
+	labels, _ := beat.Body.(map[string]any)["claudeAccounts"].([]map[string]any)
+	if len(labels) != 1 || labels[0]["nodeAccountId"] != claudeID || labels[0]["name"] != "Max subscription" || labels[0]["enabled"] != false || len(labels[0]) != 3 {
+		t.Fatalf("heartbeat Claude labels = %#v", beat.Body)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM mira_claude_accounts WHERE node_account_id=$1`, claudeID); err != nil {
+		t.Fatal(err)
+	}
 	revoked, err := service.RevokeNode(ctx, request, principal, nodeID, nil)
 	if err != nil || revoked.Status != 200 {
 		t.Fatalf("revoke Node = %#v, %v", revoked, err)

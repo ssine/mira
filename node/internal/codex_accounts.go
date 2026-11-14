@@ -99,6 +99,28 @@ func (client *controlClient) setDesiredAccounts(accounts []desiredCodexAccount) 
 	client.accountsMu.Lock()
 	defer client.accountsMu.Unlock()
 	client.desiredAccounts = accounts
+	// Only Server-confirmed desired state refreshes the offline launch index.
+	client.recordLocalAccountIndex(client.effectiveDesiredAccountsLocked())
+}
+
+// effectiveDesiredAccountsLocked applies the Node's own desired App Server to
+// its legacy instance, adding that instance when the Server sent none.
+func (client *controlClient) effectiveDesiredAccountsLocked() []desiredCodexAccount {
+	accounts := append([]desiredCodexAccount(nil), client.desiredAccounts...)
+	hasDefault := false
+	for i := range accounts {
+		if accounts[i].IsDefault {
+			accounts[i].Desired = client.desired
+			hasDefault = true
+		}
+		if !accounts[i].Enabled {
+			accounts[i].Desired.Running = false
+		}
+	}
+	if !hasDefault {
+		accounts = append(accounts, desiredCodexAccount{IsDefault: true, Enabled: true, Desired: client.desired})
+	}
+	return accounts
 }
 
 func (client *controlClient) accountManager(id string) (*appServerManager, error) {
@@ -158,20 +180,7 @@ func (client *controlClient) reconcileAccounts(ctx context.Context) error {
 		entryContext, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		client.accountRuntimes[""] = &accountRuntime{manager: client.appServer, ctx: entryContext, cancel: cancel}
 	}
-	accounts := append([]desiredCodexAccount(nil), client.desiredAccounts...)
-	hasDefault := false
-	for i := range accounts {
-		if accounts[i].IsDefault {
-			accounts[i].Desired = client.desired
-			hasDefault = true
-		}
-		if !accounts[i].Enabled {
-			accounts[i].Desired.Running = false
-		}
-	}
-	if !hasDefault {
-		accounts = append(accounts, desiredCodexAccount{IsDefault: true, Enabled: true, Desired: client.desired})
-	}
+	accounts := client.effectiveDesiredAccountsLocked()
 	sort.SliceStable(accounts, func(i, j int) bool {
 		if accounts[i].IsDefault != accounts[j].IsDefault {
 			return accounts[i].IsDefault
