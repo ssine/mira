@@ -56,6 +56,14 @@ jobs:
             package: mira-codex-package-windows-amd64
     runs-on: [self-hosted, "${{ matrix.runner }}"]
     steps:
+      # The runner resolves `bash` from GITHUB_PATH before its own PATH. Without
+      # this, System32\bash.exe (the WSL launcher) would run every bash step,
+      # including those inside composite actions.
+      - name: Use Git Bash on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\bin'
+
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
