@@ -414,7 +414,9 @@ mira --help
 mira nodes                         # 面向人的紧凑表格
 mira nodes list --summary --json   # 面向 Agent 的精简、稳定 JSON
 mira nodes get --node 软路由 --json
-mira codex                         # 本机 Mira Codex；personal PostgreSQL store，默认 YOLO
+mira accounts                      # 本机 Codex / Claude 账号，离线可用
+mira codex                         # 选择 Codex 账号；Server 可达时用 PostgreSQL store，否则离线
+mira claude                        # 选择 Claude 账号启动 Claude Code（含账号代理，纯本地）
 mira file read --node nas --path /data/report.txt --output /tmp/report.txt
 mira file write --node nas --path /data/report.zip --input /tmp/report.zip
 mira process count --node homeserver --json
@@ -466,7 +468,7 @@ store_id = "personal"
 multi_agent_v2 = true
 ```
 
-本机直接运行时使用 `mira codex`。包装器从 identity file 安全设置 `MIRA_NODE_TOKEN`，并自动注入
+本机直接运行时使用 `mira codex`，先选择本机账号（见 [`docs/local-account-launchers.md`](docs/local-account-launchers.md)）。包装器从 identity file 安全设置 `MIRA_NODE_TOKEN`，并自动注入
 当前 Server endpoint、`personal` store 及默认 YOLO 策略；后置 Codex 参数可显式覆盖默认策略，
 `MIRA_CODEX_STORE_ID` 可选择其他 store。不要打印 token。
 补丁保留显式 `bearer_token` 仅用于受控开发兼容。

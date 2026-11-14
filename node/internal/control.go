@@ -31,6 +31,9 @@ type controlClient struct {
 	appServer         *appServerManager
 	accountsMu        sync.Mutex
 	desiredAccounts   []desiredCodexAccount
+	localIndexDigest  []byte
+	claudeLabels      []localClaudeLabel
+	claudeLabelsKnown bool
 	accountRuntimes   map[string]*accountRuntime
 	accountsClosed    bool
 	http              *http.Client
@@ -62,12 +65,14 @@ type registrationResponse struct {
 	NodeID                   string                `json:"nodeId"`
 	DesiredAppServer         desiredAppServer      `json:"desiredAppServer"`
 	CodexAccounts            []desiredCodexAccount `json:"codexAccounts"`
+	ClaudeAccounts           *[]localClaudeLabel   `json:"claudeAccounts"`
 	HeartbeatIntervalSeconds int                   `json:"heartbeatIntervalSeconds"`
 }
 
 type heartbeatResponse struct {
 	DesiredAppServer desiredAppServer      `json:"desiredAppServer"`
 	CodexAccounts    []desiredCodexAccount `json:"codexAccounts"`
+	ClaudeAccounts   *[]localClaudeLabel   `json:"claudeAccounts"`
 }
 
 type enrollmentResponse struct {
@@ -358,6 +363,7 @@ func (client *controlClient) register(ctx context.Context) error {
 		}
 	}
 	client.desired = response.DesiredAppServer
+	client.setClaudeLabels(response.ClaudeAccounts)
 	client.setDesiredAccounts(response.CodexAccounts)
 	if response.HeartbeatIntervalSeconds > 0 && firstEnv("MIRA_NODE_HEARTBEAT_SECONDS", "NODE_AGENT_HEARTBEAT_SECONDS") == "" {
 		client.configuration.HeartbeatInterval = time.Duration(response.HeartbeatIntervalSeconds) * time.Second
@@ -390,6 +396,7 @@ func (client *controlClient) heartbeat(ctx context.Context) error {
 		return err
 	}
 	client.desired = response.DesiredAppServer
+	client.setClaudeLabels(response.ClaudeAccounts)
 	client.setDesiredAccounts(response.CodexAccounts)
 	return nil
 }

@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -118,12 +117,7 @@ func (m *Manager) claudeBinary() (string, error) {
 	if binary := os.Getenv("MIRA_NODE_CLAUDE_BINARY"); binary != "" {
 		return binary, nil
 	}
-	name := "claude"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	path := filepath.Join(m.dir, "node_modules", "@anthropic-ai", "claude-agent-sdk-"+runtime.GOOS+"-"+runtime.GOARCH, name)
-	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+	if path := sdkExecutable(m.dir); path != "" {
 		return path, nil
 	}
 	return "", errors.New("Claude Code executable is unavailable; prepare the runtime first")

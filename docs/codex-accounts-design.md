@@ -13,7 +13,8 @@ PostgreSQL 仍是所有账号共享的唯一权威对话库。SQLite 不保存�
 
 在 Web 的「账号」页或 Node 账号列表新增账号。创建和继续对话时分别选择执行 Node 和账号；
 连接、模型目录、标题生成和额度都使用明确选中的账号。原有安装保留为该 Node 的默认账号。
-本次没有给 `mira codex` CLI 新增账号选择参数。
+`mira codex` / `mira claude` 可从终端选择本机账号，并在 Server 不可用时离线运行，见
+[本机账号启动器](local-account-launchers.md)。
 
 | 类型 | 凭据方式 |
 | --- | --- |

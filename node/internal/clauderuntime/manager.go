@@ -109,6 +109,19 @@ func (m *Manager) prepare() {
 		}
 	}()
 }
+
+// assetDigest names the prepared SDK directory for this build's pinned assets.
+func assetDigest() string {
+	names, _ := assets.ReadDir("assets")
+	hash := sha256.New()
+	for _, name := range names {
+		data, _ := assets.ReadFile("assets/" + name.Name())
+		hash.Write([]byte(name.Name()))
+		hash.Write(data)
+	}
+	return hex.EncodeToString(hash.Sum(nil))[:24]
+}
+
 func (m *Manager) install(ctx context.Context) (string, error) {
 	if runtime.GOOS == "android" {
 		return "", errors.New("Claude runtime is unavailable on Android")
@@ -119,13 +132,7 @@ func (m *Manager) install(ctx context.Context) (string, error) {
 		return "", errors.New("Claude requires Node.js 22 or newer on this execution Node (MIRA_NODE_CLAUDE_NODE may select it)")
 	}
 	names, _ := assets.ReadDir("assets")
-	hash := sha256.New()
-	for _, name := range names {
-		data, _ := assets.ReadFile("assets/" + name.Name())
-		hash.Write([]byte(name.Name()))
-		hash.Write(data)
-	}
-	dir := filepath.Join(m.root, hex.EncodeToString(hash.Sum(nil))[:24])
+	dir := filepath.Join(m.root, assetDigest())
 	if _, err := os.Stat(filepath.Join(dir, "ready")); err == nil {
 		return dir, nil
 	}
