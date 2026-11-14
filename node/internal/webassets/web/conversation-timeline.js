@@ -8,8 +8,8 @@ export const idleBreakMs = 10 * 60 * 1000;
 const breakWidth = 60;
 const chartPad = 10;
 const minSegmentWidth = 28;
-const laneHeight = 14;
-const axisHeight = 16;
+const laneHeight = 12;
+const axisHeight = 14;
 const labelWidth = () => matchMedia("(max-width: 640px)").matches ? 56 : 72;
 const heightKey = "mira.timeline.height";
 const tickSteps = [1e3, 5e3, 15e3, 30e3, 60e3, 5 * 60e3, 15 * 60e3, 30 * 60e3, 3600e3, 2 * 3600e3, 6 * 3600e3, 12 * 3600e3, 86400e3];
@@ -235,7 +235,7 @@ export class ConversationTimeline {
     const apply = height => {
       if (height == null) { this.root.style.height = ""; this.root.dataset.sized = "false"; return; }
       const max = Math.round(innerHeight * 0.8);
-      const value = Math.max(64, Math.min(max, Math.round(height)));
+      const value = Math.max(52, Math.min(max, Math.round(height)));
       this.root.style.height = `${value}px`;
       this.root.dataset.sized = "true";
       this.resizer.setAttribute("aria-valuenow", String(value));
@@ -469,7 +469,7 @@ export class ConversationTimeline {
       axis.append(svg("line", { x1: left, x2: right, y1: axisHeight - 1, y2: axisHeight - 1, class: "timeline-axis-line" }));
       const startDay = day(segment.start);
       // One row: the bold segment start, then ticks clear of it.
-      const startLabel = svg("text", { x: left, y: 11, class: "timeline-axis-start" });
+      const startLabel = svg("text", { x: left, y: 10, class: "timeline-axis-start" });
       startLabel.textContent = `${startDay !== previousDay ? `${startDay} ` : ""}${clock(segment.start)}`;
       previousDay = startDay;
       axis.append(startLabel);
@@ -479,7 +479,7 @@ export class ConversationTimeline {
         const startWidth = (startDay !== day(layout.segments[index - 1]?.start ?? 0) ? 72 : 40);
         if (position - left < startWidth + 18 || right - position < 22) continue;
         axis.append(svg("line", { x1: position, x2: position, y1: axisHeight - 4, y2: axisHeight - 1, class: "timeline-axis-tick" }));
-        const label = svg("text", { x: position, y: 11, class: "timeline-axis-text", "text-anchor": "middle" });
+        const label = svg("text", { x: position, y: 10, class: "timeline-axis-text", "text-anchor": "middle" });
         label.textContent = clock(at, step < 60e3);
         axis.append(label);
       }
@@ -491,7 +491,7 @@ export class ConversationTimeline {
         for (let y = axisHeight; y < height; y += 8) zig.push(`${right + breakWidth / 2 - 3},${y} ${right + breakWidth / 2 + 3},${y + 4}`);
         gap.append(svg("polyline", { points: zig.join(" "), class: "timeline-break-zigzag" }));
         // The gap length sits on the tick row; segment start labels use the row above.
-        const text = svg("text", { x: right + breakWidth / 2, y: 11, class: "timeline-break-text", "text-anchor": "middle" });
+        const text = svg("text", { x: right + breakWidth / 2, y: 10, class: "timeline-break-text", "text-anchor": "middle" });
         text.textContent = compactDuration(next.start - segment.end);
         gap.append(text);
         axis.append(gap);
@@ -519,7 +519,7 @@ export class ConversationTimeline {
       for (const message of (lane.messages ?? []).filter(message => visible({ start: message.at, end: message.at }))) {
         const cx = x(message.at);
         if (message.role === "user") {
-          const marker = svg("path", { d: `M${cx} ${top + 1} l4 6 l-4 6 l-4 -6 z`, class: "timeline-message user", tabindex: 0, role: "button",
+          const marker = svg("path", { d: `M${cx} ${top + 1} l3.5 5 l-3.5 5 l-3.5 -5 z`, class: "timeline-message user", tabindex: 0, role: "button",
             "data-timeline-seq": message.seq, "data-timeline-thread": lane.threadId, "data-timeline-role": "user",
             "aria-label": `跳到你的消息：${message.preview}` }, `${clock(message.at, true)} · ${message.preview}`);
           row.append(marker);

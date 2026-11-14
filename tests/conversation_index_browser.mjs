@@ -174,7 +174,7 @@ try {
   assert.equal(await panel.locator("button.timeline-lane-label").first().getAttribute("data-timeline-open"), child, "subagent lanes open their conversation");
   const compact = await panel.evaluate(element => ({ height: element.getBoundingClientRect().height,
     axisRows: new Set([...element.querySelectorAll(".timeline-axis text")].map(text => text.getAttribute("y"))).size }));
-  assert.ok(compact.height < 120 && compact.axisRows === 1, `compact panel with a one-row axis: ${JSON.stringify(compact)}`);
+  assert.ok(compact.height < 90 && compact.axisRows === 1, `compact panel with a one-row axis: ${JSON.stringify(compact)}`);
   // Drag the bottom edge to choose the height; double-click returns to automatic.
   const handle = await panel.locator("[data-timeline-resize]").boundingBox();
   await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);

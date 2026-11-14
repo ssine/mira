@@ -132,8 +132,8 @@ fall back to paged history while a very large conversation is still indexing.
 - **Timeline.** The desktop timeline button, or the menu's switch on touch
   devices, pins a compact non-modal panel to the top of the conversation: one
   header row (summary, range, zoom, ⓘ for counts and legend, ×), a one-row
-  axis and 14 px lanes. Every subagent has a lane, newest activity first under
-  its parent. Dragging the bottom edge sets a remembered height (double-click
+  axis and 12 px lanes. Every subagent has a lane, newest activity first under
+  its parent. Dragging the bottom edge (a grip shown on hover) sets a remembered height (double-click
   restores the automatic one); the panel scrolls inside. The transcript keeps
   scrolling underneath, and jumps land
   below the panel. Pinning is a remembered preference across conversations
