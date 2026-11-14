@@ -3,9 +3,12 @@ name: Server and Web CI
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     paths:
       - ".github/workflows/ci.yml"
       - "scripts/configure-ci-apt.sh"
+      - "scripts/ci-start-server.sh"
       - "VERSION"
       - "compose*.yaml"
       - "scripts/check-version.mjs"
@@ -22,6 +25,7 @@ on:
     paths:
       - ".github/workflows/ci.yml"
       - "scripts/configure-ci-apt.sh"
+      - "scripts/ci-start-server.sh"
       - "VERSION"
       - "compose*.yaml"
       - "scripts/check-version.mjs"
@@ -38,9 +42,19 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same pull request supersedes the older run. Runs on main
+# are never cancelled so every merged commit keeps a complete result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  TEST_DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
+
+# Independent suites run as parallel jobs. Each job owns its PostgreSQL
+# container and Server worker, so no suite depends on another suite's state.
 jobs:
-  checks:
-    # Keep the browser runner within pinned Playwright's supported platforms.
+  static:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -102,61 +116,153 @@ jobs:
           docker compose -f compose.yaml config --quiet
           docker compose -f compose.homeserver.yaml config --quiet
 
+  postgres:
+    name: postgres (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, claude]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
       - name: Test PostgreSQL migrations and read models
         env:
-          TEST_DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
+          SUITE: ${{ matrix.suite }}
         run: |
           docker compose -f compose.yaml up -d --wait postgres
           trap 'docker compose -f compose.yaml down -v' EXIT
-          MIRA_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/foundation
-          MIRA_NODES_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/nodes
-          MIRA_VIEWS_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/views
-          MIRA_IMPORT_ADAPTER_TEST_DATABASE_URL="$TEST_DATABASE_URL" MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver ./internal/miraserver/imports ./internal/miraserver/channel
-          MIRA_CLAUDE_SDK_TEST=1 MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver -run '^TestClaude' -count=1 -timeout 5m
+          case "$SUITE" in
+            core)
+              MIRA_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/foundation
+              MIRA_NODES_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/nodes
+              MIRA_VIEWS_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver/views
+              MIRA_IMPORT_ADAPTER_TEST_DATABASE_URL="$TEST_DATABASE_URL" MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver ./internal/miraserver/imports ./internal/miraserver/channel
+              ;;
+            claude)
+              MIRA_CLAUDE_SDK_TEST=1 MIRA_HISTORY_UPLOAD_TEST_DATABASE_URL="$TEST_DATABASE_URL" go -C node test ./internal/miraserver -run '^TestClaude' -count=1 -timeout 5m
+              ;;
+            *) echo "unknown suite $SUITE" >&2; exit 1 ;;
+          esac
+
+  e2e:
+    name: e2e (${{ matrix.suite }})
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [console, sites]
+    runs-on: ubuntu-24.04
+    env:
+      DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
+      MIRA_SECURE_COOKIES: "false"
+      LISTEN_HOST: 127.0.0.1
+      MIRA_NODE_PREVIEW_DOMAIN: preview.localhost
+      MIRA_NODE_SITE_STREAM_BUDGET: "3"
+      MIRA_NODE_PREVIEW_INGRESSES: '[{"consoleOrigin":"http://127.0.0.1:8787","previewOrigin":"http://preview.localhost:8787"},{"consoleOrigin":"http://direct.console.example.test:24443","previewOrigin":"http://preview.direct.localhost:34443"}]'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
 
       - name: Test Go Server, Web, authentication, and Node channel
         env:
-          DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
-          MIRA_SECURE_COOKIES: "false"
-          LISTEN_HOST: 127.0.0.1
-          MIRA_NODE_PREVIEW_DOMAIN: preview.localhost
-          MIRA_NODE_SITE_STREAM_BUDGET: "3"
-          MIRA_NODE_PREVIEW_INGRESSES: '[{"consoleOrigin":"http://127.0.0.1:8787","previewOrigin":"http://preview.localhost:8787"},{"consoleOrigin":"http://direct.console.example.test:24443","previewOrigin":"http://preview.direct.localhost:34443"}]'
+          SUITE: ${{ matrix.suite }}
         run: |
           docker compose -f compose.yaml up -d --wait postgres
           go -C node build -o "$RUNNER_TEMP/mira" ./cmd/mira
           printf '%s\n' 'mira-local-admin-password' | "$RUNNER_TEMP/mira" server admin set-password admin
-          "$RUNNER_TEMP/mira" server-worker >"$RUNNER_TEMP/mira-server.log" 2>&1 &
-          server_pid=$!
+          server_pid=$(bash scripts/ci-start-server.sh "$RUNNER_TEMP/mira" "$RUNNER_TEMP/mira-server.log")
           trap 'kill "$server_pid" >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
-          for attempt in $(seq 1 40); do
-            if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
-            if [ "$attempt" -eq 40 ]; then cat "$RUNNER_TEMP/mira-server.log"; exit 1; fi
-            sleep 0.5
-          done
-          MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/schedules_e2e.mjs
-          MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/schedules_e2e.mjs
-          node tests/web_console_e2e.mjs
-          MIRA_NODE_TRANSPORT=https node tests/web_console_e2e.mjs
-          MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs
+          case "$SUITE" in
+            console)
+              MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/schedules_e2e.mjs
+              MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/schedules_e2e.mjs
+              node tests/web_console_e2e.mjs
+              MIRA_NODE_TRANSPORT=https node tests/web_console_e2e.mjs
+              MIRA_NODE_TRANSPORT=https MIRA_TEST_BINARY="$RUNNER_TEMP/mira" MIRA_TEST_PREVIEW_INGRESSES="$MIRA_NODE_PREVIEW_INGRESSES" node tests/file_preview_e2e.mjs
+              ;;
+            sites)
+              npm ci --ignore-scripts
+              MIRA_SITE_RECLAIM_TEST=true MIRA_SITE_POOL_WAIT_MS=35000 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+              MIRA_NODE_TRANSPORT=https MIRA_SITE_RECLAIM_TEST=true MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+              kill "$server_pid"
+              wait "$server_pid" 2>/dev/null || true
+              server_pid=$(MIRA_NODE_SITE_STREAM_BUDGET=128 bash scripts/ci-start-server.sh "$RUNNER_TEMP/mira" "$RUNNER_TEMP/mira-server-capacity.log")
+              MIRA_NODE_SITE_STREAM_BUDGET=128 MIRA_SITE_PARALLEL_STREAMS=40 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
+              ;;
+            *) echo "unknown suite $SUITE" >&2; exit 1 ;;
+          esac
+
+  browser:
+    name: browser (${{ matrix.shard }})
+    # Keep the browser runner within pinned Playwright's supported platforms.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Shards are balanced by observed duration. Every regression in the
+        # former single list must appear in exactly one shard.
+        include:
+          - shard: activity
+            tests: client_cache web_shell thread_menu thread_activity
+          - shard: layout
+            tests: thread_pages sidebar_swipe thread_token_usage
+          - shard: conversation
+            tests: thread_list thinking_activity thread_models codex_fast codex_accounts claude_accounts claude_plan_usage claude_questions claude_cache account_overview sidebar_layout composer_drafts transcript_images conversation_scroll trace_diagrams markdown recovery_notices conversation_index conversation_rail
+    env:
+      DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
+      MIRA_SECURE_COOKIES: "false"
+      LISTEN_HOST: 127.0.0.1
+      MIRA_NODE_PREVIEW_DOMAIN: preview.localhost
+      # Matches the capacity Server the browser regressions previously shared.
+      MIRA_NODE_SITE_STREAM_BUDGET: "128"
+      MIRA_NODE_PREVIEW_INGRESSES: '[{"consoleOrigin":"http://127.0.0.1:8787","previewOrigin":"http://preview.localhost:8787"},{"consoleOrigin":"http://direct.console.example.test:24443","previewOrigin":"http://preview.direct.localhost:34443"}]'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
+      - name: Install Playwright Chromium and fixture dependencies
+        run: |
           npm ci --ignore-scripts
-          MIRA_SITE_RECLAIM_TEST=true MIRA_SITE_POOL_WAIT_MS=35000 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
-          MIRA_NODE_TRANSPORT=https MIRA_SITE_RECLAIM_TEST=true MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
-          kill "$server_pid"
-          wait "$server_pid" || true
-          MIRA_NODE_SITE_STREAM_BUDGET=128 "$RUNNER_TEMP/mira" server-worker >"$RUNNER_TEMP/mira-server-capacity.log" 2>&1 &
-          server_pid=$!
-          for attempt in $(seq 1 40); do
-            if curl --fail --silent http://127.0.0.1:8787/healthz >/dev/null; then break; fi
-            if [ "$attempt" -eq 40 ]; then cat "$RUNNER_TEMP/mira-server-capacity.log"; exit 1; fi
-            sleep 0.5
-          done
-          MIRA_NODE_SITE_STREAM_BUDGET=128 MIRA_SITE_PARALLEL_STREAMS=40 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node tests/port_sites_e2e.mjs
           npm install --prefix "$RUNNER_TEMP/mira-browser" --no-save playwright@1.58.2
           bash scripts/configure-ci-apt.sh
           "$RUNNER_TEMP/mira-browser/node_modules/.bin/playwright" install --with-deps chromium
+
+      - name: Test Web console in a real browser
+        env:
+          TESTS: ${{ matrix.tests }}
+        run: |
+          docker compose -f compose.yaml up -d --wait postgres
+          go -C node build -o "$RUNNER_TEMP/mira" ./cmd/mira
+          printf '%s\n' 'mira-local-admin-password' | "$RUNNER_TEMP/mira" server admin set-password admin
+          server_pid=$(bash scripts/ci-start-server.sh "$RUNNER_TEMP/mira" "$RUNNER_TEMP/mira-server.log")
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
           browser_status=0
-          for test in client_cache web_shell thread_list thread_pages thread_menu thread_activity thinking_activity thread_models codex_fast codex_accounts claude_accounts claude_plan_usage claude_questions claude_cache account_overview sidebar_layout sidebar_swipe thread_token_usage composer_drafts transcript_images conversation_scroll trace_diagrams markdown recovery_notices conversation_index conversation_rail; do
+          for test in $TESTS; do
             MIRA_SERVER_URL=http://127.0.0.1:8787 node "tests/${test}_browser.mjs" "$RUNNER_TEMP/mira-browser/node_modules/playwright/index.mjs" || browser_status=1
           done
           exit "$browser_status"

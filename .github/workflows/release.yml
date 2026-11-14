@@ -83,8 +83,74 @@ jobs:
           name: mira-android-acceptance
           path: dist/android-acceptance/*
           retention-days: 7
+  # The signed APK does not consume native OpenSSH bundles, so it builds in
+  # parallel and the release job only verifies and stages its checksum.
+  android:
+    if: ${{ !inputs.android_only }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: node/go.mod
+          cache-dependency-path: node/go.sum
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.13"
+
+      - name: Check Android input and telemetry regressions
+        run: python3 tests/android_input_status_regression.py
+
+      - name: Build signed Android APK
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.MIRA_ANDROID_KEYSTORE_BASE64 }}
+          MIRA_ANDROID_STORE_PASSWORD: ${{ secrets.MIRA_ANDROID_STORE_PASSWORD }}
+          MIRA_ANDROID_KEY_ALIAS: ${{ secrets.MIRA_ANDROID_KEY_ALIAS }}
+          MIRA_ANDROID_KEY_PASSWORD: ${{ secrets.MIRA_ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          if [[ -z "${ANDROID_KEYSTORE_BASE64}" ]]; then
+            echo "MIRA_ANDROID_KEYSTORE_BASE64 is required" >&2
+            exit 1
+          fi
+          export MIRA_ANDROID_KEYSTORE="${RUNNER_TEMP}/mira-release.jks"
+          trap 'rm -f "$MIRA_ANDROID_KEYSTORE"' EXIT
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$MIRA_ANDROID_KEYSTORE"
+          chmod 600 "$MIRA_ANDROID_KEYSTORE"
+          ndk_version=$(<node/android/NDK_VERSION)
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${ndk_version}"
+          gradle -p node/android --no-daemon assembleRelease
+          version=$(<VERSION)
+          apk="mira_${version}_android_arm64.apk"
+          mkdir -p "$RUNNER_TEMP/android"
+          cp node/android/build/outputs/apk/release/mira-node-release.apk "$RUNNER_TEMP/android/$apk"
+          (cd "$RUNNER_TEMP/android" && sha256sum "$apk" > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mira-release-android
+          path: ${{ runner.temp }}/android/*
+          retention-days: 7
+
   release:
-    needs: embedded-openssh
+    needs: [embedded-openssh, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -155,42 +221,19 @@ jobs:
       - name: Validate the Node-free Mira container
         run: docker build --build-arg MIRA_VERSION="${{ steps.version.outputs.version }}" -f node/Dockerfile -t mira:release-check .
 
-      - uses: actions/setup-java@v5
+      - uses: actions/download-artifact@v4
         with:
-          distribution: temurin
-          java-version: 17
+          name: mira-release-android
+          path: ${{ runner.temp }}/android
 
-      - uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-
-      - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.13"
-
-      - name: Check Android input and telemetry regressions
-        run: python3 tests/android_input_status_regression.py
-
-      - name: Build signed Android APK
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.MIRA_ANDROID_KEYSTORE_BASE64 }}
-          MIRA_ANDROID_STORE_PASSWORD: ${{ secrets.MIRA_ANDROID_STORE_PASSWORD }}
-          MIRA_ANDROID_KEY_ALIAS: ${{ secrets.MIRA_ANDROID_KEY_ALIAS }}
-          MIRA_ANDROID_KEY_PASSWORD: ${{ secrets.MIRA_ANDROID_KEY_PASSWORD }}
+      - name: Add the signed Android APK to the release set
         shell: bash
         run: |
-          if [[ -z "${ANDROID_KEYSTORE_BASE64}" ]]; then
-            echo "MIRA_ANDROID_KEYSTORE_BASE64 is required" >&2
-            exit 1
-          fi
-          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${RUNNER_TEMP}/mira-release.jks"
-          export MIRA_ANDROID_KEYSTORE="${RUNNER_TEMP}/mira-release.jks"
-          ndk_version=$(<node/android/NDK_VERSION)
-          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;${ndk_version}"
-          gradle -p node/android --no-daemon assembleRelease
           version=$(<VERSION)
-          cp node/android/build/outputs/apk/release/mira-node-release.apk "dist/mira_${version}_android_arm64.apk"
-          (cd dist && sha256sum "mira_${version}_android_arm64.apk" >> SHA256SUMS)
+          apk="mira_${version}_android_arm64.apk"
+          (cd "$RUNNER_TEMP/android" && sha256sum --check --strict SHA256SUMS)
+          cp "$RUNNER_TEMP/android/$apk" "dist/$apk"
+          (cd dist && sha256sum "$apk" >> SHA256SUMS)
 
       - uses: actions/upload-artifact@v4
         with:
