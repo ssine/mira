@@ -58,11 +58,19 @@ jobs:
     steps:
       # The runner resolves `bash` from GITHUB_PATH before its own PATH. Without
       # this, System32\bash.exe (the WSL launcher) would run every bash step,
-      # including those inside composite actions.
-      - name: Use Git Bash on Windows
+      # including those inside composite actions. Host paths are documented in
+      # docs/codex-build-runners.md.
+      - name: Use Git Bash, Python 3.13 and D:\ Rust homes on Windows
         if: runner.os == 'Windows'
         shell: powershell
-        run: Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value 'C:\Program Files\Git\bin'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($dir in 'C:\Program Files\Python313\Scripts', 'C:\Program Files\Python313', 'C:\Program Files\Git\bin') {
+            if (-not (Test-Path $dir)) { throw "Missing build prerequisite: $dir" }
+            Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value $dir
+          }
+          Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value 'CARGO_HOME=D:\actions-runner\cargo'
+          Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value 'RUSTUP_HOME=D:\actions-runner\rustup'
 
       - uses: actions/checkout@v7
 

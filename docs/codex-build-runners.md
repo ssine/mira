@@ -42,9 +42,10 @@ upstream digests every run. Deleting these directories is always safe.
   Runner at `/opt/mira-ci/runner`; service `actions.runner.ssine-mira.desktop-wsl-codex`.
 - Windows: Visual Studio 2022 Build Tools (C++), a Windows SDK, Git for Windows, Node.js,
   Python 3.13 at `C:\Program Files\Python313` (not on the global PATH), long paths
-  enabled. Runner at `D:\actions-runner\mira-codex`; `CARGO_HOME`/`RUSTUP_HOME` live in
-  `D:\actions-runner\{cargo,rustup}` via the runner `.env`. Its `.path` puts
-  `C:\Program Files\Git\bin` before `System32` so `shell: bash` uses Git Bash, not WSL.
+  enabled. Runner at `D:\actions-runner\mira-codex`. The first Windows step adds Git Bash
+  and Python through `GITHUB_PATH` (the runner resolves `bash` there before `System32`,
+  whose `bash.exe` would start WSL) and puts `CARGO_HOME`/`RUSTUP_HOME` in
+  `D:\actions-runner\{cargo,rustup}`; the runner's `.path`/`.env` files are not used.
 - Rust 1.95.0, Node.js 22 and Zig are installed by the workflow actions.
 
 Builds queue while the Desktop is off or asleep. Both runners share one physical CPU,
