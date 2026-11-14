@@ -69,7 +69,6 @@ test("Mira and Codex have separate jobs, tags and latest policy", async () => {
   assert.match(codex, /"codex-v\*"/);
   assert.match(codex, /--latest=false/);
   assert.match(codex, /Runtime already exists/);
-  assert.match(codex, /CODEX_VERSION patches\/codex\//);
 });
 
 test("Codex runtime checks do not restore the removed Node.js Server", async () => {
@@ -79,32 +78,32 @@ test("Codex runtime checks do not restore the removed Node.js Server", async () 
   assert.doesNotMatch(workflow, /npm ci --prefix server|runtime_reliability_e2e\.mjs/);
 });
 
-test("compiler objects use bounded batched snapshots, not per-object GHA uploads", async () => {
+test("native runtime builds run only for the owner on self-hosted machines", async () => {
   const workflow = await fs.readFile(path.join(root, ".github/workflows/codex-release.yml"), "utf8");
-  assert.match(workflow, /SCCACHE_GHA_ENABLED: "false"/);
-  assert.match(workflow, /SCCACHE_DIRECT: "false"/);
-  assert.match(workflow, /SCCACHE_CACHE_SIZE: "2G"/);
-  assert.match(workflow, /actions\/cache\/restore@v4/);
-  assert.match(workflow, /actions\/cache\/save@v4/);
-  assert.match(workflow, /github\.run_id.*github\.run_attempt/);
-  assert.match(workflow, /if: always\(\).*steps\.enable_sccache\.outcome == 'success'/);
-  assert.match(workflow, /disable_annotations: true/);
-  assert(workflow.indexOf('sccache --show-stats --stats-format=json') < workflow.indexOf('sccache --stop-server'));
-  assert(workflow.indexOf('sccache --stop-server') < workflow.indexOf('actions/cache/save@v4'));
-  const jobTimeout = Number(workflow.match(/timeout-minutes: (\d+)/)[1]);
-  const buildTimeout = Number(workflow.match(/name: Build Mira-compatible Codex\n\s+timeout-minutes: (\d+)/)[1]);
-  assert(jobTimeout - buildTimeout >= 10, 'a timed-out build must leave time for cache/diagnostics');
+  const on = workflow.split("\npermissions:")[0];
+  assert.doesNotMatch(on, /pull_request/, "self-hosted builds must never run untrusted pull requests");
+  const codex = workflow.split("\n  codex:\n")[1].split("\n  release:\n")[0];
+  assert.match(codex, /if: github\.repository == 'ssine\/mira' && github\.actor == 'ssine' && github\.triggering_actor == 'ssine'/);
+  assert.match(codex, /runs-on: \[self-hosted, "\$\{\{ matrix\.runner \}\}"\]/);
+  assert.match(codex, /runner: mira-codex-linux/);
+  assert.match(codex, /runner: mira-codex-windows/);
+  assert.doesNotMatch(codex, /sccache|actions\/cache/, "persistent local trees replace hosted caches");
+  // Persistent caches must still produce a freshly linked package every run.
+  const prepare = codex.indexOf("rm -f \"$target_dir/$TARGET/release/$binary\"");
+  assert(prepare > 0 && prepare < codex.indexOf("name: Build Mira-compatible Codex"));
+  const jobTimeout = Number(codex.match(/timeout-minutes: (\d+)/)[1]);
+  const buildTimeout = Number(codex.match(/name: Build Mira-compatible Codex\n\s+timeout-minutes: (\d+)/)[1]);
+  assert(jobTimeout - buildTimeout >= 10, "a timed-out build must leave time for diagnostics");
 });
 
 test("post-build failures retain diagnostic packages without making failed runs publishable", async () => {
   const workflow = await fs.readFile(path.join(root, ".github/workflows/codex-release.yml"), "utf8");
   assert.match(workflow, /name: Assemble canonical Codex package\n\s+id: package/);
-  assert.match(workflow, /name: Reuse an unchanged, checksummed Codex package\n\s+id: reuse/);
   const steps = workflow.split("\n      - ");
   for (const name of ["mira-codex-${{ matrix.target }}", "codex-upstream-notices"]) {
     const upload = steps.find((step) => step.includes(`name: ${name}\n`));
     assert(upload, `missing ${name} upload`);
-    assert(upload.includes("if: always() && (steps.package.outcome == 'success' || steps.reuse.outcome == 'success')"));
+    assert(upload.includes("if: always() && steps.package.outcome == 'success'"));
   }
   const cleanup = steps.find((step) => step.startsWith("name: Test runtime fixture cleanup"));
   assert(cleanup.includes("node --test tests/runtime_fixture_cleanup_test.mjs"));
