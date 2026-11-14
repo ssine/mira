@@ -63,6 +63,13 @@ try {
   // A plain click still jumps.
   await ticks.nth(10).click();
   await near(10);
+  // A message just sent joins the rail without a reload.
+  await page.locator("#conversationInput").fill("新发送的一条消息");
+  await page.locator("#conversationSend").click();
+  await page.waitForFunction(count => document.querySelectorAll("#conversationRail .message-rail-tick").length === count, turns + 1);
+  await page.locator("#conversationNavToggle").click();
+  await page.waitForFunction(() => document.querySelector("#conversationNavMenu [data-nav-index='60'] .nav-item-text")?.textContent === "新发送的一条消息");
+  await page.keyboard.press("Escape");
   assert.deepEqual(errors, []);
-  console.log("PASS: whole Claude history loads on open, adaptive rail height, scrubbing and click jumps");
+  console.log("PASS: whole Claude history loads on open, adaptive rail height, scrubbing and click jumps, rail grows with a sent message");
 } finally { await browser.close(); await fixture.close(); }
