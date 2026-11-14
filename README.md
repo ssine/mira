@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.117 对话页把消息导航和时间线合并到一个导航菜单，时间线开关固定在菜单里；Claude 后台任务（如后台 Bash）运行期间，对话仍可追加消息，任务结束后自动接续，不再提前判定为结束；刚发出或新到的消息会立即出现在消息导航和菜单里，不必刷新。只需升级 Server。
+
 1.0.116 冷历史扩展到 Claude 对话：闲置会话里的大工具结果同样移到对象存储，助手回复、费用与用量记录保留在 PostgreSQL。只需升级 Server；需要在 schema 49/50 的大表上预执行迁移时见 [冷历史](docs/cold-history.md)。
 
 1.0.114 增加可选的冷历史：闲置 30 天以上对话里的大工具输出、截图和压缩记录可移到 S3 兼容对象存储（如阿里云 OSS），PostgreSQL 保留每一行和占位，读取时按需取回并校验。默认关闭，只需升级 Server；配置见 [冷历史](docs/cold-history.md)。
@@ -221,13 +223,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.116
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.117
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.116'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.117'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
