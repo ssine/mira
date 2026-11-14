@@ -2,6 +2,7 @@ package views
 
 import (
 	"context"
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 	"sort"
 	"strings"
 	"time"
@@ -347,9 +348,13 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 	lastAt := int64(0)
 	for rows.Next() {
 		var sequence int64
-		var turnID *string
+		var turnID, cold *string
 		var raw []byte
-		if err := rows.Scan(&sequence, &turnID, &raw); err != nil {
+		if err := rows.Scan(&sequence, &turnID, &raw, &cold); err != nil {
+			return Result{}, err
+		}
+		// Frozen tool results carry the tool end time; read their original bytes.
+		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return Result{}, err
 		}
 		event, err := decodeObject(raw)

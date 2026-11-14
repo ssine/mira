@@ -129,31 +129,16 @@ try {
   await page.waitForFunction(() => document.querySelector(".tool-group[open] .trace-card .trace-body")?.textContent.includes("README.md"));
   assert.deepEqual(requests.toolRanges, [String(userSeq(3) + 2)]);
 
-  // Navigation menu: the user's messages; picking one jumps there and closes the menu.
-  const toggle = page.locator("#conversationNavToggle");
+  // Desktop: a direct timeline button and the rail; no navigation menu.
+  const toggle = page.locator("#conversationTimelineToggle");
+  const navToggle = page.locator("#conversationNavToggle");
   const navMenu = page.locator("#conversationNavMenu");
   const panel = page.locator("#conversationTimeline");
   await toggle.waitFor({ state: "visible" });
-  assert.equal(await navMenu.isVisible(), false, "the menu starts closed");
-  await toggle.click();
-  await navMenu.waitFor({ state: "visible" });
-  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
-  assert.equal(await navMenu.locator("[data-nav-index]").count(), turns, "every user message is listed");
-  assert.match(await navMenu.locator("[data-nav-count]").textContent(), new RegExp(`${turns} 条`));
-  await navMenu.locator('[data-nav-index="7"]').click();
-  await navMenu.waitFor({ state: "hidden" });
-  await revealed(userSeq(7));
-  // Previous/next step through messages without closing the menu.
-  await toggle.click();
-  assert.equal(await navMenu.locator('[aria-current="true"]').getAttribute("data-nav-index"), "7");
-  await navMenu.locator("[data-nav-next]").click();
-  await revealed(userSeq(8));
-  assert.equal(await navMenu.isVisible(), true, "stepping keeps the menu open");
-  assert.equal(await navMenu.locator('[aria-current="true"]').getAttribute("data-nav-index"), "8");
-  await page.keyboard.press("Escape");
-  await navMenu.waitFor({ state: "hidden" });
+  assert.equal(await navToggle.isVisible(), false, "desktop has no navigation menu button");
+  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
 
-  // Timeline: a pinned switch in the menu, not read until shown.
+  // Timeline: pinned by the desktop button, not read until shown.
   assert.equal(await panel.isVisible(), false, "the timeline starts hidden");
   assert.equal(requests.timeline, 0, "a hidden timeline makes no request");
   // Opening and closing the floating panel never moves the transcript.
@@ -161,12 +146,10 @@ try {
     .map(card => card.getBoundingClientRect().top).find(top => top > 0));
   const before = await readingTop();
   await toggle.click();
-  await navMenu.locator("[data-nav-timeline]").click();
-  await navMenu.waitFor({ state: "hidden" });
   await panel.locator(".timeline-chart").waitFor();
   await page.waitForTimeout(100);
   assert.equal(await readingTop(), before, "opening the timeline keeps the transcript in place");
-  assert.equal(await toggle.getAttribute("data-timeline-pinned"), "true", "the button shows the pinned timeline");
+  assert.equal(await toggle.getAttribute("aria-pressed"), "true", "the button shows the pinned timeline");
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.pinned")), "1");
   // The pinned timeline is non-modal: the conversation still scrolls under it.
   const scrollBefore = await page.evaluate(() => document.querySelector("#conversationScroll").scrollTop);
@@ -210,10 +193,7 @@ try {
   assert.equal(await panel.isVisible(), false);
   await page.waitForTimeout(100);
   assert.equal(await readingTop(), beforeClose, "closing the timeline keeps the transcript in place");
-  assert.equal(await toggle.getAttribute("data-timeline-pinned"), "false");
-  await toggle.click();
-  assert.equal(await navMenu.locator("[data-nav-timeline]").getAttribute("aria-checked"), "false", "closing it also turns the switch off");
-  await page.keyboard.press("Escape");
+  assert.equal(await toggle.getAttribute("aria-pressed"), "false");
 
   // Search replaces the list and jumps to the matching message.
   const search = page.locator("#agentThreadSearch");
@@ -245,11 +225,30 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.waitForTimeout(100);
   assert.equal(await rail.isVisible(), false, "the rail is hidden on phones");
-  // Phones use the same menu; the header buttons share one row.
-  await toggle.click();
+  // Phones: one navigation menu instead of the timeline button and rail.
+  await navToggle.waitFor({ state: "visible" });
+  assert.equal(await toggle.isVisible(), false, "phones have no separate timeline button");
+  await navToggle.click();
   await navMenu.waitFor({ state: "visible" });
+  assert.equal(await navToggle.getAttribute("aria-expanded"), "true");
   assert.ok((await navMenu.boundingBox()).width <= 390, "the menu fits a phone screen");
+  assert.equal(await navMenu.locator("[data-nav-index]").count(), turns, "every user message is listed");
+  assert.match(await navMenu.locator("[data-nav-count]").textContent(), new RegExp(`${turns} 条`));
+  await navMenu.locator('[data-nav-index="7"]').click();
+  await navMenu.waitFor({ state: "hidden" });
+  await revealed(userSeq(7));
+  // Previous/next step through messages without closing the menu.
+  await navToggle.click();
+  assert.equal(await navMenu.locator('[aria-current="true"]').getAttribute("data-nav-index"), "7");
+  await navMenu.locator("[data-nav-next]").click();
+  await revealed(userSeq(8));
+  assert.equal(await navMenu.isVisible(), true, "stepping keeps the menu open");
+  assert.equal(await navMenu.locator('[aria-current="true"]').getAttribute("data-nav-index"), "8");
+  // The same pinned timeline, switched from the menu.
+  assert.equal(await navMenu.locator("[data-nav-timeline]").getAttribute("aria-checked"), "false");
   await navMenu.locator("[data-nav-timeline]").click();
+  await navMenu.waitFor({ state: "hidden" });
+  assert.equal(await navToggle.getAttribute("data-timeline-pinned"), "true");
   await panel.locator(".timeline-chart").waitFor();
   assert.ok((await panel.boundingBox()).width <= 390, "the timeline fits a phone screen");
   const headerButtons = await page.evaluate(() => ["conversationNavToggle", "conversationDetailsToggle", "conversationMenuToggle"]
@@ -261,7 +260,7 @@ try {
   await page.waitForFunction(() => document.querySelector("#conversationTrace")?.textContent.includes("Only one answer"));
   await panel.locator(".timeline-chart").waitFor();
   assert.deepEqual(errors, []);
-  console.log("PASS: whole-outline transcript, message rail preview/jump/keyboard, navigation menu, lazy tool ranges, pinned timeline with folded idle gaps, search jump across conversations and narrow layout");
+  console.log("PASS: whole-outline transcript, message rail preview/jump/keyboard, desktop timeline button, phone navigation menu, lazy tool ranges, pinned timeline with folded idle gaps, search jump across conversations and narrow layout");
 } finally {
   await browser.close();
 }

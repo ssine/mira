@@ -67,6 +67,8 @@ try {
   await page.locator("#conversationInput").fill("新发送的一条消息");
   await page.locator("#conversationSend").click();
   await page.waitForFunction(count => document.querySelectorAll("#conversationRail .message-rail-tick").length === count, turns + 1);
+  // Phones list the same messages in the navigation menu.
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.locator("#conversationNavToggle").click();
   await page.waitForFunction(() => document.querySelector("#conversationNavMenu [data-nav-index='60'] .nav-item-text")?.textContent === "新发送的一条消息");
   await page.keyboard.press("Escape");

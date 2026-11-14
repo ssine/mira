@@ -117,20 +117,22 @@ fall back to paged history while a very large conversation is still indexing.
   pressing and dragging scrubs through messages like a scrollbar. The active
   tick is the last message starting at or above the top of the reading area.
   Hidden on phones and when a conversation has fewer than two messages.
-- **Navigation menu.** One header button ("对话导航", between the sidebar and
-  details buttons) opens a popover on every screen size. Its first row is the
+- **Navigation menu (phones and touch devices).** On narrow screens and any
+  coarse pointer (phones, unfolded foldables, tablets) the rail is hidden and
+  one header button ("对话导航") opens a popover. Its first row is the
   "显示时间线" switch; below it the user's messages are listed with number,
   two-line preview and time, the one being read highlighted. Picking a message
   jumps there and closes the menu; ▲/▼ step through messages and keep it open.
-  The menu adds nothing to the page until opened, so reading on phones and
-  system scroll screenshots are never covered. Desktop keeps the rail as well.
+  The menu adds nothing to the page until opened, so it never covers messages
+  or breaks system scroll screenshots. Desktop (fine pointer, wider than
+  640 px) keeps the rail and a direct timeline button instead of the menu.
 - **Search.** A search box above the sidebar list replaces the list with results
   while a query is present. Clicking a hit opens the conversation and scrolls to
   that message (Codex by `item_seq`, Claude by event sequence).
-- **Timeline.** The menu's switch pins a non-modal panel to the top of the
-  conversation; the transcript keeps scrolling underneath, and jumps land
+- **Timeline.** The desktop timeline button, or the menu's switch on touch
+  devices, pins a non-modal panel to the top of the conversation; the transcript keeps scrolling underneath, and jumps land
   below the panel. Pinning is a remembered preference across conversations
-  (closed by its × or the switch; the navigation button turns blue while
+  (closed by its ×, the button or the switch; the button turns blue while
   pinned). Nothing is read while it is hidden. Activity of the whole
   agent tree joins into segments across idle gaps of up to 10 minutes; longer
   gaps become a fixed-width break labelled with the idle time, so a resumed

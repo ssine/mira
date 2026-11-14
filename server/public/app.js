@@ -311,8 +311,9 @@ const messageRail = new MessageRail({ rail: $("#conversationRail"), scroller: $(
   resolveCard: (key, materialize) => transcriptCardForKey(key, materialize), readingOffset: () => readingOffset() });
 const conversationTimeline = new ConversationTimeline({
   root: $("#conversationTimeline"),
-  onPinnedChange: pinned => conversationNavigation?.reflectPinned(pinned),
-  returnFocus: () => $("#conversationNavToggle").focus(),
+  onPinnedChange: pinned => { conversationNavigation?.reflectPinned(pinned); reflectTimelineButton(pinned); },
+  // Focus whichever header control is shown on this screen.
+  returnFocus: () => ($("#conversationTimelineToggle").offsetParent ? $("#conversationTimelineToggle") : $("#conversationNavToggle")).focus(),
   load: threadId => {
     const thread = agent.threads.find(item => item.threadId === threadId);
     return engineOf(threadId) === "claude"
@@ -326,6 +327,15 @@ const conversationNavigation = new NavigationMenu({
   toggle: $("#conversationNavToggle"), menu: $("#conversationNavMenu"), rail: messageRail, timeline: conversationTimeline,
   scroller: $("#conversationScroll"), readingOffset: () => readingOffset(),
 });
+// Desktop: a direct timeline button (the rail handles messages). Touch devices
+// and narrow screens reach the same timeline through the navigation menu.
+function reflectTimelineButton(pinned) {
+  const button = $("#conversationTimelineToggle");
+  button.setAttribute("aria-pressed", String(pinned));
+  button.setAttribute("aria-label", pinned ? "收起时间线" : "显示时间线");
+}
+$("#conversationTimelineToggle").addEventListener("click", () => conversationTimeline.setPinned(!conversationTimeline.pinned));
+reflectTimelineButton(conversationTimeline.pinned);
 const conversationSearch = new ConversationSearch({
   input: $("#agentThreadSearch"), results: $("#agentSearchResults"), list: $("#agentThreadList"), api,
   onOpen: ({ threadId, itemSeq, role }) => {
@@ -3130,6 +3140,7 @@ function syncActiveTurnUi() {
   $("#conversationMenuToggle").classList.toggle("hidden", !agent.threadId);
   $("#conversationDetailsToggle").classList.remove("hidden");
   $("#conversationNavToggle").classList.toggle("hidden", !agent.threadId);
+  $("#conversationTimelineToggle").classList.toggle("hidden", !agent.threadId);
   // An expanded timeline follows a running conversation and settles once more.
   const running = !!agent.threadId && agent.activeTurns.has(agent.threadId), wasRunning = conversationTimeline.running;
   conversationTimeline.setRunning(running);
