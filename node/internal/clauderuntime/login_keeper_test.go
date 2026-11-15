@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -81,7 +82,7 @@ func TestKeepLoginRenewsAheadOfTheCLI(t *testing.T) {
 	if stored["mcpOAuth"].(map[string]any)["server"].(map[string]any)["accessToken"] != "keep-me" {
 		t.Fatalf("other credentials were not preserved: %#v", stored)
 	}
-	if info, _ := os.Stat(filepath.Join(home, ".credentials.json")); info.Mode().Perm() != 0600 {
+	if info, _ := os.Stat(filepath.Join(home, ".credentials.json")); runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("mode %v", info.Mode())
 	}
 	for _, lock := range []string{filepath.Join(home, ".oauth_refresh.lock"), home + ".lock"} {
