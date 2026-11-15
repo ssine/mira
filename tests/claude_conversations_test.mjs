@@ -117,7 +117,7 @@ test("tool calls carry readable activities, keep their images, and omit sub-agen
  ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
  const view = claudeTrace(rows,{activeTurn:"turn"});
  const tools = Object.fromEntries(view.trace.filter(x=>x.kind==="tool").map(x=>[x.key.slice(5),x.activity]));
- assert.deepEqual(tools.bash,{status:"completed",durationMs:38000,actions:[{kind:"run",label:"go test ./..."}]});
+ assert.deepEqual(tools.bash,{status:"completed",durationMs:38000,actions:[{kind:"run",label:"go test ./...",title:"Run tests"}]});
  assert.deepEqual(tools.edit.actions,[{kind:"edit",label:"app.js",added:2,removed:1}]);
  assert.deepEqual(tools.write.actions,[{kind:"create",label:"/elsewhere/new.md",added:2,removed:0}]);
  assert.deepEqual(tools.shot.actions,[{kind:"read",label:"shot.png"}]);
@@ -449,4 +449,16 @@ test("live deltas render after their durable position, yield to saved blocks and
  assert.ok(!runtime.current(thread).trace.some(i=>i.body==="stale"));
  runtime.session=session; runtime.acceptLive("s",[delta(8,"more")]); runtime.resetLive();
  assert.equal([...runtime.rows.values()].filter(r=>r.live).length,0);
+});
+
+test("a Claude command shows its own description like the terminal, while counts stay by kind", async () => {
+ const { activitySummary, summarizeActivities } = await import("../server/public/trace-activity.js");
+ const rows=[{seq:1,turnId:"t",payload:{type:"assistant",uuid:"a",message:{id:"m",content:[
+  {type:"tool_use",id:"b1",name:"Bash",input:{command:"sed -n 1,80p docs/thread-list-pagination.md",description:"Read pagination doc"}},
+  {type:"tool_use",id:"b2",name:"Bash",input:{command:"ls"}}]}}}];
+ const [described, plain] = claudeTrace(rows,{activeTurn:"t"}).trace.filter(x=>x.kind==="tool").map(x=>x.activity);
+ assert.equal(activitySummary(described),"Read pagination doc");
+ assert.equal(activitySummary(plain),"正在执行 ls");
+ assert.equal(activitySummary({...described,status:"failed"}),"Read pagination doc · 失败");
+ assert.equal(summarizeActivities([described,plain]),"执行 × 2");
 });
