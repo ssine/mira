@@ -52,3 +52,16 @@ export function answerContinuation(questions, answers) {
   const body = pairs.length ? pairs.join(", ") : JSON.stringify(answers ?? {});
   return `Your questions have been answered: ${body}. You can now continue with these answers in mind.`;
 }
+
+// The same rotation strikes a turn that is simply running long: a renewal by
+// another process revokes the tokens this process holds, and its next model
+// request fails before the model runs. When the stored credentials changed
+// since this process started, the worker continues the session in a fresh
+// process. No tool is repeated: the rejected request never executed.
+export function revokedLogin(event) {
+  if (event?.type !== "result" || event.parent_tool_use_id || event.is_error !== true) return false;
+  const text = [event.result, ...(event.errors ?? [])].map(value => String(value ?? "")).join("\n");
+  return /OAuth token revoked|OAuth access token has expired|authentication_failed|Failed to authenticate/i.test(text);
+}
+
+export const authContinuation = "Mira: the previous model request was rejected because this Claude process held login tokens that another process had already renewed. The session continues in a fresh process with the current login. Continue the task from where you stopped; do not repeat tool calls whose results are already above.";
