@@ -67,6 +67,30 @@ If an editor operation or modal is busy, a visible prompt waits for the user to 
 The first version opens notifications only for the Node's configured Server; switching
 that Server does not reuse another Server's cookies, opt-in or queued navigation.
 
+## System alerts (`mira notify`)
+
+Any trusted local client can raise a system alert through the same queue:
+
+```bash
+mira notify --title "iOA 代理故障" --body "心跳 5 分钟未更新" --level critical --url https://portal.example/work/?tab=status
+```
+
+`POST /v1/notifications/alerts` (CLI/Node credential, schema 51) queues one delivery per Android
+device whose administrator enabled native notifications — the same opt-in as completion notifications,
+so logout, session expiry or device revocation stop alerts too. With no such device the request fails
+with `409 no_notification_device` instead of silently dropping the alert. Title is 1–120 characters,
+body up to 1000, `url` must be `https` without credentials, and the three together stay under 3000
+bytes so the Node's 4 KiB control limit is never hit. Alerts expire after 12 hours and reuse the
+30-second retry, 128-pending bound and 512-ID dedup of completion delivery.
+
+The `notification.deliver` params gain `kind: "alert"` with `title`, `body`, `level` and `url`, and no
+`threadId`; the Server skips thread validation for them. Android posts them on three channels —
+`系统故障` (critical, high importance), `系统提醒` (warning, default) and `系统消息` (info, low) — so
+their sound can be adjusted per level. A channel the user turned off is acknowledged as suppressed,
+not retried. Tapping opens the `url` in the browser, or Mira when there is none. An older APK rejects
+alert payloads; the Server keeps retrying until the alert expires, so update the APK with the Server.
+After a rollback to a pre-51 Server, queued alerts are finished without delivery.
+
 ## WebView boundary
 
 Only the exact configured HTTPS origin's main frame receives an AndroidX WebKit

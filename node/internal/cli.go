@@ -869,6 +869,7 @@ Commands:
   screen         Inspect or control an Android display
   schedule       Manage scheduled scripts and execution history
   site           Register persistent public sites for Node loopback ports
+  notify         Send a system alert to Android devices with notifications on
   app-server     Inspect, start, stop or connect to Codex App Server
   accounts       List this Node's Codex and Claude accounts (offline)
   codex          Choose a Codex account and run Codex CLI
@@ -904,6 +905,15 @@ Task JSON: {"name":"Daily job","nodeId":"node alias or UUID","cron":"30 6 * * *"
 Credentials belong in files on the target Node. Use a stable taskId/request-id
 when retrying after a lost response. Pausing leaves existing executions running.
 Uncertain execution blocks future runs until the operator confirms it stopped.`,
+		"notify": `Usage:
+  mira notify --title <text> [--body <text>] [--level critical|warning|info] [--url https://...]
+
+Queues a system alert for every Android device whose administrator enabled
+native notifications in the Mira app. Levels map to separate Android channels
+(系统故障 / 系统提醒 / 系统消息) so their sound can be tuned on the phone.
+Delivery retries every 30 seconds for up to 12 hours; the command returns once
+the alert is queued. It fails with no_notification_device when no device has
+notifications enabled. Authenticates with this Node's credential.`,
 		"site": `Usage:
   mira site list [--limit 50] [--after <name>]
   mira site get <name|UUID>
@@ -1323,6 +1333,8 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		result, err = client.runSchedule(commandCtx, remaining[1:])
 	case "site":
 		result, err = client.runSite(commandCtx, remaining[1:])
+	case "notify":
+		result, err = client.runNotify(commandCtx, remaining[1:])
 	case "nodes":
 		result, err = client.runNodes(commandCtx, remaining[1:])
 	case "file":
