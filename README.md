@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.124 将 Mira 兼容的 Codex 运行时升级到官方 0.169.0（`0.169.0-mira.1`）：保留 PostgreSQL 持久化、调用模型前的历史刷盘、账号迁移、输入恢复、明文压缩和图片计数压缩；子线程的父子关系改为在子线程创建后写入，私有 Guardian 审核员按上游自行处理限流。Claude 等待 AskUserQuestion 回答期间若 OAuth 令牌已轮换，回答到达后改用新进程继续同一回合；账号代理不再加入正在退出的网关。时间线标题在放得下时直接显示图例，“最近”时段可自定义。Codex 运行时随 Node 按需下载，升级 Node 后生效；时间线改动需升级 Server；无数据库迁移。
+
 1.0.123 修复 `mira claude` / `mira codex` 偶发 ECONNREFUSED：启动器不再借用 Node 按会话开关的账号代理端口，而是用同一份配置在自己的端口上运行私有代理，退出时清理。只需升级使用启动器的 Node。
 
 1.0.122 新增 `mira claude` 并重做 `mira codex`：先从本机已配置的账号中选择（菜单、`--account`，回车重复上次选择），再用该账号的配置目录、凭据和代理启动；Mira Server 不可用时也能运行，Codex 会话此时只保存在账号本地（见[本机账号启动器](docs/local-account-launchers.md)），`mira accounts` 可离线列出账号。Claude 附件（含图片）改为以文件路径交给 Agent，对话中显示模型实际收到的消息；Claude Agent SDK 升级到 0.3.325。离线菜单显示账号名称需同时升级 Server 和 Node。
@@ -235,13 +237,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.123
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.124
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.123'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.124'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
