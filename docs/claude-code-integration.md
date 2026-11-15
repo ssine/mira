@@ -39,9 +39,17 @@ Implemented:
   line per batch, and the text Claude writes between them stays visible as progress.
   Built-in tools are summarized as actions with durations, like Codex shell actions:
   commands, reads, edits with line counts, searches and subagents. Images a tool
-  returns stay in its card. Mira's system prompt asks Claude for a short update
-  every several tool calls; the Developer instructions file comes later and can
-  override it. While a turn runs, polls patch changed or new cards in place.
+  returns stay in its card. Like Claude Code's terminal, a command's own
+  `description` is its line in the group header while it runs. The appended prompt
+  tells Claude how Mira displays a turn, requires its messages and final answer in
+  the language of the user's latest message, and asks for one opening sentence. It
+  sets no reporting cadence, so later updates keep the native frequency; the
+  Developer instructions file comes later. A 2026-11 A/B run on Chinese read-only
+  tasks (10 runs each) gave an opening sentence in 10/10 runs (terminal 0/10),
+  0.6 mid-turn updates per run (terminal 0.6) and 1 English update instead of 5
+  of 7 without the prompt. An extra "update at findings" rule tripled the rate to
+  2.1, so do not add one. While a turn runs, polls
+  patch changed or new cards in place.
 - The worker requests `thinking: {type:"adaptive", display:"summarized"}`; without
   an explicit display the API returns only signatures. Empty thinking blocks are
   not rendered.

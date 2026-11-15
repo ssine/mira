@@ -211,6 +211,8 @@ export function activitySummary(activity) {
   const suffix = { failed: " · 失败", declined: " · 已拒绝", interrupted: " · 已中断" }[activity.status] ?? "";
   const visible = activity.actions.slice(0, 3).map((action) => {
     const stats = Number.isFinite(action.added) ? ` +${action.added} −${action.removed}` : "";
+    // A title is the tool's own one-line description, shown as written.
+    if (action.title) return `${action.title}${stats}`;
     return `${prefix}${verbs[action.kind] ?? "调用"} ${action.label}${stats}`;
   });
   if (activity.actions.length > 3) visible.push(`另 ${activity.actions.length - 3} 项`);

@@ -1011,8 +1011,10 @@ func TestClaudeManagedSDK(t *testing.T) {
 	}
 	if system, _ := systemPrompt.Load().(string); !strings.Contains(system, "SHARED_NODE_INSTRUCTION_MARKER") {
 		t.Fatalf("Claude system prompt omitted the shared Developer instructions file: %s", system)
-	} else if progress := strings.Index(system, strings.TrimSuffix(claudeProgressInstructions, "\n")); progress < 0 || progress > strings.Index(system, "SHARED_NODE_INSTRUCTION_MARKER") {
-		t.Fatalf("Claude system prompt must describe progress updates before the Developer instructions: %s", system)
+	} else if mira := strings.Index(system, strings.SplitN(claudeMiraInstructions, "\n", 2)[0]); mira < 0 || mira > strings.Index(system, "SHARED_NODE_INSTRUCTION_MARKER") {
+		t.Fatalf("Claude system prompt must describe Mira before the Developer instructions: %s", system)
+	} else if !strings.Contains(system, "in the language of the user's latest message") || strings.Contains(system, "every several tool calls") {
+		t.Fatalf("Claude system prompt must require the user's language and set no reporting cadence: %s", system)
 	}
 	if err = os.RemoveAll(configDir); err != nil {
 		t.Fatal(err)

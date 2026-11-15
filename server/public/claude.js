@@ -15,7 +15,8 @@ function toolActions(name, input = {}, cwd = "") {
   };
   const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
   switch (name) {
-    case "Bash": return [{ kind: "run", label: compact(input.command) || "命令" }];
+    // Claude Code's terminal shows a command's own description as its line.
+    case "Bash": return [{ kind: "run", label: compact(input.command) || "命令", ...(input.description?.trim() ? { title: compact(input.description) } : {}) }];
     case "Read": return [{ kind: "read", label: path(input.file_path) }];
     case "Edit": case "MultiEdit": return [{ kind: "edit", label: path(input.file_path) }];
     case "NotebookEdit": return [{ kind: "edit", label: path(input.notebook_path) }];
