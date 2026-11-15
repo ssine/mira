@@ -4,14 +4,14 @@ Mira currently needs a small patch on top of the official Codex source tree so t
 App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
-- Base tag: `rust-v0.159.3` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `01fc69f40267` (annotated tag object: `8e46774a94a7`)
-- Patch source commit: `4b4b548c2e61`
+- Base tag: `rust-v0.169.0` (pinned in repository-root `CODEX_VERSION`)
+- Base commit: `d32063f96c2d` (annotated tag object: `a41fe5b44365`)
+- Patch source commit: `1e0ba1881d8c`
 
 Apply it to a clean checkout:
 
 ```bash
-git clone --branch rust-v0.159.3 https://github.com/openai/codex.git codex
+git clone --branch rust-v0.169.0 https://github.com/openai/codex.git codex
 git -C codex am ../patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch
 ```
 
@@ -24,6 +24,38 @@ Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the e
 as an independent Codex runtime, downloaded by the Node on demand. The Node probes the remote ThreadStore configuration before advertising a build
 as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
 release matrix builds, not just changing the version file.
+
+Runtime `0.169.0-mira.1` rebases the Mira adapter onto official Codex 0.169.0.
+`ThreadStore::resume_thread` now returns the replay history; the remote store
+returns the snapshot Core just loaded from PostgreSQL (the broker keeps one writer
+per conversation tree). The store is built through upstream's new
+`ThreadStoreBuilder`. Mira's compaction policy also gates the new background
+(async) compaction, so the plaintext default never installs opaque checkpoints.
+Image-count compaction, the pre-sampling flush barrier, task panic handling and
+the persistent 429 policy are ported to the new step-context compaction and
+sampling APIs. Subagents keep inheriting the parent's dynamic tools through
+upstream's inheritance hook, regardless of multi-agent version or its feature
+gate. Account handoff and memory residency use upstream's watch-based shutdown
+drain and keyed pending-unload map. Protocol bundles, config schema and Python
+SDK types are regenerated.
+
+The durability barriers before sampling, before continuing after an image-count
+checkpoint and at turn completion now require the store's history flush to
+succeed. Upstream's derived thread-metadata sync stays best-effort: a failure is
+logged and the patch remains pending for the next flush. A rejected tool result
+still stops the turn. Upstream 0.169 also adds persistent Guardian reviewer
+threads that save their transcript together with the terminal event, and that
+pass exhausted retry advice to Guardian's own cancellable review retry. Private
+reviewers therefore skip Mira's pre-sampling barrier and its persistent 429
+wait. User and subagent turns keep both.
+
+Upstream 0.169 also publishes a subagent's spawn edge before it creates the
+child, while Mira Server accepts an edge only after both threads exist. The
+remote store holds an edge for a child it has not yet created or resumed, and
+writes it in the same ordered parent/child writer right after the child's
+creation commits. A status change made in that window updates the held edge.
+Durable `parent_thread_id` metadata still identifies the child. No Server change
+or database migration is required.
 
 Runtime `0.159.3-mira.1` rebases the existing Mira adapter and compatibility
 behavior onto official Codex 0.159.3, including its GPT-6.1 Sol catalog. The port

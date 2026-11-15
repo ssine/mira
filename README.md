@@ -611,5 +611,5 @@ python3 -m compileall -q tests
 node tests/web_console_e2e.mjs
 ```
 
-官方 Codex 补丁基于 `rust-v0.151.0`（`78c2908`）。升级原则是保留上游原始 payload、使用追加式
+官方 Codex 补丁基于 `rust-v0.169.0`（`d32063f`）。升级原则是保留上游原始 payload、使用追加式
 migration、让旧事件始终可回放，并把兼容逻辑限制在 ThreadStore/App Server 边界。
