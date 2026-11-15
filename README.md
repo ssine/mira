@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.127 修复被继续的 Claude 对话在登录续期后报"OAuth token revoked"的根因：Agent SDK 恢复会话时让 CLI 读取临时目录里一份不含刷新令牌的凭据拷贝，看不到续期；worker 现在把每次续期后的访问令牌同步进本账号的恢复副本（仍不含刷新令牌），CLI 在下一个请求前或第一次 401 后改用新令牌。只需升级运行 Claude 的 Node；无数据库迁移。
+
 1.0.126 新增系统告警通知：`mira notify --title … [--body …] [--level critical|warning|info] [--url https://…]` 用本机 Node 凭据把告警推到已开启原生通知的 Android 设备，复用对话完成通知的投递队列、重试和去重，不依赖 Google 推送或第三方服务。Android 新增「系统故障 / 系统提醒 / 系统消息」三个通知渠道，可分别设置声音，点开直接打开告警附带的链接。数据库迁移 schema 51（仅新增列）；需升级 Server 和 Android APK。
 
 1.0.125 根治 Claude 订阅账号运行中途报"OAuth token revoked"：Node 成为每个订阅登录唯一的续期者，在令牌过期前 45 分钟、按 Claude CLI 自己的刷新锁协议提前续期并原子写回，运行中的回合在下一个请求前直接换上新令牌，不再由多个 CLI 进程在过期前 5 分钟争抢刷新；回合和额度读取另写有界的本地 CLI 调试日志。时间线改为按活动增量读取（不再每 10 秒拉全量），"最近"视图连续平移、进行中动画不再重置。`mira codex` 在线启动不再报 invalid_account_context，显式 Codex 二进制的派生状态不再因 Node 升级而冷迁移。Claude 进度说明保持原生频率并使用用户的语言。需升级 Server 和运行 Claude/Codex 的 Node；无数据库迁移。
@@ -241,13 +243,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.126
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.127
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.126'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.127'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
