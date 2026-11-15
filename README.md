@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.125 根治 Claude 订阅账号运行中途报"OAuth token revoked"：Node 成为每个订阅登录唯一的续期者，在令牌过期前 45 分钟、按 Claude CLI 自己的刷新锁协议提前续期并原子写回，运行中的回合在下一个请求前直接换上新令牌，不再由多个 CLI 进程在过期前 5 分钟争抢刷新；回合和额度读取另写有界的本地 CLI 调试日志。时间线改为按活动增量读取（不再每 10 秒拉全量），"最近"视图连续平移、进行中动画不再重置。`mira codex` 在线启动不再报 invalid_account_context，显式 Codex 二进制的派生状态不再因 Node 升级而冷迁移。Claude 进度说明保持原生频率并使用用户的语言。需升级 Server 和运行 Claude/Codex 的 Node；无数据库迁移。
+
 1.0.124 将 Mira 兼容的 Codex 运行时升级到官方 0.169.0（`0.169.0-mira.1`）：保留 PostgreSQL 持久化、调用模型前的历史刷盘、账号迁移、输入恢复、明文压缩和图片计数压缩；子线程的父子关系改为在子线程创建后写入，私有 Guardian 审核员按上游自行处理限流。Claude 等待 AskUserQuestion 回答期间若 OAuth 令牌已轮换，回答到达后改用新进程继续同一回合；账号代理不再加入正在退出的网关。时间线标题在放得下时直接显示图例，“最近”时段可自定义。Codex 运行时随 Node 按需下载，升级 Node 后生效；时间线改动需升级 Server；无数据库迁移。
 
 1.0.123 修复 `mira claude` / `mira codex` 偶发 ECONNREFUSED：启动器不再借用 Node 按会话开关的账号代理端口，而是用同一份配置在自己的端口上运行私有代理，退出时清理。只需升级使用启动器的 Node。
@@ -237,13 +239,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.124
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.125
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.124'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.125'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
