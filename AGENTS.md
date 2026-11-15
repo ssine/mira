@@ -374,7 +374,10 @@ Android never downloads or executes the Codex runtime; Linux arm64 currently req
 compatible build. Codex runtime installation does not grant model authentication.
 
 Mira-managed compatible Codex processes use a separate `sqlite_home` under the Node identity
-directory, scoped to the pinned runtime and actual binary location. This is derived upstream runtime
+directory, scoped to the actual binary: the pinned managed package by its runtime version, any other
+(explicit) binary by its own size and modification time plus location, so a Node pin change never
+forces a cold migration for an unchanged binary. The first start under a new key copies the newest
+older state of the same binary written after its modification time. This is derived upstream runtime
 state, not authoritative history. Do not reuse Desktop's SQLite databases: even differing source line
 endings can change upstream migration checksums. Preserve `CODEX_HOME`, authentication and original
 rollouts; honor explicit `sqlite_home` arguments or `CODEX_SQLITE_HOME` overrides.

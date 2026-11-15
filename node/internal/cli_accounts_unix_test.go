@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -171,5 +172,39 @@ func TestLauncherHelpBelongsToEngineAfterItsArguments(t *testing.T) {
 		if help != test.help || help && strings.Join(topic, " ") != test.args[0] {
 			t.Fatalf("%v: help=%v topic=%v", test.args, help, topic)
 		}
+	}
+}
+
+func TestCodexLauncherSendsAccountAndRuntimeContextOnline(t *testing.T) {
+	directory := t.TempDir()
+	id := "21dfcf17-1486-4e89-922a-b67a4fd644d9"
+	home := filepath.Join(directory, "accounts", id, "codex")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(directory, "codex")
+	record := filepath.Join(directory, "record")
+	script := `#!/bin/sh
+case "$*" in *"features list"*) exit 0 ;; esac
+{ echo "ACCOUNT=$MIRA_NODE_CODEX_ACCOUNT_ID"; echo "RUNTIME=$MIRA_NODE_CODEX_RUNTIME_ID"; } > "` + record + `"
+`
+	if err := os.WriteFile(binary, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	client := &cliClient{identity: &persistedNodeState{ServerURL: "https://mira.example.test", Token: "node-token"}}
+	launch := codexLaunch{account: localCodexAccount{NodeAccountID: id, Name: "Mafia", Enabled: true, CodexHome: home},
+		client: client, identityFile: filepath.Join(directory, "identity.json"), binary: binary}
+	var stderr bytes.Buffer
+	if err := runCodexAccount(context.Background(), launch, []string{"exec", "hi"}, bytes.NewReader(nil), &bytes.Buffer{}, &stderr); err != nil {
+		t.Fatalf("%v: %s", err, stderr.String())
+	}
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := string(data)
+	runtimeLine := regexp.MustCompile(`(?m)^RUNTIME=([0-9a-f-]{36})$`).FindStringSubmatch(output)
+	if !strings.Contains(output, "ACCOUNT="+id+"\n") || runtimeLine == nil || !nodeUUIDPattern.MatchString(runtimeLine[1]) {
+		t.Fatalf("online launch must send a valid account binding and runtime instance:\n%s", output)
 	}
 }

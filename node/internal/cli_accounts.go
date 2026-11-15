@@ -642,7 +642,13 @@ func runCodexAccount(ctx context.Context, launch codexLaunch, args []string, std
 		)
 		environment = append(environment, "MIRA_NODE_TOKEN="+launch.client.identity.Token, "MIRA_SERVER_URL="+launch.client.identity.ServerURL)
 		if account.NodeAccountID != "" {
-			environment = append(environment, "MIRA_NODE_CODEX_ACCOUNT_ID="+account.NodeAccountID)
+			// Server accepts account context only as a binding plus a runtime
+			// instance, as for managed App Servers; this CLI is its own runtime.
+			runtimeID, err := randomUUID()
+			if err != nil {
+				return err
+			}
+			environment = append(environment, "MIRA_NODE_CODEX_ACCOUNT_ID="+account.NodeAccountID, "MIRA_NODE_CODEX_RUNTIME_ID="+runtimeID)
 		}
 	}
 	arguments = append(arguments, "-c", `approval_policy="never"`, "-c", `sandbox_mode="danger-full-access"`)
