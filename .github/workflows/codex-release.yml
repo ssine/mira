@@ -44,6 +44,13 @@ jobs:
     env:
       STABLE_GIT_COMMIT: ${{ github.sha }}
       RUST_TOOLCHAIN: "1.95.0"
+      # Codex fetches a rusty_v8 git fork with deep Chromium submodules. As in upstream
+      # CI, use the Git CLI with long paths; libgit2 fails on Windows MAX_PATH. The
+      # GIT_CONFIG_* variables scope core.longpaths to this job, not the runner account.
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.longpaths
+      GIT_CONFIG_VALUE_0: "true"
     strategy:
       fail-fast: false
       matrix:

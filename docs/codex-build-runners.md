@@ -50,6 +50,9 @@ upstream digests every run. Deleting these directories is always safe.
   `CARGO_HOME`, `RUSTUP_HOME`, `TEMP` and `TMP` under the work folder; the runner's
   `.path`/`.env` files are not used.
 - Rust 1.95.0, Node.js 22 and Zig are installed by the workflow actions.
+- Cargo fetches git dependencies (Codex's rusty_v8 fork has deep Chromium submodules)
+  through the Git CLI with `core.longpaths` scoped to the job by `GIT_CONFIG_*`
+  variables, as upstream CI does; the runner account's Git configuration is unchanged.
 
 The Windows job lowers its worker to below-normal CPU priority and low memory
 priority; cargo, rustc and link inherit the CPU priority class, so Windows trims build
