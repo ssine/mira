@@ -184,6 +184,37 @@ session in a fresh process of the same turn with the answer, worded like the
 native tool result, as its next message. A `mira_question_resume` event marks
 this; the Web does not show the stopped response as an error.
 
+#### One renewer per login
+
+OAuth refresh tokens rotate and a renewal revokes the previous tokens. Every
+Claude CLI process renews on its own once its access token is within five
+minutes of expiry, so whichever processes of the account are alive then (turns,
+titles, the five-minute plan-usage read) race for that renewal, and a process
+that loses can keep revoked tokens and fail with "OAuth token revoked". The
+same race affects several terminal sessions on one login upstream; Mira
+starts more short-lived CLI processes per account, so it hit it more often.
+
+The Node is therefore the single renewer of each subscription login. Its login
+keeper checks every five minutes and renews a login whose access token expires
+within 45 minutes, long before any CLI reaches its own window. It takes the
+CLI's two refresh locks (`<config>/.oauth_refresh.lock` and the legacy
+`<config realpath>.lock` directories, taken over only when older than the CLI's
+60 s stale threshold), re-reads the credentials under the lock, sends the CLI's
+refresh request through the account egress, and replaces `.credentials.json`
+atomically, preserving every other stored field. Running CLI processes notice
+the changed file before their next request and adopt the new tokens without a
+401 (validated with the pinned CLI against a rotating fake token service). The
+request is never cancelled midway, because an accepted refresh whose response
+is dropped spends the refresh token. When the keeper cannot renew (Node down,
+network failure, provider refusal), the CLI's own renewal remains the fallback
+and the Node log records the failure.
+
+Turns and plan-usage reads also write a CLI debug log (the only place the CLI
+records its OAuth refresh and 401 recovery decisions) under
+`<identity>/logs/claude/<account>/{turn,usage}/`. Tokens are redacted by the
+CLI and prompts are not logged; files stay local, at most 40 turn and 24
+usage logs per account and none older than three days.
+
 The account egress gateway is reference-counted. A caller that arrives while
 the last holder's gateway is still exiting waits for that exit and starts a
 fresh one; it never joins a listener that is about to disappear or waits on a

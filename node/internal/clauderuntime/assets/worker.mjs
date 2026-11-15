@@ -62,6 +62,10 @@ async function message(spec, text, attachments = []) {
     message: { role: "user", content: [{ type: "text", text: body }] },
   };
 }
+// Mira names a bounded local CLI debug log for turns and plan-usage reads
+// (authentication decisions are recorded only there).
+const debugFile = () =>
+  process.env.MIRA_NODE_CLAUDE_DEBUG_FILE ? { extraArgs: { "debug-file": process.env.MIRA_NODE_CLAUDE_DEBUG_FILE } } : {};
 let spec;
 lines.on("line", async (line) => {
   try {
@@ -109,6 +113,7 @@ lines.on("line", async (line) => {
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
+          ...debugFile(),
           ...(process.env.MIRA_NODE_CLAUDE_BINARY
             ? {
                 pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY,
@@ -308,6 +313,7 @@ async function main(spec) {
       ...(process.env.MIRA_NODE_CLAUDE_BINARY
         ? { pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY }
         : {}),
+      ...debugFile(),
       stderr: () => {},
     });
     for (let resume = spec.resume; ; resume = true) {

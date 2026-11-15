@@ -3,6 +3,7 @@ package clauderuntime
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"math"
@@ -178,7 +179,7 @@ func (m *Manager) usage(accountID string) (any, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, nodeBinary(), filepath.Join(dir, "worker.mjs"))
-	cmd.Env = env
+	cmd.Env = append(env, m.debugLogEnv("usage", accountID, rand.Text())...)
 	cmd.Dir = dir
 	configureCommand(cmd)
 	cmd.Stdin = bytes.NewReader([]byte("{\"action\":\"usage\"}\n"))
