@@ -55,7 +55,7 @@ class PromotionTests(unittest.TestCase):
             prefix = f'mira-codex_{LOCK["version"]}_{platform.replace("-", "_")}'
             names = [f"bin/codex{suffix}", f"bin/codex-code-mode-host{suffix}", f"codex-path/rg{suffix}"]
             names += (["codex-resources/codex-command-runner.exe", "codex-resources/codex-windows-sandbox-setup.exe"]
-                      if windows else ["codex-resources/bwrap", "codex-resources/zsh/bin/zsh"])
+                      if windows else ["codex-resources/bwrap"])
             files = {name: b"fixture binary" for name in names}
             files["codex-package.json"] = json.dumps({"layoutVersion": 1, "variant": "codex", "version": LOCK["upstreamVersion"],
                 "entrypoint": "bin/codex" + suffix,

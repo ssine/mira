@@ -20,7 +20,7 @@ test("independent Codex archives preserve canonical companions and file hashes",
       const source = path.join(temporary, platform);
       const suffix = windows ? ".exe" : "";
       const files = [`bin/codex${suffix}`, `bin/codex-code-mode-host${suffix}`, `codex-path/rg${suffix}`,
-        ...(windows ? ["codex-resources/codex-command-runner.exe", "codex-resources/codex-windows-sandbox-setup.exe"] : ["codex-resources/bwrap", "codex-resources/zsh/bin/zsh"])];
+        ...(windows ? ["codex-resources/codex-command-runner.exe", "codex-resources/codex-windows-sandbox-setup.exe"] : ["codex-resources/bwrap"])];
       for (const file of files) {
         await fs.mkdir(path.dirname(path.join(source, file)), { recursive: true });
         await fs.writeFile(path.join(source, file), `fixture ${file}`, { mode: 0o644 });

@@ -65,9 +65,10 @@ def verify_package(file, platform, target, lock):
         require(isinstance(item["size"], int) and item["size"] >= 0
                 and re.fullmatch(r"[0-9a-f]{64}", item["sha256"]), "Invalid file inventory")
         expected[name] = item
+    # Upstream stopped bundling the patched zsh in 0.169 (openai/codex#52213).
     required = ["codex-package.json", f"bin/codex{suffix}", f"bin/codex-code-mode-host{suffix}", f"codex-path/rg{suffix}"]
     required += (["codex-resources/codex-command-runner.exe", "codex-resources/codex-windows-sandbox-setup.exe"]
-                 if windows else ["codex-resources/bwrap", "codex-resources/zsh/bin/zsh"])
+                 if windows else ["codex-resources/bwrap"])
     require(all(name in expected and expected[name]["size"] > 0 for name in required), "Incomplete canonical package")
     seen = set()
     canonical = None
