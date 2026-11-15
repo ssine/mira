@@ -314,7 +314,7 @@ func (server *Server) routeClaude(ctx context.Context, w http.ResponseWriter, r 
 		return true, err
 	}
 	if op == "timeline" && r.Method == "GET" {
-		result, err := server.views.GetClaudeTimeline(ctx, id)
+		result, err := server.views.GetClaudeTimeline(ctx, id, r.URL.Query().Get("cursor"))
 		if err != nil {
 			return true, err
 		}

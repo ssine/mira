@@ -230,7 +230,7 @@ func TestConversationIndexPostgres(t *testing.T) {
 	})
 
 	t.Run("timeline lanes follow the subagent tree", func(t *testing.T) {
-		result, err := service.GetCodexTimeline(ctx, store, root)
+		result, err := service.GetCodexTimeline(ctx, store, root, "")
 		if err != nil || result.Status != 200 {
 			t.Fatalf("timeline: %v %#v", err, result.Body)
 		}
@@ -238,6 +238,57 @@ func TestConversationIndexPostgres(t *testing.T) {
 		if len(lanes) != 2 || lanes[0].ThreadID != root || lanes[1].ThreadID != child || lanes[1].Depth != 1 || len(lanes[0].Turns) != 3 ||
 			len(lanes[0].Tools) != 2 || lanes[0].Tools[0].End-lanes[0].Tools[0].Start != 1000 || result.Body["partial"] != false {
 			t.Fatalf("lanes: %#v", lanes)
+		}
+
+		// Incremental reads skip unchanged lanes and re-derive a changed lane
+		// from its latest turn start, so a tool output after the cursor closes
+		// the tool the client already has.
+		cursor := result.Body["cursor"].(string)
+		result, err = service.GetCodexTimeline(ctx, store, root, cursor)
+		if err != nil || result.Body["delta"] != true {
+			t.Fatalf("delta: %v %#v", err, result.Body)
+		}
+		for _, lane := range result.Body["lanes"].([]*timelineLane) {
+			if !lane.Unchanged || len(lane.Turns)+len(lane.Tools)+len(lane.Messages) != 0 {
+				t.Fatalf("nothing changed, yet a lane carries items: %#v", lane)
+			}
+		}
+		var count int
+		if err := pool.QueryRow(ctx, `SELECT item_count FROM codex_thread_projections WHERE store_id=$1 AND thread_id=$2`, store, root).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		fixture.appendItems(root, 1, count, []map[string]any{
+			record("event_msg", map[string]any{"type": "task_started", "turn_id": "t4"}),
+			record("event_msg", map[string]any{"type": "user_message", "turn_id": "t4", "message": "第四轮"}),
+			record("response_item", map[string]any{"type": "function_call", "name": "exec_command", "call_id": "c4", "arguments": `{"cmd":"sleep 2"}`}),
+		}, base.Add(4*time.Hour))
+		result, err = service.GetCodexTimeline(ctx, store, root, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lanes = result.Body["lanes"].([]*timelineLane)
+		if lanes[0].Unchanged || lanes[0].Reset || !lanes[1].Unchanged || len(lanes[0].Turns) != 1 || lanes[0].Turns[0].ID != "t4" || !lanes[0].Turns[0].Open ||
+			len(lanes[0].Tools) != 1 || lanes[0].Tools[0].ID != "c4" || !lanes[0].Tools[0].Open || len(lanes[0].Messages) != 1 {
+			t.Fatalf("new turn delta: %#v %#v", lanes[0], lanes[1])
+		}
+		cursor = result.Body["cursor"].(string)
+		fixture.appendItems(root, 1, count+3, []map[string]any{
+			record("response_item", map[string]any{"type": "function_call_output", "call_id": "c4", "output": "done"}),
+		}, base.Add(4*time.Hour+5*time.Second))
+		result, err = service.GetCodexTimeline(ctx, store, root, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lanes = result.Body["lanes"].([]*timelineLane)
+		if len(lanes[0].Tools) != 1 || lanes[0].Tools[0].ID != "c4" || lanes[0].Tools[0].Open || lanes[0].Tools[0].End-lanes[0].Tools[0].Start != 3000 ||
+			len(lanes[0].Turns) != 1 || lanes[0].Turns[0].ID != "t4" {
+			t.Fatalf("mid-turn delta must re-derive the turn and close its tool: %#v", lanes[0])
+		}
+		// A cursor from another generation re-reads the lane whole.
+		stale := strings.Replace(cursor, root+":1:", root+":9:", 1)
+		result, _ = service.GetCodexTimeline(ctx, store, root, stale)
+		if lane := result.Body["lanes"].([]*timelineLane)[0]; !lane.Reset || len(lane.Turns) != 4 {
+			t.Fatalf("stale generation: %#v", lane)
 		}
 	})
 

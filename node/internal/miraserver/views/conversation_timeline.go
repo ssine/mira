@@ -2,10 +2,13 @@ package views
 
 import (
 	"context"
-	"github.com/ssine/mira/node/internal/miraserver/coldstore"
+	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ssine/mira/node/internal/miraserver/coldstore"
 )
 
 const (
@@ -23,12 +26,15 @@ type timelineTurn struct {
 }
 
 type timelineTool struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Start  int64  `json:"start"`
-	End    int64  `json:"end"`
-	Open   bool   `json:"open,omitempty"`
-	Kind   string `json:"kind"` // tool | wait | agent
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Start int64  `json:"start"`
+	End   int64  `json:"end"`
+	Open  bool   `json:"open,omitempty"`
+	// Close marks an incremental result for a tool started before the cursor:
+	// it only ends that tool (the client already has its start and name).
+	Close  bool   `json:"close,omitempty"`
+	Kind   string `json:"kind,omitempty"` // tool | wait | agent
 	Seq    int64  `json:"seq"`
 	TurnID string `json:"turnId,omitempty"`
 }
@@ -41,14 +47,18 @@ type timelineMessage struct {
 }
 
 type timelineLane struct {
-	ThreadID       string            `json:"threadId"`
-	ParentThreadID *string           `json:"parentThreadId"`
-	Title          *string           `json:"title"`
-	Depth          int               `json:"depth"`
-	Partial        bool              `json:"partial,omitempty"`
-	Turns          []timelineTurn    `json:"turns"`
-	Tools          []timelineTool    `json:"tools"`
-	Messages       []timelineMessage `json:"messages"`
+	ThreadID       string  `json:"threadId"`
+	ParentThreadID *string `json:"parentThreadId"`
+	Title          *string `json:"title"`
+	Depth          int     `json:"depth"`
+	Partial        bool    `json:"partial,omitempty"`
+	// Incremental reads: Unchanged lanes carry no items; Reset lanes replace
+	// the client's copy; other lanes are merged by item identity.
+	Unchanged bool              `json:"unchanged,omitempty"`
+	Reset     bool              `json:"reset,omitempty"`
+	Turns     []timelineTurn    `json:"turns"`
+	Tools     []timelineTool    `json:"tools"`
+	Messages  []timelineMessage `json:"messages"`
 }
 
 func previewText(text string) string {
@@ -205,15 +215,58 @@ func codexTimelineLane(records []outlineRecord) ([]timelineTurn, []timelineTool,
 	return turns, tools, messages
 }
 
-// GetCodexTimeline returns lanes for a root conversation and its subagent tree.
-func (service *Service) GetCodexTimeline(ctx context.Context, storeID, threadID string) (Result, error) {
+// Incremental timeline reads. A response carries an opaque cursor; passing it
+// back returns only what changed since. Codex cursors hold each lane's
+// generation and indexed record count, so unchanged lanes are skipped without
+// reading records and changed lanes are re-derived from their latest turn
+// start (the outline's incremental rule). Claude cursors hold the last event
+// sequence read. The client merges items by identity: turns and tools by ID
+// (tools without one by sequence), messages by sequence.
+type codexLaneCursor struct{ generation, indexed int64 }
+
+func parseCodexTimelineCursor(raw string) map[string]codexLaneCursor {
+	body, ok := strings.CutPrefix(raw, "x1.")
+	if !ok {
+		return nil
+	}
+	lanes := map[string]codexLaneCursor{}
+	for _, entry := range strings.Split(body, ",") {
+		parts := strings.Split(entry, ":")
+		if len(parts) != 3 || len(parts[0]) != 36 {
+			return nil
+		}
+		generation, err1 := strconv.ParseInt(parts[1], 10, 64)
+		indexed, err2 := strconv.ParseInt(parts[2], 10, 64)
+		if err1 != nil || err2 != nil || generation < 0 || indexed < 0 {
+			return nil
+		}
+		lanes[strings.ToLower(parts[0])] = codexLaneCursor{generation, indexed}
+	}
+	return lanes
+}
+
+func formatCodexTimelineCursor(lanes []*timelineLane, cursors map[string]codexLaneCursor) string {
+	parts := make([]string, 0, len(lanes))
+	for _, lane := range lanes {
+		if value, ok := cursors[lane.ThreadID]; ok {
+			parts = append(parts, fmt.Sprintf("%s:%d:%d", lane.ThreadID, value.generation, value.indexed))
+		}
+	}
+	return "x1." + strings.Join(parts, ",")
+}
+
+// GetCodexTimeline returns lanes for a root conversation and its subagent
+// tree; with a cursor from an earlier response, only what changed since.
+func (service *Service) GetCodexTimeline(ctx context.Context, storeID, threadID, cursor string) (Result, error) {
+	known := parseCodexTimelineCursor(cursor)
+	delta := known != nil
 	rows, err := service.pool.Query(ctx, `WITH RECURSIVE tree AS (
 	    SELECT p.thread_id,p.parent_thread_id,0 AS depth FROM codex_thread_projections p WHERE p.store_id=$1 AND p.thread_id=$2
 	    UNION ALL
 	    SELECT p.thread_id,p.parent_thread_id,t.depth+1 FROM tree t JOIN codex_thread_projections p
 	      ON p.store_id=$1 AND p.parent_thread_id=t.thread_id AND p.thread_id<>t.thread_id WHERE t.depth<16
 	  )
-	  SELECT t.thread_id,t.parent_thread_id,t.depth,COALESCE(NULLIF(n.value#>>'{}',''),p.title) FROM tree t
+	  SELECT t.thread_id,t.parent_thread_id,t.depth,COALESCE(NULLIF(n.value#>>'{}',''),p.title),p.active_generation,p.item_count FROM tree t
 	  JOIN codex_thread_projections p ON p.store_id=$1 AND p.thread_id=t.thread_id
 	  LEFT JOIN codex_store_state_entries n ON n.store_id=$1 AND n.field='names' AND NOT n.is_root AND n.entry_key=t.thread_id
 	  ORDER BY t.depth,t.thread_id LIMIT $3`, storeID, threadID, timelineMaxLanes)
@@ -221,12 +274,16 @@ func (service *Service) GetCodexTimeline(ctx context.Context, storeID, threadID 
 		return Result{}, err
 	}
 	lanes := []*timelineLane{}
+	projected := map[string]codexLaneCursor{}
 	for rows.Next() {
 		lane := &timelineLane{}
-		if err := rows.Scan(&lane.ThreadID, &lane.ParentThreadID, &lane.Depth, &lane.Title); err != nil {
+		var current codexLaneCursor
+		if err := rows.Scan(&lane.ThreadID, &lane.ParentThreadID, &lane.Depth, &lane.Title, &current.generation, &current.indexed); err != nil {
 			rows.Close()
 			return Result{}, err
 		}
+		lane.ThreadID = strings.ToLower(lane.ThreadID)
+		projected[lane.ThreadID] = current
 		lanes = append(lanes, lane)
 	}
 	rows.Close()
@@ -238,26 +295,44 @@ func (service *Service) GetCodexTimeline(ctx context.Context, storeID, threadID 
 	}
 	deadline := time.Now().Add(timelineCatchUpBudget)
 	partial := false
+	next := map[string]codexLaneCursor{}
 	for _, lane := range lanes {
+		previous, seen := known[lane.ThreadID]
+		// A lane whose projection still matches its cursor has nothing new.
+		if seen && previous == projected[lane.ThreadID] {
+			lane.Unchanged = true
+			next[lane.ThreadID] = previous
+			continue
+		}
 		complete := false
 		if time.Now().Before(deadline) {
 			if complete, err = service.IndexCodexThread(ctx, storeID, lane.ThreadID, deadline); err != nil {
 				return Result{}, err
 			}
 		}
-		_, _, _, _, records, found, _, err := service.loadOutlineRecords(ctx, storeID, lane.ThreadID, nil, nil)
+		var after, generation *int64
+		if seen {
+			after, generation = &previous.indexed, &previous.generation
+		}
+		readGeneration, indexed, _, _, records, found, effectiveAfter, err := service.loadOutlineRecords(ctx, storeID, lane.ThreadID, after, generation)
 		if err != nil {
 			return Result{}, err
 		}
+		// A new generation (or a lane the client never saw) is read whole.
+		lane.Reset = delta && seen && effectiveAfter == nil
 		lane.Partial = !complete || !found
 		partial = partial || lane.Partial
 		lane.Turns, lane.Tools, lane.Messages = codexTimelineLane(records)
+		if found {
+			next[lane.ThreadID] = codexLaneCursor{readGeneration, indexed}
+		}
 	}
 	if partial {
 		service.WakeConversationIndexer()
 	}
-	return Result{Status: 200, Body: map[string]any{"engine": "codex", "rootThreadId": threadID, "lanes": orderedLanes(lanes), "partial": partial,
-		"truncated": len(lanes) == timelineMaxLanes}}, nil
+	ordered := orderedLanes(lanes)
+	return Result{Status: 200, Body: map[string]any{"engine": "codex", "rootThreadId": threadID, "lanes": ordered, "partial": partial,
+		"truncated": len(lanes) == timelineMaxLanes, "delta": delta, "cursor": formatCodexTimelineCursor(ordered, next)}}, nil
 }
 
 // orderedLanes places each child directly beneath its parent (depth-first).
@@ -302,8 +377,16 @@ func orderedLanes(lanes []*timelineLane) []*timelineLane {
 
 // GetClaudeTimeline derives lanes from a Claude session's durable events:
 // turns from Mira turn records, tools from tool_use/tool_result pairs, and
-// one lane per native subagent (grouped by its parent Task tool call).
-func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string) (Result, error) {
+// one lane per native subagent (grouped by its parent Task tool call). With a
+// cursor it reads only later events; root turns are always complete (a few
+// small rows), and a result for an earlier tool becomes a Close item.
+func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID, cursor string) (Result, error) {
+	after, delta := int64(0), false
+	if raw, ok := strings.CutPrefix(cursor, "c1."); ok {
+		if value, err := strconv.ParseInt(raw, 10, 64); err == nil && value >= 0 {
+			after, delta = value, true
+		}
+	}
 	var title string
 	if err := service.pool.QueryRow(ctx, `SELECT title FROM mira_claude_sessions WHERE session_id=$1`, sessionID).Scan(&title); err != nil {
 		return errorResult(404, "session not found", "not_found"), nil
@@ -332,7 +415,7 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 		return Result{}, err
 	}
 	rows, err := service.pool.Query(ctx, `SELECT seq,turn_id::text,payload,cold_sha256 FROM mira_claude_events WHERE session_id=$1
-	  AND event_type IN ('mira_user','assistant','user') ORDER BY seq`, sessionID)
+	  AND seq>$2 AND event_type IN ('mira_user','assistant','user') ORDER BY seq`, sessionID, after)
 	if err != nil {
 		return Result{}, err
 	}
@@ -346,6 +429,8 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 		turnStart[turn.ID] = turn.Start
 	}
 	lastAt := int64(0)
+	through := after
+	closes := map[*timelineLane][]timelineTool{}
 	for rows.Next() {
 		var sequence int64
 		var turnID, cold *string
@@ -353,6 +438,7 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 		if err := rows.Scan(&sequence, &turnID, &raw, &cold); err != nil {
 			return Result{}, err
 		}
+		through = max(through, sequence)
 		// Frozen tool results carry the tool end time; read their original bytes.
 		if raw, err = coldstore.Hydrate(ctx, raw, cold); err != nil {
 			return Result{}, err
@@ -372,12 +458,17 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 		lane := root
 		if parent := stringValue(event["parent_tool_use_id"]); parent != "" {
 			if subagents[parent] == nil {
-				name := "子 Agent"
+				// An incremental read may not see the Task call; the client
+				// keeps (or derives) the title of a lane without one.
+				var title *string
 				if tool := toolsByID[parent]; tool != nil && tool.Name != "" {
-					name = tool.Name
+					title = &tool.Name
+				} else if !delta {
+					name := "子 Agent"
+					title = &name
 				}
 				id := sessionID + ":" + parent
-				subagents[parent] = &timelineLane{ThreadID: id, ParentThreadID: &sessionID, Title: &name, Depth: 1, Turns: []timelineTurn{}, Tools: []timelineTool{}, Messages: []timelineMessage{}}
+				subagents[parent] = &timelineLane{ThreadID: id, ParentThreadID: &sessionID, Title: title, Depth: 1, Turns: []timelineTurn{}, Tools: []timelineTool{}, Messages: []timelineMessage{}}
 				order = append(order, subagents[parent])
 			}
 			lane = subagents[parent]
@@ -420,6 +511,8 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 				if stringValue(item["type"]) == "tool_result" {
 					if tool := toolsByID[stringValue(item["tool_use_id"])]; tool != nil {
 						tool.End, tool.Open = max(tool.End, at), false
+					} else if delta && stringValue(item["tool_use_id"]) != "" {
+						closes[lane] = append(closes[lane], timelineTool{ID: stringValue(item["tool_use_id"]), Start: at, End: at, Close: true, Seq: sequence})
 					}
 				}
 			}
@@ -438,6 +531,8 @@ func (service *Service) GetClaudeTimeline(ctx context.Context, sessionID string)
 		for _, tool := range laneTools[lane] {
 			lane.Tools = append(lane.Tools, *tool)
 		}
+		lane.Tools = append(lane.Tools, closes[lane]...)
 	}
-	return Result{Status: 200, Body: map[string]any{"engine": "claude", "rootThreadId": sessionID, "lanes": lanes, "partial": false, "truncated": false}}, nil
+	return Result{Status: 200, Body: map[string]any{"engine": "claude", "rootThreadId": sessionID, "lanes": lanes, "partial": false, "truncated": false,
+		"delta": delta, "cursor": "c1." + strconv.FormatInt(through, 10)}}, nil
 }

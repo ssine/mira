@@ -117,7 +117,7 @@ func TestClaudeTimelinePostgres(t *testing.T) {
 		  VALUES(gen_random_uuid(),$1,$2,$3,$4::json,$5)`, sessionID, turnID, event["type"], payload, cold)
 		_ = index
 	}
-	result, err := New(pool).GetClaudeTimeline(ctx, sessionID)
+	result, err := New(pool).GetClaudeTimeline(ctx, sessionID, "")
 	if err != nil || result.Status != 200 {
 		t.Fatalf("timeline: %v %#v", err, result.Body)
 	}
@@ -128,5 +128,37 @@ func TestClaudeTimelinePostgres(t *testing.T) {
 	tool := lanes[0].Tools[0]
 	if tool.Open || tool.End-tool.Start != 20_000 || tool.Name != "Bash" {
 		t.Fatalf("the frozen tool result must close the tool interval: %#v", tool)
+	}
+
+	// Incremental reads return only later events; a result for a tool read
+	// earlier becomes a Close item for the client's copy.
+	insert := func(event map[string]any) {
+		raw, _ := json.Marshal(event)
+		exec(`INSERT INTO mira_claude_events(event_id,session_id,turn_id,event_type,payload) VALUES(gen_random_uuid(),$1,$2,$3,$4::json)`, sessionID, turnID, event["type"], string(raw))
+	}
+	delta := func(cursor string) (*timelineLane, string) {
+		t.Helper()
+		result, err := New(pool).GetClaudeTimeline(ctx, sessionID, cursor)
+		if err != nil || result.Body["delta"] != true {
+			t.Fatalf("delta: %v %#v", err, result.Body)
+		}
+		return result.Body["lanes"].([]*timelineLane)[0], result.Body["cursor"].(string)
+	}
+	cursor := result.Body["cursor"].(string)
+	root, next := delta(cursor)
+	if next != cursor || len(root.Turns) != 1 || len(root.Tools)+len(root.Messages) != 0 {
+		t.Fatalf("an unchanged session returned items: %#v %s", root, next)
+	}
+	insert(map[string]any{"type": "assistant", "timestamp": at(60), "message": map[string]any{"id": "m3", "content": []any{
+		map[string]any{"type": "tool_use", "id": "tool-2", "name": "Read", "input": map[string]any{}}}}})
+	root, cursor = delta(cursor)
+	if len(root.Tools) != 1 || root.Tools[0].ID != "tool-2" || !root.Tools[0].Open || len(root.Messages) != 0 {
+		t.Fatalf("new tool: %#v", root)
+	}
+	insert(map[string]any{"type": "user", "timestamp": at(70), "message": map[string]any{"content": []any{
+		map[string]any{"type": "tool_result", "tool_use_id": "tool-2", "content": "ok"}}}})
+	root, _ = delta(cursor)
+	if len(root.Tools) != 1 || !root.Tools[0].Close || root.Tools[0].ID != "tool-2" || root.Tools[0].End != start.Add(70*time.Second).UnixMilli() {
+		t.Fatalf("closing result: %#v", root.Tools)
 	}
 }

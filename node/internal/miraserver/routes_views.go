@@ -88,7 +88,7 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 		if err != nil {
 			return true, err
 		}
-		result, err := server.views.GetCodexTimeline(ctx, storeID, match[1])
+		result, err := server.views.GetCodexTimeline(ctx, storeID, match[1], request.URL.Query().Get("cursor"))
 		if err != nil {
 			return true, err
 		}
