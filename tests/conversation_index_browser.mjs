@@ -164,12 +164,26 @@ try {
   assert.equal(requests.timeline, 1);
   // Compact header: the short summary; counts and legend behind ⓘ.
   assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^2 段 · 活跃 15 分$/);
+  // A wide header shows counts and legend in its first row; ⓘ is not needed.
+  const inlineInfo = panel.locator("[data-timeline-inline-info]");
+  await page.waitForFunction(() => document.querySelector("#conversationTimeline").dataset.infoInline === "true");
+  assert.match(await inlineInfo.locator(".timeline-details").textContent(), /^工具 3 次 · 子 Agent 2 个$/);
+  assert.ok(await inlineInfo.locator(".timeline-legend li").count() >= 4);
+  assert.equal(await panel.locator("[data-timeline-info-toggle]").isVisible(), false);
+  const headFits = await panel.evaluate(element => { const head = element.querySelector(".timeline-head"); return head.scrollWidth <= head.clientWidth + 1; });
+  assert.ok(headFits, "the inline legend never overflows the header");
+  // A narrower window moves them behind ⓘ.
+  await page.setViewportSize({ width: 760, height: 900 });
+  await page.waitForFunction(() => document.querySelector("#conversationTimeline").dataset.infoInline === "false");
+  assert.equal(await inlineInfo.isVisible(), false);
   assert.equal(await panel.locator("[data-timeline-info]").isVisible(), false, "the legend starts hidden");
   await panel.locator("[data-timeline-info-toggle]").click();
-  assert.match(await panel.locator(".timeline-details").textContent(), /^工具 3 次 · 子 Agent 2 个$/);
-  assert.equal(await panel.locator(".timeline-legend li").count() >= 4, true);
+  assert.match(await panel.locator("[data-timeline-info] .timeline-details").textContent(), /^工具 3 次 · 子 Agent 2 个$/);
+  assert.equal(await panel.locator("[data-timeline-info] .timeline-legend li").count() >= 4, true);
   await panel.locator("[data-timeline-info-toggle]").click();
   assert.equal(await panel.locator("[data-timeline-info]").isVisible(), false);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.waitForFunction(() => document.querySelector("#conversationTimeline").dataset.infoInline === "true");
   assert.deepEqual(await panel.locator(".timeline-lane-label").allTextContents(), ["Index browser", "Subagent", "Older subagent"], "subagents expanded, newest first");
   assert.equal(await panel.locator("button.timeline-lane-label").first().getAttribute("data-timeline-open"), child, "subagent lanes open their conversation");
   const compact = await panel.evaluate(element => ({ height: element.getBoundingClientRect().height,
@@ -208,6 +222,32 @@ try {
   assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.mode")), "hour");
   assert.equal(await panel.locator('.timeline-message.user[data-timeline-seq="1"]').count(), 0, "messages outside the hour are hidden");
   assert.equal(await panel.locator(`.timeline-message.user[data-timeline-seq="${userSeq(4)}"]`).count(), 1);
+  // The recent window's length is a preset or a custom amount, remembered.
+  const windowMenu = page.locator(".timeline-window-menu");
+  await panel.locator("[data-timeline-window-toggle]").click();
+  await windowMenu.waitFor();
+  assert.equal(await panel.locator("[data-timeline-window-toggle]").getAttribute("aria-expanded"), "true");
+  assert.equal(await windowMenu.locator('[data-timeline-window="3600000"]').getAttribute("aria-pressed"), "true");
+  await windowMenu.locator('[data-timeline-window="1800000"]').click();
+  assert.equal(await windowMenu.isVisible(), false, "a preset closes the menu");
+  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^最近 30 分钟$/);
+  assert.equal(await panel.locator('[data-timeline-mode="hour"]').textContent(), "最近 30 分钟");
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.window")), "1800000");
+  await panel.locator('[data-timeline-mode="all"]').click();
+  await panel.locator("[data-timeline-window-toggle]").click();
+  await windowMenu.locator('input[name="amount"]').fill("3");
+  await windowMenu.locator('select[name="unit"]').selectOption("3600000");
+  await windowMenu.locator('input[name="amount"]').press("Escape");
+  assert.equal(await windowMenu.isVisible(), false, "Escape closes only the menu");
+  assert.equal(await panel.isVisible(), true);
+  await panel.locator("[data-timeline-window-toggle]").click();
+  await windowMenu.locator('input[name="amount"]').fill("3");
+  await windowMenu.locator('select[name="unit"]').selectOption("3600000");
+  await windowMenu.locator('button[type="submit"]').click();
+  assert.match(await panel.locator("[data-timeline-summary]").textContent(), /^最近 3 小时$/, "a custom length switches to the recent view");
+  assert.equal(await panel.locator('[data-timeline-mode="hour"]').getAttribute("aria-pressed"), "true");
+  assert.equal(await panel.locator('.timeline-message.user[data-timeline-seq="1"]').count(), 1, "three hours include the first message");
+  assert.equal(await page.evaluate(() => localStorage.getItem("mira.timeline.window")), String(3 * 3600000));
   await panel.locator('[data-timeline-mode="all"]').click();
   assert.equal(await panel.locator(".timeline-break").count(), 1);
   await panel.locator("[data-timeline-zoom=in]").click();

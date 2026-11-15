@@ -86,7 +86,8 @@ function compaction(e) {
 }
 
 export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
-  const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map(), endedTurns = new Set();
+  const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map(), endedTurns = new Set(),
+    resumedTurns = new Set();
   // Compaction is reported as status -> boundary -> a synthetic user message holding the summary.
   const compacting = new Map(), summaries = new Map();
   let interrupted = false, cwd = "";
@@ -180,7 +181,10 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
       questions.delete(e.questionId);
       put(`question:${e.questionId}`, "question", "已回答", Object.entries(e.answers || {}).map(([question, answer]) => `${question}\n${answer}`).join("\n\n"), turnId,
         { questionId: e.questionId, questionState: "answered" });
-    } else if (e.type === "mira_interrupt_requested") { interrupted = true; endedTurns.add(turnId); }
+    } else if (e.type === "mira_question_resume") resumedTurns.add(turnId);
+    // A late answer continues in a fresh Claude process; the stale process'
+    // stopped response is not an error.
+    else if (e.type === "mira_interrupt_requested") { interrupted = true; endedTurns.add(turnId); }
     else if (e.type === "mira_completed") endedTurns.add(turnId);
     else if (e.type === "mira_execution_stopped") {
       endedTurns.add(turnId);
@@ -190,7 +194,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
     else if (e.type === "system" && e.subtype === "mirror_error") put(key, "error", "历史未完整保存", "部分原生记录未能保存到 Mira。", turnId);
     else if (e.type === "result") {
       for (const id of e.parent_tool_use_id ? [] : e.user_message_uuids || []) placeSteer(id, "inserted");
-      if (e.is_error && !interrupted) put(key, "error", "Claude 返回错误", (e.errors?.length ? e.errors : [e.result || e.subtype]).join("\n"), turnId);
+      if (e.is_error && !interrupted && !(!e.parent_tool_use_id && resumedTurns.delete(turnId))) put(key, "error", "Claude 返回错误", (e.errors?.length ? e.errors : [e.result || e.subtype]).join("\n"), turnId);
       const last = [...items.values()].findLast(item => item.turnId === turnId && item.kind === "assistant" && item.body);
       if (last) Object.assign(last, { turnElapsedMs: e.duration_ms, turnCostEstimate: row.costEstimate, turnCompletedAt: row.completedAt ?? e.timestamp });
     } else if (e.type === "system" && e.subtype === "init" && e.cwd) cwd = e.cwd.replace(/\/+$/, "");

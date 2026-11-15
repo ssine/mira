@@ -165,6 +165,10 @@ func profileFor(name string) *routeProfile {
 
 const defaultNoProxy = "localhost,127.0.0.1,::1,mira.ssine.cc,direct.mira.ssine.cc,.woa.com,.oa.com,.local,.lan,.home.arpa,.ssine.cc,.ts.net,100.64.0.0/10,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,9.0.0.0/8,11.0.0.0/8"
 
+// gatewayReadyTimeout covers one failed attempt, the retry pause and a full
+// health check of the next attempt.
+const gatewayReadyTimeout = 30 * time.Second
+
 type storedConfig struct {
 	Spec       Spec `json:"spec"`
 	ListenPort int  `json:"listenPort"`
@@ -207,6 +211,8 @@ type Manager struct {
 	entries      map[string]*entry
 	closed       bool
 	closeOnce    sync.Once
+	// exitHook runs before an exiting gateway is marked stopped (tests only).
+	exitHook func()
 	// sourceRoot is set for a foreground CLI manager. It reads the Node's
 	// account configurations there but runs private gateways under root.
 	sourceRoot string
@@ -455,6 +461,27 @@ func (manager *Manager) Acquire(id string) (map[string]string, func(), error) {
 		manager.mu.Unlock()
 		return nil, nil, err
 	}
+	// The last caller released this gateway and its process is still exiting.
+	// Joining it would return a listener that is about to disappear, or wait on
+	// a startup that will never complete; wait for the exit and start afresh.
+	for value.cancel != nil && value.stopping {
+		done := value.done
+		manager.mu.Unlock()
+		select {
+		case <-done:
+		case <-time.After(gatewayReadyTimeout):
+			return nil, nil, errors.New("account egress did not stop in time")
+		}
+		manager.mu.Lock()
+		if manager.closed {
+			manager.mu.Unlock()
+			return nil, nil, errors.New("account egress manager is closed")
+		}
+		if value, err = manager.loadLocked(id); err != nil {
+			manager.mu.Unlock()
+			return nil, nil, err
+		}
+	}
 	value.refs++
 	if value.cancel == nil {
 		if err := manager.startLocked(id, value); err != nil {
@@ -472,7 +499,7 @@ func (manager *Manager) Acquire(id string) (map[string]string, func(), error) {
 				manager.Release(id)
 				return nil, nil, ready.err
 			}
-		case <-time.After(15 * time.Second):
+		case <-time.After(gatewayReadyTimeout):
 			manager.Release(id)
 			return nil, nil, errors.New("account egress did not become ready")
 		}
@@ -504,6 +531,9 @@ func (manager *Manager) startLocked(id string, value *entry) error {
 func (manager *Manager) run(ctx context.Context, id string, value *entry, root string) {
 	done := value.done
 	defer func() {
+		if manager.exitHook != nil {
+			manager.exitHook()
+		}
 		manager.mu.Lock()
 		value.cancel = nil
 		close(done)

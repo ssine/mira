@@ -131,7 +131,8 @@ fall back to paged history while a very large conversation is still indexing.
   that message (Codex by `item_seq`, Claude by event sequence).
 - **Timeline.** The desktop timeline button, or the menu's switch on touch
   devices, pins a compact non-modal panel to the top of the conversation: one
-  header row (summary, range, zoom, ⓘ for counts and legend, ×), a one-row
+  header row (summary, range, zoom, ×; tool/subagent counts and the legend sit
+  in that row whenever it is wide enough, otherwise behind ⓘ), a one-row
   axis and 12 px lanes. Every subagent has a lane, newest activity first under
   its parent. Dragging the bottom edge (a grip shown on hover) sets a remembered height (double-click
   restores the automatic one); the panel scrolls inside. The transcript keeps
@@ -145,8 +146,10 @@ fall back to paged history while a very large conversation is still indexing.
   time is to scale (shared scale, zoomable). Model phases are turn time not
   covered by tools, attributed by event boundaries, not provider latency. User
   message markers jump to the message; subagent lane labels open the subagent.
-  A remembered "最近 1 小时" mode shows one real-time hour (ending now while the
-  conversation runs, otherwise at its last activity) without folded gaps. While
+  A remembered "最近" mode shows one real-time window (ending now while the
+  conversation runs, otherwise at its last activity) without folded gaps; its
+  length is a preset from 10 minutes to 1 day or a custom number of minutes,
+  hours or days (1 minute to 30 days), one hour by default and remembered. While
   the conversation runs, unfinished turns and tool calls grow to the current
   time every second (unfinished intervals without evidence for 15 minutes keep
   their last evidence). The panel floats over the reading surface, so opening

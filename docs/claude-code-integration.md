@@ -164,6 +164,23 @@ response and that write used to leave a dead refresh token on disk. The account
 still looked configured while every later turn failed with "OAuth access token
 has expired" until the user logged in again (seen after Node updates).
 
+A turn waiting on `AskUserQuestion` keeps its CLI process, and the tokens it
+read at startup, until the answer arrives. If another process on the account
+(a turn, title or plan-usage read) refreshes meanwhile, the waiting process
+holds a rotated pair that the provider rejects as "OAuth token revoked". The
+worker therefore fingerprints the account's stored tokens when a question is
+asked. When the answer arrives after they changed, or after an hour without a
+comparable store (keychain), it records the answer, denies the pending tool
+with `interrupt` so the stale process makes no further request, and resumes the
+session in a fresh process of the same turn with the answer, worded like the
+native tool result, as its next message. A `mira_question_resume` event marks
+this; the Web does not show the stopped response as an error.
+
+The account egress gateway is reference-counted. A caller that arrives while
+the last holder's gateway is still exiting waits for that exit and starts a
+fresh one; it never joins a listener that is about to disappear or waits on a
+startup that will never complete.
+
 ### Claude.ai plan usage
 
 Subscription accounts show their claude.ai plan windows in the Web sidebar the

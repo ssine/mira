@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { createMiraTools } from "./mira-tools.mjs";
 import { serverClient } from "./store.mjs";
 import { TurnLifecycle } from "./turn-lifecycle.mjs";
+import { answerContinuation, questionCredentials } from "./question-credentials.mjs";
 
 const lines = createInterface({ input: process.stdin });
 const privacyInstructions = `Privacy defaults:
@@ -22,7 +23,10 @@ let client,
   interruptRecordFailed = false,
   interrupted = false,
   interruptAcknowledged = false,
-  nativeIdle = false;
+  nativeIdle = false,
+  // The answer to a question that waited past its credentials; the next
+  // process of this turn receives it as its first message.
+  continuation = null;
 // Retried steer commands share one outcome; Mira stores the request by its ID.
 const steers = new Map();
 let markReady;
@@ -224,22 +228,23 @@ async function main(spec) {
     failed = false;
   lifecycle = new TurnLifecycle();
   try {
-    input.push(await message(spec, spec.text, spec.attachments));
+    const first = await message(spec, spec.text, spec.attachments);
+    input.push(first);
     await client.event({
       type: "mira_user",
-      message: input[0].message,
+      message: first.message,
       text: spec.text,
       attachments: spec.attachments ?? [],
     });
     if (interrupted) return;
-    const options = {
+    const options = (resume) => ({
       cwd: spec.cwd,
       model: spec.model || undefined,
       effort: spec.effort || undefined,
       // Without an explicit display the API omits thinking text and returns
       // only signatures, which would render as empty reasoning cards.
       thinking: { type: "adaptive", display: "summarized" },
-      ...(spec.resume
+      ...(resume
         ? { resume: spec.sessionId }
         : { sessionId: spec.sessionId }),
       sessionStore: client.store,
@@ -252,6 +257,7 @@ async function main(spec) {
         if (name !== "AskUserQuestion")
           return { behavior: "allow", updatedInput: input };
         const questionId = randomUUID();
+        const credentials = questionCredentials();
         const answers = await new Promise((resolve, reject) => {
           questions.set(questionId, resolve);
           signal.addEventListener(
@@ -271,6 +277,17 @@ async function main(spec) {
             .catch(reject);
         });
         await client.event({ type: "mira_answer", questionId, answers });
+        if (credentials.stale()) {
+          // This process may hold rotated OAuth tokens. Stop its response
+          // without another model request and continue in a fresh process.
+          continuation = answerContinuation(input.questions, answers);
+          await client.event({ type: "mira_question_resume", questionId }).catch(() => {});
+          return {
+            behavior: "deny",
+            message: "The answer arrived after a long wait; the session continues in a fresh process with the answer as the next message.",
+            interrupt: true,
+          };
+        }
         return { behavior: "allow", updatedInput: { ...input, answers } };
       },
       mcpServers: { home_nodes: createMiraTools(spec) },
@@ -292,36 +309,48 @@ async function main(spec) {
         ? { pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY }
         : {}),
       stderr: () => {},
-    };
-    run = query({ prompt: prompts(), options });
-    markReady();
-    for await (const event of run) {
-      if (event.type === "system" && event.subtype === "mirror_error")
-        degraded = true;
-      // Batched workers keep consuming the SDK while earlier events are in
-      // flight; ordering is preserved by the queue. A large backlog applies
-      // backpressure, and a failed batch stops the turn like a failed write.
-      const write = client.emit(event);
-      if (!spec.eventBatchV1 || client.backlog() > 8 * 1024 * 1024) await write;
-      if (client.failure()) throw client.failure();
-      if (event.type === "system" && event.subtype === "session_state_changed") {
-        nativeIdle = event.state === "idle";
-        // Cancelling the initial input during resume can produce idle without
-        // any result. The SDK's bidirectional input writer waits for its first
-        // result before closing stdin, so ending prompts alone would deadlock.
-        // Only close after both native idle and the interrupt acknowledgement;
-        // SDK cleanup drains pending transcript mirrors before ending iteration.
-        if (nativeIdle && interruptAcknowledged) run.close();
+    });
+    for (let resume = spec.resume; ; resume = true) {
+      run = query({ prompt: prompts(), options: options(resume) });
+      markReady();
+      for await (const event of run) {
+        if (event.type === "system" && event.subtype === "mirror_error")
+          degraded = true;
+        // Batched workers keep consuming the SDK while earlier events are in
+        // flight; ordering is preserved by the queue. A large backlog applies
+        // backpressure, and a failed batch stops the turn like a failed write.
+        const write = client.emit(event);
+        if (!spec.eventBatchV1 || client.backlog() > 8 * 1024 * 1024) await write;
+        if (client.failure()) throw client.failure();
+        if (event.type === "system" && event.subtype === "session_state_changed") {
+          nativeIdle = event.state === "idle";
+          // Cancelling the initial input during resume can produce idle without
+          // any result. The SDK's bidirectional input writer waits for its first
+          // result before closing stdin, so ending prompts alone would deadlock.
+          // Only close after both native idle and the interrupt acknowledgement;
+          // SDK cleanup drains pending transcript mirrors before ending iteration.
+          if (nativeIdle && interruptAcknowledged) run.close();
+        }
+        if (event.type === "result" && !event.parent_tool_use_id) {
+          // A background notification can recover from an earlier API error in
+          // this same worker. Completion reflects the latest native response.
+          failed = event.is_error === true && !interrupted;
+        }
+        if (lifecycle.observe(event)) {
+          stopping = true;
+          wake?.();
+        }
       }
-      if (event.type === "result" && !event.parent_tool_use_id) {
-        // A background notification can recover from an earlier API error in
-        // this same worker. Completion reflects the latest native response.
-        failed = event.is_error === true && !interrupted;
-      }
-      if (lifecycle.observe(event)) {
-        stopping = true;
-        wake?.();
-      }
+      if (!continuation || interrupted || !lifecycle.finished) break;
+      // The stale process has ended its response; resume in a new one.
+      await run[Symbol.asyncDispose]?.();
+      input.length = 0;
+      input.push(await message(spec, continuation));
+      continuation = null;
+      lifecycle = new TurnLifecycle();
+      failed = false;
+      nativeIdle = false;
+      stopping = false;
     }
     if (!lifecycle.finished && !interrupted)
       throw new Error("Claude exited before its background work and final response completed");

@@ -404,3 +404,59 @@ func TestOfflineManagerRunsPrivateGatewayIndependentOfNode(t *testing.T) {
 		t.Fatal("CLI gateway still listening after Close")
 	}
 }
+
+// A caller arriving while the last holder's gateway is still exiting must get a
+// fresh, listening gateway rather than the one about to disappear.
+func TestAcquireWhileReleasedGatewayIsExiting(t *testing.T) {
+	manager, id := testManager(t)
+	spec := Spec{Type: "http", Server: "proxy.example", Port: 9000, Profile: ProfileClaude}
+	if _, err := manager.Configure(id, spec); err != nil {
+		t.Fatal(err)
+	}
+	exiting, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	manager.exitHook = func() {
+		once.Do(func() {
+			close(exiting)
+			<-resume
+		})
+	}
+	_, release, err := manager.Acquire(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go release()
+	<-exiting
+	type result struct {
+		env     map[string]string
+		release func()
+		err     error
+	}
+	acquired := make(chan result, 1)
+	go func() {
+		env, release, err := manager.Acquire(id)
+		acquired <- result{env, release, err}
+	}()
+	select {
+	case value := <-acquired:
+		if value.err == nil {
+			value.release()
+		}
+		t.Fatalf("acquire joined an exiting gateway: %v", value.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(resume)
+	value := <-acquired
+	if value.err != nil {
+		t.Fatal(value.err)
+	}
+	defer value.release()
+	connection, err := net.DialTimeout("tcp", strings.TrimPrefix(value.env["HTTPS_PROXY"], "http://"), time.Second)
+	if err != nil {
+		t.Fatalf("acquired gateway is not listening: %v", err)
+	}
+	connection.Close()
+	if status, _ := manager.Status(id); status["running"] != true || status["refs"] != 1 {
+		t.Fatalf("status after restart: %#v", status)
+	}
+}
