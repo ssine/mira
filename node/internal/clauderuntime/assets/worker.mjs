@@ -4,7 +4,7 @@ import { createInterface } from "node:readline";
 import { createMiraTools } from "./mira-tools.mjs";
 import { serverClient } from "./store.mjs";
 import { TurnLifecycle } from "./turn-lifecycle.mjs";
-import { answerContinuation, authContinuation, credentialFingerprint, questionCredentials, revokedLogin } from "./question-credentials.mjs";
+import { answerContinuation, questionCredentials } from "./question-credentials.mjs";
 
 const lines = createInterface({ input: process.stdin });
 const privacyInstructions = `Privacy defaults:
@@ -62,6 +62,10 @@ async function message(spec, text, attachments = []) {
     message: { role: "user", content: [{ type: "text", text: body }] },
   };
 }
+// Mira names a bounded local CLI debug log for turns and plan-usage reads
+// (authentication decisions are recorded only there).
+const debugFile = () =>
+  process.env.MIRA_NODE_CLAUDE_DEBUG_FILE ? { extraArgs: { "debug-file": process.env.MIRA_NODE_CLAUDE_DEBUG_FILE } } : {};
 let spec;
 lines.on("line", async (line) => {
   try {
@@ -109,6 +113,7 @@ lines.on("line", async (line) => {
           settingSources: [],
           strictMcpConfig: true,
           mcpServers: {},
+          ...debugFile(),
           ...(process.env.MIRA_NODE_CLAUDE_BINARY
             ? {
                 pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY,
@@ -308,16 +313,12 @@ async function main(spec) {
       ...(process.env.MIRA_NODE_CLAUDE_BINARY
         ? { pathToClaudeCodeExecutable: process.env.MIRA_NODE_CLAUDE_BINARY }
         : {}),
+      ...debugFile(),
       stderr: () => {},
     });
-    let authResumes = 0;
     for (let resume = spec.resume; ; resume = true) {
-      // The login this process starts with; a later change means another
-      // process renewed (and so revoked) the tokens this one holds.
-      const startedWith = credentialFingerprint();
       run = query({ prompt: prompts(), options: options(resume) });
       markReady();
-      try {
       for await (const event of run) {
         if (event.type === "system" && event.subtype === "mirror_error")
           degraded = true;
@@ -340,23 +341,13 @@ async function main(spec) {
           // A background notification can recover from an earlier API error in
           // this same worker. Completion reflects the latest native response.
           failed = event.is_error === true && !interrupted;
-          if (failed && !continuation && authResumes < 2 && revokedLogin(event) &&
-              startedWith !== null && credentialFingerprint() !== startedWith) {
-            authResumes++;
-            continuation = authContinuation;
-            await client.event({ type: "mira_auth_resume" }).catch(() => {});
-          }
         }
         if (lifecycle.observe(event)) {
           stopping = true;
           wake?.();
         }
       }
-      } catch (error) {
-        // The SDK raises the rejected response as an error after its result.
-        if (!continuation || interrupted) throw error;
-      }
-      if (!continuation || interrupted) break;
+      if (!continuation || interrupted || !lifecycle.finished) break;
       // The stale process has ended its response; resume in a new one.
       await run[Symbol.asyncDispose]?.();
       input.length = 0;

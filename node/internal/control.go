@@ -124,6 +124,8 @@ func newControlClient(configuration config, runtimeValue *capabilityRuntime) *co
 		sshWorkers:     make(map[string]context.CancelFunc),
 	}
 	client.claude = clauderuntime.NewWithEgress(filepath.Dir(configuration.IdentityFile), client.egress)
+	// The Node is the single renewer of its subscription logins.
+	client.claude.StartLoginKeeper(Log)
 	client.appServer.egress = client.egress
 	client.endpoints = newServerEndpointSelector(configuration.ServerURL, httpClient)
 	return client

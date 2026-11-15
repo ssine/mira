@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 const assets = path.join(path.dirname(fileURLToPath(import.meta.url)), "../node/internal/clauderuntime/assets");
 
 const fakeSdk = `
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 const log = (value) => appendFileSync(process.env.FAKE_LOG, JSON.stringify(value) + "\\n");
 let queries = 0;
 export function query({ prompt, options }) {
@@ -23,17 +23,7 @@ export function query({ prompt, options }) {
     const first = await input.next();
     log({ kind: "prompt", n, text: first.value.message.content[0].text });
     yield { type: "system", subtype: "session_state_changed", state: "running" };
-    if (n === 1 && process.env.FAKE_MODE === "auth") {
-      // A long tool ran while another process renewed the login; the next
-      // request is rejected and the SDK raises the error result.
-      if (process.env.FAKE_ROTATE === "1") {
-        const home = process.env.MIRA_NODE_CLAUDE_CONFIG_DIR;
-        writeFileSync(home + "/.credentials.json", JSON.stringify({ claudeAiOauth: { accessToken: "a-2", refreshToken: "r-2" } }));
-      }
-      yield { type: "result", is_error: true, subtype: "success", result: "Failed to authenticate: OAuth token revoked. Please log in again or contact your administrator." };
-      yield { type: "system", subtype: "session_state_changed", state: "idle" };
-      throw new Error("Claude Code returned an error result: Failed to authenticate: OAuth token revoked.");
-    } else if (n === 1) {
+    if (n === 1) {
       const questions = [{ question: "部署到哪里？", header: "位置", options: [] }];
       yield { type: "assistant", message: { id: "m1", content: [{ type: "tool_use", id: "t1", name: "AskUserQuestion", input: { questions } }] } };
       const decision = await options.canUseTool("AskUserQuestion", { questions }, { signal: new AbortController().signal });
@@ -64,7 +54,7 @@ export function serverClient() {
 }
 `;
 
-async function scenario(rotate, mode = "question") {
+async function scenario(rotate) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mira-question-resume-"));
   try {
     for (const file of ["worker.mjs", "turn-lifecycle.mjs", "question-credentials.mjs"])
@@ -84,17 +74,12 @@ async function scenario(rotate, mode = "question") {
     const entries = async () => (await fs.readFile(logPath, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
     const child = spawn(process.execPath, [path.join(dir, "worker.mjs")], {
       cwd: dir,
-      env: { ...process.env, FAKE_LOG: logPath, MIRA_NODE_CLAUDE_CONFIG_DIR: home, FAKE_MODE: mode, FAKE_ROTATE: rotate ? "1" : "0" },
+      env: { ...process.env, FAKE_LOG: logPath, MIRA_NODE_CLAUDE_CONFIG_DIR: home },
       stdio: ["pipe", "ignore", "inherit"],
     });
     const exited = new Promise((resolve) => child.on("exit", resolve));
     const sessionId = "00000000-0000-4000-8000-0000000000aa";
     child.stdin.write(JSON.stringify({ action: "start", sessionId, cwd: dir, text: "先问我", credential: "secret" }) + "\n");
-    if (mode === "auth") {
-      const code = await Promise.race([exited, new Promise((_, reject) => setTimeout(() => reject(new Error("worker did not exit")), 10_000))]);
-      assert.equal(code, 0);
-      return await entries();
-    }
     let question;
     for (let i = 0; i < 200 && !question; i++) {
       question = (await entries()).find((entry) => entry.payload?.type === "mira_question");
@@ -133,24 +118,4 @@ async function scenario(rotate, mode = "question") {
   assert.deepEqual(decision.answers, { "部署到哪里？": "Home Server" });
   assert.equal(log.at(-1).payload.failed, false);
 }
-{
-  // A running turn whose login another process renewed continues in a fresh
-  // process; nothing is repeated and the turn does not fail.
-  const log = await scenario(true, "auth");
-  const queries = log.filter((entry) => entry.kind === "query");
-  assert.equal(queries.length, 2, "a revoked login continues in a fresh process");
-  assert.equal(queries[1].resume, "00000000-0000-4000-8000-0000000000aa");
-  assert.match(log.find((entry) => entry.kind === "prompt" && entry.n === 2).text, /fresh process with the current login/);
-  const types = log.filter((entry) => entry.kind === "event").map((entry) => entry.payload.type);
-  assert.deepEqual(types, ["mira_user", "mira_auth_resume", "mira_completed"]);
-  assert.equal(log.at(-1).payload.failed, false);
-}
-{
-  // Unchanged credentials: a real sign-out fails the turn instead of looping.
-  const log = await scenario(false, "auth");
-  assert.equal(log.filter((entry) => entry.kind === "query").length, 1);
-  const types = log.filter((entry) => entry.kind === "event").map((entry) => entry.payload.type);
-  assert.deepEqual(types, ["mira_user", "mira_error", "mira_completed"]);
-  assert.equal(log.at(-1).payload.failed, true);
-}
-console.log("PASS: stale question answers and revoked logins resume in a fresh Claude process; fresh answers continue in place; a real sign-out still fails");
+console.log("PASS: stale question answers resume in a fresh Claude process; fresh answers continue in place");

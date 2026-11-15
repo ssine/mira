@@ -58,6 +58,9 @@ type Manager struct {
 	closeOnce sync.Once
 	// usageSlots bounds concurrent plan-usage workers.
 	usageSlots chan struct{}
+	// keeper renews subscription logins ahead of the CLI (login_keeper.go).
+	keeper       *loginKeeper
+	keeperCancel context.CancelFunc
 }
 
 func New(identityDir string) *Manager {
@@ -73,6 +76,7 @@ func NewWithEgress(identityDir string, egress *accountegress.Manager) *Manager {
 	m := &Manager{runtimeID: rand.Text(), root: filepath.Join(identityDir, "runtimes", "claude"), accountsRoot: filepath.Join(identityDir, "accounts"), state: "stopped", processes: map[string]*process{}, logins: map[string]*loginProcess{}, accepted: map[string]bool{}, sealed: map[string]bool{}, starting: map[string]int{}, usageSlots: make(chan struct{}, usageReads)}
 	m.egress = egress
 	m.ownsEgress = ownsEgress
+	m.keeper = newLoginKeeper()
 	m.cachePaths(identityDir)
 	return m
 }
@@ -347,7 +351,7 @@ func (m *Manager) start(params map[string]any) (any, error) {
 	}
 	params["cache"] = map[string]string{"root": m.cacheRoot, "config": m.cacheConfig}
 	cmd := exec.Command(nodeBinary(), filepath.Join(m.dir, "worker.mjs"))
-	cmd.Env = env
+	cmd.Env = append(env, m.debugLogEnv("turn", accountID, id)...)
 	cmd.Dir = m.dir
 	configureCommand(cmd)
 	input, err := cmd.StdinPipe()
@@ -559,6 +563,9 @@ func (m *Manager) close() {
 	m.closed = true
 	if m.cancel != nil {
 		m.cancel()
+	}
+	if m.keeperCancel != nil {
+		m.keeperCancel()
 	}
 	ps := make([]*process, 0, len(m.processes))
 	for _, p := range m.processes {
