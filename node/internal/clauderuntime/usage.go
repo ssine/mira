@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -158,9 +157,6 @@ func (m *Manager) usage(accountID string) (any, error) {
 	if account.AuthType != "subscription" {
 		return nil, errors.New("Claude account does not use subscription authentication")
 	}
-	if home, err := m.accountHome(accountID); err == nil && m.accountTurnActive(accountID) && oauthExpiresWithin(filepath.Join(home, ".credentials.json"), time.Now(), usageRefreshMargin) {
-		return nil, errors.New("Claude plan usage is deferred while a running turn renews the account's login")
-	}
 	select {
 	case m.usageSlots <- struct{}{}:
 		defer func() { <-m.usageSlots }()
@@ -200,46 +196,4 @@ func (m *Manager) usage(accountID string) (any, error) {
 		return nil, errors.New("Claude returned an invalid plan usage response")
 	}
 	return CleanPlanUsage(raw), nil
-}
-
-// usageRefreshMargin exceeds the CLI's own refresh threshold (minutes before
-// expiry), so a plan-usage read never becomes the process that renews the
-// login while a turn is running.
-const usageRefreshMargin = 15 * time.Minute
-
-// OAuth refresh tokens rotate, and a renewal revokes the previous tokens at
-// once. A long-running turn's CLI holds its tokens in memory; if a short
-// plan-usage read renews the login meanwhile, the turn's next request fails
-// with "OAuth token revoked". Near expiry, a running turn on the account
-// therefore renews the login itself and plan-usage reads wait.
-func (m *Manager) accountTurnActive(accountID string) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.starting[accountID] > 0 {
-		return true
-	}
-	for _, process := range m.processes {
-		if process.accountID == accountID {
-			return true
-		}
-	}
-	return false
-}
-
-// oauthExpiresWithin reports whether the stored access token expires within
-// margin. Unreadable credentials report false: the read then fails on its own.
-func oauthExpiresWithin(path string, now time.Time, margin time.Duration) bool {
-	data, err := os.ReadFile(path)
-	if err != nil || len(data) > 1024*1024 {
-		return false
-	}
-	var stored struct {
-		OAuth struct {
-			ExpiresAt int64 `json:"expiresAt"`
-		} `json:"claudeAiOauth"`
-	}
-	if json.Unmarshal(data, &stored) != nil || stored.OAuth.ExpiresAt <= 0 {
-		return false
-	}
-	return time.UnixMilli(stored.OAuth.ExpiresAt).Sub(now) < margin
 }
