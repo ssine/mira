@@ -44,6 +44,9 @@ jobs:
     env:
       STABLE_GIT_COMMIT: ${{ github.sha }}
       RUST_TOOLCHAIN: "1.95.0"
+      # Codex fetches a rusty_v8 git fork with deep Chromium submodules. As in upstream
+      # CI, fetch with the Git CLI; Windows also needs core.longpaths (set below).
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
     strategy:
       fail-fast: false
       matrix:
@@ -89,7 +92,13 @@ jobs:
           $temp = Join-Path $work 'tmp'
           New-Item -ItemType Directory -Force $temp | Out-Null
           Add-Content -Encoding utf8 -Path $env:GITHUB_PATH -Value (Join-Path $work 'cargo\bin')
-          foreach ($line in "CARGO_HOME=$work\cargo", "RUSTUP_HOME=$work\rustup", "TEMP=$temp", "TMP=$temp") {
+          # Cargo checks out git submodules with libgit2, which reads core.longpaths
+          # only from Git config files (%HOME% first), not GIT_CONFIG_* variables.
+          # A job-scoped HOME keeps the runner account's Git configuration unchanged.
+          $gitHome = Join-Path $work 'git-home'
+          New-Item -ItemType Directory -Force $gitHome | Out-Null
+          Set-Content -Encoding ascii -Path (Join-Path $gitHome '.gitconfig') -Value "[core]`n`tlongpaths = true"
+          foreach ($line in "CARGO_HOME=$work\cargo", "RUSTUP_HOME=$work\rustup", "TEMP=$temp", "TMP=$temp", "HOME=$gitHome") {
             Add-Content -Encoding utf8 -Path $env:GITHUB_ENV -Value $line
           }
 
