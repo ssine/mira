@@ -2,7 +2,10 @@ package clauderuntime
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCleanPlanUsage(t *testing.T) {
@@ -56,5 +59,45 @@ func TestCleanPlanUsage(t *testing.T) {
 	unavailable := CleanPlanUsage(map[string]any{"subscription_type": nil, "rate_limits_available": false, "rate_limits": nil})
 	if unavailable.Available || unavailable.SevenDay != nil || unavailable.SubscriptionType != "" {
 		t.Fatalf("unavailable: %+v", unavailable)
+	}
+}
+
+func TestPlanUsageDefersNearExpiryWhileATurnRuns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".credentials.json")
+	now := time.Date(2026, 11, 15, 12, 26, 4, 0, time.UTC)
+	write := func(expires time.Time) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"claudeAiOauth": map[string]any{"accessToken": "a", "refreshToken": "r", "expiresAt": expires.UnixMilli()}})
+		if err := os.WriteFile(path, body, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The incident: the read ran 49 s before expiry and renewed the login.
+	write(now.Add(49 * time.Second))
+	if !oauthExpiresWithin(path, now, usageRefreshMargin) {
+		t.Fatal("a token expiring within the margin must defer the read")
+	}
+	write(now.Add(2 * time.Hour))
+	if oauthExpiresWithin(path, now, usageRefreshMargin) {
+		t.Fatal("a fresh token must not defer the read")
+	}
+	if oauthExpiresWithin(filepath.Join(dir, "missing.json"), now, usageRefreshMargin) {
+		t.Fatal("unreadable credentials must not defer")
+	}
+
+	m := New(t.TempDir())
+	const account = "00000000-0000-4000-8000-0000000000c1"
+	if m.accountTurnActive(account) {
+		t.Fatal("no turn runs yet")
+	}
+	m.processes["turn"] = &process{accountID: account}
+	if !m.accountTurnActive(account) || m.accountTurnActive("00000000-0000-4000-8000-0000000000c2") {
+		t.Fatal("only the running turn's account is active")
+	}
+	delete(m.processes, "turn")
+	m.starting[account] = 1
+	if !m.accountTurnActive(account) {
+		t.Fatal("a starting turn counts as running")
 	}
 }

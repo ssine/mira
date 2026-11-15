@@ -176,6 +176,24 @@ session in a fresh process of the same turn with the answer, worded like the
 native tool result, as its next message. A `mira_question_resume` event marks
 this; the Web does not show the stopped response as an error.
 
+Rotation strikes running turns too, not only waiting ones. A renewal revokes
+the previous tokens at once, so a turn's CLI that is in the middle of a long
+tool fails its next request if another process renewed the login meanwhile.
+Observed causes: the five-minute plan-usage read reaching the CLI's refresh
+window just before expiry, and several concurrent turns on one account. Two
+measures apply:
+
+- Plan-usage reads are deferred (a sample gap) while a turn on the account is
+  running and the stored access token expires within 15 minutes, so the
+  running turn renews the login itself.
+- A turn whose top-level result is an authentication failure, while the
+  stored credentials changed since its process started, records
+  `mira_auth_resume` and continues the session in a fresh process (at most
+  twice per turn). The rejected request never ran, so no tool is repeated;
+  the continuation message asks the model to resume where it stopped. With
+  unchanged credentials (a real sign-out) the turn fails as before. The Web
+  hides the rejected response's error once the turn continues.
+
 The account egress gateway is reference-counted. A caller that arrives while
 the last holder's gateway is still exiting waits for that exit and starts a
 fresh one; it never joins a listener that is about to disappear or waits on a
