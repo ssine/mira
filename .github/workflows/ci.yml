@@ -79,6 +79,7 @@ jobs:
             tests/account_status_test.mjs \
             tests/claude_conversations_test.mjs \
             tests/claude_lifecycle_test.mjs \
+            tests/claude_credential_mirror_test.mjs \
             tests/claude_question_resume_test.mjs \
             tests/claude_cache_test.mjs \
             tests/account_recovery_test.mjs \

@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { createMiraTools } from "./mira-tools.mjs";
 import { serverClient } from "./store.mjs";
 import { TurnLifecycle } from "./turn-lifecycle.mjs";
+import { mirrorResumeCredentials } from "./credential-mirror.mjs";
 import { answerContinuation, questionCredentials } from "./question-credentials.mjs";
 
 const lines = createInterface({ input: process.stdin });
@@ -229,6 +230,8 @@ async function steer({ steerId, text, attachments }) {
 }
 async function main(spec) {
   client = serverClient(spec);
+  // A resumed CLI reads a private copy of the login; keep it current.
+  const stopMirror = mirrorResumeCredentials(process.env.MIRA_NODE_CLAUDE_CONFIG_DIR);
   let degraded = false,
     failed = false;
   lifecycle = new TurnLifecycle();
@@ -377,6 +380,7 @@ async function main(spec) {
       degraded = true;
     }
   } finally {
+    stopMirror();
     stopping = true;
     markReady();
     wake?.();

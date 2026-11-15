@@ -209,6 +209,20 @@ is dropped spends the refresh token. When the keeper cannot renew (Node down,
 network failure, provider refusal), the CLI's own renewal remains the fallback
 and the Node log records the failure.
 
+Resumed turns need one more step. When a turn resumes through Mira's
+SessionStore, the Agent SDK materializes the transcript in a private
+`<tmpdir>/claude-resume-<id>/` directory, points the CLI's `CLAUDE_CONFIG_DIR`
+there and copies the account's `.credentials.json` into it once, with the
+refresh token removed. That CLI never reads the account directory again: it
+cannot see a renewal and cannot renew itself, so after the next renewal its
+next request fails with "OAuth token revoked" (production turn
+`1eb8e8dd`, 2026-11-16, and earlier incidents; reproduced exactly with the
+pinned SDK 0.3.325 against a rotating fake token service). The worker therefore
+mirrors every renewal of the account's login into the resume copies that still
+hold one of this account's earlier access tokens, still without the refresh
+token (`credential-mirror.mjs`). The CLI adopts the changed file before its next
+request, or retries with it after a 401 for a request that was in flight.
+
 Turns and plan-usage reads also write a CLI debug log (the only place the CLI
 records its OAuth refresh and 401 recovery decisions) under
 `<identity>/logs/claude/<account>/{turn,usage}/`. Tokens are redacted by the
