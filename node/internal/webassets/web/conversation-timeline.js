@@ -181,6 +181,65 @@ export function orderLanes(lanes) {
   return ordered;
 }
 
+// Incremental reads (see GetCodexTimeline/GetClaudeTimeline) carry only what
+// changed. Turns and tools merge by ID (tools without one by sequence),
+// messages by sequence; a Close item only ends a tool the client already has.
+// Lanes missing from an update keep their items; Reset lanes start over.
+const toolKey = tool => tool.id ? `id:${tool.id}` : `seq:${tool.seq}`;
+const messageKey = message => `${message.seq}:${message.role}:${message.preview}`;
+function mergeItems(previous = [], updates = [], key) {
+  const items = previous.slice();
+  const index = new Map(items.map((item, position) => [key(item), position]));
+  for (const item of updates ?? []) {
+    const position = index.get(key(item));
+    if (position === undefined) {
+      if (item.close) continue;
+      index.set(key(item), items.length);
+      items.push(item);
+      continue;
+    }
+    const prior = items[position];
+    items[position] = item.close ? { ...prior, end: Math.max(prior.end, item.end), open: false }
+      : "start" in item ? { ...prior, ...item, start: Math.min(prior.start, item.start), end: Math.max(prior.end, item.end), open: item.open === true }
+      : item;
+  }
+  return items.sort((a, b) => (a.start ?? a.at) - (b.start ?? b.at) || (a.seq ?? 0) - (b.seq ?? 0));
+}
+
+export function mergeTimeline(data, update) {
+  if (!data || !update?.delta) return update;
+  const previous = new Map((data.lanes ?? []).map(lane => [lane.threadId, lane]));
+  const lanes = [], seen = new Set();
+  for (const lane of update.lanes ?? []) {
+    seen.add(lane.threadId);
+    const old = previous.get(lane.threadId);
+    const meta = { threadId: lane.threadId, parentThreadId: lane.parentThreadId ?? old?.parentThreadId ?? null,
+      depth: lane.depth ?? old?.depth ?? 0, title: lane.title ?? old?.title ?? null };
+    if (lane.unchanged && old) { lanes.push({ ...old, ...meta }); continue; }
+    const base = old && !lane.reset ? old : {};
+    lanes.push({ ...meta, ...(lane.partial ? { partial: true } : {}), turns: mergeItems(base.turns, lane.turns, turn => turn.id),
+      tools: mergeItems(base.tools, lane.tools, toolKey), messages: mergeItems(base.messages, lane.messages, messageKey) });
+  }
+  for (const lane of data.lanes ?? []) if (!seen.has(lane.threadId)) lanes.push(lane);
+  // A Claude subagent first seen in an increment names itself after its Task call.
+  const tools = new Map(lanes.flatMap(lane => (lane.tools ?? []).map(tool => [tool.id, tool])));
+  for (const lane of lanes) {
+    if (lane.title == null && lane.depth > 0) lane.title = tools.get(lane.threadId.split(":")[1])?.name ?? null;
+  }
+  return { ...data, ...update, lanes, delta: false, partial: lanes.some(lane => lane.partial) };
+}
+
+// The live pulse restarts whenever an element is created. Align every live
+// element to one global phase so re-renders continue it seamlessly.
+const pulsePeriodMs = 2400;
+const alignPulse = root => {
+  const delay = `-${Math.round(performance.now() % pulsePeriodMs)}ms`;
+  for (const element of root.querySelectorAll(".timeline-span.live, .timeline-turn.live")) element.style.animationDelay = delay;
+};
+// The recent view drawn this far past now, so it can slide without redrawing.
+const panLeadMs = 30_000;
+let clipCounter = 0;
+
 export class ConversationTimeline {
   // The timeline is a pinned, non-modal panel at the top of the conversation.
   // Its visibility is a remembered preference shared by all conversations;
@@ -206,6 +265,12 @@ export class ConversationTimeline {
     this.request = 0;
     this.timer = null;
     this.ticker = null;
+    this.settle = null;
+    this.inflight = false;
+    this.pending = false;
+    this.lastRead = 0;
+    this.pan = null;
+    this.panFrame = 0;
     // "hour" is the stored name of the recent mode; its length is separate.
     try { this.mode = localStorage.getItem("mira.timeline.mode") === "hour" ? "hour" : "all"; } catch { this.mode = "all"; }
     try { this.windowMs = clampWindow(Number(localStorage.getItem(windowKey)) || hourMs); } catch { this.windowMs = hourMs; }
@@ -313,7 +378,7 @@ export class ConversationTimeline {
     const open = this.pinned && !!this.threadId;
     const was = this.open;
     this.root.hidden = !open;
-    if (open && !was) void this.refresh();
+    if (open && !was) void this.refresh({ full: true });
     else if (!open) this.stop();
   }
 
@@ -331,7 +396,41 @@ export class ConversationTimeline {
     this.show();
   }
 
-  stop() { clearTimeout(this.timer); this.timer = null; this.setTicker(false); }
+  stop() {
+    clearTimeout(this.timer); clearTimeout(this.settle); clearTimeout(this.fallback);
+    this.timer = this.settle = this.fallback = null;
+    this.pending = false;
+    this.setTicker(false);
+    this.stopPan();
+  }
+
+  // Whether a notification about this thread can change the timeline.
+  follows(threadId) {
+    return !!threadId && (threadId === this.threadId || (this.data?.lanes ?? []).some(lane => lane.threadId === threadId));
+  }
+
+  // New durable activity (a Claude durable signal, a Codex item/turn
+  // notification or a changed item count): read what changed. At most one read
+  // is in flight and reads start at most once a second; a burst of signals
+  // coalesces into one read, and one more read follows the last signal
+  // because a notification can arrive just before its record is stored.
+  notify() {
+    if (!this.open || !this.threadId || !this.data) return;
+    this.pending = true;
+    this.schedule();
+    clearTimeout(this.settle);
+    this.settle = setTimeout(() => { this.settle = null; this.pending = true; this.schedule(); }, 2500);
+  }
+
+  schedule() {
+    if (this.inflight || this.timer || !this.pending) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      if (!this.pending) return;
+      this.pending = false;
+      void this.refresh();
+    }, Math.max(0, this.lastRead + 1000 - Date.now()));
+  }
 
   // Re-render every second while something is growing (or the hour window
   // slides) and the panel is open; the data itself refreshes every 10 s.
@@ -421,29 +520,39 @@ export class ConversationTimeline {
     if (fits) this.info.hidden = true;
   }
 
-  // running: keep following an active conversation while expanded.
-  async refresh({ running = false } = {}) {
-    this.running = running || this.running;
+  // Reads the whole timeline the first time (or with full), and afterwards
+  // only what changed since the last response's cursor.
+  async refresh({ full = false } = {}) {
     if (!this.open || !this.threadId) return;
-    const threadId = this.threadId, request = ++this.request;
+    const threadId = this.threadId, request = ++this.request, base = full ? null : this.data;
     if (!this.data) this.body.replaceChildren(Object.assign(document.createElement("p"), { className: "timeline-status", textContent: "正在读取时间线…" }));
+    this.inflight = true;
+    this.lastRead = Date.now();
     try {
-      const data = await this.load(threadId);
-      if (request !== this.request || threadId !== this.threadId) return;
-      this.data = data;
+      const update = await this.load(threadId, base?.cursor ?? null);
+      if (request !== this.request || threadId !== this.threadId || this.data !== base && base) return;
+      this.data = base ? mergeTimeline(base, update) : update;
       this.render();
     } catch (error) {
       if (request !== this.request) return;
       if (!this.data) this.body.replaceChildren(Object.assign(document.createElement("p"), { className: "timeline-status", textContent: `时间线读取失败：${error.message}` }));
+    } finally {
+      if (request === this.request) {
+        this.inflight = false;
+        this.schedule();
+        // A missed signal (a dropped stream, a subagent on another Node) is
+        // caught by a slow read while the conversation runs.
+        clearTimeout(this.fallback);
+        this.fallback = this.open && this.running ? setTimeout(() => { this.pending = true; this.schedule(); }, 30_000) : null;
+      }
     }
-    this.stop();
-    if (this.open && this.running) this.timer = setTimeout(() => void this.refresh(), 10_000);
   }
 
   setRunning(running) {
+    const was = this.running;
     this.running = running;
-    if (!running) { this.setTicker(false); if (this.data) this.render(); }
-    if (running && this.open && !this.timer) this.timer = setTimeout(() => void this.refresh(), 2_000);
+    if (!running) { this.setTicker(false); clearTimeout(this.fallback); this.fallback = null; if (this.data) this.render(); }
+    if (running && !was) this.notify();
   }
 
   setZoom(direction) {
@@ -455,14 +564,20 @@ export class ConversationTimeline {
     const data = this.data;
     if (!data) return;
     const now = Date.now(), hour = this.mode === "hour";
-    const lanes = liveLanes(data.lanes ?? [], now, this.running);
+    // While running, the recent view is drawn panLeadMs past now and slides
+    // left every frame (one transform; see startPan). Live items reach the
+    // lead, and a clip at now hides what has not happened yet.
+    const panning = hour && this.running;
+    const drawnTo = panning ? now + panLeadMs : now;
+    const lanes = liveLanes(data.lanes ?? [], drawnTo, this.running);
     const live = lanes.some(lane => [...(lane.turns ?? []), ...(lane.tools ?? [])].some(item => item.live));
-    this.setTicker(live);
+    this.setTicker(live && !panning);
     const all = activitySegments(lanes);
     const range = hour && all.length ? hourWindow(lanes, now, this.running, this.windowMs) : null;
     // The hour view is one real-time segment: idle time is shown, not folded.
     const segments = range ? [range] : all;
-    const visible = item => !range || item.end >= range.start && item.start <= range.end;
+    const visible = item => !range || item.end >= range.start && item.start <= (panning ? drawnTo : range.end);
+    if (!panning || !segments.length) this.stopPan();
     const recent = `最近 ${formatWindow(this.windowMs)}`;
     this.summary.textContent = all.length ? (hour ? recent : timelineSummary({ ...data, lanes })) : "";
     if (!segments.length) {
@@ -575,11 +690,43 @@ export class ConversationTimeline {
     scroller.className = "timeline-scroll";
     const chart = svg("svg", { width: layout.width + chartPad * 2, height, class: "timeline-chart", role: "img",
       "aria-label": `会话时间线：${timelineSummary(data)}` });
-    const x = at => chartPad + layout.position(at);
+    const panScale = panning ? layout.segments[0].scale : 0;
+    const x = panning ? at => chartPad + layout.segments[0].x + (at - range.start) * panScale : at => chartPad + layout.position(at);
+    // Row stripes stay put; everything time-based is drawn into content.
+    const stripes = svg("g", { class: "timeline-stripes" });
+    ordered.forEach((lane, index) => stripes.append(svg("rect", { x: 0, y: axisHeight + index * laneHeight, width: layout.width + chartPad * 2, height: laneHeight,
+      class: index % 2 ? "timeline-row odd" : "timeline-row" })));
+    chart.append(stripes);
+    let content = chart;
+    if (panning) {
+      const id = `timeline-clip-${++clipCounter}`;
+      const defs = svg("defs");
+      const clip = svg("clipPath", { id });
+      clip.append(svg("rect", { x: 0, y: 0, width: x(now) + 1, height }));
+      defs.append(clip);
+      const clipped = svg("g", { "clip-path": `url(#${id})` });
+      content = svg("g", { class: "timeline-pan" });
+      clipped.append(content);
+      chart.append(defs, clipped);
+    }
     // Axis: date at each segment start, then ticks at a readable step.
     const axis = svg("g", { class: "timeline-axis" });
     let previousDay = null;
-    layout.segments.forEach((segment, index) => {
+    if (panning) {
+      // Sliding axis: plain ticks from before the window to the lead; the
+      // date joins the first tick of each day.
+      const step = tickSteps.find(value => value * panScale >= 72) ?? tickSteps.at(-1);
+      axis.append(svg("line", { x1: x(range.start - step), x2: x(drawnTo), y1: axisHeight - 1, y2: axisHeight - 1, class: "timeline-axis-line" }));
+      let previous = null;
+      for (let at = Math.floor(range.start / step) * step; at <= drawnTo; at += step) {
+        const position = x(at);
+        axis.append(svg("line", { x1: position, x2: position, y1: axisHeight - 4, y2: axisHeight - 1, class: "timeline-axis-tick" }));
+        const label = svg("text", { x: position, y: 10, class: "timeline-axis-text", "text-anchor": "middle" });
+        label.textContent = `${day(at) !== previous && previous !== null ? `${day(at)} ` : ""}${clock(at, step < 60e3)}`;
+        previous = day(at);
+        axis.append(label);
+      }
+    } else layout.segments.forEach((segment, index) => {
       const step = tickSteps.find(value => value * segment.scale >= 72) ?? tickSteps.at(-1);
       const left = chartPad + segment.x, right = left + segment.width;
       axis.append(svg("line", { x1: left, x2: right, y1: axisHeight - 1, y2: axisHeight - 1, class: "timeline-axis-line" }));
@@ -613,11 +760,10 @@ export class ConversationTimeline {
         axis.append(gap);
       }
     });
-    chart.append(axis);
+    content.append(axis);
     ordered.forEach((lane, index) => {
       const top = axisHeight + index * laneHeight;
       const row = svg("g", { class: "timeline-lane", "data-thread-id": lane.threadId });
-      row.append(svg("rect", { x: 0, y: top, width: layout.width + chartPad * 2, height: laneHeight, class: index % 2 ? "timeline-row odd" : "timeline-row" }));
       for (const turn of (lane.turns ?? []).filter(visible)) {
         row.append(svg("rect", { x: x(turn.start), y: top + laneHeight / 2 - 1, width: Math.max(1, x(turn.end) - x(turn.start)), height: 2, class: `timeline-turn${turn.live ? " live" : turn.open ? " open" : ""}` },
           `轮次 · ${clock(turn.start, true)} 起 · ${formatDuration(turn.end - turn.start)}${turn.live ? " · 进行中" : turn.open ? " · 未观测到结束" : turn.status === "aborted" ? " · 已中断" : ""}`));
@@ -644,8 +790,9 @@ export class ConversationTimeline {
             "data-timeline-seq": message.seq, "data-timeline-thread": lane.threadId, "data-timeline-role": "assistant" }, `回复 · ${clock(message.at, true)} · ${message.preview}`));
         }
       }
-      chart.append(row);
+      content.append(row);
     });
+    alignPulse(chart);
     scroller.append(chart);
     grid.append(labels, scroller);
     this.body.replaceChildren(grid);
@@ -653,5 +800,34 @@ export class ConversationTimeline {
     const following = scroll && scroll.scrollLeft + scroll.clientWidth >= scroll.scrollWidth - 4;
     if (previousScroll !== null && !(live && following)) scroller.scrollLeft = previousScroll;
     else if (this.zoom > 1) scroller.scrollLeft = scroller.scrollWidth;
+    if (panning) {
+      this.pan = { group: content, scale: panScale, base: now, dx: 0 };
+      this.startPan();
+    }
+  }
+
+  // One transform per frame while the recent view runs; it changes only when
+  // the shift moves by a tenth of a pixel. Before the drawn lead runs out the
+  // view is redrawn from the current time.
+  startPan() {
+    if (this.panFrame) return;
+    const frame = () => {
+      this.panFrame = 0;
+      const pan = this.pan;
+      if (!pan || !this.open) return;
+      const elapsed = Date.now() - pan.base;
+      // A redraw restarts the loop itself (or ends it).
+      if (elapsed > panLeadMs * 0.6) { this.render(); return; }
+      const dx = Math.round(elapsed * pan.scale * 10) / 10;
+      if (dx !== pan.dx) { pan.dx = dx; pan.group.setAttribute("transform", `translate(${-dx} 0)`); }
+      this.panFrame = requestAnimationFrame(frame);
+    };
+    this.panFrame = requestAnimationFrame(frame);
+  }
+
+  stopPan() {
+    if (this.panFrame) cancelAnimationFrame(this.panFrame);
+    this.panFrame = 0;
+    this.pan = null;
   }
 }

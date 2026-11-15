@@ -316,11 +316,13 @@ const conversationTimeline = new ConversationTimeline({
   onPinnedChange: pinned => { conversationNavigation?.reflectPinned(pinned); reflectTimelineButton(pinned); },
   // Focus whichever header control is shown on this screen.
   returnFocus: () => ($("#conversationTimelineToggle").offsetParent ? $("#conversationTimelineToggle") : $("#conversationNavToggle")).focus(),
-  load: threadId => {
+  // With a cursor from the previous response, only what changed since.
+  load: (threadId, cursor) => {
     const thread = agent.threads.find(item => item.threadId === threadId);
+    const query = cursor ? `cursor=${encodeURIComponent(cursor)}` : "";
     return engineOf(threadId) === "claude"
-      ? api(`/v1/claude/sessions/${encodeURIComponent(thread?.sessionId || threadId)}/timeline`)
-      : api(`/v1/codex/threads/${encodeURIComponent(threadId)}/timeline?storeId=personal`);
+      ? api(`/v1/claude/sessions/${encodeURIComponent(thread?.sessionId || threadId)}/timeline${query ? `?${query}` : ""}`)
+      : api(`/v1/codex/threads/${encodeURIComponent(threadId)}/timeline?storeId=personal${query ? `&${query}` : ""}`);
   },
   onJump: (threadId, seq, role) => void openConversationAt(threadId, seq, role),
   onOpenThread: threadId => void openConversationAt(threadId, null, null),
@@ -477,6 +479,7 @@ function openClaudeLive(threadId, thread) {
     if (!current()) return;
     let data; try { data = JSON.parse(event.data); } catch { return; }
     live.durable = Math.max(live.durable, Number(data.seq) || 0);
+    conversationTimeline.notify();
     if (live.durable <= claudeRuntime.cursor) return;
     if (claudeHistoryJob?.threadId === threadId) return; // Its completion re-polls when behind.
     clearTimeout(claudePollTimer);
@@ -1296,6 +1299,8 @@ async function refreshThreadActivity() {
       // Avoid interrupting older-page loads or resetting a reader's position.
       if (current && current.engine !== "claude" && Number.isSafeInteger(current.itemCount) && !agent.transcriptLoadingOlder &&
           (agent.transcriptGap || agent.transcriptGeneration !== current.generation || agent.transcriptActivityCount !== current.itemCount)) {
+        // Windows without an App Server subscription learn of new records here.
+        conversationTimeline.notify();
         await syncPersistedTranscript(current.threadId, signal);
       }
     } catch { /* Keep the last known state; stale running states become unknown. */ }
@@ -3146,7 +3151,8 @@ function syncActiveTurnUi() {
   // An expanded timeline follows a running conversation and settles once more.
   const running = !!agent.threadId && agent.activeTurns.has(agent.threadId), wasRunning = conversationTimeline.running;
   conversationTimeline.setRunning(running);
-  if (wasRunning && !running) void conversationTimeline.refresh();
+  // A finished conversation settles with one whole read.
+  if (wasRunning && !running) void conversationTimeline.refresh({ full: true });
   syncConversationSendUi();
   renderReplyProgress();
   renderThreadStates();
@@ -5190,6 +5196,8 @@ function handleAgentNotification(message) {
     return;
   }
   if (notificationIsForOpenThread(params) && (/^(item|turn)\//.test(method) || method === "thread/status/changed")) agent.liveRevision++;
+  // Started/completed items and turns change the timeline; deltas do not.
+  if (/^(item\/(started|completed)|turn\/(started|completed))$/.test(method) && conversationTimeline.follows(notificationThreadId(params))) conversationTimeline.notify();
   if (method === "thread/closed") agent.loadedThreadIds.delete(params.threadId);
   if (message.id !== undefined) {
     if (notificationIsForOpenThread(params)) {

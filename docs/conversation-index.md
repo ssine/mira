@@ -96,7 +96,16 @@ fall back to paged history while a very large conversation is still indexing.
 - `GET /v1/codex/threads/{id}/timeline` and `GET /v1/claude/sessions/{id}/timeline`
   return one lane per agent (root and subagents) with turns, tool calls (kind
   `tool`, `wait` or `agent`) and message instants, in epoch milliseconds.
-  Unfinished intervals end at their last evidence, never "now".
+  Unfinished intervals end at their last evidence, never "now". Each response
+  has an opaque `cursor`; `?cursor=` returns only what changed (`delta: true`).
+  Codex cursors hold every lane's generation and indexed count: lanes whose
+  projection still matches are marked `unchanged` without reading records,
+  changed lanes are re-derived from their latest turn start (the outline's
+  rule), and a new generation marks the lane `reset`. Claude cursors hold the
+  last event sequence: only later events are read, root turns are always
+  complete, and a result for an earlier tool is a `close` item. Clients merge
+  turns and tools by ID (tools without one by sequence) and messages by
+  sequence; lanes absent from a delta keep their items.
 
 ## Web console
 
@@ -150,9 +159,19 @@ fall back to paged history while a very large conversation is still indexing.
   conversation runs, otherwise at its last activity) without folded gaps; its
   length is a preset from 10 minutes to 1 day or a custom number of minutes,
   hours or days (1 minute to 30 days), one hour by default and remembered. While
-  the conversation runs, unfinished turns and tool calls grow to the current
-  time every second (unfinished intervals without evidence for 15 minutes keep
-  their last evidence). The panel floats over the reading surface, so opening
+  the conversation runs, the recent view is drawn 30 seconds past now and
+  slides left continuously: one transform per animation frame, changed only
+  when it moves by a tenth of a pixel, redrawn before the drawn lead runs out
+  or when data arrives; a clip at now hides the lead. The whole view still
+  grows unfinished work to the current time every second. Live elements share
+  one global pulse phase, so redraws never restart their animation
+  (unfinished intervals without evidence for 15 minutes keep their last
+  evidence). New data is read incrementally on activity, not on a timer: a
+  Claude durable signal, a Codex item/turn notification for any lane, or a
+  changed item count in the activity poll. Signals coalesce (one read in
+  flight, at most one per second, one more 2.5 s after the last signal), a
+  slow 30-second read catches missed signals while running, and finishing
+  the conversation re-reads it whole. The panel floats over the reading surface, so opening
   or closing it never moves the transcript.
 
 ## Limits
