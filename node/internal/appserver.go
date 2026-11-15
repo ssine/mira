@@ -561,8 +561,14 @@ func appServerHealthURL(listenURL string) string {
 	return parsed.String()
 }
 
+// appServerReadyTimeout bounds startup of a live App Server. A cold derived
+// SQLite migration/backfill for a large history can take well over 20 seconds;
+// killing it then restarts the work from scratch in a loop. Exits are still
+// detected immediately through instance.done.
+var appServerReadyTimeout = 3 * time.Minute
+
 func waitForAppServer(ctx context.Context, instance *appServerInstance) error {
-	deadline := time.NewTimer(20 * time.Second)
+	deadline := time.NewTimer(appServerReadyTimeout)
 	defer deadline.Stop()
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
