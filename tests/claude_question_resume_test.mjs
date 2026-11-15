@@ -57,7 +57,7 @@ export function serverClient() {
 async function scenario(rotate) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "mira-question-resume-"));
   try {
-    for (const file of ["worker.mjs", "turn-lifecycle.mjs", "question-credentials.mjs"])
+    for (const file of ["worker.mjs", "turn-lifecycle.mjs", "question-credentials.mjs", "credential-mirror.mjs"])
       await fs.copyFile(path.join(assets, file), path.join(dir, file));
     await fs.writeFile(path.join(dir, "store.mjs"), fakeStore);
     await fs.writeFile(path.join(dir, "mira-tools.mjs"), "export const createMiraTools = () => ({});\n");
