@@ -134,7 +134,7 @@ func TestCodexSQLiteStateAdoptsPinKeyedStateOfTheSameBinary(t *testing.T) {
 	if err := os.Chtimes(explicit, built, built); err != nil {
 		t.Fatal(err)
 	}
-	digest := sha256.Sum256([]byte(explicit))
+	digest := sha256.Sum256([]byte(resolvedTestPath(t, explicit)))
 	location := hex.EncodeToString(digest[:12])
 	write := func(version, name, content string, modified time.Time) {
 		t.Helper()
@@ -187,7 +187,7 @@ func TestCodexSQLiteStateAdoptsPinKeyedStateOfTheSameBinary(t *testing.T) {
 	if err := os.WriteFile(other, []byte("other"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	otherDigest := sha256.Sum256([]byte(other))
+	otherDigest := sha256.Sum256([]byte(resolvedTestPath(t, other)))
 	stalePath := filepath.Join(dir, "state", "codex", "0.3.0-mira.1", hex.EncodeToString(otherDigest[:12]), "state_5.sqlite")
 	if err := os.MkdirAll(filepath.Dir(stalePath), 0o700); err != nil {
 		t.Fatal(err)
@@ -203,4 +203,15 @@ func TestCodexSQLiteStateAdoptsPinKeyedStateOfTheSameBinary(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(codexStateDir(t, otherOverride), "state_5.sqlite")); !os.IsNotExist(err) {
 		t.Fatalf("state older than the binary must not be adopted: %v", err)
 	}
+}
+
+// resolvedTestPath mirrors the production location hash, which resolves
+// symlinks and Windows short names (for example RUNNER~1) first.
+func resolvedTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
