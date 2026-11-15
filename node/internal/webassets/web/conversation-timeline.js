@@ -127,11 +127,23 @@ export function liveLanes(lanes, now, running) {
 }
 
 export const hourMs = 60 * 60 * 1000;
-// The fixed window ends now while running, otherwise at the last activity.
-export function hourWindow(lanes, now, running) {
+const windowKey = "mira.timeline.window";
+export const minWindowMs = 60e3;
+export const maxWindowMs = 30 * 86400e3;
+export const windowPresets = [10 * 60e3, 30 * 60e3, hourMs, 3 * hourMs, 6 * hourMs, 12 * hourMs, 24 * hourMs];
+export const clampWindow = ms => Number.isFinite(ms) && ms > 0 ? Math.min(maxWindowMs, Math.max(minWindowMs, Math.round(ms / 60e3) * 60e3)) : hourMs;
+// "1 小时", "90 分钟" → "1 小时 30 分钟", "2 天".
+export function formatWindow(ms) {
+  const minutes = Math.round(clampWindow(ms) / 60e3);
+  if (minutes < 60) return `${minutes} 分钟`;
+  if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
+  return `${Math.floor(minutes / 60)} 小时${minutes % 60 ? ` ${minutes % 60} 分钟` : ""}`;
+}
+// The recent window ends now while running, otherwise at the last activity.
+export function hourWindow(lanes, now, running, windowMs = hourMs) {
   const segments = activitySegments(lanes);
   const end = running ? now : segments.at(-1)?.end ?? now;
-  return { start: end - hourMs, end };
+  return { start: end - windowMs, end };
 }
 
 export function timelineSummary(data) {
@@ -184,6 +196,8 @@ export class ConversationTimeline {
     this.body = root.querySelector("[data-timeline-body]");
     this.controls = root.querySelector("[data-timeline-controls]");
     this.info = root.querySelector("[data-timeline-info]");
+    this.inlineInfo = root.querySelector("[data-timeline-inline-info]");
+    this.head = root.querySelector(".timeline-head");
     this.resizer = root.querySelector("[data-timeline-resize]");
     this.installResize();
     this.threadId = null;
@@ -192,11 +206,22 @@ export class ConversationTimeline {
     this.request = 0;
     this.timer = null;
     this.ticker = null;
+    // "hour" is the stored name of the recent mode; its length is separate.
     try { this.mode = localStorage.getItem("mira.timeline.mode") === "hour" ? "hour" : "all"; } catch { this.mode = "all"; }
+    try { this.windowMs = clampWindow(Number(localStorage.getItem(windowKey)) || hourMs); } catch { this.windowMs = hourMs; }
+    this.installWindowMenu();
+    // Show the legend and counts in the header whenever they fit there.
+    if (typeof ResizeObserver === "function") {
+      let frame = 0;
+      new ResizeObserver(() => {
+        cancelAnimationFrame(frame);
+        frame = requestAnimationFrame(() => this.fitInfo());
+      }).observe(root);
+    }
     try { this.pinned = localStorage.getItem("mira.timeline.pinned") === "1"; } catch { this.pinned = false; }
     root.querySelector("[data-timeline-close]")?.addEventListener("click", () => { this.setPinned(false); this.returnFocus?.(); });
     root.addEventListener("keydown", event => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || this.windowMenu?.contains(event.target)) return;
       // Handled here: do not also close the conversation drawer.
       event.preventDefault(); event.stopPropagation();
       this.setPinned(false); this.returnFocus?.();
@@ -322,6 +347,80 @@ export class ConversationTimeline {
     this.render();
   }
 
+  // Choose the recent window's length (remembered) and switch to it.
+  setWindow(ms) {
+    this.windowMs = clampWindow(ms);
+    try { localStorage.setItem(windowKey, String(this.windowMs)); } catch { /* Preference only. */ }
+    this.setMode("hour");
+  }
+
+  // A popover (top layer, so the short panel never clips it) with preset
+  // lengths and a custom number of minutes, hours or days.
+  installWindowMenu() {
+    const menu = document.createElement("div");
+    menu.id = `${this.root.id || "conversationTimeline"}Window`;
+    menu.className = "timeline-window-menu";
+    menu.popover = "auto";
+    menu.setAttribute("role", "dialog");
+    menu.setAttribute("aria-label", "最近时间长度");
+    const presets = document.createElement("div");
+    presets.className = "timeline-window-presets";
+    const form = document.createElement("form");
+    form.className = "timeline-window-custom";
+    form.innerHTML = '<label>自定义 <input type="number" name="amount" min="1" step="1" inputmode="numeric" required aria-label="时间长度"></label>'
+      + '<select name="unit" aria-label="时间单位"><option value="60000">分钟</option><option value="3600000">小时</option><option value="86400000">天</option></select>'
+      + '<button type="submit">应用</button>';
+    menu.append(presets, form);
+    this.root.append(menu);
+    this.windowMenu = menu;
+    menu.addEventListener("beforetoggle", event => {
+      // toggle events are asynchronous; reflect the state as it changes.
+      this.root.querySelector("[data-timeline-window-toggle]")?.setAttribute("aria-expanded", String(event.newState === "open"));
+      if (event.newState !== "open") return;
+      presets.replaceChildren(...windowPresets.map(ms => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.dataset.timelineWindow = String(ms);
+        button.textContent = formatWindow(ms);
+        button.setAttribute("aria-pressed", String(this.mode === "hour" && this.windowMs === ms));
+        return button;
+      }));
+      const minutes = this.windowMs / 60e3;
+      const [amount, unit] = minutes % 1440 === 0 ? [minutes / 1440, 86400e3] : minutes % 60 === 0 ? [minutes / 60, 3600e3] : [minutes, 60e3];
+      form.elements.amount.value = String(amount);
+      form.elements.unit.value = String(unit);
+      const anchor = this.root.querySelector("[data-timeline-window-toggle]")?.getBoundingClientRect();
+      if (anchor) {
+        menu.style.top = `${Math.round(anchor.bottom + 4)}px`;
+        menu.style.left = `${Math.round(Math.max(8, Math.min(innerWidth - 228, anchor.right - 220)))}px`;
+      }
+    });
+    presets.addEventListener("click", event => {
+      const choice = event.target.closest("[data-timeline-window]");
+      if (!choice) return;
+      menu.hidePopover();
+      this.setWindow(Number(choice.dataset.timelineWindow));
+    });
+    form.addEventListener("submit", event => {
+      event.preventDefault();
+      const amount = Number(form.elements.amount.value), unit = Number(form.elements.unit.value);
+      if (!(amount > 0)) { form.elements.amount.focus(); return; }
+      menu.hidePopover();
+      this.setWindow(amount * unit);
+    });
+  }
+
+  // The header shows counts and legend inline when they fit without
+  // truncating the summary; otherwise the ⓘ button opens them below.
+  fitInfo() {
+    if (!this.inlineInfo || !this.head || this.root.hidden || !this.inlineInfo.childElementCount) return;
+    this.root.dataset.infoInline = "true";
+    const summary = this.summary;
+    const fits = this.head.scrollWidth <= this.head.clientWidth + 1 && (!summary || summary.scrollWidth <= summary.clientWidth + 1);
+    this.root.dataset.infoInline = String(fits);
+    if (fits) this.info.hidden = true;
+  }
+
   // running: keep following an active conversation while expanded.
   async refresh({ running = false } = {}) {
     this.running = running || this.running;
@@ -360,11 +459,12 @@ export class ConversationTimeline {
     const live = lanes.some(lane => [...(lane.turns ?? []), ...(lane.tools ?? [])].some(item => item.live));
     this.setTicker(live);
     const all = activitySegments(lanes);
-    const range = hour && all.length ? hourWindow(lanes, now, this.running) : null;
+    const range = hour && all.length ? hourWindow(lanes, now, this.running, this.windowMs) : null;
     // The hour view is one real-time segment: idle time is shown, not folded.
     const segments = range ? [range] : all;
     const visible = item => !range || item.end >= range.start && item.start <= range.end;
-    this.summary.textContent = all.length ? (hour ? "最近 1 小时" : timelineSummary({ ...data, lanes })) : "";
+    const recent = `最近 ${formatWindow(this.windowMs)}`;
+    this.summary.textContent = all.length ? (hour ? recent : timelineSummary({ ...data, lanes })) : "";
     if (!segments.length) {
       this.body.replaceChildren(Object.assign(document.createElement("p"), { className: "timeline-status", textContent: "还没有可显示的活动。" }));
       return;
@@ -383,7 +483,7 @@ export class ConversationTimeline {
     modes.className = "timeline-modes";
     modes.setAttribute("role", "group");
     modes.setAttribute("aria-label", "时间范围");
-    for (const [value, text] of [["all", "全部"], ["hour", "最近 1 小时"]]) {
+    for (const [value, text] of [["all", "全部"], ["hour", recent]]) {
       const button = document.createElement("button");
       button.type = "button";
       button.dataset.timelineMode = value;
@@ -391,6 +491,17 @@ export class ConversationTimeline {
       button.setAttribute("aria-pressed", String(this.mode === value));
       modes.append(button);
     }
+    const windowToggle = document.createElement("button");
+    windowToggle.type = "button";
+    windowToggle.className = "timeline-window-toggle";
+    windowToggle.dataset.timelineWindowToggle = "";
+    windowToggle.popoverTargetElement = this.windowMenu;
+    windowToggle.setAttribute("aria-haspopup", "dialog");
+    windowToggle.setAttribute("aria-expanded", String(this.windowMenu.matches(":popover-open")));
+    windowToggle.setAttribute("aria-label", "选择最近时间长度");
+    windowToggle.title = "选择最近时间长度";
+    windowToggle.innerHTML = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5"></path></svg>';
+    modes.append(windowToggle);
     for (const [kind, label] of [["model", "模型"], ["tool", "工具"], ["wait", "等待"], ["user", "你的消息"], ...(hour ? [] : [["break", "空闲已折叠"]]), ...(live ? [["live", "进行中"]] : [])]) {
       const item = document.createElement("li");
       item.dataset.kind = kind;
@@ -431,6 +542,11 @@ export class ConversationTimeline {
       infoChildren.push(note);
     }
     this.info.replaceChildren(...infoChildren);
+    if (this.inlineInfo) {
+      const inlineDetails = Object.assign(document.createElement("span"), { className: "timeline-details", textContent: details.textContent });
+      this.inlineInfo.replaceChildren(inlineDetails, legend.cloneNode(true), ...(data.partial ? [infoChildren.at(-1).cloneNode(true)] : []));
+      this.fitInfo();
+    }
 
     const grid = document.createElement("div");
     grid.className = "timeline-grid";
