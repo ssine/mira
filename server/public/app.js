@@ -8,7 +8,7 @@ import { FitAddon } from "/vendor/xterm-addon-fit.js";
 import { Terminal } from "/vendor/xterm.js";
 import DOMPurify from "/vendor/dompurify.js";
 import { marked } from "/markdown.js";
-import { decorateTraceDiagrams } from "/trace-diagrams.js";
+import { decorateTraceDiagrams, renderMermaidImage } from "/trace-diagrams.js";
 import { toolItemView, activitySummary, summarizeActivities, activityStatus, formatActivityDuration, formatTraceTimestamp as traceClock, reasoningText, reasoningParts, reasoningHeading } from "/trace-activity.js";
 import { ComposerDrafts } from "/composer-drafts.js";
 import { ClientCache } from "/client-cache.js";
@@ -28,6 +28,7 @@ import { RecoveryNotices, encryptedContextError, recoveryNoticeLabel } from "/re
 import { AccountRecovery } from "/account-recovery.js";
 import { compactTokenUsage, compactTokenCount, tokenCount, tokenUsageTitle, formatEstimatedCost, compactCost, threadTimestamp } from "/thread-usage.js";
 import { TraceImages } from "/trace-images.js";
+import { collectCodexTranscript, collectImages, embedDiagrams, exportedImages, exportFilename, exportMarkdownRenderer, renderConversationHtml } from "/conversation-export.js";
 import { invalidateModelCatalog, readModelCatalog } from "/thread-model.js";
 import { buildThreadTree, splitProjectThreads } from "/thread-list.js";
 import { ThreadPager, mergeThreadPages } from "/thread-pages.js";
@@ -238,6 +239,7 @@ const agent = {
   subagentShowAll: new Set(),
   draftProject: null,
   menuThreadId: null,
+  exportJob: null,
   rename: null,
   forkPromise: null,
   forkRequests: new Map(),
@@ -6140,6 +6142,64 @@ function openThreadMenu(threadId, anchor, point = null) {
   menu.querySelector('[role="menuitem"]:not(.hidden):not(:disabled)')?.focus();
 }
 
+// Conversation export reads its own complete copy of the history, so the open
+// transcript, its pagination and caches stay untouched.
+function openThreadExport() {
+  const threadId = agent.menuThreadId;
+  $("#threadOptionsMenu").hidePopover();
+  const thread = agent.threads.find(t => t.threadId === threadId);
+  if (!thread) return;
+  agent.exportJob?.controller?.abort();
+  agent.exportJob = { threadId, controller: null };
+  $("#threadExportName").textContent = thread.title || threadId;
+  setThreadExportStatus("");
+  $("#threadExportConfirm").disabled = false;
+  $("#threadExportTools").checked = false;
+  $("#threadExportTools").disabled = false;
+  $("#threadExportDialog").showModal();
+}
+
+function setThreadExportStatus(text, error = false) {
+  $("#threadExportStatus").textContent = text;
+  $("#threadExportStatus").classList.toggle("error", error);
+}
+
+async function exportThread(threadId, includeTools, signal) {
+  const summary = agent.threads.find(t => t.threadId === threadId);
+  if (!summary) throw new Error("找不到这个对话");
+  const thread = await readConversation(threadId, { signal }).catch(() => summary);
+  const engine = summary.engine === "claude" || thread.engine === "claude" ? "claude" : "codex";
+  let items;
+  if (engine === "claude") {
+    const runtime = new ClaudeRuntime(api);
+    setThreadExportStatus("正在读取对话…");
+    await runtime.history(summary, { trace: false });
+    await runtime.loadAllOlder(summary, { cancelled: () => signal.aborted, onPage: pages => setThreadExportStatus(`正在读取对话…（${pages + 1} 页）`) });
+    signal.throwIfAborted();
+    items = runtime.trace(summary, summary.subpath ? null : runtime.session?.activeTurn ?? null).trace;
+  } else {
+    items = await collectCodexTranscript(api, threadId, { includeTools, merge: mergeTranscriptItems, signal,
+      onProgress: pages => setThreadExportStatus(`正在读取对话…（${pages} 页）`) });
+  }
+  // A brief export omits tool output images; only fetch what will be shown.
+  const images = await collectImages(api, exportedImages(items, includeTools), { signal,
+    onProgress: (done, total) => setThreadExportStatus(`正在读取图片…（${done}/${total}）`) });
+  setThreadExportStatus("正在生成 HTML…");
+  const title = thread.title || summary.title || "";
+  const markdown = exportMarkdownRenderer(marked, DOMPurify);
+  const html = await embedDiagrams(renderConversationHtml({ title, engine, threadId, items, includeTools, images, markdown }),
+    markdown, renderMermaidImage, { signal, onProgress: (done, total) => setThreadExportStatus(`正在渲染图表…（${done}/${total}）`) });
+  signal.throwIfAborted();
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+  const link = element("a");
+  link.href = url;
+  link.download = exportFilename(title);
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
 async function editThreadTitle() {
   const threadId = agent.menuThreadId;
   if (!agent.titleJobs.get(threadId)?.saving) agent.titleJobs.get(threadId)?.controller.abort();
@@ -7981,6 +8041,27 @@ $("#threadRegenerateTitle").addEventListener("click", () => {
 $("#threadCancelTitle").addEventListener("click", () => {
   agent.titleJobs.get(agent.menuThreadId)?.controller.abort();
   $("#threadOptionsMenu").hidePopover();
+});
+$("#threadExport").addEventListener("click", openThreadExport);
+$("#threadExportCancel").addEventListener("click", () => $("#threadExportDialog").close());
+$("#threadExportDialog").addEventListener("close", () => { agent.exportJob?.controller?.abort(); agent.exportJob = null; });
+$("#threadExportForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const job = agent.exportJob;
+  if (!job || job.controller) return;
+  job.controller = new AbortController();
+  $("#threadExportConfirm").disabled = true;
+  $("#threadExportTools").disabled = true;
+  try {
+    await exportThread(job.threadId, $("#threadExportTools").checked, job.controller.signal);
+    if (agent.exportJob === job) { $("#threadExportDialog").close(); toast("对话已导出"); }
+  } catch (error) {
+    if (agent.exportJob !== job || job.controller.signal.aborted) return;
+    setThreadExportStatus(`导出失败：${error.message}`, true);
+    job.controller = null;
+    $("#threadExportConfirm").disabled = false;
+    $("#threadExportTools").disabled = false;
+  }
 });
 $("#threadCopyId").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText(agent.menuThreadId); $("#threadOptionsMenu").hidePopover(); toast("已复制对话 ID"); }

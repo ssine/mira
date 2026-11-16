@@ -99,6 +99,7 @@ jobs:
             tests/thread_token_usage_test.mjs \
             tests/thread_reasoning_effort_test.mjs \
             tests/conversation_timeline_test.mjs \
+            tests/conversation_export_test.mjs \
             tests/reasoning_content_test.mjs \
             tests/trace_copy_test.mjs
 
@@ -222,7 +223,7 @@ jobs:
         # former single list must appear in exactly one shard.
         include:
           - shard: activity
-            tests: client_cache web_shell thread_menu thread_activity
+            tests: client_cache web_shell thread_menu thread_activity conversation_export
           - shard: layout
             tests: thread_pages sidebar_swipe thread_token_usage
           - shard: conversation

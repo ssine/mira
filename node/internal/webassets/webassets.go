@@ -72,6 +72,7 @@ var specs = map[string]assetSpec{
 	"/conversation-nav.js":       {"web/conversation-nav.js", "text/javascript; charset=utf-8"},
 	"/conversation-search.js":    {"web/conversation-search.js", "text/javascript; charset=utf-8"},
 	"/conversation-timeline.js":  {"web/conversation-timeline.js", "text/javascript; charset=utf-8"},
+	"/conversation-export.js":    {"web/conversation-export.js", "text/javascript; charset=utf-8"},
 	"/theme.js":                  {"web/theme.js", "text/javascript; charset=utf-8"},
 	"/styles.css":                {"web/styles.css", "text/css; charset=utf-8"},
 	"/android.js":                {"web/android.js", "text/javascript; charset=utf-8"},

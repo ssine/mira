@@ -519,6 +519,7 @@
       <button id="threadRegenerateTitle" type="button" role="menuitem">重新生成标题</button>
       <button id="threadCancelTitle" class="hidden" type="button" role="menuitem">取消标题生成</button>
       <button id="threadFork" type="button" role="menuitem">分支新对话</button>
+      <button id="threadExport" type="button" role="menuitem">导出为 HTML</button>
       <button id="threadCopyId" type="button" role="menuitem">复制对话 ID</button>
       <a id="threadOpenWindow" href="/?view=agent" target="_blank" rel="noopener" role="menuitem">在新窗口打开</a>
       <button id="threadArchive" type="button" role="menuitem">归档对话</button>
@@ -550,6 +551,16 @@
         <p class="muted">删除后无法恢复，已有分支会保留。</p>
         <p id="threadDeleteError" class="chat-edit-error" role="status"></p>
         <div class="chat-edit-actions"><button id="threadDeleteCancel" class="ghost" type="button">取消</button><button id="threadDeleteConfirm" class="danger" type="submit">永久删除</button></div>
+      </form>
+    </dialog>
+    <dialog id="threadExportDialog" class="chat-edit-dialog" aria-labelledby="threadExportTitle">
+      <form id="threadExportForm">
+        <h2 id="threadExportTitle">导出对话</h2>
+        <p id="threadExportName"></p>
+        <p class="muted">导出为单个 HTML 文件，图片内嵌，可离线打开。默认只保留消息，工具调用折叠为一行摘要。</p>
+        <label class="chat-edit-check"><input id="threadExportTools" type="checkbox"> 包含工具调用详情（含输入、输出与思考过程，在文件中点击展开）</label>
+        <p id="threadExportStatus" class="chat-edit-error" role="status"></p>
+        <div class="chat-edit-actions"><button id="threadExportCancel" class="ghost" type="button">取消</button><button id="threadExportConfirm" class="primary" type="submit">导出</button></div>
       </form>
     </dialog>
     <dialog id="threadRenameDialog" class="chat-edit-dialog" aria-labelledby="threadRenameTitle">

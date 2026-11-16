@@ -1042,6 +1042,9 @@ progress { width: 100%; accent-color: var(--accent); }
 .chat-edit-dialog textarea { padding: 9px 10px; resize: vertical; font: 11px/1.5 var(--font-code); }
 .chat-edit-dialog p { font-size: 12px; }
 .chat-edit-error { color: var(--danger); }
+.chat-edit-dialog label.chat-edit-check { display: flex; align-items: center; gap: 8px; margin: 14px 0 0; font-size: 13px; }
+.chat-edit-dialog label.chat-edit-check input { width: auto; min-height: 0; }
+#threadExportStatus:not(.error) { color: var(--muted); }
 .chat-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 @media (pointer: coarse) {
   .conversation-menu-toggle { margin-top: calc(4px + var(--safe-area-top)); margin-right: max(9px, env(safe-area-inset-right)); }

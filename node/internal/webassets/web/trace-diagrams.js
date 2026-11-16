@@ -2,46 +2,59 @@ let renderer;
 let renderQueue = Promise.resolve();
 const diagrams = new WeakMap();
 
+// Renders Mermaid source to an SVG image data URL with explicit theme colors.
+async function mermaidImage(source, themeVariables) {
+  renderer ??= import("/vendor/mermaid.js").catch((error) => {
+    renderer = null;
+    throw error;
+  });
+  const { default: mermaid } = await renderer;
+  mermaid.initialize({
+    startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true,
+    theme: "base", themeVariables,
+    htmlLabels: false, fontFamily: "sans-serif",
+    secure: ["secure", "securityLevel", "startOnLoad", "suppressErrorRendering", "maxTextSize", "maxEdges", "htmlLabels"],
+  });
+  const { svg } = await mermaid.render(`mira-diagram-${crypto.randomUUID()}`, source);
+  const documentSVG = new DOMParser().parseFromString(svg, "image/svg+xml");
+  const svgRoot = documentSVG.documentElement;
+  const bounds = svgRoot.getAttribute("viewBox")?.trim().split(/[\s,]+/).map(Number);
+  if (bounds?.length === 4 && bounds.every(Number.isFinite) && bounds[2] > 0 && bounds[3] > 0) {
+    // Percentage SVG sizes have no intrinsic dimensions in an image document.
+    svgRoot.setAttribute("width", String(bounds[2]));
+    svgRoot.setAttribute("height", String(bounds[3]));
+  }
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(svgRoot))}`;
+}
+
+// Mermaid configuration is global: exports render in the same queue as the
+// conversation's diagrams.
+export function renderMermaidImage(source, themeVariables) {
+  const result = renderQueue.then(() => mermaidImage(source, themeVariables));
+  renderQueue = result.catch(() => {});
+  return result;
+}
+
 function renderDiagram(figure) {
   const state = diagrams.get(figure);
   const revision = ++state.revision;
   renderQueue = renderQueue.then(async () => {
     if (!figure.isConnected || revision !== state.revision) return;
     try {
-      renderer ??= import("/vendor/mermaid.js").catch((error) => {
-        renderer = null;
-        throw error;
-      });
-      const { default: mermaid } = await renderer;
-      if (!figure.isConnected || revision !== state.revision) return;
       const style = getComputedStyle(document.documentElement);
       const color = (name) => style.getPropertyValue(name).trim();
-      mermaid.initialize({
-        startOnLoad: false, securityLevel: "strict", suppressErrorRendering: true,
-        theme: "base",
-        themeVariables: {
-          darkMode: document.documentElement.dataset.theme === "dark",
-          background: color("--surface-raised"), primaryColor: color("--accent-soft"),
-          primaryTextColor: color("--text"), primaryBorderColor: color("--accent"),
-          lineColor: color("--muted"), secondaryColor: color("--surface"),
-          tertiaryColor: color("--surface-soft"), edgeLabelBackground: color("--surface-raised"),
-        },
-        htmlLabels: false, fontFamily: "sans-serif",
-        secure: ["secure", "securityLevel", "startOnLoad", "suppressErrorRendering", "maxTextSize", "maxEdges", "htmlLabels"],
+      const url = await mermaidImage(state.source, {
+        darkMode: document.documentElement.dataset.theme === "dark",
+        background: color("--surface-raised"), primaryColor: color("--accent-soft"),
+        primaryTextColor: color("--text"), primaryBorderColor: color("--accent"),
+        lineColor: color("--muted"), secondaryColor: color("--surface"),
+        tertiaryColor: color("--surface-soft"), edgeLabelBackground: color("--surface-raised"),
       });
-      const { svg } = await mermaid.render(`mira-diagram-${crypto.randomUUID()}`, state.source);
-      const documentSVG = new DOMParser().parseFromString(svg, "image/svg+xml");
-      const svgRoot = documentSVG.documentElement;
-      const bounds = svgRoot.getAttribute("viewBox")?.trim().split(/[\s,]+/).map(Number);
-      if (bounds?.length === 4 && bounds.every(Number.isFinite) && bounds[2] > 0 && bounds[3] > 0) {
-        // Percentage SVG sizes have no intrinsic dimensions in an image document.
-        svgRoot.setAttribute("width", String(bounds[2]));
-        svgRoot.setAttribute("height", String(bounds[3]));
-      }
+      if (!figure.isConnected || revision !== state.revision) return;
       // SVG is an image document: diagram CSS, links and scripts never enter the app DOM.
       const image = new Image();
       image.alt = "Mermaid 图表，源码可在下方展开";
-      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(new XMLSerializer().serializeToString(svgRoot))}`;
+      image.src = url;
       await image.decode();
       if (!figure.isConnected || revision !== state.revision) return;
       const after = state.beforeChange?.();
