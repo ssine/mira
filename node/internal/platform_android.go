@@ -176,6 +176,7 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 	return map[string]any{
 		"appServer": false, "shell": false, "files": true, "processes": true, "pty": false,
 		"filePreviewV1":    true,
+		"fileProbeV1":      true,
 		"portSitesV1":      true,
 		"fileChunkedWrite": true,
 		"codexSessions":    false,

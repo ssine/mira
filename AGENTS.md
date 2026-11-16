@@ -196,6 +196,14 @@ items. Render them independently of tool details, ordered and keyed by raw recor
 content position, and lazily load their saved data from PostgreSQL in the active generation.
 Do not reconstruct historical images from tool arguments, event notifications or current Node files.
 Expanded tool detail updates must preserve existing bodies and the user's reading position.
+A path written in Agent output becomes a link only after the Node that produced that output confirms
+it; the Node, not the browser, resolves `~` and the turn's working directory. Keep the grammar for
+bare prose conservative, never link fenced code, cache answers only in memory, and never let an
+unresolved relative target navigate the console origin. Both engines record the Node and cwd of each
+output as a projection. References are real links with one shared action list (preview, workspace,
+website, reveal, copy, download) on every surface; opening a workspace or a website must not depend
+on a script popup or `prompt()`, which mobile browsers and WebViews withhold. See
+`docs/file-preview-design.md`.
 The conversation index (schema 48, `docs/conversation-index.md`) is a derived, rebuildable copy of
 displayed prose and tool skeletons for whole-conversation outlines, search, the message rail and
 timelines. Never make it authoritative or read tool bodies from it; bump its projector version
@@ -347,6 +355,15 @@ falling back to LocalSystem. A captured background process must duplicate that t
 process session before inheriting bounded stdio handles; retain and report the originating interactive
 session ID, and do not turn this into interactive desktop access. Keep allowed-root checks in force.
 This does not change SSH, PTY, App Server, Supervisor, or Node worker identity.
+The `file` actions `probe` and `reveal` exist for the administrator console's file references and are
+not Agent tools: the Server accepts them only from the administrator and they stay out of the tool
+schema. `probe` lets the owning Node resolve `~` and cwd-relative references and report existence in
+one bounded batch, disclosing nothing outside the roots. `reveal` shows one authorized path in that
+machine's desktop file manager (Explorer through WSL interop, or on the interactive session's desktop
+from the Windows service). It is the single sanctioned start of a program on the interactive desktop:
+the program is fixed, its only argument is the path, the target is never opened or executed, and
+`system` context or a logged-out machine fails instead of falling back. Do not widen it into opening
+files with their default application or starting other programs. See `protocol/file-preview-v1.md`.
 The interactive `--tray` Node mode remains a manual diagnostic UI, not installation ownership or a
 second startup path. Local diagnostic logs rotate with bounded retention and never store conversations.
 

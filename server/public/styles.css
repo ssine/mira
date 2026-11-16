@@ -697,11 +697,27 @@ progress { width: 100%; accent-color: var(--accent); }
 .attachment-remove:hover { color: var(--danger); }
 
 /* File links and preview overlay */
-.node-file-link, .node-file-code-link, .node-file-image-link { cursor: pointer; }
-.node-file-link::after { font-size: .78em; text-decoration: none; content: " ↗"; }
-.node-file-code-link { display: inline; padding: 0; border: 0; background: transparent; color: inherit; }
-.node-file-code-link:hover code, .node-file-image-link:hover { border-color: var(--accent); color: var(--accent-hover); }
-.node-file-image-link { display: inline-flex; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--accent-hover); }
+/* A reference becomes a link once its Node confirms the path; the change
+   restyles the same text and never moves the surrounding lines. */
+.node-file-link { cursor: pointer; text-decoration: underline dotted; text-decoration-color: color-mix(in srgb, var(--accent) 55%, transparent); text-underline-offset: 3px; -webkit-touch-callout: none; }
+.node-file-link:hover { text-decoration-style: solid; text-decoration-color: var(--accent); }
+.node-file-code-link { color: inherit; }
+.node-file-code-link code { color: var(--accent-hover); }
+.node-file-code-link:hover code { border-color: var(--accent); }
+.node-file-image-link { display: inline-flex; align-items: center; padding: 6px 8px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--accent-hover); text-decoration: none; }
+.node-file-image-link:hover { border-color: var(--accent); }
+a.node-file-link.node-file-missing { color: var(--muted); text-decoration: line-through; }
+a.node-file-unresolved { color: inherit; text-decoration: none; cursor: default; }
+.file-link-menu { position: fixed; inset: auto; z-index: 120; min-width: 232px; max-width: min(360px, calc(100vw - 16px)); max-height: calc(100dvh - 16px); margin: 0; padding: 4px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); box-shadow: var(--shadow-float); color: var(--text); }
+.file-link-menu-head { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--line); }
+.file-link-menu-head strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.file-link-menu-head span { color: var(--muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.file-link-menu-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 32px; padding: 6px 10px; border: 0; border-radius: var(--radius-control); background: transparent; color: var(--text); font-size: 13px; text-align: left; text-decoration: none; }
+.file-link-menu-item:hover, .file-link-menu-item:focus-visible { background: var(--hover); outline: 0; }
+.file-link-menu-item.primary-action { font-weight: 600; }
+.file-link-menu-hint { flex-shrink: 0; color: var(--quiet); font-size: 11px; font-weight: 400; white-space: nowrap; }
+@media (hover: none) { .file-link-menu-hint { display: none; } .file-link-menu-item { min-height: 44px; } }
+@media (forced-colors: active) { .file-link-menu { background: Canvas; box-shadow: none; } }
 .node-file-dialog { width: min(980px, calc(100vw - 28px)); max-height: calc(100dvh - 28px); padding: 0; border: 1px solid var(--line); border-radius: var(--radius-float); background: var(--surface-raised); color: var(--text); box-shadow: var(--shadow-float); }
 .node-file-dialog::backdrop { background: rgb(24 38 56 / 22%); }
 .node-file-dialog-shell { display: flex; flex-direction: column; min-height: 260px; max-height: calc(100dvh - 30px); }

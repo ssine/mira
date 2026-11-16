@@ -2,6 +2,7 @@ package node
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -80,4 +81,20 @@ func mergeExecutionEnvironment(base []string, overrides map[string]string, caseI
 		}
 	}
 	return result
+}
+
+// executionHome is the home directory "~" refers to for one file operation.
+// An impersonated Windows user carries a profile environment; every other
+// identity is the Node process itself.
+func executionHome(identity *executionIdentity) string {
+	for _, item := range identity.environment {
+		if name, value, found := strings.Cut(item, "="); found && strings.EqualFold(name, "USERPROFILE") && value != "" {
+			return value
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
 }

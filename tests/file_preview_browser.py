@@ -148,22 +148,17 @@ try:
     print('Agent HTML click → isolated new window, no opener, warm conversation draft: passed')
     run('goto',fixture['base']+'/files.html?nodeId='+fixture['nodeID']+'&path='+str(root/'site/pages/index.html')+'&root='+str(root/'site')+'&entry=pages/index.html&view=site&noauto=1')
     wait("!document.querySelector('#siteControls')?.hidden")
-    before = {row['index'] for row in run('tabs')['tabs']}
+    # The launcher opens the website in its own tab: no popup permission is
+    # involved, and Back returns to a launcher that still owns the session.
     activate('#siteOpen')
-    popup = None
-    for _ in range(60):
-        added = [row for row in run('tabs')['tabs'] if row['index'] not in before]
-        if added:
-            popup = added[0]['index']; owned.add(popup); break
-        time.sleep(.2)
-    assert popup is not None, 'Root adjustment did not create an independent window'
-    run('select',str(popup))
     wait("document.body.dataset.result === 'relative fetch works'",30)
-    assert evaluate("window.opener === null")
-    run('close-tab',str(popup)); owned.discard(popup); run('select',str(own))
+    assert evaluate("location.hostname.endsWith('.preview.localhost')")
+    evaluate("history.back()")
+    wait("location.pathname === '/files.html' && document.querySelector('#siteStop') && !document.querySelector('#siteStop').hidden",30)
+    assert evaluate("new URLSearchParams(location.search).get('noauto') === '1'")
     activate('#siteStop')
     wait("document.querySelector('#siteStop').hidden")
-    print('Root adjustment → isolated new window without an opener: passed')
+    print('Root adjustment → same-tab website, Back to the launcher, explicit stop: passed')
     query='?nodeId='+fixture['nodeID']+'&path='+str(root/'bundle.zip')
     run('goto',fixture['base']+'/files.html'+query)
     wait("document.querySelectorAll('.file-tree-row').length > 0")

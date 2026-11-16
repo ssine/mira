@@ -58,6 +58,7 @@ public final class ConsoleActivity extends Activity {
     private volatile HttpURLConnection activeDownload;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private boolean ready;
+    private boolean darkAppearance;
     private ConsoleDownloads blobDownloads;
 
     static String originOf(String value) {
@@ -152,6 +153,7 @@ public final class ConsoleActivity extends Activity {
         return result;
     }
     @SuppressWarnings("deprecation") private void applyAppearance(boolean dark) {
+        darkAppearance = dark;
         int background = Color.parseColor(dark ? "#1f2226" : "#ffffff");
         layout.setBackgroundColor(background); web.setBackgroundColor(background);
         feedback.setBackgroundColor(background); notice.setTextColor(Color.parseColor(dark ? "#e9edf2" : "#323130"));
@@ -201,7 +203,7 @@ public final class ConsoleActivity extends Activity {
         web.setWebChromeClient(new WebChromeClient() {
             @Override public boolean onCreateWindow(WebView view, boolean dialog, boolean gesture, android.os.Message result) {
                 if (!gesture || !trusted(view.getUrl())) return false;
-                return FilePreviewActivity.createWindow(ConsoleActivity.this, result, origin);
+                return FilePreviewActivity.createWindow(ConsoleActivity.this, result, origin, true, darkAppearance);
             }
             @Override public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback, FileChooserParams params) {
                 if (!trusted(view.getUrl())) return false;

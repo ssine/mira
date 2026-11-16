@@ -36,6 +36,7 @@ var specs = map[string]assetSpec{
 	"/vendor/marked-cjk-friendly.js": {"web/vendor/marked-cjk-friendly.js", "text/javascript; charset=utf-8"},
 
 	"/file-preview.js":           {"web/file-preview.js", "text/javascript; charset=utf-8"},
+	"/file-links.js":             {"web/file-links.js", "text/javascript; charset=utf-8"},
 	"/file-preview.css":          {"web/file-preview.css", "text/css; charset=utf-8"},
 	"/files.html":                {"web/files.html", "text/html; charset=utf-8"},
 	"/files.js":                  {"web/files.js", "text/javascript; charset=utf-8"},

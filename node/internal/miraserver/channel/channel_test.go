@@ -254,8 +254,85 @@ func TestCapabilityValidationBounds(t *testing.T) {
 	if _, err := validateCapabilityParams("process", map[string]any{"action": "poll", "executionContext": "system"}); err == nil {
 		t.Fatal("process poll accepted an execution context")
 	}
+	probe := func(paths any, extra map[string]any) error {
+		params := map[string]any{"action": "probe", "paths": paths}
+		for name, value := range extra {
+			params[name] = value
+		}
+		_, err := validateCapabilityParams("file", params)
+		return err
+	}
+	if err := probe([]any{"~/notes.md", "src/app.js"}, map[string]any{"cwd": "/work", "executionContext": "user"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := probe([]string{"a.txt"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	oversized := make([]any, maxProbePaths+1)
+	for index := range oversized {
+		oversized[index] = "a"
+	}
+	for name, paths := range map[string]any{
+		"missing": nil, "empty": []any{}, "oversized": oversized, "non-string": []any{7},
+		"empty entry": []any{""}, "NUL": []any{"a\x00b"}, "long entry": []any{strings.Repeat("a", maxProbePathUnits+1)},
+	} {
+		if probe(paths, nil) == nil {
+			t.Fatalf("probe accepted %s paths", name)
+		}
+	}
+	if _, err := validateCapabilityParams("file", map[string]any{"action": "stat", "path": "/a", "paths": []any{"b"}}); err == nil {
+		t.Fatal("paths accepted outside probe")
+	}
+	if _, err := validateCapabilityParams("file", map[string]any{"action": "reveal"}); err == nil {
+		t.Fatal("reveal accepted without a path")
+	}
 	if _, err := validateCapabilityParams("file", map[string]any{"action": "roots", "executionContext": "system", "userSessionId": json.Number("7")}); err == nil {
 		t.Fatal("system execution context accepted a user session ID")
+	}
+}
+
+type recordingInvoker struct {
+	calls []map[string]any
+}
+
+func (invoker *recordingInvoker) IsConnected(string) bool { return true }
+func (invoker *recordingInvoker) Invoke(_ context.Context, _ string, _ string, params map[string]any, _ time.Duration) (any, error) {
+	invoker.calls = append(invoker.calls, params)
+	return map[string]any{"ok": true}, nil
+}
+
+func TestConsoleFileActionsRequireAdministratorAndNodeSupport(t *testing.T) {
+	registry := &fakeRegistry{values: map[string]nodes.Node{
+		testNodeA: {NodeID: testNodeA, Capabilities: map[string]any{"files": true, "fileProbeV1": true, "desktopRevealV1": true}},
+		testNodeB: {NodeID: testNodeB, Capabilities: map[string]any{"files": true}},
+	}}
+	invoker := &recordingInvoker{}
+	service := NewCapabilityService(registry, invoker, nil)
+	admin := &foundation.Principal{Kind: "admin"}
+	agent := &foundation.Principal{Kind: "node", NodeID: testNodeA}
+	probe := map[string]any{"action": "probe", "paths": []any{"~/a.md"}, "cwd": "/work"}
+	reveal := map[string]any{"action": "reveal", "path": "/work/a.md"}
+	for name, params := range map[string]map[string]any{"probe": probe, "reveal": reveal} {
+		// An Agent tool call carries a Node identity; these never reach a Node.
+		if _, err := service.Invoke(context.Background(), agent, testNodeA, "file", params, InvokeContext{}); errorCode(err) != "actor_forbidden" {
+			t.Fatalf("%s from an Agent: %v", name, err)
+		}
+		if _, err := service.CallTool(context.Background(), agent, "file", map[string]any{"nodeId": testNodeA, "action": name, "path": "/work/a.md", "paths": []any{"a"}}, InvokeContext{}); err == nil {
+			t.Fatalf("%s reached a Node through the Agent tool", name)
+		}
+		if _, err := service.Invoke(context.Background(), admin, testNodeB, "file", params, InvokeContext{}); errorCode(err) != "capability_unavailable" {
+			t.Fatalf("%s on an older Node: %v", name, err)
+		}
+		if len(invoker.calls) != 0 {
+			t.Fatalf("%s was forwarded: %v", name, invoker.calls)
+		}
+		if _, err := service.Invoke(context.Background(), admin, testNodeA, "file", params, InvokeContext{}); err != nil {
+			t.Fatal(name, err)
+		}
+		if len(invoker.calls) != 1 || invoker.calls[0]["action"] != name {
+			t.Fatalf("%s forwarded as %v", name, invoker.calls)
+		}
+		invoker.calls = nil
 	}
 }
 

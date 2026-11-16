@@ -17,12 +17,23 @@ import (
 
 var capabilityActions = map[string]map[string]bool{
 	"status":        {"get": true},
-	"file":          {"roots": true, "stat": true, "list": true, "read": true, "write": true, "mkdir": true, "move": true, "remove": true},
+	"file":          {"roots": true, "stat": true, "list": true, "read": true, "write": true, "mkdir": true, "move": true, "remove": true, "probe": true, "reveal": true},
 	"process":       {"count": true, "list": true, "start": true, "poll": true, "signal": true},
 	"pty":           {"list": true, "open": true, "write": true, "poll": true, "resize": true, "close": true},
 	"screen":        {"display": true, "screenshot": true, "hierarchy": true, "tap": true, "swipe": true, "key": true, "text": true},
 	"codexSessions": {"list": true, "read": true, "resolve": true},
 }
+
+// consoleFileActions support the administrator console's file references and
+// are deliberately not Agent tools: probe resolves and stats a batch of
+// references, reveal shows one path in the target machine's desktop file
+// manager. Each names the Node capability flag that negotiates it.
+var consoleFileActions = map[string]string{"probe": "fileProbeV1", "reveal": "desktopRevealV1"}
+
+const (
+	maxProbePaths     = 64
+	maxProbePathUnits = 4096
+)
 
 var (
 	environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
@@ -104,6 +115,13 @@ func (service *CapabilityService) Invoke(ctx context.Context, actor *foundation.
 	if err != nil {
 		return nil, err
 	}
+	consoleFlag := ""
+	if capability == "file" {
+		consoleFlag = consoleFileActions[stringValue(validated["action"])]
+	}
+	if consoleFlag != "" && actor.Kind != "admin" {
+		return nil, channelError("this file action is reserved for the administrator console", http.StatusForbidden, "actor_forbidden")
+	}
 	resolution, err := service.nodes.Resolve(ctx, selector, false)
 	if err != nil {
 		return nil, err
@@ -125,6 +143,9 @@ func (service *CapabilityService) Invoke(ctx context.Context, actor *foundation.
 	}
 	if capability == "file" && (validated["archive"] == true || validated["pageSize"] != nil) && target.Capabilities["filePreviewV1"] != true {
 		return nil, channelError("target Node requires filePreviewV1; upgrade it first", 409, "preview_unavailable")
+	}
+	if consoleFlag != "" && target.Capabilities[consoleFlag] != true {
+		return nil, channelError("target Node does not support this file action; upgrade it or use a Node with a desktop", 409, "capability_unavailable")
 	}
 	if !advertised(target, capability) {
 		return nil, channelError("target Node does not advertise "+capability, http.StatusConflict, "capability_unavailable")
@@ -251,7 +272,11 @@ func validateCapabilityParams(capability string, params map[string]any) (map[str
 	}
 	var err error
 	if capability == "file" {
-		if action != "roots" {
+		if action == "probe" {
+			err = validateProbe(params)
+		} else if params["paths"] != nil || params["cwd"] != nil {
+			err = channelError("paths and cwd are valid only for probe", 400, "invalid_request")
+		} else if action != "roots" {
 			err = validateText(params, "path", true, 32768)
 		}
 		if err == nil {
@@ -366,6 +391,37 @@ func validateCapabilityParams(capability string, params map[string]any) (map[str
 		}
 	}
 	return params, err
+}
+
+// validateProbe bounds one batch of unresolved file references. The Node
+// resolves them; nothing here interprets a path.
+func validateProbe(params map[string]any) error {
+	if err := validateText(params, "cwd", false, 32768); err != nil {
+		return err
+	}
+	var count int
+	switch paths := params["paths"].(type) {
+	case []any:
+		count = len(paths)
+		for index := range paths {
+			if err := validateText(map[string]any{"paths": paths[index]}, "paths", true, maxProbePathUnits); err != nil {
+				return err
+			}
+		}
+	case []string:
+		count = len(paths)
+		for _, path := range paths {
+			if err := validateText(map[string]any{"paths": path}, "paths", true, maxProbePathUnits); err != nil {
+				return err
+			}
+		}
+	default:
+		return channelError("paths must be an array of strings", 400, "invalid_request")
+	}
+	if count == 0 || count > maxProbePaths {
+		return channelError(fmt.Sprintf("paths must contain 1 to %d entries", maxProbePaths), 400, "invalid_request")
+	}
+	return nil
 }
 
 func validateExecutionContext(params map[string]any, allowed bool) error {

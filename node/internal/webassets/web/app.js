@@ -1,7 +1,8 @@
 import { SchedulesPanel } from "/schedules.js";
 import { SitesPanel } from "/sites.js";
 import { MiraSocket, configureMiraTransport } from "./mira-socket.js";
-import { FileReader, FileWorkspace, workspaceURL } from "/file-preview.js";
+import { FileReader, FileWorkspace, fileActions, renderFileActions, runFileAction } from "/file-preview.js";
+import { FileLinks, defaultFileAction } from "/file-links.js";
 import { ClaudeRuntime, claudeHistoryAcknowledgementRequired, claudeTrace } from "/claude.js";
 import { conversationPageReader } from "/conversation-pages.js";
 import { FitAddon } from "/vendor/xterm-addon-fit.js";
@@ -3583,81 +3584,19 @@ function conversationNodeCandidates() {
   ].filter(Boolean))];
 }
 
-function resolveNodeFileReference(value, context = {}) {
-  let reference = String(value ?? "").trim();
-  if (!reference || reference.startsWith("#") || /^(?:https?|mailto|tel|data|blob|javascript):/i.test(reference)) return null;
-  try { reference = decodeURIComponent(reference); } catch { /* retain malformed percent escapes */ }
-  if (reference.startsWith("<") && reference.endsWith(">")) reference = reference.slice(1, -1).trim();
-  const lineMatch = reference.match(/(?:#L|:)(\d+)(?::(\d+))?$/);
-  const line = lineMatch ? Number(lineMatch[1]) : null;
-  const column = lineMatch?.[2] ? Number(lineMatch[2]) : null;
-  if (lineMatch) reference = reference.slice(0, -lineMatch[0].length);
-  if (/^[a-z][a-z0-9+.-]*:/i.test(reference) && !/^file:/i.test(reference) && !/^[A-Za-z]:[\\/]/.test(reference)) return null;
-  if (/^file:/i.test(reference)) {
-    try {
-      const url = new URL(reference);
-      reference = decodeURIComponent(url.pathname);
-      if (url.hostname && url.hostname !== "localhost") reference = `\\\\${url.hostname}${reference.replaceAll("/", "\\")}`;
-    } catch { return null; }
-  }
-  // Markdown links can contain a URL-style Windows drive path without file:.
-  // Node file operations need the native absolute form, e.g. C:/Reports/file.json.
-  if (/^\/[A-Za-z]:[\\/]/.test(reference)) reference = reference.slice(1);
-  const cwd = context.cwd ?? $("#conversationCwd")?.value.trim() ?? "";
-  const absolute = reference.startsWith("/") || /^[A-Za-z]:[\\/]/.test(reference) || reference.startsWith("\\\\");
-  const pathLike = absolute || reference.startsWith("./") || reference.startsWith("../") ||
-    reference.includes("/") || reference.includes("\\") || /\.[\p{L}][\p{L}\p{N}._-]{0,15}$/u.test(reference);
-  if (!pathLike || (!absolute && !cwd)) return null;
-  if (!absolute) {
-    const separator = pathSeparator(cwd);
-    reference = joinPath(cwd, reference.replace(/[\\/]/g, separator));
-  }
-  return { path: reference, line, column };
-}
+// File references in Agent output: the owning Node confirms which written
+// paths exist before they become links (see file-links.js).
+const fileNodeName = (nodeId) => dashboardNodes.has(nodeId) ? nodeDisplayName(nodeId) : "所属 Node";
+const fileLinks = new FileLinks({
+  post: (path, body) => api(path, { method: "POST", body: JSON.stringify(body) }),
+  node: (nodeId) => dashboardNodes.get(nodeId),
+  nodeName: fileNodeName,
+  preview: (reference, context) => { void openNodeFile(reference.path, reference.line ?? null, context, { type: reference.type }); },
+  notify: (message) => toast(message),
+});
 
 function decorateTraceFileReferences(root, fileReferences = new Map(), context = {}) {
-  for (const anchor of root.querySelectorAll("a[href]")) {
-    const href = anchor.getAttribute("href");
-    const reference = fileReferences.get(href) ?? resolveNodeFileReference(href, context);
-    if (reference) {
-      anchor.dataset.nodeFilePath = reference.path;
-      if (reference.line) anchor.dataset.nodeFileLine = String(reference.line);
-      if (reference.column) anchor.dataset.nodeFileColumn = String(reference.column);
-      anchor.classList.add("node-file-link");
-      anchor.title = `从 Mira Node 打开 ${reference.path}`;
-      anchor.setAttribute("href", "#");
-    } else {
-      anchor.target = "_blank";
-      anchor.rel = "noopener noreferrer";
-    }
-  }
-  for (const image of root.querySelectorAll("img[src]")) {
-    const src = image.getAttribute("src");
-    const reference = fileReferences.get(src) ?? resolveNodeFileReference(src, context);
-    if (!reference) continue;
-    const button = element("button", "node-file-image-link", `▧ ${image.alt || baseName(reference.path)}`);
-    button.type = "button";
-    button.dataset.nodeFilePath = reference.path;
-    if (reference.line) button.dataset.nodeFileLine = String(reference.line);
-    image.replaceWith(button);
-  }
-  for (const code of root.querySelectorAll("code")) {
-    if (code.closest("pre, a, button")) continue;
-    const reference = resolveNodeFileReference(code.textContent, context);
-    if (!reference) continue;
-    const button = element("button", "node-file-code-link");
-    button.type = "button";
-    button.dataset.nodeFilePath = reference.path;
-    if (reference.line) button.dataset.nodeFileLine = String(reference.line);
-    button.title = `从 Mira Node 打开 ${reference.path}`;
-    button.append(code.cloneNode(true));
-    code.replaceWith(button);
-  }
- for (const link of root.querySelectorAll('[data-node-file-path]')) {
-   link.dataset.fileContext = JSON.stringify(context);
-   link.title = `查看当前文件 · ${context.nodeId || "请选择所属 Node"} · ${link.dataset.nodeFilePath}`;
- }
-
+  fileLinks.decorate(root, fileReferences, context);
 }
 
 function createTraceCopyButton(card) {
@@ -3804,7 +3743,7 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
     const sourceContext = card._miraFileContext ?? {};
     const html = marked.parse(value, { walkTokens(token) {
       if (token.type !== "link" && token.type !== "image") return;
-      const reference = resolveNodeFileReference(token.href, sourceContext);
+      const reference = fileLinks.linkReference(token.href);
       if (!reference) return;
       // Keep local paths out of browser URLs: DOMPurify correctly rejects C:
       // and file: schemes. Restore them only as Node file actions after sanitizing.
@@ -4212,6 +4151,7 @@ function openTraceImagePreview(blob, path) {
 function resetNodeFileDialog() {
  nodeFileReader?.dispose(); nodeFileReader=null; nodeFileWorkspace?.dispose(); nodeFileWorkspace=null;
  $("#nodeFileReader").hidden=true;
+ $("#nodeFileActions").hidden=true; $("#nodeFileActions").replaceChildren();
  document.body.classList.remove("file-reader-open");
  $("#nodeFileDialog").classList.remove("file-dock");
   $("#nodeFileTextMore").classList.add("hidden");
@@ -4235,20 +4175,12 @@ let nodeFileReader = null;
 let nodeFileWorkspace = null;
 let nodeFileReturnFocus = null;
 const nodeFileReaderStates = new Map();
-function openNodeFile(path, line = null, context = {}) {
-  const ref = { nodeId: context.nodeId, path, ...(line ? { line } : {}) };
-  const standalone = !line && (/\.(?:html?|zip)$/i.test(path) || /[\\/]$/.test(path) || !baseName(path).includes("."));
-  if (ref.nodeId && standalone) {
-    // Reserve the window during the click, sever its opener before navigating,
-    // and retain a visible retry link only when a client blocks the popup.
-    const target = window.open("about:blank", "_blank");
-    if (target) {
-      target.opener = null;
-      target.location.replace(workspaceURL(ref, { site:/\.html?$/i.test(path), sourceThreadId:context.sourceThreadId || agent.threadId }));
-      if ($("#nodeFileDialog").open) closeNodeFileDialog();
-      return Promise.resolve();
-    }
-  }
+// The reader beside the conversation. Opening a website or the file workspace
+// is a link in its action bar (or the reference itself), never a script popup.
+function openNodeFile(path, line = null, context = {}, { type = "" } = {}) {
+  const ref = { nodeId: context.nodeId, path, ...(line ? { line } : {}),
+    ...(context.executionContext ? { executionContext: context.executionContext } : {}),
+    ...(context.userSessionId != null ? { userSessionId: context.userSessionId } : {}) };
   const dialog = $("#nodeFileDialog");
   if (!dialog.open) nodeFileReturnFocus = document.activeElement;
   // Changing from a historical image modal to the live file dock must also
@@ -4257,18 +4189,33 @@ function openNodeFile(path, line = null, context = {}) {
   resetNodeFileDialog();
   const host = $("#nodeFileReader"); host.hidden = false; host.replaceChildren();
   dialog.classList.add("file-dock");
-  $("#nodeFileTitle").textContent = baseName(path); $("#nodeFileMeta").textContent = "Node 上的当前内容";
-  $("#nodeFilePath").textContent = path; $("#nodeFileLoading").classList.add("hidden");
-  if (ref.nodeId && standalone) {
-    host.append(element("p", "muted", "窗口被拦截，请点击下面的链接打开文件页面。"));
-    const link = element("a", "", "再次打开 →"); link.href = workspaceURL(ref, { site: /\.html?$/i.test(path), sourceThreadId: context.sourceThreadId || agent.threadId }); link.target = "_blank"; link.rel = "noopener"; host.append(link);
-  } else if (ref.nodeId) {
-    const reader = new FileReader(host, { states:nodeFileReaderStates, independent: value => window.open(workspaceURL(value, { sourceThreadId:context.sourceThreadId || agent.threadId }), "_blank", "noopener") });
+  $("#nodeFileLoading").classList.add("hidden");
+  // The header follows the reader: a link inside a document opens another file.
+  const describe = (current, kind) => {
+    const name = fileNodeName(current.nodeId);
+    const location = current.archive ? `${current.path} → ${current.archiveEntry || "/"}` : current.path;
+    $("#nodeFileTitle").textContent = baseName(current.archive && current.archiveEntry ? current.archiveEntry : current.path);
+    $("#nodeFileMeta").textContent = current.nodeId ? `${name} · ${location}` : location;
+    $("#nodeFileMeta").title = location;
+    $("#nodeFilePath").textContent = location;
+    if (!current.nodeId) return;
+    const actions = fileActions(current, { type: kind, node: dashboardNodes.get(current.nodeId), nodeName: name,
+      sourceThreadId: context.sourceThreadId || agent.threadId || "", surface: "dock" });
+    const primary = defaultFileAction(current.path, kind, current.line);
+    for (const action of actions) action.primary = action.id === primary;
+    renderFileActions($("#nodeFileActions"), actions, (id) => runFileAction(id, current, {
+      post: (route, body) => api(route, { method: "POST", body: JSON.stringify(body) }), notify: toast, nodeName: name,
+    }), { short: true });
+    $("#nodeFileActions").hidden = false;
+  };
+  describe(ref, type);
+  if (ref.nodeId) {
+    const reader = new FileReader(host, { states: nodeFileReaderStates, website: false, download: false,
+      onStat: (stat, current) => { if (nodeFileReader === reader) describe(current, stat.type); } });
     nodeFileReader = reader;
     void reader.open(ref).then(() => {
       if (nodeFileReader === reader && reader.stat?.type === "directory") {
-        // An explicit link remains available when type discovery is asynchronous.
-        nodeFileWorkspace = new FileWorkspace(host); void nodeFileWorkspace.open(ref).catch(e => toast(e.message));
+        nodeFileWorkspace = new FileWorkspace(host, { states: nodeFileReaderStates }); void nodeFileWorkspace.open(ref).catch(e => toast(e.message));
       }
     });
   } else {
@@ -7825,21 +7772,13 @@ $("#conversationTrace").addEventListener("click", (event) => {
     dismiss.closest("[data-diagnostic-key]").remove();
     return;
   }
-  const file = event.target.closest("[data-node-file-path]");
-  if (file) {
-    event.preventDefault();
-    openNodeFile(file.dataset.nodeFilePath, Number(file.dataset.nodeFileLine) || null, JSON.parse(file.dataset.fileContext || "{}")).catch((error) => {
-      if (error.name === "AbortError") return;
-      $("#nodeFileMeta").textContent = "读取失败";
-      $("#nodeFileLoading").textContent = error.message;
-      toast(error.message);
-    });
-    return;
-  }
+  if (fileLinks.handleClick(event)) return;
   if (event.target.closest("button[data-load-older]")) {
     void loadOlderAgentTranscript();
   }
 });
+$("#conversationTrace").addEventListener("contextmenu", (event) => { fileLinks.handleContextMenu(event); });
+$("#conversationTrace").addEventListener("pointerdown", (event) => { fileLinks.handlePointerDown(event); });
 $("#sessionScan").addEventListener("click", () => scanLocalSessions().catch((error) => {
   $("#sessionScanState").textContent = `扫描失败：${error.message}`;
 }));
