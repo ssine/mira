@@ -95,10 +95,11 @@ try {
       return route.fulfill({ json: row });
     });
     // CI Nodes have no desktop: report one, and observe the request instead of
-    // starting a file manager.
-    await context.route("**/v1/nodes?*", async route => {
+    // starting a file manager. The console reads the list and the single Node.
+    await context.route(/\/v1\/nodes(\/[0-9a-f-]+)?(\?[^/]*)?$/, async route => {
+      if (route.request().method() !== "GET") return route.continue();
       const response = await route.fetch(), body = await response.json();
-      for (const node of body.data ?? []) if (node.nodeId === nodeId) node.capabilities.desktopRevealV1 = true;
+      for (const node of body.data ?? [body]) if (node.nodeId === nodeId) node.capabilities.desktopRevealV1 = true;
       await route.fulfill({ response, json: body });
     });
     await context.route("**/v1/files/reveal", route => { requests.reveal.push(route.request().postDataJSON()); return route.fulfill({ json: { revealed: true } }); });
