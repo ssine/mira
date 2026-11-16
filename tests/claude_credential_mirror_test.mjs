@@ -35,6 +35,11 @@ test("renewals reach this account's resume copies, without the refresh token", a
   const stop = mirrorResumeCredentials(account, { intervalMs: 20, root });
   try {
     write(path.join(account, ".credentials.json"), { accessToken: "a3", refreshToken: "r3", expiresAt: 3 });
+    // A real renewal comes minutes after the previous write. Give this one its
+    // own modification time: two writes inside one kernel clock tick share one,
+    // and the watcher rightly treats an unchanged time as an unchanged file.
+    const renewed = new Date(fs.statSync(path.join(account, ".credentials.json")).mtimeMs + 2000);
+    fs.utimesSync(path.join(account, ".credentials.json"), renewed, renewed);
     const deadline = Date.now() + 3000;
     while (read(path.join(root, "claude-resume-mine", ".credentials.json")).claudeAiOauth.accessToken !== "a3") {
       assert.ok(Date.now() < deadline, "the watcher did not mirror the renewal");
