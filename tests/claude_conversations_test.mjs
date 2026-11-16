@@ -462,3 +462,24 @@ test("a Claude command shows its own description like the terminal, while counts
  assert.equal(activitySummary({...described,status:"failed"}),"Read pagination doc · 失败");
  assert.equal(summarizeActivities([described,plain]),"执行 × 2");
 });
+
+test("each Claude item records the Node and working directory it was written on", () => {
+ const text=(uuid,value)=>({type:"assistant",uuid,message:{id:`m-${uuid}`,content:[{type:"text",text:value}]}});
+ const rows=[
+  {type:"mira_user",text:"first"}, text("a","before any init: see README.md"),
+  {type:"system",subtype:"init",cwd:"/work/repo/"}, text("b","in the repository: src/app.js"),
+  {type:"system",subtype:"init",cwd:"/work/other"}, text("c","after cd: docs/guide.md"),
+ ].map((payload,seq)=>({seq,payload,turnId:"turn"}));
+ const origin=key=>claudeTrace(rows,{activeTurn:"turn",source:{nodeId:"node-1",cwd:"/session"}}).trace.find(item=>item.key===`claude:${key}:0`).sourceContext;
+ // The session's own directory applies until the SDK reports one.
+ assert.deepEqual(origin("a"),{nodeId:"node-1",cwd:"/session"});
+ assert.deepEqual(origin("b"),{nodeId:"node-1",cwd:"/work/repo"});
+ assert.deepEqual(origin("c"),{nodeId:"node-1",cwd:"/work/other"});
+ // Callers that give no origin (titles, tests) get items without one.
+ assert.equal(claudeTrace(rows,{activeTurn:"turn"}).trace.some(item=>"sourceContext" in item),false);
+ // The runtime supplies the session's Node and directory.
+ const runtime=new ClaudeRuntime(async()=>({}));
+ runtime.restore("session",{rows:rows.map(row=>({...row})),cursor:rows.length,earliest:null});
+ const viaRuntime=runtime.trace({runtimeNodeId:"node-2",cwd:"/session"},"turn").trace.find(item=>item.key==="claude:b:0");
+ assert.deepEqual(viaRuntime.sourceContext,{nodeId:"node-2",cwd:"/work/repo"});
+});

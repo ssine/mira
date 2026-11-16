@@ -121,6 +121,8 @@ func (runtimeValue *capabilityRuntime) advertisedCapabilities(context.Context) m
 		"executionContexts":          runtime.GOOS == "windows",
 		"codexSessions":              true,
 		"filePreviewV1":              true,
+		"fileProbeV1":                true,
+		"desktopRevealV1":            desktopRevealAvailable(),
 		"portSitesV1":                true,
 		"fileChunkedWrite":           true,
 		"codexRuntimeDownload":       runtimeValue.configuration.CodexBinary == "" && runtime.GOARCH == "amd64" && (runtime.GOOS == "linux" || runtime.GOOS == "windows"),

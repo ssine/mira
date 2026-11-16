@@ -1,1 +1,50 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#ffffff"><title>Mira 文件工作区</title><link rel="stylesheet" href="/styles.css"><link rel="stylesheet" href="/file-preview.css"><script type="module" src="/theme.js"></script><script type="module" src="/files.js"></script></head><body class="files-page"><header class="files-head"><a id="fileReturn" href="/">返回 Mira</a><strong id="fileLocation">文件工作区</strong><button id="fileTreeToggle" class="ghost" type="button">文件树</button></header><p id="filePageStatus" role="status">正在准备…</p><section id="siteControls" hidden><label>站点根目录<input id="siteRoot" type="text"></label><label>入口（相对于根目录）<input id="siteEntry" type="text"></label><button id="siteOpen" type="button" class="primary">打开网站</button><button id="siteStop" type="button" class="ghost" hidden>关闭预览会话</button><p>资源缺失时，可在这里调整根目录后重新打开。</p></section><main id="fileWorkspace"></main></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <title>Mira 文件工作区</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/file-preview.css">
+  <script type="module" src="/theme.js"></script>
+  <script type="module" src="/files.js"></script>
+</head>
+<body class="files-page">
+  <header class="files-head">
+    <a id="fileReturn" class="ghost files-back" href="/" title="返回对话"><span aria-hidden="true">←</span><span class="files-back-label">返回对话</span></a>
+    <div class="files-title">
+      <strong id="fileName">文件工作区</strong>
+      <span id="fileLocation"></span>
+    </div>
+    <button id="fileTreeToggle" class="ghost" type="button" aria-expanded="false" aria-controls="fileWorkspace">文件树</button>
+    <div class="files-bar">
+      <div id="fileModes" class="files-modes" role="tablist" aria-label="视图" hidden>
+        <button id="modeFiles" type="button" role="tab" aria-selected="true">文件</button>
+        <button id="modeSite" type="button" role="tab" aria-selected="false">网站</button>
+      </div>
+      <nav id="fileActions" class="file-actions" aria-label="文件操作"></nav>
+    </div>
+  </header>
+  <p id="filePageStatus" role="status" hidden></p>
+  <section id="siteControls" class="site-panel" hidden>
+    <div class="site-card">
+      <h1>网站预览</h1>
+      <p class="site-summary">把 Node 上的一个目录作为静态网站，在独立的预览域名下打开。页面里的相对路径和根路径都按这个目录解析。</p>
+      <label for="siteRoot">站点根目录</label>
+      <input id="siteRoot" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <label for="siteEntry">入口文件（相对于根目录）</label>
+      <input id="siteEntry" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div id="siteSuggestions" class="site-suggestions" hidden></div>
+      <p id="siteState" class="site-state" role="status"></p>
+      <div class="site-actions">
+        <button id="siteOpen" type="button" class="primary">打开网站</button>
+        <a id="siteLink" class="ghost" hidden>没有自动跳转？点这里打开</a>
+        <button id="siteStop" type="button" class="ghost" hidden>关闭预览会话</button>
+      </div>
+    </div>
+  </section>
+  <main id="fileWorkspace"></main>
+  <div id="fileTreeBackdrop" class="files-backdrop" hidden></div>
+</body>
+</html>

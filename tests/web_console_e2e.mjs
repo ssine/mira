@@ -104,6 +104,7 @@ for (const [pathname, contentType] of [
   ["/", "text/html"],
   ["/app.js", "text/javascript"],
   ["/file-preview.js", "text/javascript"],
+  ["/file-links.js", "text/javascript"],
   ["/file-preview.css", "text/css"],
   ["/files.html", "text/html"],
   ["/files.js", "text/javascript"],
@@ -194,8 +195,14 @@ for (const control of ["agentView", "runtimeView", "agentThreadDrawer", "agentTh
 for (const route of ["/v1/codex/threads", "/transcript?${query}", "/codex-sessions", "/codex-session-imports", "/v1/codex/runtimes/"]) {
   assert(assets["/app.js"].includes(route), `website omitted Agent console route ${route}`);
 }
-for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "desiredAppServer?.developerInstructionsFile", "saveAgentRuntimeDeveloperInstructionsFile", "notificationIsForOpenThread", "activeTurns", "turnThreads", "resolveNodeFileReference", "decorateTraceFileReferences", "new FileReader(host", "openNodeFile", "prepareTurnInput", "addComposerFiles", "dataset.nodeFilePath", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
+for (const wiring of ["transcriptPageSize = 60", "loadOlderAgentTranscript", "traceNearBottom", "scrollTraceToBottom", "preserveViewport", "data-load-older", "reconcilePendingUserTrace", "ensureToolGroup", "updateToolGroup", "emptyNarrative", "projectedThread?.cwd", "desiredAppServer?.defaultCwd", "saveAgentRuntimeDefaultCwd", "desiredAppServer?.developerInstructionsFile", "saveAgentRuntimeDeveloperInstructionsFile", "notificationIsForOpenThread", "activeTurns", "turnThreads", "fileLinks.linkReference", "decorateTraceFileReferences", "new FileReader(host", "openNodeFile", "fileLinks.handleClick", "prepareTurnInput", "addComposerFiles", "type: \"localImage\"", "file.slice(offset, offset + nodeFileChunkBytes)", "?storeId=personal", "sendPromise", "syncConversationSendUi", "miraRequestId", "newThreadRequestId"]) {
   assert(assets["/app.js"].includes(wiring), `website omitted paginated conversation wiring: ${wiring}`);
+}
+for (const wiring of ["/v1/files/probe", "dataset.nodeFilePath", "scanTextForPaths", "handleContextMenu"]) {
+  assert(assets["/file-links.js"].includes(wiring), `website omitted Node-confirmed file reference wiring: ${wiring}`);
+}
+for (const wiring of ["/v1/files/reveal", "desktopRevealV1", "renderFileActions"]) {
+  assert(assets["/file-preview.js"].includes(wiring), `website omitted shared file action: ${wiring}`);
 }
 assert(!assets["/app.js"].includes('$("#conversationSend").disabled = false'),
   "App Server connect can re-enable Send while a submission is still in flight");

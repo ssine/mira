@@ -33,6 +33,11 @@ type fileParams struct {
 	Append           bool    `json:"append"`
 	ExecutionContext string  `json:"executionContext"`
 	UserSessionID    *uint32 `json:"userSessionId"`
+	// probe: unresolved references and the directory relative ones start from.
+	Cwd   string   `json:"cwd"`
+	Paths []string `json:"paths"`
+	// home is the execution identity's home directory, never client input.
+	home string
 }
 
 func pathContained(root string, candidate string) bool {
@@ -117,6 +122,9 @@ func (runtime *capabilityRuntime) file(params fileParams) (any, error) {
 		}
 		return map[string]any{"roots": roots}, nil
 	}
+	if params.Action == "probe" {
+		return runtime.probeFiles(params)
+	}
 	allowRoot := params.Action != "move" && params.Action != "remove"
 	target, err := runtime.authorize(params.Path, allowRoot)
 	if err != nil {
@@ -128,6 +136,14 @@ func (runtime *capabilityRuntime) file(params fileParams) (any, error) {
 	switch params.Action {
 	case "stat":
 		value, err := os.Lstat(target)
+		if err != nil {
+			return nil, err
+		}
+		return statView(target, value), nil
+	case "reveal":
+		// Only resolve and classify here; the file manager starts after any
+		// Windows impersonation has ended (see fileWithExecutionContext).
+		value, err := os.Stat(target)
 		if err != nil {
 			return nil, err
 		}
@@ -174,11 +190,18 @@ func (runtime *capabilityRuntime) fileWithExecutionContext(params fileParams) (a
 		return nil, err
 	}
 	defer identity.close()
+	params.home = executionHome(identity)
 	result, err := identity.runImpersonated(func() (any, error) {
 		return runtime.file(params)
 	})
 	if err != nil {
 		return nil, err
+	}
+	if params.Action == "reveal" {
+		request := executionRequest{Context: params.ExecutionContext, UserSessionID: params.UserSessionID}
+		if result, err = revealResolvedFile(params.operationContext, request, result); err != nil {
+			return nil, err
+		}
 	}
 	return attachExecutionMetadata(result, identity), nil
 }

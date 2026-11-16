@@ -91,6 +91,7 @@ jobs:
             tests/conversation_progress_test.mjs \
             tests/markdown_test.mjs \
             tests/file_preview_paths_test.mjs \
+            tests/file_links_test.mjs \
             tests/pwa_notifications_test.mjs \
             tests/thread_list_test.mjs \
             tests/thread_pages_test.mjs \
@@ -225,7 +226,7 @@ jobs:
           - shard: activity
             tests: client_cache web_shell thread_menu thread_activity conversation_export
           - shard: layout
-            tests: thread_pages sidebar_swipe thread_token_usage
+            tests: thread_pages sidebar_swipe thread_token_usage file_links
           - shard: conversation
             tests: thread_list thinking_activity thread_models codex_fast codex_accounts claude_accounts claude_plan_usage claude_questions claude_cache account_overview sidebar_layout composer_drafts transcript_images conversation_scroll trace_diagrams markdown recovery_notices conversation_index conversation_rail timeline_live
     env:
@@ -266,6 +267,6 @@ jobs:
           trap 'kill "$server_pid" >/dev/null 2>&1 || true; docker compose -f compose.yaml down -v' EXIT
           browser_status=0
           for test in $TESTS; do
-            MIRA_SERVER_URL=http://127.0.0.1:8787 node "tests/${test}_browser.mjs" "$RUNNER_TEMP/mira-browser/node_modules/playwright/index.mjs" || browser_status=1
+            MIRA_SERVER_URL=http://127.0.0.1:8787 MIRA_TEST_BINARY="$RUNNER_TEMP/mira" node "tests/${test}_browser.mjs" "$RUNNER_TEMP/mira-browser/node_modules/playwright/index.mjs" || browser_status=1
           done
           exit "$browser_status"

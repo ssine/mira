@@ -86,7 +86,10 @@ function compaction(e) {
     anchor: meta.preserved_messages?.anchor_uuid ?? meta.preserved_segment?.anchor_uuid ?? null };
 }
 
-export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
+// `source` is where the session runs ({ nodeId, cwd }). Each item then records
+// the Node and the working directory in effect when it was written, so file
+// references in it resolve where the Agent wrote them.
+export function claudeTrace(rows, { child = false, activeTurn = null, source = null } = {}) {
   const items = new Map(), questions = new Map(), streams = new Map(), steers = new Map(), endedTurns = new Set(),
     resumedTurns = new Set();
   // Compaction is reported as status -> boundary -> a synthetic user message holding the summary.
@@ -95,7 +98,8 @@ export function claudeTrace(rows, { child = false, activeTurn = null } = {}) {
   // rowSeq: the durable event that first produced an item, for search and
   // timeline jumps. Live rows have none until their durable event arrives.
   let rowSeq = null;
-  const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, rowSeq: items.get(key)?.rowSeq ?? rowSeq, ...extra });
+  const origin = () => source ? { sourceContext: { ...source, cwd: cwd || source.cwd || "" } } : {};
+  const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, rowSeq: items.get(key)?.rowSeq ?? rowSeq, ...origin(), ...extra });
   const image = (key, url, turnId, timing) => put(key, "image", "图片", "", turnId, { ...timing, image: { url } });
   function blocks(message, key, role, turnId, timestamp, toolResult) {
     const timing = timestamp ? { completedAt: timestamp, timingScope: "recorded" } : {};
@@ -251,7 +255,8 @@ export class ClaudeRuntime {
     // Partial output belongs to the running turn; afterwards durable assistant
     // events hold the complete text.
     for (const [key, row] of this.rows) if (row.live && row.turnId !== activeTurn) this.rows.delete(key);
-    return claudeTrace([...this.rows.values()].sort(rowOrder), { child: !!thread.subpath, activeTurn });
+    return claudeTrace([...this.rows.values()].sort(rowOrder), { child: !!thread.subpath, activeTurn,
+      source: { nodeId: thread.runtimeNodeId ?? thread.sourceNodeId ?? null, cwd: thread.cwd ?? "" } });
   }
   // Ephemeral items pushed by the Server's live stream. Only streaming deltas
   // affect the transcript; other counters are not rendered.

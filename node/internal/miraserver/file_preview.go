@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -116,6 +117,8 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		return e
 	}
 	switch r.URL.Path {
+	case "/v1/files/probe", "/v1/files/reveal":
+		return server.consoleFileAction(w, r, actor)
 	case "/v1/files/meta", "/v1/files/content":
 		if r.Method != "GET" && r.Method != "HEAD" {
 			return foundation.WriteErrorJSON(w, 405, "read-only resource", "method_not_allowed")
@@ -203,6 +206,9 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		}
 		stat, e := server.checkResource(r, actor, body.NodeID, p)
 		if e != nil {
+			if nodeRefused(e) {
+				return foundation.WriteErrorJSON(w, 400, "站点根目录不存在或无法读取", "invalid_root")
+			}
 			return e
 		}
 		if stat["type"] != "directory" {
@@ -224,6 +230,9 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		}
 		entryStat, e := server.checkResource(r, actor, body.NodeID, p)
 		if e != nil {
+			if nodeRefused(e) {
+				return foundation.WriteErrorJSON(w, 400, "入口文件不存在或无法读取", "invalid_entry")
+			}
 			return e
 		}
 		if entryStat["type"] != "file" {
@@ -290,6 +299,56 @@ func (server *Server) fileRoutes(w http.ResponseWriter, r *http.Request) error {
 		}
 		return foundation.WriteErrorJSON(w, 405, "method not allowed", "method_not_allowed")
 	}
+}
+
+// consoleFileAction serves the file references of the conversation view:
+// probe turns a batch of written references into existing native paths, reveal
+// shows one of them in the owning machine's desktop file manager. Both run on
+// the Node that produced the output; the Server never interprets a path.
+func (server *Server) consoleFileAction(w http.ResponseWriter, r *http.Request, actor *foundation.Principal) error {
+	if r.Method != "POST" {
+		return foundation.WriteErrorJSON(w, 405, "POST required", "method_not_allowed")
+	}
+	var body struct {
+		NodeID           string   `json:"nodeId"`
+		Cwd              string   `json:"cwd"`
+		Paths            []string `json:"paths"`
+		Path             string   `json:"path"`
+		ExecutionContext string   `json:"executionContext"`
+		UserSessionID    *uint32  `json:"userSessionId"`
+	}
+	if err := foundation.ReadJSON(r, &body, 512*1024); err != nil {
+		return err
+	}
+	params := map[string]any{"action": "reveal", "path": body.Path}
+	if r.URL.Path == "/v1/files/probe" {
+		paths := make([]any, len(body.Paths))
+		for index, value := range body.Paths {
+			paths[index] = value
+		}
+		params = map[string]any{"action": "probe", "paths": paths}
+		if body.Cwd != "" {
+			params["cwd"] = body.Cwd
+		}
+	}
+	if body.ExecutionContext != "" {
+		params["executionContext"] = body.ExecutionContext
+	}
+	if body.UserSessionID != nil {
+		params["userSessionId"] = int64(*body.UserSessionID)
+	}
+	result, err := server.channel.Capabilities().Invoke(r.Context(), actor, body.NodeID, "file", params, channel.InvokeContext{Request: r})
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, 200, result)
+}
+
+// nodeRefused reports that the Node itself answered and rejected the path
+// (missing, unreadable or outside its roots), as opposed to being unreachable.
+func nodeRefused(err error) bool {
+	var failure *channel.Error
+	return errors.As(err, &failure) && failure.Code == "node_request_failed"
 }
 func safeSitePath(p string) bool {
 	return !strings.ContainsAny(p, "\\\x00:") && p != ".." && !strings.HasPrefix(p, "../") && p == path.Clean(p) && !strings.HasPrefix(p, "/")
