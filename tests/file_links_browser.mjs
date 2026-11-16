@@ -84,25 +84,29 @@ try {
   ];
   const row = { threadId: thread, title: "File links", cwd: work, generation: 1, itemCount: trace.length, runtimeNodeId: nodeId, updatedAt: new Date().toISOString(), activity: { state: "idle", generation: 1, itemCount: 1 } };
   const requests = { probe: [], reveal: [] };
+  // A tab may close while one of its requests is in flight; that is not a failure.
+  const answer = (route, response) => route.fulfill(response).catch(() => {});
   const install = async context => {
-    await context.route("**/v1/codex/threads?*", route => route.fulfill({ json: { data: [row] } }));
+    await context.route("**/v1/codex/threads?*", route => answer(route, { json: { data: [row] } }));
     await context.route(/\/v1\/codex\/threads\/[^/?]+(\/[a-z]+)?\?/, route => {
       const url = new URL(route.request().url());
-      if (url.pathname.endsWith("/costs")) return route.fulfill({ json: { threadId: thread, generation: 1, itemCount: trace.length, turnCostEstimates: {} } });
-      if (url.pathname.endsWith("/timeline")) return route.fulfill({ json: { engine: "codex", rootThreadId: thread, partial: false, truncated: false, lanes: [] } });
-      if (url.pathname.endsWith("/transcript")) return route.fulfill({ json: { generation: 1, itemCount: trace.length, storeVersion: 1, outline: true, nextCursor: null,
+      if (url.pathname.endsWith("/costs")) return answer(route, { json: { threadId: thread, generation: 1, itemCount: trace.length, turnCostEstimates: {} } });
+      if (url.pathname.endsWith("/timeline")) return answer(route, { json: { engine: "codex", rootThreadId: thread, partial: false, truncated: false, lanes: [] } });
+      if (url.pathname.endsWith("/transcript")) return answer(route, { json: { generation: 1, itemCount: trace.length, storeVersion: 1, outline: true, nextCursor: null,
         trace: url.searchParams.get("after") === null ? trace : [], ...(url.searchParams.get("after") === null ? {} : { after: Number(url.searchParams.get("after")) }) } });
-      return route.fulfill({ json: row });
+      return answer(route, { json: row });
     });
     // CI Nodes have no desktop: report one, and observe the request instead of
     // starting a file manager. The console reads the list and the single Node.
     await context.route(/\/v1\/nodes(\/[0-9a-f-]+)?(\?[^/]*)?$/, async route => {
-      if (route.request().method() !== "GET") return route.continue();
-      const response = await route.fetch(), body = await response.json();
-      for (const node of body.data ?? [body]) if (node.nodeId === nodeId) node.capabilities.desktopRevealV1 = true;
-      await route.fulfill({ response, json: body });
+      try {
+        if (route.request().method() !== "GET") return await route.continue();
+        const response = await route.fetch(), body = await response.json();
+        for (const node of body.data ?? [body]) if (node.nodeId === nodeId) node.capabilities.desktopRevealV1 = true;
+        await route.fulfill({ response, json: body });
+      } catch { /* the tab that asked closed while its request was in flight */ }
     });
-    await context.route("**/v1/files/reveal", route => { requests.reveal.push(route.request().postDataJSON()); return route.fulfill({ json: { revealed: true } }); });
+    await context.route("**/v1/files/reveal", route => { requests.reveal.push(route.request().postDataJSON()); return answer(route, { json: { revealed: true } }); });
     context.on("request", request => { if (request.url().endsWith("/v1/files/probe")) requests.probe.push(request.postDataJSON()); });
   };
   const signIn = async page => {
