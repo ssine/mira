@@ -4,14 +4,14 @@ Mira currently needs a small patch on top of the official Codex source tree so t
 App Server processes can use the remote PostgreSQL-backed ThreadStore adapter.
 
 - Upstream: <https://github.com/openai/codex>
-- Base tag: `rust-v0.169.0` (pinned in repository-root `CODEX_VERSION`)
-- Base commit: `d32063f96c2d` (annotated tag object: `a41fe5b44365`)
-- Patch source commit: `1e0ba1881d8c`
+- Base tag: `rust-v0.170.0` (pinned in repository-root `CODEX_VERSION`)
+- Base commit: `29eb79e9866b` (annotated tag object: `72f97c309fb0`)
+- Patch source commit: `ef28c9ce27b7`
 
 Apply it to a clean checkout:
 
 ```bash
-git clone --branch rust-v0.169.0 https://github.com/openai/codex.git codex
+git clone --branch rust-v0.170.0 https://github.com/openai/codex.git codex
 git -C codex am ../patches/codex/0001-feat-thread-store-add-remote-PostgreSQL-adapter.patch
 ```
 
@@ -24,6 +24,17 @@ Linux amd64 and Windows amd64. The resulting `mira-codex-package` includes the e
 as an independent Codex runtime, downloaded by the Node on demand. The Node probes the remote ThreadStore configuration before advertising a build
 as compatible. Updating `CODEX_VERSION` therefore requires rebasing this patch and passing both
 release matrix builds, not just changing the version file.
+
+Runtime `0.170.0-mira.1` rebases the same adapter onto official Codex 0.170.0,
+whose bundled model catalog adds GPT-6.2-Sol and GPT-6.2-Astra. Accounts whose
+provider does not serve a Codex model catalog (API-key gateways such as the
+default OpenAI provider behind a proxy) only list models from that bundled
+catalog, so they need this runtime to select the new models. The Mira 429 policy
+is expressed through upstream's new retry-policy classification (`RetryLimit` 429
+uses server advice or backoff). Upstream's local and in-memory stores now record
+the next model-facing ID ordinal in compaction checkpoints; the remote store does
+the same before committing a checkpoint, so PostgreSQL holds the bytes a local
+rollout would contain. Protocol bundles and Python SDK types are regenerated.
 
 Runtime `0.169.0-mira.1` rebases the Mira adapter onto official Codex 0.169.0.
 `ThreadStore::resume_thread` now returns the replay history; the remote store
