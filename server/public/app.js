@@ -746,6 +746,8 @@ async function sendClaudeMessage(text, attachments, progress) {
     const session = await claudeRuntime.call("sessions", JSON.parse(agent.newThreadRequestSignature));
     const thread = await api(`/v1/claude/conversations/${session.sessionId}`);
     agent.threadId = thread.threadId; acceptClaudeSummary(thread); claudeRuntime.reset(thread.threadId);
+    // The created conversation becomes the timeline's subject (a pinned panel opens).
+    conversationTimeline.select(thread.threadId);
     composerDraftRemoveKey = composerDraftKey; composerDraftKey = `personal:thread:${thread.threadId}`; saveComposerDraft();
     agent.newThreadRequestId = agent.newThreadRequestSignature = null;
     writeBrowserRoute("agent", thread.threadId, { replace: true });
@@ -7334,6 +7336,8 @@ async function sendAgentMessage(text, attachments = [], progress = null) {
     params.miraRequestId = agent.newThreadRequestId;
     const started = await rpc("thread/start", params, 120_000);
     agent.threadId = started.thread.id;
+    // The created conversation becomes the timeline's subject (a pinned panel opens).
+    conversationTimeline.select(agent.threadId);
     // Queue an atomic move so upload failures retain the draft on the created thread.
     composerDraftRemoveKey = composerDraftKey;
     composerDraftKey = `personal:thread:${agent.threadId}`;
