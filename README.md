@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.132 修复身份文件不在默认位置的 Node（如独立状态目录的部署）上，Agent 按注入的绝对路径调用 `mira` 时报 `not_enrolled`：安装目录里的 CLI 现在使用同一状态目录 `node.json` 记录的 Node 身份，`conversation read`、`ssh`、`file` 等命令无需包装脚本即可使用。只需升级要使用 CLI 的 Node；无数据库迁移。
+
 1.0.131 新增 `mira conversation read <对话ID>`：用本机 Node 凭据按 ID 读取任意 Node 上的 Codex 线程、Claude 会话或子 Agent，输出标题、cwd、子 Agent 列表，以及按顺序排列的用户/助手消息和工具调用（名称、状态、输入与输出；每段默认保留 8 KiB 并标明原始大小，`--tool-output-limit` 可调到 1 MiB，`--no-tools` 只读正文索引）。Mira 注入给 Codex 和 Claude 对话的 CLI 说明加入了这项能力；`mira codex` / `mira claude` 在 Server 可达时也会注入与网页对话相同的 Mira 指令（含该 Node 的 Developer instructions 文件），与已有的 `developer_instructions` / `--append-system-prompt` 合并，`--no-mira-instructions` 可关闭。需升级 Server 和要使用这些命令的 Node；无数据库迁移。
 
 1.0.130 修复静态网站预览中站内资源和外部链接无法在新标签页打开的问题。目标页面使用自身的浏览器安全策略。更新 Server 后重新打开预览即可。
@@ -251,13 +253,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.131
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.132
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.131'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.132'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
