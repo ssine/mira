@@ -173,6 +173,32 @@ try:
     assert evaluate("location.hostname.endsWith('.preview.localhost') && typeof window.MiraAndroid === 'undefined'")
     assert evaluate("document.body.dataset.worker === 'blocked'")
     print('Isolated website → root paths, module, fetch, blocked Service Worker: passed')
+
+    preview_url = evaluate('location.href')
+    for selector, destination in [
+        ('#local-link', preview_url + '?opened=1'),
+        ('#external-link', fixture['base'] + '/healthz'),
+    ]:
+        before = {row['index'] for row in run('tabs')['tabs']}
+        activate(selector)
+        for _ in range(60):
+            added = [
+                row for row in run('tabs')['tabs']
+                if row['index'] not in before and row['url'] == destination
+            ]
+            if added:
+                break
+            time.sleep(.2)
+        assert added, 'Preview link did not open a new tab: ' + selector
+        popup = added[0]['index']
+        owned.add(popup)
+        run('select', str(popup))
+        assert evaluate('window.opener === null')
+        run('close-tab', str(popup))
+        owned.discard(popup)
+        run('select', str(own))
+        assert evaluate('location.href') == preview_url
+    print('Preview links → same-origin and external new tabs with no opener: passed')
 finally:
     # Indices only shift when closing; close this test's tracked pages backwards.
     tabs = run('tabs')['tabs']

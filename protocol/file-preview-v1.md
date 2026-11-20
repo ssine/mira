@@ -55,6 +55,8 @@ POST for a host-only HttpOnly cookie. HTTPS cookies use the `__Host-` prefix.
 Every request checks cookie scope, expiry, live admin ownership and Node presence.
 The routing ID is never authorization. CSP blocks Service Workers/native bridge
 exposure; site data never receives administrator cookies or Node credentials.
+Preview links can open a new tab. The destination uses its own sandbox policy,
+and the preview's same-origin opener policy isolates cross-origin destinations.
 Bootstrap and management paths are reserved under `/__mira_preview/`.
 
 Source contexts are projections of canonical turn cwd and execution events, not
