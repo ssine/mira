@@ -870,6 +870,7 @@ Commands:
   schedule       Manage scheduled scripts and execution history
   site           Register persistent public sites for Node loopback ports
   notify         Send a system alert to Android devices with notifications on
+  conversation   Read a Codex or Claude conversation (messages and tools) by ID
   app-server     Inspect, start, stop or connect to Codex App Server
   accounts       List this Node's Codex and Claude accounts (offline)
   codex          Choose a Codex account and run Codex CLI
@@ -914,6 +915,21 @@ native notifications in the Mira app. Levels map to separate Android channels
 Delivery retries every 30 seconds for up to 12 hours; the command returns once
 the alert is queued. It fails with no_notification_device when no device has
 notifications enabled. Authenticates with this Node's credential.`,
+		"conversation": `Usage:
+  mira conversation read <conversation-id> [--tail N] [--max N] [--after SEQ]
+      [--kind user,assistant,tool,error,notice] [--tool-output-limit BYTES] [--no-tools] [--json]
+
+Reads one Codex thread, Claude session or subagent conversation from Mira
+Server by its UUID, whichever Node ran it. Output is the title, engine, cwd,
+parent and subagent IDs, then every user message, assistant message and tool
+call (name, status, input and output) in order with its sequence and time.
+Reasoning is not included. Each tool input/output keeps the first 8192 bytes
+by default; --tool-output-limit sets the bound (0 = the 1 MiB maximum) and
+truncated fields report their full size. --no-tools reads only prose from the
+conversation index, which is faster for very long conversations.
+--after SEQ continues after a sequence; --tail N keeps the last N items;
+--max N stops after N items; --kind filters item kinds. --json emits the same
+data. Authenticates with this Node's credential.`,
 		"site": `Usage:
   mira site list [--limit 50] [--after <name>]
   mira site get <name|UUID>
@@ -998,7 +1014,7 @@ continues an accepted update if this CLI, SSH session, Node, or Server exits.`,
 
 Lists the Codex and Claude accounts configured on this Node from local files,
 without contacting Mira Server. The selector column is accepted by --account.`,
-		"codex": `Usage: mira codex [--account SELECTOR] [--offline|--online] [--] [Codex arguments...]
+		"codex": `Usage: mira codex [--account SELECTOR] [--offline|--online] [--no-mira-instructions] [--] [Codex arguments...]
 
 Runs Codex CLI with one of this Node's Codex accounts: its Codex home, managed
 API profile, environment and account proxy. Without --account an interactive
@@ -1009,15 +1025,27 @@ When Mira Server is reachable the session uses Mira's PostgreSQL ThreadStore.
 Otherwise (or with --offline) Codex keeps its rollouts in the account's local
 Codex home. --online fails instead of falling back. Launcher defaults
 (approval_policy="never", sandbox_mode="danger-full-access") precede your
-arguments, so explicit -c options still win.`,
-		"claude": `Usage: mira claude [--account SELECTOR] [--] [Claude Code arguments...]
+arguments, so explicit -c options still win.
+
+Online sessions also receive the Developer instructions that Mira-managed
+conversations on this Node get (Mira CLI usage, including conversation read,
+and the Node's Developer instructions file), merged after the account's own
+developer_instructions. An explicit -c developer_instructions=... replaces
+them; --no-mira-instructions skips them. Offline sessions receive none.`,
+		"claude": `Usage: mira claude [--account SELECTOR] [--no-mira-instructions] [--] [Claude Code arguments...]
 
 Runs Claude Code with one of this Node's Claude accounts: its private config
 directory (subscription login or API key), model, effort and account proxy.
-It never contacts Mira Server. Sessions stay in that account's local Claude
-transcripts and are not mirrored to Mira. A selector is a Node account UUID,
-unique prefix or the subscription's login email. Without --account an
-interactive menu opens; Enter repeats the last choice.`,
+Sessions stay in that account's local Claude transcripts and are not mirrored
+to Mira. A selector is a Node account UUID, unique prefix or the subscription's
+login email. Without --account an interactive menu opens; Enter repeats the
+last choice.
+
+When Mira Server answers within 3 seconds, the session's system prompt is
+appended (--append-system-prompt, merged with yours) with the instructions
+Mira-managed conversations on this Node get: Mira CLI usage, including
+conversation read, and the Node's Developer instructions file. Otherwise, or
+with --no-mira-instructions, Claude Code starts without them.`,
 		"codex-runtime": `Usage: mira codex-runtime <status|prepare> [--json]`,
 		"ssh": `Usage: mira ssh [OpenSSH options] <node-id|nodeKey|alias> [-- command...]
 
@@ -1109,7 +1137,7 @@ func printNodesHuman(writer io.Writer, value any, get bool) error {
 }
 
 func cliUsage() string {
-	return "usage: mira [--json] [--timeout 30s] <install|doctor|repair|uninstall|setup|start|stop|restart|status|version|update|identity|nodes|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
+	return "usage: mira [--json] [--timeout 30s] <install|doctor|repair|uninstall|setup|start|stop|restart|status|version|update|identity|nodes|conversation|file|process|pty|screen|app-server|codex|codex-runtime|ssh|scp|sftp> ..."
 }
 
 func cliExitCode(err error) int {
@@ -1335,6 +1363,8 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		result, err = client.runSite(commandCtx, remaining[1:])
 	case "notify":
 		result, err = client.runNotify(commandCtx, remaining[1:])
+	case "conversation", "conversations":
+		result, err = client.runConversation(commandCtx, remaining[1:], options.JSON)
 	case "nodes":
 		result, err = client.runNodes(commandCtx, remaining[1:])
 	case "file":
@@ -1357,6 +1387,13 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return cliExitCode(err)
 	}
 	if result != nil {
+		if text, ok := result.(conversationText); ok {
+			if err := printConversation(stdout, text.conversationRead); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		if remaining[0] == "nodes" && !options.JSON {
 			if err := printNodesHuman(stdout, result, len(remaining) > 1 && remaining[1] == "get"); err != nil {
 				fmt.Fprintln(stderr, err)

@@ -367,6 +367,8 @@ type launcherOptions struct {
 	account string
 	mode    string // auto, online or offline (Codex only)
 	args    []string
+	// noInstructions skips the Mira CLI and Node Developer instructions.
+	noInstructions bool
 }
 
 // parseLauncherArgs consumes Mira options before the first engine argument.
@@ -389,6 +391,8 @@ func parseLauncherArgs(args []string, allowMode bool) (launcherOptions, error) {
 			options.account = strings.TrimPrefix(arg, "--account=")
 		case allowMode && (arg == "--offline" || arg == "--online"):
 			options.mode = strings.TrimPrefix(arg, "--")
+		case arg == "--no-mira-instructions":
+			options.noInstructions = true
 		default:
 			options.args = args[i:]
 			return options, nil
@@ -493,7 +497,15 @@ func runClaudeLauncher(ctx context.Context, options cliOptions, args []string, s
 	defer session.Release()
 	rememberRecentAccount(options.Identity, "Claude", choice.Selector)
 	fmt.Fprintf(stderr, "mira: Claude account %s (%s); local transcripts only\n", choice.label(), choice.Detail)
-	command := exec.Command(binary, append(session.Arguments, launch.args...)...)
+	arguments, userArgs := append([]string(nil), session.Arguments...), launch.args
+	if !launch.noInstructions {
+		if client, clientErr := newCLIClient(options); clientErr == nil {
+			var prompt []string
+			prompt, userArgs = claudeSystemPromptArguments(fetchLauncherInstructions(ctx, client, stderr), userArgs, stderr)
+			arguments = append(arguments, prompt...)
+		}
+	}
+	command := exec.Command(binary, append(arguments, userArgs...)...)
 	command.Env = session.Environment
 	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
 	return runChild(command)
@@ -523,6 +535,8 @@ type codexLaunch struct {
 	identityFile string
 	binary       string
 	egress       *accountegress.Manager
+	// instructions are Mira's Developer instructions; empty when offline.
+	instructions string
 }
 
 func runCodexLauncher(ctx context.Context, options cliOptions, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -567,7 +581,11 @@ func runCodexLauncher(ctx context.Context, options cliOptions, args []string, st
 		mode = "offline"
 	}
 	fmt.Fprintf(stderr, "mira: Codex account %s (%s); %s\n", choice.label(), choice.Detail, mode)
-	return runCodexAccount(ctx, codexLaunch{account: *choice.codex, client: client, identityFile: options.Identity, binary: choice.codex.CodexPath, egress: egress}, launch.args, stdin, stdout, stderr)
+	instructions := ""
+	if client != nil && !launch.noInstructions {
+		instructions = fetchLauncherInstructions(ctx, client, stderr)
+	}
+	return runCodexAccount(ctx, codexLaunch{account: *choice.codex, client: client, identityFile: options.Identity, binary: choice.codex.CodexPath, egress: egress, instructions: instructions}, launch.args, stdin, stdout, stderr)
 }
 
 func runCodexAccount(ctx context.Context, launch codexLaunch, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -652,6 +670,12 @@ func runCodexAccount(ctx context.Context, launch codexLaunch, args []string, std
 		}
 	}
 	arguments = append(arguments, "-c", `approval_policy="never"`, "-c", `sandbox_mode="danger-full-access"`)
+	finalOverrides := overrides
+	if launch.instructions != "" {
+		var developer string
+		developer, finalOverrides = codexDeveloperInstructions(launch.instructions, account.CodexHome, overrides)
+		arguments = append(arguments, "-c", developer)
+	}
 	if compatible {
 		override, err := codexAccountSQLiteOverride(launch.identityFile, codexPath, configuration.CodexAccountID, overrides)
 		if err != nil {
@@ -661,7 +685,7 @@ func runCodexAccount(ctx context.Context, launch codexLaunch, args []string, std
 			arguments = append(arguments, "-c", override)
 		}
 	}
-	for _, override := range overrides {
+	for _, override := range finalOverrides {
 		if override != codexDefaultSubagentOverride {
 			arguments = append(arguments, "-c", override)
 		}

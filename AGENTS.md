@@ -330,9 +330,11 @@ tokens stay local and must not be included in desired state. A Node may also kee
 `desiredAppServer.developerInstructionsFile`. For managed App Server traffic only, the broker reads
 that UTF-8 file through the Node's bounded file capability and injects its content as Developer
 instructions on `thread/start`, `thread/resume` and `thread/fork`; read or validation failures stop the
-request instead of silently dropping policy. Tool-free ephemeral title threads skip the file. The
-setting does not apply to `mira codex` CLI sessions. Managed Claude turns share the same file and
-append it to their system prompt on every turn.
+request instead of silently dropping policy. Tool-free ephemeral title threads skip the file. Managed
+Claude turns share the same file and append it to their system prompt on every turn. Online `mira codex`
+and `mira claude` launches fetch the same Server-rendered CLI block and file for their own Node (bounded,
+skipped offline or with `--no-mira-instructions`; a file error only warns) and merge them with the
+user's own instructions; explicit user arguments still win. See `docs/local-account-launchers.md`.
 Nodes also discover rollout JSONL files under their configured, environment and default Codex homes.
 Discovery is read-only. Import is an explicit administrator action: preserve every original record in
 append-only provenance storage, then adapt it into the versioned ThreadStore without silently replacing

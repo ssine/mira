@@ -93,6 +93,15 @@ fall back to paged history while a very large conversation is still indexing.
   subagents included. Each result names its root conversation and at most three
   hits with snippets. Statements are bounded to 15 seconds; one- and
   two-character terms cannot use trigrams.
+- `GET /v1/conversations/{id}/messages?after=SEQ&limit=N` (administrator or any
+  approved Node credential) returns one Codex thread, Claude session or native
+  Claude subagent transcript as ordered user/assistant prose from
+  `mira_conversation_messages`, with title, cwd, parent, direct subagent IDs and
+  `complete` (false while the index is still catching up after an on-demand
+  pass). Pages hold at most 1,000 messages; `nextCursor` is the last sequence.
+  Tool calls, tool output and reasoning are not included. `mira conversation
+  read <id>` reads every page, and the managed CLI instructions injected into
+  Codex and Claude conversations describe it.
 - `GET /v1/codex/threads/{id}/timeline` and `GET /v1/claude/sessions/{id}/timeline`
   return one lane per agent (root and subagents) with turns, tool calls (kind
   `tool`, `wait` or `agent`) and message instants, in epoch milliseconds.

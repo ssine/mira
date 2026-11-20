@@ -1,7 +1,8 @@
 # 本机账号启动器：`mira codex` 与 `mira claude`
 
 Node 上配置好的 Codex 和 Claude 账号可以直接从终端启动，并在 Mira Server 不可用时继续工作。
-启动器只读取 Node 身份目录中的本地文件，不需要 Server、Web 登录或额外 CLI 凭据。
+启动器只依赖 Node 身份目录中的本地文件，不需要 Server、Web 登录或额外 CLI 凭据；
+Server 可达时额外注入 Mira 指令（见下文）。
 
 ```bash
 mira accounts                      # 列出本机 Codex / Claude 账号（离线可用）
@@ -53,6 +54,21 @@ SDK（最新优先），最后是 `PATH` 中的 `claude`。启动器不会下载
 - **Claude**：始终只写该账号目录下的原生 transcript，不镜像到 PostgreSQL，Web 中看不到。
 
 离线会话是 Server 故障时的应急路径，不是第二个权威存储。它们不会自动合并回 PostgreSQL。
+
+## Mira 指令注入
+
+Server 可达时，启动器向 `GET /v1/nodes/{本机 Node ID}/launcher-instructions`（只接受本 Node 凭据，
+3 秒超时）取回与托管会话完全相同的两段 Developer 指令：Mira CLI 用法（含 `conversation read`）
+和该 Node 配置的 Developer instructions 文件。文本由 Server 渲染，两种入口不会分叉。
+
+- **Codex**：作为 `-c developer_instructions=...` 放在启动器默认参数里，位于用户参数之前；内容是
+  账号 config override（若有）或 `CODEX_HOME/config.toml` 中原有的 `developer_instructions`
+  加上 Mira 两段（旧的 Mira 段先去掉）。显式 `-c developer_instructions=...` 仍然整体覆盖它。
+- **Claude**：用 `--append-system-prompt` 追加；用户自己的 `--append-system-prompt` 会合并到同一个
+  参数里。用户给了 `--append-system-prompt-file` 时不注入并提示。
+- 指令文件读取失败只提示并跳过该段（托管会话则会拒绝请求），CLI 段照常注入。
+- Server 不可达、Codex `--offline`，或传入 `--no-mira-instructions` 时不注入：这些指令里的能力
+  （跨 Node SSH、文件、读对话）都需要 Server。Claude 启动器因此多一次最长 3 秒的探测。
 
 ## 本地账号索引
 

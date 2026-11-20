@@ -16,6 +16,7 @@ var (
 	adminEnrollmentPattern = regexp.MustCompile(`(?i)^/v1/admin/enrollments/([0-9a-f-]{36})/(approve|reject)$`)
 	nodePattern            = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})$`)
 	heartbeatPattern       = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/heartbeat$`)
+	instructionsPattern    = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/launcher-instructions$`)
 	desiredPattern         = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/desired-app-server$`)
 	revokePattern          = regexp.MustCompile(`(?i)^/v1/admin/nodes/([0-9a-f-]{36})/revoke$`)
 	metadataPattern        = regexp.MustCompile(`(?i)^/v1/admin/nodes/([0-9a-f-]{36})/metadata$`)
@@ -158,6 +159,23 @@ func (server *Server) routeNodes(ctx context.Context, response http.ResponseWrit
 			return true, foundation.WriteErrorJSON(response, 404, "Node not found", "not_found")
 		}
 		return true, writeJSON(response, 200, server.nodeView(*node))
+	}
+	if match := instructionsPattern.FindStringSubmatch(path); request.Method == http.MethodGet && match != nil {
+		// Local `mira codex`/`mira claude` launches receive the instructions that
+		// managed runtimes on the same Node get; only that Node may ask.
+		principal, err := server.authorize(ctx, response, request, "node", authOptions{ClientType: "cli", NodeID: strings.ToLower(match[1])})
+		if err != nil || principal == nil {
+			return true, err
+		}
+		cli, file, fileErr, err := server.channel.LauncherInstructions(ctx, principal.NodeID)
+		if err != nil {
+			return true, err
+		}
+		result := map[string]any{"cliInstructions": cli, "developerInstructions": file, "developerInstructionsError": nil}
+		if fileErr != nil {
+			result["developerInstructionsError"] = fileErr.Error()
+		}
+		return true, writeJSON(response, 200, result)
 	}
 	if match := heartbeatPattern.FindStringSubmatch(path); request.Method == http.MethodPost && match != nil {
 		principal, err := server.authorize(ctx, response, request, "node", authOptions{ClientType: "node", NodeID: match[1]})
