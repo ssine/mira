@@ -16,15 +16,16 @@ import (
 )
 
 var (
-	threadViewPattern       = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})$`)
-	threadManagePattern     = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/(archive|restore)$`)
-	threadReadPattern       = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/read$`)
-	threadForkTitlePattern  = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/fork-title$`)
-	threadCostsPattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/costs$`)
-	threadImagePattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript/image$`)
-	threadTranscriptPattern = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript$`)
-	threadTimelinePattern   = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/timeline$`)
-	accountHistoryPattern   = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/account-history$`)
+	threadViewPattern           = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})$`)
+	threadManagePattern         = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/(archive|restore)$`)
+	threadReadPattern           = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/read$`)
+	threadForkTitlePattern      = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/fork-title$`)
+	threadCostsPattern          = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/costs$`)
+	threadImagePattern          = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript/image$`)
+	threadTranscriptPattern     = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/transcript$`)
+	threadTimelinePattern       = regexp.MustCompile(`(?i)^/v1/codex/threads/([0-9a-f-]{36})/timeline$`)
+	conversationMessagesPattern = regexp.MustCompile(`(?i)^/v1/conversations/([0-9a-f-]{36})/messages$`)
+	accountHistoryPattern       = regexp.MustCompile(`(?i)^/v1/nodes/([0-9a-f-]{36})/account-history$`)
 )
 
 func (server *Server) routeViews(ctx context.Context, response http.ResponseWriter, request *http.Request) (bool, error) {
@@ -75,6 +76,35 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 		}
 		result, err := server.views.SearchConversations(ctx, storeID, serverviews.SearchOptions{Query: query.Get("q"),
 			Archived: query.Get("archived"), Limit: int(boundedQueryInteger(query.Get("limit"), 50, 1, 100))})
+		if err != nil {
+			return true, err
+		}
+		return true, writeJSON(response, result.Status, result.Body)
+	}
+	if match := pathMatch(conversationMessagesPattern, path); request.Method == http.MethodGet && match != nil {
+		// Approved Nodes are mutually trusted and may already read raw history;
+		// this exposes the derived prose to the Node CLI as well.
+		if principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: "cli"}); err != nil || principal == nil {
+			return true, err
+		}
+		storeID, err := viewStoreID(request)
+		if err != nil {
+			return true, err
+		}
+		query := request.URL.Query()
+		after, err := strconv.ParseInt(query.Get("after"), 10, 64)
+		if query.Get("after") == "" {
+			after, err = 0, nil
+		}
+		if err != nil || after < 0 {
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "invalid conversation cursor"}
+		}
+		if tools := query.Get("tools"); tools != "" && tools != "0" && tools != "1" {
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "tools must be 0 or 1"}
+		}
+		result, err := server.views.ReadConversationMessages(ctx, storeID, strings.ToLower(match[1]), serverviews.MessagesOptions{
+			After: after, Limit: int(boundedQueryInteger(query.Get("limit"), 0, 1, 1000)), Tools: query.Get("tools") == "1",
+			ToolLimit: int(boundedQueryInteger(query.Get("toolOutputLimit"), serverviews.ToolFieldLimitDefault, 0, serverviews.ToolFieldLimitMax))})
 		if err != nil {
 			return true, err
 		}

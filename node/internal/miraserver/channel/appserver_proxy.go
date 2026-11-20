@@ -942,6 +942,19 @@ func isTurnStartMethod(method string) bool {
 	return method == "turn/start" || method == "mira/thread/recover"
 }
 
+// LauncherInstructions returns the same Mira CLI block and Node Developer
+// instructions file that managed runtimes receive, for a local `mira codex` or
+// `mira claude` launch on that Node. A file problem is reported separately so
+// an interactive launch can warn and continue with the CLI block.
+func (channel *Channel) LauncherInstructions(ctx context.Context, nodeID string) (cli, file string, fileErr error, err error) {
+	target, err := channel.nodes.Get(ctx, nodeID, false)
+	if err != nil {
+		return "", "", nil, err
+	}
+	file, fileErr = channel.readRuntimeInstructionsFile(ctx, target, nodeID, nil)
+	return miraCLIInstructions(target), file, fileErr, nil
+}
+
 // RuntimeInstructions shares the existing bounded policy and CLI injection with
 // other managed runtimes without changing their native conversation protocols.
 func (channel *Channel) RuntimeInstructions(ctx context.Context, nodeID string) (string, error) {
