@@ -52,7 +52,7 @@ func (values *stringList) String() string         { return strings.Join(*values,
 func (values *stringList) Set(value string) error { *values = append(*values, value); return nil }
 
 func parseGlobalCLI(args []string) (cliOptions, []string, error) {
-	identityFile, err := DefaultIdentityFile()
+	identityFile, err := cliDefaultIdentityFile()
 	if err != nil {
 		return cliOptions{}, nil, err
 	}

@@ -429,7 +429,10 @@ Mira v1 has exactly two security identities: one administrator and one credentia
 - A new Node generates a credential UUID and 256-bit secret before requesting enrollment. The
   Server stores only the secret hash; there is no activation secret or replacement token.
 - `mira`, local Codex and local App Server share one protected identity file and Node
-  credential. Do not introduce CLI login or a global ThreadStore token.
+  credential. Do not introduce CLI login or a global ThreadStore token. Without
+  `MIRA_IDENTITY_FILE`, an installed image (`<state>/versions/<v>/mira` or `current/mira`) uses the
+  identity recorded in its own `<state>/node.json`, so the absolute CLI path given to Agents works
+  on Nodes with a non-default identity location without a wrapper.
 - All approved Nodes are mutually trusted in v1. The Mira Node process' OS identity and resource
   limits remain the effective boundary. File roots cover the filesystems visible to that identity by
   default and may be explicitly narrowed per Node.
