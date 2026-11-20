@@ -11,7 +11,12 @@ const base=(process.env.MIRA_SERVER_URL||'http://127.0.0.1:8787').replace(/\/$/,
 const root=await fs.mkdtemp(path.join(os.tmpdir(),'mira-file-preview-'));
 const binary=process.env.MIRA_TEST_BINARY||path.join(root,'mira');if(!process.env.MIRA_TEST_BINARY)execFileSync('go',['build','-o',binary,'./cmd/mira'],{cwd:'node'});
 await fs.mkdir(path.join(root,'site/pages'),{recursive:true});await fs.mkdir(path.join(root,'site/assets'));
-await fs.writeFile(path.join(root,'site/pages/index.html'),'<!doctype html><link rel="stylesheet" href="/assets/style.css"><h1>Preview website</h1><script type="module" src="/assets/main.js"></script>');
+await fs.writeFile(path.join(root,'site/pages/index.html'),`<!doctype html>
+<link rel="stylesheet" href="/assets/style.css">
+<h1>Preview website</h1>
+<a id="local-link" href="?opened=1" target="_blank">Open preview page</a>
+<a id="external-link" href="${new URL('/healthz',base)}" target="_blank">Open another origin</a>
+<script type="module" src="/assets/main.js"></script>`);
 await fs.copyFile(path.join(root,'site/pages/index.html'),path.join(root,'site/index.html'));
 await fs.writeFile(path.join(root,'site/assets/style.css'),'h1 { color: rgb(0, 120, 212) }');
 await fs.writeFile(path.join(root,'site/assets/main.js'),"const data=await fetch('/assets/data.json').then(r=>r.json());document.body.dataset.result=data.value;try{await navigator.serviceWorker.register('/sw.js')}catch(e){document.body.dataset.worker='blocked'}");
@@ -83,6 +88,10 @@ try{
  r=await preview('/__mira_preview/claim',{'Content-Type':'application/json',Origin:origin},'POST',JSON.stringify({grant:u.hash.slice(1)}));assert.equal(r.status,200,await r.clone().text());const siteCookie=r.headers.get('set-cookie').split(';')[0];assert.equal((await r.json()).entry,'/pages/index.html');
  r=await preview('/__mira_preview/claim',{'Content-Type':'application/json',Origin:origin},'POST',JSON.stringify({grant:u.hash.slice(1)}));assert.equal(r.status,403);
  for(const [route,text]of [['/pages/index.html','Preview website'],['/assets/main.js','fetch'],['/assets/data.json','relative fetch works']]){r=await preview(route,{cookie:siteCookie});assert.equal(r.status,200);assert.equal(r.headers.get('cross-origin-opener-policy'),'same-origin');assert.ok((await r.text()).includes(text));}
+ r=await preview('/pages/index.html',{cookie:siteCookie});
+ const sandbox=r.headers.get('content-security-policy')?.split(';').find(directive=>directive.startsWith('sandbox '))?.split(/\s+/);
+ assert.ok(sandbox?.includes('allow-popups'),'preview links must be able to open a new tab');
+ assert.ok(sandbox?.includes('allow-popups-to-escape-sandbox'),'destination pages must use their own sandbox policy');
  r=await preview('/v1/admin/session',{cookie:siteCookie+'; '+cookie});assert.notEqual(r.status,200);assert.ok(!(await r.text()).includes('csrfToken'));
  r=await preview('/leak.txt',{cookie:siteCookie});assert.equal(r.status,400);assert.ok(!(await r.text()).includes('secret outside site'));
  r=await hostFetch(base+'/assets/data.json',{headers:{Host:'another.'+host.split('.').slice(1).join('.'),cookie:siteCookie}});assert.equal(r.status,410);

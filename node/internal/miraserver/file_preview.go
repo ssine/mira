@@ -488,7 +488,7 @@ func (server *Server) servePreviewHost(w http.ResponseWriter, r *http.Request, i
 	} else {
 		p.Path = joinNative(p.Root, relative)
 	}
-	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-same-origin allow-forms allow-downloads; default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; connect-src 'self'; worker-src 'none'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'")
+	w.Header().Set("Content-Security-Policy", "sandbox allow-scripts allow-same-origin allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox; default-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; connect-src 'self'; worker-src 'none'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'")
 	tracked := &trackingResponseWriter{ResponseWriter: w}
 	if e = server.streamResource(tracked, r, s.NodeID, p, s.Owner, s.ID); e != nil {
 		if tracked.written {
