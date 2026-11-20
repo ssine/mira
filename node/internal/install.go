@@ -142,6 +142,7 @@ func localStatus(ctx context.Context, options cliOptions) (any, error) {
 		return nil, err
 	}
 	view := identityView(identity, options.Identity)
+	view["stateDir"], view["identitySource"] = options.Installation.StateDir, options.Installation.IdentitySource
 	view["build"] = CurrentBuild()
 	if identity.Enrollment.Status != "approved" {
 		view["verificationCode"] = identity.Enrollment.VerificationCode

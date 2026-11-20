@@ -38,7 +38,7 @@ func fetchLauncherInstructions(ctx context.Context, client *cliClient, stderr io
 		DeveloperInstructionsError *string `json:"developerInstructionsError"`
 	}
 	if err := client.request(requestCtx, http.MethodGet, "/v1/nodes/"+url.PathEscape(client.identity.NodeID)+"/launcher-instructions", nil, &result); err != nil {
-		fmt.Fprintf(stderr, "mira: Mira instructions unavailable (%v); launching without them\n", err)
+		fmt.Fprintf(stderr, "mira: Mira instructions unavailable (%v); launching without them\n", client.explainMissingRoute(ctx, err, "launcher instructions", "1.0.131"))
 		return ""
 	}
 	if result.DeveloperInstructionsError != nil {

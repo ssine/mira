@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -133,7 +134,7 @@ func (client *cliClient) runConversation(ctx context.Context, args []string, jso
 		query.Set("after", strconv.FormatInt(cursor, 10))
 		var result conversationRead
 		if err := client.request(ctx, http.MethodGet, "/v1/conversations/"+id+"/messages?"+query.Encode(), nil, &result); err != nil {
-			return nil, err
+			return nil, client.explainMissingRoute(ctx, err, "conversation read", "1.0.131")
 		}
 		if page == 0 {
 			combined = result
@@ -301,4 +302,21 @@ func truncationNote(total, kept int, truncated bool) string {
 		return ""
 	}
 	return fmt.Sprintf(" (first %d of %d bytes; raise --tool-output-limit for more)", kept, total)
+}
+
+// explainMissingRoute turns the Server's generic 404 for an unknown route into
+// a version message. A missing resource keeps its own, more specific error.
+func (client *cliClient) explainMissingRoute(ctx context.Context, err error, feature, since string) error {
+	var httpError *cliHTTPError
+	if !errors.As(err, &httpError) || httpError.Status != http.StatusNotFound || httpError.Message != "not found" {
+		return err
+	}
+	var health struct {
+		Version string `json:"version"`
+	}
+	if client.request(ctx, http.MethodGet, "/healthz", nil, &health) != nil || health.Version == "" {
+		health.Version = "(unknown version)"
+	}
+	return &cliHTTPError{Status: http.StatusNotFound, Code: "unsupported_by_server",
+		Message: fmt.Sprintf("Mira Server %s at %s does not support `mira %s`; it needs %s or newer", health.Version, client.identity.ServerURL, feature, since)}
 }
