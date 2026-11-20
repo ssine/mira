@@ -30,6 +30,8 @@ type cliOptions struct {
 	JSON     bool
 	Timeout  time.Duration
 	Identity string
+	// Installation records how Identity was chosen, for status and errors.
+	Installation cliInstallation
 }
 
 type cliHTTPError struct {
@@ -52,11 +54,12 @@ func (values *stringList) String() string         { return strings.Join(*values,
 func (values *stringList) Set(value string) error { *values = append(*values, value); return nil }
 
 func parseGlobalCLI(args []string) (cliOptions, []string, error) {
-	identityFile, err := DefaultIdentityFile()
+	resolved, err := resolveCLIInstallation()
 	if err != nil {
 		return cliOptions{}, nil, err
 	}
-	options := cliOptions{Timeout: 30 * time.Second, Identity: identityFile}
+	applyInstallationSettings(resolved.StateDir)
+	options := cliOptions{Timeout: 30 * time.Second, Identity: resolved.IdentityFile, Installation: resolved}
 	remaining := make([]string, 0, len(args))
 	parsing := true
 	for index := 0; index < len(args); index++ {
@@ -108,12 +111,12 @@ func newCLIClient(options cliOptions) (*cliClient, error) {
 	identity, err := loadIdentity(options.Identity)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira node-worker to submit an enrollment request"}
+			return nil, notEnrolledError(options, false)
 		}
 		return nil, err
 	}
 	if identity.NodeID == "" || identity.Enrollment.Status != "approved" {
-		return nil, &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira node-worker and wait for administrator approval"}
+		return nil, notEnrolledError(options, true)
 	}
 	server := strings.TrimRight(identity.ServerURL, "/")
 	parsed, err := url.Parse(server)
@@ -369,6 +372,22 @@ func printResult(writer io.Writer, options cliOptions, value any) error {
 	}
 	_, err = fmt.Fprintln(writer, string(encoded))
 	return err
+}
+
+// notEnrolledError names the installation and identity file that were used.
+// The installation's own Node worker enrolls it, so the message never tells a
+// caller (often an Agent) to start another worker, which would request a
+// second, unrelated Node.
+func notEnrolledError(options cliOptions, pending bool) error {
+	where := fmt.Sprintf("identity file %s, chosen by %s", options.Identity, options.Installation.IdentitySource)
+	if options.Installation.StateDir != "" {
+		where = "state directory " + options.Installation.StateDir + ", " + where
+	}
+	message := "This Mira installation has no Node identity yet (" + where + "). Its own Node worker enrolls it once the Mira service runs; check `mira status`. Do not start another node-worker or request a new enrollment."
+	if pending {
+		message = "This Mira installation's Node is waiting for administrator approval (" + where + "). Approve it in the Mira console; check `mira status`. Do not request a new enrollment."
+	}
+	return &cliHTTPError{Status: 428, Code: "not_enrolled", Message: message}
 }
 
 func identityView(state *persistedNodeState, identityFile string) map[string]any {
@@ -1315,12 +1334,14 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		state, err := loadIdentity(options.Identity)
 		if err != nil {
 			if os.IsNotExist(err) {
-				err = &cliHTTPError{Status: 428, Code: "not_enrolled", Message: "This machine is not enrolled in Mira. Start mira node-worker to submit an enrollment request"}
+				err = notEnrolledError(options, false)
 			}
 			printCLIError(stderr, options, err)
 			return cliExitCode(err)
 		}
-		if err := printResult(stdout, options, identityView(state, options.Identity)); err != nil {
+		view := identityView(state, options.Identity)
+		view["stateDir"], view["identitySource"] = options.Installation.StateDir, options.Installation.IdentitySource
+		if err := printResult(stdout, options, view); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}

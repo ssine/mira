@@ -430,6 +430,15 @@ Mira v1 has exactly two security identities: one administrator and one credentia
   Server stores only the secret hash; there is no activation secret or replacement token.
 - `mira`, local Codex and local App Server share one protected identity file and Node
   credential. Do not introduce CLI login or a global ThreadStore token.
+- One installation is one state directory, and `mira` always acts for the installation it runs
+  from. Supervisor, Node worker and CLI locate it by one rule: `MIRA_STATE_DIR`, the installation
+  containing the executable, then the default state directory. The CLI takes its identity from
+  that directory's `node.json` (`MIRA_IDENTITY_FILE` remains an explicit override) and shares an
+  allowlist of Node settings from its `mira.env`; other entries there, such as Server database
+  credentials, never reach CLI children. Command entries are plain links to `current/mira`
+  (`mira-<name>` for a further installation); do not add wrapper scripts or make a command depend
+  on the caller's environment. Agents receive `<state>/current/mira` on Unix so the path follows
+  updates. Enrollment errors name the installation and never tell the caller to start a worker.
 - All approved Nodes are mutually trusted in v1. The Mira Node process' OS identity and resource
   limits remain the effective boundary. File roots cover the filesystems visible to that identity by
   default and may be explicitly narrowed per Node.

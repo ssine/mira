@@ -12,6 +12,9 @@ func TestCacheSettingsSurviveManagerRestart(t *testing.T) {
 	if _, err := exec.LookPath(nodeBinary()); err != nil {
 		t.Skip("Node.js unavailable")
 	}
+	// A hosted Windows runner's first Node.js start can exceed the 15 second
+	// call bound (seen 2026-11-20); the bound itself is not under test here.
+	_ = exec.Command(nodeBinary(), "--input-type=module", "-e", "await import('node:sqlite')").Run()
 	root := t.TempDir()
 	m := New(root)
 	value, err := m.Call(map[string]any{"action": "cache-status"})

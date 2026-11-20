@@ -8,7 +8,7 @@ import (
 )
 
 // localMiraCLIPath returns the absolute control-CLI path that belongs to this
-// installed Mira release. App Server clients use it to tell Codex how to open
+// Mira installation. App Server clients use it to tell Codex how to open
 // the end-to-end SSH transport without assuming that mira is on PATH.
 func localMiraCLIPath() string {
 	if runtime.GOOS == "android" {
@@ -19,6 +19,14 @@ func localMiraCLIPath() string {
 		name = "mira.exe"
 	}
 	if executable, err := os.Executable(); err == nil {
+		// Unix installations expose <state>/current/mira, which follows updates.
+		// A versioned path would keep long-lived conversations on the old CLI.
+		// Windows keeps the versioned image: its current pointer is a file.
+		if stateDir, installed := installedStateDir(executable); installed && runtime.GOOS != "windows" {
+			if candidate := existingAbsoluteFile(filepath.Join(stateDir, "current", name)); candidate != "" {
+				return candidate
+			}
+		}
 		if resolved, resolveErr := filepath.EvalSymlinks(executable); resolveErr == nil {
 			executable = resolved
 		}

@@ -11,6 +11,7 @@ service_owner=""
 service_manager=""
 service_scope=""
 release_directory=""
+name=""
 state_dir="${MIRA_STATE_DIR:-$HOME/.local/share/mira}"
 
 while [ "$#" -gt 0 ]; do
@@ -22,16 +23,38 @@ while [ "$#" -gt 0 ]; do
     --service-manager) service_manager=$2; shift 2 ;;
     --service-scope) service_scope=$2; shift 2 ;;
     --state-dir|--prefix) state_dir=$2; shift 2 ;;
+    --name) name=$2; shift 2 ;;
     --release-directory) release_directory=$2; shift 2 ;;
     --update)
       printf '%s\n' 'Installer-driven updates were removed. Run: mira update' >&2
       exit 2 ;;
     --help)
-      printf '%s\n' 'Usage: install.sh [--server URL] [--version VERSION] [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd|builtin] [--service-scope user|system] [--state-dir DIR] [--release-directory DIR]'
+      printf '%s\n' 'Usage: install.sh [--server URL] [--version VERSION] [--role node|server] [--service-owner nix|mira] [--service-manager auto|systemd|procd|builtin] [--service-scope user|system] [--state-dir DIR] [--name NAME] [--release-directory DIR]'
       exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+
+# The command entry is a plain link to this installation's current image; the
+# CLI finds its own installation, so no wrapper or environment is needed. A
+# second installation of the same user is named: --name beta, or a state
+# directory called mira-beta, gives ~/.local/bin/mira-beta.
+if [ -z "$name" ]; then
+  case "$(basename "$state_dir")" in mira-?*) name=$(basename "$state_dir"); name=${name#mira-} ;; esac
+fi
+case "$name" in
+  "") entry=mira ;;
+  *[!a-z0-9-]*|-*) printf '%s\n' '--name accepts lowercase letters, digits and hyphens' >&2; exit 2 ;;
+  *) entry="mira-$name" ;;
+esac
+bin_dir="$HOME/.local/bin"
+if [ -e "$bin_dir/$entry" ] || [ -L "$bin_dir/$entry" ]; then
+  current=$(readlink "$bin_dir/$entry" 2>/dev/null || true)
+  [ "$current" = "$state_dir/current/mira" ] || {
+    printf 'Refusing to replace unrelated path: %s\nFor a second installation choose a name: --name NAME creates %s/mira-NAME.\n' "$bin_dir/$entry" "$bin_dir" >&2
+    exit 1
+  }
+fi
 
 [ "$(uname -s)" = Linux ] || { printf '%s\n' 'Use install.ps1 on Windows.' >&2; exit 1; }
 case "$(uname -m)" in
@@ -89,13 +112,8 @@ else
   "$package_dir/mira" "$@"
 fi
 
-bin_dir="$HOME/.local/bin"
 mkdir -p "$bin_dir"
-if [ -e "$bin_dir/mira" ] || [ -L "$bin_dir/mira" ]; then
-  current=$(readlink "$bin_dir/mira" 2>/dev/null || true)
-  [ "$current" = "$state_dir/current/mira" ] || { printf 'Refusing to replace unrelated path: %s\n' "$bin_dir/mira" >&2; exit 1; }
-fi
-ln -sfn "$state_dir/current/mira" "$bin_dir/mira"
+ln -sfn "$state_dir/current/mira" "$bin_dir/$entry"
 
-printf '\nMira %s installed as %s. Later updates: %s/mira update --state-dir %s\n' "$version" "$role" "$bin_dir" "$state_dir"
+printf '\nMira %s installed as %s. Command: %s/%s. Later updates: %s update\n' "$version" "$role" "$bin_dir" "$entry" "$entry"
 case ":$PATH:" in *":$bin_dir:"*) ;; *) printf 'Add %s to PATH.\n' "$bin_dir" ;; esac

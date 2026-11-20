@@ -25,7 +25,7 @@ Mira 1.0 支持单机 Supervisor 管理 Node，以及 Server 主机上的 Node +
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | \
-  sh -s -- --role node --server https://mira.example.com --version 1.0.131
+  sh -s -- --role node --server https://mira.example.com --version 1.0.132
 ```
 
 支持 Linux amd64/arm64。`--service-manager auto|systemd|procd|builtin` 默认为 auto：
@@ -42,9 +42,19 @@ Supervisor 管理 worker 重启及更新，通过 exec 交接自身，没有额�
 
 
 脚本只完成首次引导：下载 GitHub Release、校验 SHA-256，再调用 `mira install` 安装 Supervisor。
-默认状态目录是 `~/.local/share/mira`，命令入口位于 `~/.local/bin`，身份配置位于
-`~/.config/mira`。可用 `--version 1.0.131` 固定首次安装版本，或用
+默认状态目录是 `~/.local/share/mira`。可用 `--version 1.0.132` 固定首次安装版本，或用
 `--state-dir /absolute/path` 选择状态目录。
+
+一套安装就是一个状态目录：镜像（`versions/`、`current`）、Node 配置（`node.json`）、Node 身份
+（`node-identity.json`）和服务环境（`mira.env`）都在里面。`mira` 命令总是使用它自己所在的那套安装：
+Supervisor、Node worker 和 CLI 按同一顺序定位——`MIRA_STATE_DIR`、可执行文件所在的安装、默认状态目录——
+再从该目录的 `node.json` 读取身份，并共用 `mira.env` 中的 Node 设置（`CODEX_BINARY`、
+`MIRA_NODE_CODEX_CACHE`、`MIRA_NODE_SING_BOX`、`MIRA_NODE_CLAUDE_BINARY`、`MIRA_NODE_CLAUDE_NODE`、
+`MIRA_NODE_OPENSSH_DIR`、`MIRA_CODEX_STORE_ID`；其余条目只属于服务，不会进入 CLI 启动的进程）。
+因此命令入口只是软链接 `~/.local/bin/mira -> <状态目录>/current/mira`，不需要包装脚本或环境变量；
+`mira identity show` 会显示所用的状态目录和身份文件。同一用户的第二套安装用 `--name beta`
+（或名为 `mira-beta` 的状态目录）得到 `~/.local/bin/mira-beta`。旧安装的身份仍在 `~/.config/mira`，
+由其 `node.json` 指向，无需迁移；`MIRA_IDENTITY_FILE` 仍可显式覆盖。
 
 安装器不再接受 `--update`。首次安装后统一使用 `mira update`。
 
@@ -120,7 +130,7 @@ Node 只用于隔离测试，不能代表宿主机文件和进程权限。
 在管理员 PowerShell 中运行（Windows x64）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.131'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.132'"
 ```
 
 Windows 使用系统服务运行 Supervisor。默认状态目录为 `%USERPROFILE%\.mira`；`-StateDirectory`
