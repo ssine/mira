@@ -936,13 +936,14 @@ the alert is queued. It fails with no_notification_device when no device has
 notifications enabled. Authenticates with this Node's credential.`,
 		"conversation": `Usage:
   mira conversation read <conversation-id> [--tail N] [--max N] [--after SEQ]
-      [--kind user,assistant,tool,error,notice] [--tool-output-limit BYTES] [--no-tools] [--json]
+      [--kind user,assistant,tool,compaction,error,notice] [--tool-output-limit BYTES] [--no-tools] [--json]
 
 Reads one Codex thread, Claude session or subagent conversation from Mira
 Server by its UUID, whichever Node ran it. Output is the title, engine, cwd,
 parent and subagent IDs, then every user message, assistant message and tool
-call (name, status, input and output) in order with its sequence and time.
-Reasoning is not included. Each tool input/output keeps the first 8192 bytes
+call (name, status, input and output) and every context compaction with the
+summary that replaced the earlier context, in order with its sequence and time.
+Reasoning is not included; --no-tools also omits compactions. Each tool input/output keeps the first 8192 bytes
 by default; --tool-output-limit sets the bound (0 = the 1 MiB maximum) and
 truncated fields report their full size. --no-tools reads only prose from the
 conversation index, which is faster for very long conversations.

@@ -233,4 +233,49 @@ func TestReadConversationMessagesPostgres(t *testing.T) {
 			t.Fatalf("split page: %#v", rest)
 		}
 	})
+
+	t.Run("compactions carry their summaries", func(t *testing.T) {
+		compacted := fmt.Sprintf("58000000-0000-4000-8000-%012d", suffix)
+		fixture.thread(compacted, "压缩", nil)
+		fixture.appendItems(compacted, 1, 0, []map[string]any{
+			record("event_msg", map[string]any{"type": "task_started", "turn_id": "k1"}),
+			record("event_msg", map[string]any{"type": "user_message", "turn_id": "k1", "message": "长任务"}),
+			{"type": "compacted", "payload": map[string]any{"message": "摘要：已完成 A，下一步 B", "replacement_history": []any{}}},
+			record("event_msg", map[string]any{"type": "agent_message", "turn_id": "k1", "message": "继续"}),
+		}, base)
+		items := readWith(compacted, MessagesOptions{Tools: true})["items"].([]conversationItem)
+		if len(items) != 3 || items[1].Kind != "compaction" || items[1].Summary != "摘要：已完成 A，下一步 B" || !strings.Contains(items[1].Text, "压缩") {
+			t.Fatalf("codex compaction: %#v", items)
+		}
+
+		session := fmt.Sprintf("59000000-0000-4000-8000-%012d", suffix)
+		turn := fmt.Sprintf("5a000000-0000-4000-8000-%012d", suffix)
+		t.Cleanup(func() {
+			_, _ = pool.Exec(context.Background(), `DELETE FROM mira_claude_sessions WHERE session_id=$1`, session)
+		})
+		fixture.exec(`INSERT INTO mira_claude_sessions(session_id,request_id,node_id,cwd,title) VALUES($1,gen_random_uuid(),$2,'/work','Claude 压缩')`, session, nodeID)
+		fixture.exec(`INSERT INTO mira_claude_turns(turn_id,session_id,node_id,revision,request,status) VALUES($1,$2,$3,1,'{}','completed')`, turn, session, nodeID)
+		for _, event := range []map[string]any{
+			{"type": "mira_user", "text": "开始"},
+			{"type": "system", "subtype": "compact_boundary", "compact_metadata": map[string]any{"trigger": "auto", "pre_tokens": 969348, "post_tokens": 11060}},
+			{"type": "user", "isCompactSummary": true, "message": map[string]any{"content": "This session is being continued. Summary: 做完了 X"}},
+			{"type": "assistant", "message": map[string]any{"content": []any{map[string]any{"type": "text", "text": "接着做"}}}},
+		} {
+			raw, _ := json.Marshal(event)
+			fixture.exec(`INSERT INTO mira_claude_events(event_id,session_id,turn_id,event_type,payload) VALUES(gen_random_uuid(),$1,$2,$3,$4::json)`, session, turn, event["type"], string(raw))
+		}
+		items = readWith(session, MessagesOptions{Tools: true})["items"].([]conversationItem)
+		if len(items) != 3 || items[1].Kind != "compaction" || items[1].Text != "较早的上下文已自动压缩（969,348 → 11,060 tokens）。" ||
+			items[1].Summary != "This session is being continued. Summary: 做完了 X" || items[2].Text != "接着做" {
+			t.Fatalf("claude compaction: %#v", items)
+		}
+		// The boundary ends one page and its summary starts the next.
+		first := readWith(session, MessagesOptions{Tools: true, Limit: 2})
+		page := first["items"].([]conversationItem)
+		rest := readWith(session, MessagesOptions{Tools: true, Limit: 2, After: *first["nextCursor"].(*int64)})["items"].([]conversationItem)
+		if len(page) != 2 || page[1].Summary != "" || len(rest) != 2 || rest[0].Kind != "compaction" || rest[0].Text != "" || !strings.Contains(rest[0].Summary, "做完了 X") {
+			t.Fatalf("split compaction: %#v %#v", page, rest)
+		}
+	})
+
 }

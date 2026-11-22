@@ -47,6 +47,7 @@ type conversationItem struct {
 	Seq        int64             `json:"seq"`
 	Kind       string            `json:"kind"`
 	Text       string            `json:"text,omitempty"`
+	Summary    string            `json:"summary,omitempty"`
 	RecordedAt *string           `json:"recordedAt"`
 	Tool       *conversationTool `json:"tool,omitempty"`
 }
@@ -67,7 +68,7 @@ type conversationTool struct {
 // conversationText marks a result that RunCLI prints as a readable transcript.
 type conversationText struct{ conversationRead }
 
-var conversationKinds = map[string]bool{"user": true, "assistant": true, "tool": true, "error": true, "notice": true}
+var conversationKinds = map[string]bool{"user": true, "assistant": true, "tool": true, "compaction": true, "error": true, "notice": true}
 
 func (client *cliClient) runConversation(ctx context.Context, args []string, json bool) (any, error) {
 	if len(args) == 0 {
@@ -81,7 +82,7 @@ func (client *cliClient) runConversation(ctx context.Context, args []string, jso
 	after := flags.Int64("after", 0, "only items after this sequence")
 	maximum := flags.Int("max", 0, "stop after this many items (0 = all)")
 	tail := flags.Int("tail", 0, "keep only the last N items")
-	kinds := flags.String("kind", "", "comma-separated kinds: user,assistant,tool,error,notice")
+	kinds := flags.String("kind", "", "comma-separated kinds: user,assistant,tool,compaction,error,notice")
 	noTools := flags.Bool("no-tools", false, "read only user/assistant prose from the conversation index")
 	toolLimit := flags.Int("tool-output-limit", conversationToolLimitDefault, "bytes kept per tool input/output (0 = 1 MiB maximum)")
 	// Accept the ID before or after options.
@@ -112,7 +113,7 @@ func (client *cliClient) runConversation(ctx context.Context, args []string, jso
 			continue
 		}
 		if !conversationKinds[kind] {
-			return nil, fmt.Errorf("--kind accepts user, assistant, tool, error and notice")
+			return nil, fmt.Errorf("--kind accepts user, assistant, tool, compaction, error and notice")
 		}
 		selected[kind] = true
 	}
@@ -141,6 +142,13 @@ func (client *cliClient) runConversation(ctx context.Context, args []string, jso
 			combined.Items = nil
 		}
 		for _, item := range result.Items {
+			// A compaction summary whose boundary ended the previous page.
+			if item.Kind == "compaction" && item.Text == "" && item.Summary != "" && len(combined.Items) > 0 {
+				if last := &combined.Items[len(combined.Items)-1]; last.Kind == "compaction" && last.Summary == "" {
+					last.Summary = item.Summary
+					continue
+				}
+			}
 			// A tool call whose output landed on the next page shares its key.
 			if item.Tool != nil && item.Tool.Key != "" {
 				if index, ok := tools[item.Tool.Key]; ok {
@@ -289,6 +297,9 @@ func printConversation(writer io.Writer, conversation conversationRead) error {
 			}
 		} else {
 			out.WriteString(strings.TrimRight(item.Text, "\n") + "\n")
+			if item.Summary != "" {
+				fmt.Fprintf(&out, "\nSummary:\n%s\n", fenced(item.Summary))
+			}
 		}
 		if _, err := io.WriteString(writer, out.String()); err != nil {
 			return err
