@@ -99,7 +99,11 @@ fall back to paged history while a very large conversation is still indexing.
   `mira_conversation_messages`, with title, cwd, parent, direct subagent IDs and
   `complete` (false while the index is still catching up after an on-demand
   pass). Pages hold at most 1,000 messages; `nextCursor` is the last sequence.
-  Tool calls, tool output and reasoning are not included. `mira conversation
+  With `tools=1` the route reads canonical history instead: prose, tool calls
+  with clipped inputs/outputs, and each context compaction with the summary
+  that replaced the earlier context (Codex `compacted.message`; Claude
+  `compact_boundary` joined with its synthetic summary message, as the Web
+  transcript does). Reasoning is never included. `mira conversation
   read <id>` reads every page, and the managed CLI instructions injected into
   Codex and Claude conversations describe it.
 - `GET /v1/codex/threads/{id}/timeline` and `GET /v1/claude/sessions/{id}/timeline`

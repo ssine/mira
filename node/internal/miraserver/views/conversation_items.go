@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -40,9 +41,11 @@ type conversationTool struct {
 // conversationItem is one displayed entry of a conversation read: prose
 // (user/assistant), a tool call with its output, an error or a notice.
 type conversationItem struct {
-	Seq        int64             `json:"seq"`
-	Kind       string            `json:"kind"`
-	Text       string            `json:"text,omitempty"`
+	Seq  int64  `json:"seq"`
+	Kind string `json:"kind"`
+	Text string `json:"text,omitempty"`
+	// Summary is the compaction summary that replaced the earlier context.
+	Summary    string            `json:"summary,omitempty"`
 	RecordedAt *string           `json:"recordedAt"`
 	Tool       *conversationTool `json:"tool,omitempty"`
 }
@@ -205,7 +208,7 @@ collect:
 		case "error":
 			item.Kind, item.Text = "error", stringValue(entry["body"])
 		case "compaction":
-			item.Kind, item.Text = "notice", stringValue(first(entry["title"], "上下文自动压缩"))
+			item.Kind, item.Text, item.Summary = "compaction", stringValue(entry["body"]), stringValue(entry["compactionSummary"])
 		case "image":
 			item.Kind, item.Text = "notice", "[图片]"
 		default:
@@ -217,6 +220,26 @@ collect:
 		return result, nil, nil
 	}
 	return result, &last, nil
+}
+
+// claudeCompactionText mirrors the Web transcript's compaction line and returns
+// the anchor of the preserved segment, which marks the summary message.
+func claudeCompactionText(meta map[string]any) (string, string) {
+	manual := stringValue(meta["trigger"]) == "manual"
+	before, hasBefore := safeInteger(first(meta["pre_tokens"], meta["preTokens"]))
+	after, hasAfter := safeInteger(first(meta["post_tokens"], meta["postTokens"]))
+	text := "较早的上下文已自动压缩"
+	if manual {
+		text = "较早的上下文已压缩"
+	}
+	switch {
+	case hasBefore && hasAfter:
+		text += fmt.Sprintf("（%s → %s tokens）", groupedInteger(before), groupedInteger(after))
+	case hasBefore:
+		text += fmt.Sprintf("（压缩前 %s tokens）", groupedInteger(before))
+	}
+	anchor := stringValue(first(object(meta["preserved_messages"])["anchor_uuid"], object(meta["preserved_segment"])["anchor_uuid"]))
+	return text + "。", anchor
 }
 
 // claudeToolText renders a tool_use input or tool_result content as text.
@@ -303,6 +326,9 @@ func (service *Service) readClaudeItems(ctx context.Context, sessionID, subpath 
 	native := subpath != ""
 	result := []conversationItem{}
 	pendingTools := map[string]int{}
+	// Compaction is recorded as a boundary followed by a synthetic user message
+	// holding the summary (the Web transcript's rule); that message is not prose.
+	summaryAt, summaryAnchor := -1, ""
 	for _, entry := range events {
 		value := entry.value
 		var recordedAt *string
@@ -314,7 +340,21 @@ func (service *Service) readClaudeItems(ctx context.Context, sessionID, subpath 
 			result = append(result, item)
 		}
 		message := object(value["message"])
+		if stringValue(value["type"]) == "user" && summaryAt >= 0 && value["parent_tool_use_id"] == nil &&
+			(value["isCompactSummary"] == true || summaryAnchor != "" && stringValue(value["uuid"]) == summaryAnchor || summaryAnchor == "" && value["isSynthetic"] == true) {
+			result[summaryAt].Summary = claudeTextBlocks(message["content"])
+			summaryAt = -1
+			continue
+		}
 		switch stringValue(value["type"]) {
+		case "system":
+			if stringValue(value["subtype"]) != "compact_boundary" {
+				continue
+			}
+			meta := object(first(value["compact_metadata"], value["compactMetadata"]))
+			text, anchor := claudeCompactionText(meta)
+			push(conversationItem{Kind: "compaction", Text: text})
+			summaryAt, summaryAnchor = len(result)-1, anchor
 		case "mira_user":
 			if !native {
 				push(conversationItem{Kind: "user", Text: stringValue(value["text"])})
@@ -337,7 +377,12 @@ func (service *Service) readClaudeItems(ctx context.Context, sessionID, subpath 
 				}
 			}
 		case "user":
-			if !native && value["parent_tool_use_id"] != nil || value["isCompactSummary"] == true {
+			if !native && value["parent_tool_use_id"] != nil {
+				continue
+			}
+			if value["isCompactSummary"] == true {
+				// Its boundary ended the previous page: readers join the two.
+				push(conversationItem{Kind: "compaction", Summary: claudeTextBlocks(message["content"])})
 				continue
 			}
 			content := message["content"]

@@ -91,3 +91,38 @@ func TestConversationReadPagesMergesToolsAndPrints(t *testing.T) {
 		t.Fatalf("help: %q", help)
 	}
 }
+
+func TestConversationReadCompactionSummary(t *testing.T) {
+	id := "019a0000-0000-7000-8000-000000000002"
+	pages := map[string]map[string]any{
+		"0": {"items": []any{map[string]any{"seq": 2, "kind": "compaction", "text": "较早的上下文已自动压缩（969,348 → 11,060 tokens）。"}}, "nextCursor": 2},
+		"2": {"items": []any{map[string]any{"seq": 3, "kind": "compaction", "summary": "Summary: 做完了 X ```"},
+			map[string]any{"seq": 4, "kind": "assistant", "text": "接着做"}}, "nextCursor": nil},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := pages[r.URL.Query().Get("after")]
+		body["engine"], body["threadId"], body["complete"] = "claude", id, true
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer server.Close()
+	client := &cliClient{identity: &persistedNodeState{ServerURL: server.URL, Token: "test-only-token"}, http: &http.Client{Timeout: 5 * time.Second}}
+	result, err := client.runConversation(context.Background(), []string{"read", id}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := result.(conversationText).conversationRead
+	if len(read.Items) != 2 || read.Items[0].Summary != "Summary: 做完了 X ```" {
+		t.Fatalf("joined compaction: %#v", read.Items)
+	}
+	var out bytes.Buffer
+	if err := printConversation(&out, read); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "## compaction · #2\n\n较早的上下文已自动压缩（969,348 → 11,060 tokens）。\n\nSummary:\n````\nSummary: 做完了 X ```\n````") {
+		t.Fatalf("printed:\n%s", out.String())
+	}
+	result, err = client.runConversation(context.Background(), []string{"read", id, "--kind", "compaction"}, true)
+	if items := result.(conversationRead).Items; err != nil || len(items) != 1 || items[0].Kind != "compaction" {
+		t.Fatalf("kind filter: %v %#v", err, items)
+	}
+}

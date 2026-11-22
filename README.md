@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.133 `mira conversation read` 会输出每次上下文压缩及其摘要（替代早期上下文的那份总结）：Codex 读取 `compacted` 记录里的摘要，Claude 把压缩边界和随后的摘要消息合成一条，跨页时自动拼回；可用 `--kind compaction` 只看压缩。需升级 Server 和要使用该命令的 Node；无数据库迁移。
+
 1.0.132 统一了「这条 `mira` 命令属于哪套安装」的规则：一套安装就是一个状态目录，Supervisor、Node worker 和 CLI 都按 `MIRA_STATE_DIR` → 可执行文件所在的安装 → 默认目录定位，CLI 从该目录的 `node.json` 取 Node 身份，并共用 `mira.env` 里的 Node 设置（如 `CODEX_BINARY`；数据库等其余条目不会进入 CLI 启动的进程）。修复当前安装器装出的 Node 上直接调用 `mira`（包括注入给 Agent 的绝对路径和 `~/.local/bin/mira` 软链接）报 `not_enrolled` 的问题，不再需要包装脚本。注入给 Agent 的路径在 Linux 上改为随升级更新的 `current/mira`；同一用户的第二套安装可用 `--name` 得到 `mira-<名字>` 入口；未注册的报错会写明状态目录与身份文件，不再建议启动新的 node-worker；Server 过旧时 `conversation read` 会报出 Server 版本。需升级 Node；无数据库迁移。
 
 1.0.131 新增 `mira conversation read <对话ID>`：用本机 Node 凭据按 ID 读取任意 Node 上的 Codex 线程、Claude 会话或子 Agent，输出标题、cwd、子 Agent 列表，以及按顺序排列的用户/助手消息和工具调用（名称、状态、输入与输出；每段默认保留 8 KiB 并标明原始大小，`--tool-output-limit` 可调到 1 MiB，`--no-tools` 只读正文索引）。Mira 注入给 Codex 和 Claude 对话的 CLI 说明加入了这项能力；`mira codex` / `mira claude` 在 Server 可达时也会注入与网页对话相同的 Mira 指令（含该 Node 的 Developer instructions 文件），与已有的 `developer_instructions` / `--append-system-prompt` 合并，`--no-mira-instructions` 可关闭。需升级 Server 和要使用这些命令的 Node；无数据库迁移。
@@ -253,13 +255,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.132
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.133
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.132'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.133'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
