@@ -96,3 +96,36 @@ func TestLauncherInstructionsRouteIsNodeScoped(t *testing.T) {
 		t.Fatalf("administrator status %d", status)
 	}
 }
+
+// The Node CLI searches with its own credential; parameters are validated.
+func TestConversationSearchRouteAcceptsNodeCredential(t *testing.T) {
+	f := newClaudeFixture(t)
+	f.server.views = serverviews.New(f.server.pool)
+	get := func(query string, credential bool) (int, map[string]any) {
+		t.Helper()
+		request, _ := http.NewRequest("GET", f.endpoint+"/v1/conversations/search?"+query, nil)
+		if credential {
+			request.Header.Set("Authorization", "Bearer "+f.token)
+			request.Header.Set("X-Mira-Client-Type", "cli")
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body := map[string]any{}
+		_ = json.NewDecoder(response.Body).Decode(&body)
+		return response.StatusCode, body
+	}
+	if status, _ := get("q=x", false); status != 401 {
+		t.Fatalf("anonymous %d", status)
+	}
+	if status, body := get("q=评测+eval&match=any&engine=claude&since=2026-11-01T00:00:00Z", true); status != 200 || body["match"] != "any" {
+		t.Fatalf("node search %d %#v", status, body)
+	}
+	for _, query := range []string{"q=x&match=some", "q=x&engine=gpt", "q=x&since=yesterday"} {
+		if status, _ := get(query, true); status != 400 {
+			t.Fatalf("%s: %d", query, status)
+		}
+	}
+}

@@ -63,7 +63,9 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 		return true, writeJSON(response, 200, map[string]any{"storeId": storeID, "data": threads, "cleanup": cleanup})
 	}
 	if request.Method == http.MethodGet && path == "/v1/conversations/search" {
-		if ok, err := server.authorizeAdminRead(ctx, response, request); err != nil || !ok {
+		// The Web console and the Node CLI (`mira conversation search`) share it;
+		// approved Nodes are mutually trusted and can already read conversations.
+		if principal, err := server.authorize(ctx, response, request, "trusted", authOptions{ClientType: "cli"}); err != nil || principal == nil {
 			return true, err
 		}
 		storeID, err := viewStoreID(request)
@@ -74,8 +76,29 @@ func (server *Server) routeViews(ctx context.Context, response http.ResponseWrit
 		if len([]rune(query.Get("q"))) > 2000 {
 			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "search query is too long"}
 		}
-		result, err := server.views.SearchConversations(ctx, storeID, serverviews.SearchOptions{Query: query.Get("q"),
-			Archived: query.Get("archived"), Limit: int(boundedQueryInteger(query.Get("limit"), 50, 1, 100))})
+		options := serverviews.SearchOptions{Query: query.Get("q"), Archived: query.Get("archived"),
+			Limit: int(boundedQueryInteger(query.Get("limit"), 50, 1, 100))}
+		switch query.Get("match") {
+		case "", "all":
+		case "any":
+			options.Any = true
+		default:
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "match must be all or any"}
+		}
+		switch engine := query.Get("engine"); engine {
+		case "", "codex", "claude":
+			options.Engine = engine
+		default:
+			return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "engine must be codex or claude"}
+		}
+		if since := query.Get("since"); since != "" {
+			parsed, err := time.Parse(time.RFC3339, since)
+			if err != nil {
+				return true, &HTTPError{Status: 400, Code: "invalid_request", Message: "since must be an RFC 3339 time"}
+			}
+			options.Since = &parsed
+		}
+		result, err := server.views.SearchConversations(ctx, storeID, options)
 		if err != nil {
 			return true, err
 		}

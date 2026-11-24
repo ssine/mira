@@ -176,6 +176,7 @@ func miraCLIInstructions(target *nodes.Node) string {
 		"Download one regular file: " + executable + " scp <node-id>::<absolute-remote-path> <local-path>",
 		"Copy a directory with native SCP: " + executable + " scp -rp <local-directory> <node-id>::<absolute-remote-directory>",
 		"Use SFTP interactively: " + executable + " sftp <node-id>; batch: " + executable + " sftp -b <commands-file> <node-id>. Native SCP/SFTP overwrite semantics apply.",
+		"Search all Mira conversations (titles and user/assistant messages; not tool output) instead of querying databases: " + executable + " conversation search <terms...> [--any] [--engine codex|claude] [--since YYYY-MM-DD] [--json]. Results list conversation IDs with matching message sequences.",
 		"Read another Mira conversation (a Codex thread, Claude session or subagent, started on any Node) by its UUID: " + executable + " conversation read <conversation-id> [--tail N] [--kind user,assistant,tool] [--tool-output-limit BYTES] [--no-tools] [--json]. It prints the title, cwd, subagent IDs, then user/assistant messages, tool calls with inputs and outputs (8 KiB per field by default, truncation is marked) and context compactions with their summaries in order; reasoning is not included.",
 		"Use a Node ID, exact nodeKey, or exact user-defined alias returned by nodes list; do not guess selectors. Never read or expose the Mira identity credential.",
 		miraCLIInstructionsEnd,
