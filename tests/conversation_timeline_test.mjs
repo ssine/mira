@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { activitySegments, compactDuration, hourWindow, liveLanes, mergeTimeline, modelPhases, timelineLayout } from "../server/public/conversation-timeline.js";
+import { activitySegments, compactDuration, drawnSpans, hourWindow, liveLanes, mergeTimeline, modelPhases, timelineLayout } from "../server/public/conversation-timeline.js";
 
 const minute = 60_000, now = 1_800_000_000_000;
 
@@ -67,4 +67,15 @@ test("incremental timeline reads merge by identity", () => {
   assert.deepEqual(next.lanes[1].turns.map(turn => turn.id), ["y"]);
   // A full response replaces the copy.
   assert.equal(mergeTimeline(codex, { lanes: [] }).lanes.length, 0);
+});
+
+test("spans too narrow to tell apart are drawn as one; distinguishable ones stay", () => {
+  const x = at => at / 1000;
+  const dense = Array.from({ length: 5000 }, (_, index) => ({ start: index * 100, end: index * 100 + 60 }));
+  assert.ok(drawnSpans(dense, x).length <= 2, "thousands of adjacent sub-pixel calls collapse");
+  assert.equal(drawnSpans(dense, x).reduce((sum, span) => sum + span.items.length, 0), 5000);
+  const wide = [{ start: 0, end: 4000 }, { start: 4100, end: 9000 }, { start: 20_000, end: 20_100 }, { start: 30_000, end: 30_100 }];
+  assert.equal(drawnSpans(wide, x).length, 4);
+  const kinds = [{ start: 0, end: 100, kind: "tool" }, { start: 100, end: 200, kind: "wait" }, { start: 200, end: 300, kind: "tool" }];
+  assert.deepEqual(drawnSpans(kinds, x, { kind: item => item.kind }).map(span => [span.kind, span.items.length]), [["tool", 2], ["wait", 1]]);
 });

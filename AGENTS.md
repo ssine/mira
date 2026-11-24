@@ -209,6 +209,9 @@ displayed prose and tool skeletons for whole-conversation outlines, search, the 
 timelines. Never make it authoritative or read tool bodies from it; bump its projector version
 when slimming rules change. Permanent deletion must remove its rows in the same transaction, and
 search/outline reads must join the active generation. `pg_trgm` stays optional.
+Transcript work per read, scroll or token must not grow with conversation length, and a message in
+view must never be empty: reconcile rows incrementally, never force layout per row, and decide what
+to render from geometry before paint. See `docs/transcript-rendering.md`.
 The Web sidebar paginates root conversations per project and loads direct subagent children on
 expansion. Preserve the complete project directory, merge loaded pages during refresh, and keep
 Token/cost totals independent of which rows are loaded. See `docs/thread-list-pagination.md`.

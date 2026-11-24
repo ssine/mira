@@ -30,8 +30,12 @@ export function compactDuration(ms) {
   return formatDuration(ms).replace(/\s+/g, "");
 }
 
-const clock = (at, seconds = false) => new Date(at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", ...(seconds ? { second: "2-digit" } : {}), hour12: false });
-const day = at => new Date(at).toLocaleDateString("zh-CN", { month: "numeric", day: "numeric" });
+// Formatters are reused: a long conversation labels thousands of elements.
+const clockFormat = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+const clockSecondsFormat = new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+const dayFormat = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric" });
+const clock = (at, seconds = false) => (seconds ? clockSecondsFormat : clockFormat).format(at);
+const day = at => dayFormat.format(at);
 
 // Union of intervals, sorted. Inputs are [start, end] pairs in milliseconds.
 export function unionIntervals(intervals) {
@@ -240,6 +244,25 @@ const alignPulse = root => {
 const panLeadMs = 30_000;
 let clipCounter = 0;
 
+// A long conversation packs thousands of spans into one panel width. Adjacent
+// spans of one kind that are too narrow to tell apart are drawn as one, so the
+// chart has about as many elements as pixels rather than as tool calls.
+export function drawnSpans(items, x, { kind = () => "", narrow = 2, gap = 1 } = {}) {
+  const drawn = [], open = new Map();
+  for (const item of [...items].sort((left, right) => left.start - right.start)) {
+    const left = x(item.start), right = Math.max(left, x(item.end)), type = kind(item), last = open.get(type);
+    if (last && right - left < narrow && left - last.right < gap && last.mergeable) {
+      last.right = Math.max(last.right, right);
+      last.items.push(item);
+      continue;
+    }
+    const span = { left, right, kind: type, items: [item], mergeable: right - left < narrow };
+    open.set(type, span);
+    drawn.push(span);
+  }
+  return drawn;
+}
+
 export class ConversationTimeline {
   // The timeline is a pinned, non-modal panel at the top of the conversation.
   // Its visibility is a remembered preference shared by all conversations;
@@ -432,11 +455,12 @@ export class ConversationTimeline {
     }, Math.max(0, this.lastRead + 1000 - Date.now()));
   }
 
-  // Re-render every second while something is growing (or the hour window
-  // slides) and the panel is open; the data itself refreshes every 10 s.
-  setTicker(on) {
-    if (on && !this.ticker && this.open) this.ticker = setInterval(() => { if (this.open) this.render(); else this.setTicker(false); }, 1000);
-    else if (!on && this.ticker) { clearInterval(this.ticker); this.ticker = null; }
+  // Re-render while something is growing and the panel is open.
+  setTicker(on, interval = 1000) {
+    if (this.ticker && (!on || this.tickerInterval !== interval)) { clearInterval(this.ticker); this.ticker = null; }
+    if (!on || this.ticker || !this.open) return;
+    this.tickerInterval = interval;
+    this.ticker = setInterval(() => { if (this.open) this.render(); else this.setTicker(false); }, interval);
   }
 
   setMode(mode) {
@@ -571,13 +595,13 @@ export class ConversationTimeline {
     const drawnTo = panning ? now + panLeadMs : now;
     const lanes = liveLanes(data.lanes ?? [], drawnTo, this.running);
     const live = lanes.some(lane => [...(lane.turns ?? []), ...(lane.tools ?? [])].some(item => item.live));
-    this.setTicker(live && !panning);
     const all = activitySegments(lanes);
     const range = hour && all.length ? hourWindow(lanes, now, this.running, this.windowMs) : null;
     // The hour view is one real-time segment: idle time is shown, not folded.
     const segments = range ? [range] : all;
     const visible = item => !range || item.end >= range.start && item.start <= (panning ? drawnTo : range.end);
     if (!panning || !segments.length) this.stopPan();
+    if (!segments.length) this.setTicker(false);
     const recent = `最近 ${formatWindow(this.windowMs)}`;
     this.summary.textContent = all.length ? (hour ? recent : timelineSummary({ ...data, lanes })) : "";
     if (!segments.length) {
@@ -589,6 +613,8 @@ export class ConversationTimeline {
     const labelsWidth = labelWidth();
     const available = Math.max(200, (this.body.clientWidth || this.root.clientWidth || 720) - labelsWidth - chartPad * 2 - 2);
     const layout = timelineLayout(segments, available, this.zoom);
+    // Redraw as often as a growing span gains half a pixel, at most each second.
+    this.setTicker(live && !panning, Math.min(30_000, Math.max(1000, 0.5 / (layout.segments.at(-1)?.scale || 1))));
     const ordered = orderLanes(lanes);
     const height = axisHeight + ordered.length * laneHeight + 2;
 
@@ -768,18 +794,27 @@ export class ConversationTimeline {
         row.append(svg("rect", { x: x(turn.start), y: top + laneHeight / 2 - 1, width: Math.max(1, x(turn.end) - x(turn.start)), height: 2, class: `timeline-turn${turn.live ? " live" : turn.open ? " open" : ""}` },
           `轮次 · ${clock(turn.start, true)} 起 · ${formatDuration(turn.end - turn.start)}${turn.live ? " · 进行中" : turn.open ? " · 未观测到结束" : turn.status === "aborted" ? " · 已中断" : ""}`));
       }
-      for (const [start, end] of modelPhases(lane).filter(([start, end]) => visible({ start, end }))) {
-        const growing = (lane.turns ?? []).some(turn => turn.live && end === turn.end);
-        row.append(svg("rect", { x: x(start), y: top + 3, width: Math.max(1, x(end) - x(start)), height: laneHeight - 6, class: `timeline-span model${growing ? " live" : ""}` },
-          `模型阶段 · ${formatDuration(end - start)}${growing ? " · 进行中" : ""}（按工具边界归因）`));
+      const phases = modelPhases(lane).map(([start, end]) => ({ start, end })).filter(visible);
+      const liveEnds = new Set((lane.turns ?? []).filter(turn => turn.live).map(turn => turn.end));
+      for (const { left, right, kind, items } of drawnSpans(phases, x, { kind: phase => liveEnds.has(phase.end) ? " live" : "" })) {
+        const total = items.reduce((sum, phase) => sum + phase.end - phase.start, 0);
+        row.append(svg("rect", { x: left, y: top + 3, width: Math.max(1, right - left), height: laneHeight - 6, class: `timeline-span model${kind}` },
+          `模型阶段${items.length > 1 ? ` · ${items.length} 段` : ""} · ${formatDuration(total)}${kind ? " · 进行中" : ""}（按工具边界归因）`));
       }
-      for (const tool of (lane.tools ?? []).filter(visible)) {
-        row.append(svg("rect", { x: x(tool.start), y: top + 2, width: Math.max(2, x(tool.end) - x(tool.start)), height: laneHeight - 4,
-          class: `timeline-span ${tool.kind === "wait" ? "wait" : "tool"}${tool.live ? " live" : tool.open ? " open" : ""}` },
-          `${tool.name} · ${clock(tool.start, true)} · ${formatDuration(tool.end - tool.start)}${tool.live ? " · 进行中" : tool.open ? " · 未观测到返回" : ""}`));
+      const toolClass = tool => `${tool.kind === "wait" ? "wait" : "tool"}${tool.live ? " live" : tool.open ? " open" : ""}`;
+      for (const { left, right, kind, items } of drawnSpans((lane.tools ?? []).filter(visible), x, { kind: toolClass })) {
+        const [tool] = items;
+        row.append(svg("rect", { x: left, y: top + 2, width: Math.max(2, right - left), height: laneHeight - 4, class: `timeline-span ${kind}` },
+          items.length > 1
+            ? `${items.length} 次调用 · ${clock(tool.start, true)} 起 · 共 ${formatDuration(items.reduce((sum, item) => sum + item.end - item.start, 0))}`
+            : `${tool.name} · ${clock(tool.start, true)} · ${formatDuration(tool.end - tool.start)}${tool.live ? " · 进行中" : tool.open ? " · 未观测到返回" : ""}`));
       }
+      let replyX = -Infinity;
       for (const message of (lane.messages ?? []).filter(message => visible({ start: message.at, end: message.at }))) {
         const cx = x(message.at);
+        // Replies on the same pixel share one mark; the user's own stay distinct.
+        if (message.role !== "user" && Math.abs(cx - replyX) < 1) continue;
+        if (message.role !== "user") replyX = cx;
         if (message.role === "user") {
           const marker = svg("path", { d: `M${cx} ${top + 1} l3.5 5 l-3.5 5 l-3.5 -5 z`, class: "timeline-message user", tabindex: 0, role: "button",
             "data-timeline-seq": message.seq, "data-timeline-thread": lane.threadId, "data-timeline-role": "user",
