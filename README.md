@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.135 修复超长对话的卡顿与正文变空：网页转录改为增量更新，后台读取不再整页重建，未变化的卡片、展开状态和图片保持原样；较早的消息分段布局，一处变化不再牵动整页；屏幕附近的正文在绘制前就填好，不会再只剩工具调用外壳。4.1 万条记录的对话在桌面浏览器上打开由 10.7 秒降到 0.6 秒，滚动与后台更新不再出现长任务。同时修复展开一个工具调用会重复加载同一段详情、Claude 长会话流式输出反复全量计算，以及时间线固定展开时的频繁重画。只需升级 Server 并刷新页面；无数据库迁移，见[转录渲染](docs/transcript-rendering.md)。
+
 1.0.134 新增 `mira conversation search <关键词...>`：用本机 Node 凭据搜索所有 Codex 与 Claude 对话（含子 Agent 和已归档）的标题与用户/助手消息，默认要求包含全部关键词，`--any` 改为任一；可按 `--engine`、`--since`、`--archived` 过滤。结果列出对话 ID、根对话、命中数和至多三条命中消息及其序号，可接着用 `conversation read <ID> --after 序号-1` 阅读。工具输出和压缩摘要不在搜索范围内。注入给 Agent 的 CLI 说明同步加入该命令，避免 Agent 绕过 Mira 直接查数据库。需升级 Server 和要使用该命令的 Node；无数据库迁移。
 
 1.0.133 `mira conversation read` 会输出每次上下文压缩及其摘要（替代早期上下文的那份总结）：Codex 读取 `compacted` 记录里的摘要，Claude 把压缩边界和随后的摘要消息合成一条，跨页时自动拼回；可用 `--kind compaction` 只看压缩。需升级 Server 和要使用该命令的 Node；无数据库迁移。
@@ -257,13 +259,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.134
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.135
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.134'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.135'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
