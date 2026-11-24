@@ -501,8 +501,10 @@ progress { width: 100%; accent-color: var(--accent); }
 .conversation-notices > .workspace-notice { margin: 8px 16px 0; }
 .conversation-compatibility { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .conversation-compatibility[hidden] { display: none; }
-.conversation-scroll { grid-area: 1 / 1 / 4 / 2; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; overscroll-behavior: contain; scrollbar-gutter: stable; scroll-padding-top: calc(var(--conversation-overlay-height) + 8px); padding: calc(var(--conversation-overlay-height) + 16px) var(--conversation-inline-end) 0 var(--conversation-inline-start); display: flex; flex-direction: column; background: var(--canvas); }
-.conversation-trace { display: flex; flex: 1 0 auto; flex-direction: column; gap: 10px; width: min(100%, 808px); margin: 0 auto; padding: 0 0 10px; }
+.conversation-scroll { grid-area: 1 / 1 / 4 / 2; min-height: 0; overflow-y: auto; overflow-x: hidden; overflow-anchor: none; overscroll-behavior: contain; scrollbar-gutter: stable; scroll-padding-top: calc(var(--conversation-overlay-height) + 8px); padding: calc(var(--conversation-overlay-height) + 16px) var(--conversation-inline-end) 0 var(--conversation-inline-start); background: var(--canvas); }
+/* A block scroller: a nested flex container would lay its whole content out twice. */
+.conversation-trace { box-sizing: border-box; display: flex; flex-direction: column; gap: 10px; width: min(100%, 808px); min-height: 100%; margin: 0 auto; padding: 0 0 10px; }
+.trace-section { flex: 0 0 auto; display: flex; flex-direction: column; gap: 10px; width: 100%; contain: layout style; }
 .conversation-empty { margin: auto; padding: 36px; color: var(--muted); text-align: center; font-size: 12px; }
 .trace-card{flex:0 0 auto;align-self:center;width:min(100%,808px);max-width:808px;overflow:visible;background:transparent}
 .trace-card.user { align-self: flex-end; width: auto; max-width: min(87%, 680px); }
@@ -523,7 +525,8 @@ progress { width: 100%; accent-color: var(--accent); }
 .trace-card.image figcaption { margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--muted); font: 11px/1.5 var(--font-ui); }
 .trace-image-status { color: var(--muted); font: 12px/1.5 var(--font-ui); }
 .trace-card.image button { margin-left: 8px; }
-.conversation-trace > :not(.user) + .trace-card.user, .conversation-trace > .trace-card.user + :not(.user) { margin-top: 6px; }
+:is(.conversation-trace, .trace-section) > :not(.user) + .trace-card.user, :is(.conversation-trace, .trace-section) > .trace-card.user + :not(.user),
+.trace-section + .trace-section > .trace-card.user:first-child { margin-top: 6px; }
 .trace-card.tool, .trace-card.reasoning, .trace-card.system, .trace-card.error { width: min(100%, 808px); }
 .trace-card.system { padding: 8px 11px; border-left: 2px solid var(--line); background: var(--surface); }
 .trace-card.error { padding: 8px 11px; border-left: 2px solid var(--danger); background: var(--danger-soft); }

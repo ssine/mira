@@ -20,7 +20,8 @@ disposable, may be stale, and is replaced by the next successful Server read.
 
 Every record carries the Server version reported by `/healthz`. A different version
 never reads it, so projection changes between releases cannot surface old shapes.
-Writes are coalesced per key and flushed after one second, when switching
+Writes are coalesced per key and flushed after one second (at most every 30
+seconds for a copy above 1 MiB), when switching
 conversations, and when the page is hidden. A write may be a function evaluated at
 flush time; it returns `undefined` to keep the previous copy when the current state
 is inconsistent. Signing out clears the whole database. Storage failures (quota,

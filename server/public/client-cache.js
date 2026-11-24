@@ -2,15 +2,25 @@
 // PostgreSQL stays authoritative: every entry is disposable, bound to one Server
 // version, bounded in total size and evicted least recently used first.
 const databaseName = "mira-client-cache";
-const sizeOf = value => JSON.stringify(value)?.length ?? 0;
+// Close to the serialized length without building that string: transcripts
+// reach many megabytes.
+const sizeOf = value => {
+  if (typeof value === "string") return value.length + 2;
+  if (value === null || typeof value !== "object") return 6;
+  let size = 2;
+  if (Array.isArray(value)) for (const item of value) size += sizeOf(item) + 1;
+  else for (const key in value) if (value[key] !== undefined) size += key.length + 4 + sizeOf(value[key]);
+  return size;
+};
 const resolve = operation => {
   if (typeof operation.value !== "function") return operation.value;
   try { return operation.value() ?? undefined; } catch { return undefined; }
 };
 
 export class ClientCache {
-  constructor({ budgetBytes = 96 * 1024 * 1024, entryBytes = 16 * 1024 * 1024, maxEntries = 400, delayMs = 1000 } = {}) {
-    Object.assign(this, { budgetBytes, entryBytes, maxEntries, delayMs });
+  constructor({ budgetBytes = 96 * 1024 * 1024, entryBytes = 16 * 1024 * 1024, maxEntries = 400, delayMs = 1000, largeBytes = 1024 * 1024, largeDelayMs = 30_000 } = {}) {
+    Object.assign(this, { budgetBytes, entryBytes, maxEntries, delayMs, largeBytes, largeDelayMs });
+    this.largeUntil = new Map();
     this.version = null;
     this.database = null;
     this.pending = new Map();
@@ -101,21 +111,39 @@ export class ClientCache {
   #queue(id, operation) {
     if (!this.version) return;
     this.pending.set(id, operation);
-    this.timer ??= setTimeout(() => { this.timer = null; void this.flush(); }, this.delayMs);
+    this.#schedule(Math.max(this.delayMs, (this.largeUntil.get(id) ?? 0) - Date.now()));
+  }
+
+  #schedule(delay) {
+    const at = Date.now() + delay;
+    if (this.timer !== null && this.timerAt <= at) return;
+    clearTimeout(this.timer);
+    this.timerAt = at;
+    this.timer = setTimeout(() => { this.timer = null; void this.flush({ dueOnly: true }); }, delay);
   }
 
   // Writes are coalesced per key. Serialization happens here, off the read path.
-  async flush() {
+  // Copying a long conversation takes noticeable time, so while it keeps growing
+  // its copy is rewritten rarely; an explicit flush (switching conversations,
+  // hiding the page) always stores the latest state.
+  async flush({ dueOnly = false } = {}) {
     clearTimeout(this.timer);
     this.timer = null;
-    if (!this.pending.size) return;
-    const operations = [...this.pending.values()].map(operation => ({ ...operation, value: resolve(operation) }));
-    this.pending.clear();
+    const now = Date.now(), operations = [];
+    let waiting = Infinity;
+    for (const [id, operation] of this.pending) {
+      const wait = dueOnly && operation.value !== null ? (this.largeUntil.get(id) ?? 0) - now : 0;
+      if (wait > 0) { waiting = Math.min(waiting, wait); continue; }
+      this.pending.delete(id);
+      operations.push({ ...operation, id, value: resolve(operation) });
+    }
+    if (waiting !== Infinity) this.#schedule(waiting);
+    if (!operations.length) return;
     const version = this.version, usedAt = Date.now();
     let grew = false;
     try {
       await this.#transaction(["entries", "meta", "snapshots"], "readwrite", transaction => {
-        for (const { kind, key, value } of operations) {
+        for (const { kind, key, value, id } of operations) {
           if (kind === "snapshot") {
             if (value === undefined) transaction.objectStore("snapshots").delete(key);
             else transaction.objectStore("snapshots").put({ version, value }, key);
@@ -123,6 +151,8 @@ export class ClientCache {
           }
           if (value === undefined) continue;
           const bytes = value === null ? 0 : sizeOf(value);
+          if (bytes > this.largeBytes) this.largeUntil.set(id, Date.now() + this.largeDelayMs);
+          else this.largeUntil.delete(id);
           if (value === null || bytes > this.entryBytes) {
             transaction.objectStore("entries").delete(key);
             transaction.objectStore("meta").delete(key);

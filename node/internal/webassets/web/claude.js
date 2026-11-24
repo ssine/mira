@@ -6,6 +6,13 @@ const compact = (value, limit = 160) => {
 const nativeImage = b => b?.type === "image" && b.source?.type === "base64" && /^image\/(png|jpeg|gif|webp)$/.test(b.source.media_type)
   ? `data:${b.source.media_type};base64,${b.source.data}` : null;
 
+// Recorded blocks never change, while a live repaint projects them again.
+const inputTexts = new WeakMap();
+function inputText(block) {
+  if (!inputTexts.has(block)) inputTexts.set(block, JSON.stringify(block.input, null, 2));
+  return inputTexts.get(block);
+}
+
 // Claude Code's built-in tools, summarized like Codex's parsed shell actions.
 // Paths inside the session directory are shown relative to it.
 function toolActions(name, input = {}, cwd = "") {
@@ -94,12 +101,21 @@ export function claudeTrace(rows, { child = false, activeTurn = null, source = n
     resumedTurns = new Set();
   // Compaction is reported as status -> boundary -> a synthetic user message holding the summary.
   const compacting = new Map(), summaries = new Map();
+  // Items made of partial output, and each turn's replies: scanning every item
+  // per event made a long session's projection quadratic.
+  const streamKeys = new Set(), replies = new Map();
   let interrupted = false, cwd = "";
   // rowSeq: the durable event that first produced an item, for search and
   // timeline jumps. Live rows have none until their durable event arrives.
   let rowSeq = null;
   const origin = () => source ? { sourceContext: { ...source, cwd: cwd || source.cwd || "" } } : {};
-  const put = (key, kind, title, body, turnId, extra = {}) => items.set(key, { key, kind, title, body, turnId, rowSeq: items.get(key)?.rowSeq ?? rowSeq, ...origin(), ...extra });
+  const put = (key, kind, title, body, turnId, extra = {}) => {
+    if (kind === "assistant" && !items.has(key)) {
+      if (!replies.has(turnId)) replies.set(turnId, []);
+      replies.get(turnId).push(key);
+    }
+    return items.set(key, { key, kind, title, body, turnId, rowSeq: items.get(key)?.rowSeq ?? rowSeq, ...origin(), ...extra });
+  };
   const image = (key, url, turnId, timing) => put(key, "image", "图片", "", turnId, { ...timing, image: { url } });
   function blocks(message, key, role, turnId, timestamp, toolResult) {
     const timing = timestamp ? { completedAt: timestamp, timingScope: "recorded" } : {};
@@ -110,7 +126,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null, source = n
       else if (b.type === "thinking") { if (b.thinking?.trim()) put(k, "reasoning", "思考", b.thinking, turnId, timing); }
       else if (b.type === "tool_use") {
         const activity = { status: "running", durationMs: null, actions: toolActions(b.name, b.input, cwd) };
-        put(`tool:${b.id}`, "tool", b.name, JSON.stringify(b.input, null, 2), turnId, { ...timing, activity, startedAt: timestamp });
+        put(`tool:${b.id}`, "tool", b.name, inputText(b), turnId, { ...timing, activity, startedAt: timestamp });
       } else if (b.type === "tool_result") {
         const prior = items.get(`tool:${b.tool_use_id}`);
         const text = typeof b.content === "string" ? b.content : JSON.stringify((b.content || []).filter(v => v.type !== "image"), null, 2);
@@ -161,7 +177,8 @@ export function claudeTrace(rows, { child = false, activeTurn = null, source = n
       // A transcript reload omits stream events. A saved block still identifies
       // the message for later deltas from that message's remaining blocks.
       if (e.message?.id) streams.set(scope, e.message.id);
-      for (const k of items.keys()) if (k.startsWith(`stream:${scope}:${e.message?.id}:`)) items.delete(k);
+      const prefix = `stream:${scope}:${e.message?.id}:`;
+      for (const k of streamKeys) if (k.startsWith(prefix)) { items.delete(k); streamKeys.delete(k); }
       blocks(e.message, key, "assistant", turnId, e.timestamp);
     } else if (e.type === "user" && summaries.has(scope) && (e.isCompactSummary || e.uuid === summaries.get(scope).anchor ||
       !summaries.get(scope).anchor && e.isSynthetic)) {
@@ -175,6 +192,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null, source = n
       const stream = streams.get(scope);
       if (stream && raw?.type === "content_block_delta" && raw.delta?.type === "text_delta") {
         const k = `stream:${scope}:${stream}:${raw.index}`;
+        streamKeys.add(k);
         put(k, "assistant", "Claude", (items.get(k)?.body || "") + raw.delta.text, turnId);
       }
       if (raw?.type === "message_stop") streams.delete(scope);
@@ -200,7 +218,7 @@ export function claudeTrace(rows, { child = false, activeTurn = null, source = n
     else if (e.type === "result") {
       for (const id of e.parent_tool_use_id ? [] : e.user_message_uuids || []) placeSteer(id, "inserted");
       if (e.is_error && !interrupted && !(!e.parent_tool_use_id && resumedTurns.delete(turnId))) put(key, "error", "Claude 返回错误", (e.errors?.length ? e.errors : [e.result || e.subtype]).join("\n"), turnId);
-      const last = [...items.values()].findLast(item => item.turnId === turnId && item.kind === "assistant" && item.body);
+      const last = (replies.get(turnId) ?? []).map(key => items.get(key)).findLast(item => item?.turnId === turnId && item.kind === "assistant" && item.body);
       if (last) Object.assign(last, { turnElapsedMs: e.duration_ms, turnCostEstimate: row.costEstimate, turnCompletedAt: row.completedAt ?? e.timestamp });
     } else if (e.type === "system" && e.subtype === "init" && e.cwd) cwd = e.cwd.replace(/\/+$/, "");
     else if (e.type === "system" && e.subtype === "status") {

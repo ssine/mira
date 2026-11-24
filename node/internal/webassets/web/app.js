@@ -504,10 +504,18 @@ function paintClaudeTranscript(threadId, thread, result, options = {}) {
   const previous = agent.transcriptThreadId === threadId ? agent.transcriptItems : null;
   agent.transcriptThreadId = threadId; agent.transcriptGeneration = 1;
   const previousCosts = new Map(agent.transcriptItems.filter(i => i.turnCostEstimate).map(i => [i.key, i.turnCostEstimate]));
-  for (const item of result.trace) item.turnCostEstimate ??= previousCosts.get(item.key);
+  // Every read projects new objects. Keep those whose card would look the same,
+  // so a live repaint only visits what changed.
+  const known = new Map((previous ?? []).map(item => [item.key, item]));
+  for (const [index, item] of result.trace.entries()) {
+    item.turnCostEstimate ??= previousCosts.get(item.key);
+    const same = known.get(item.key);
+    if (sameClaudeItem(same, item)) result.trace[index] = Object.assign(same, item);
+  }
   agent.transcriptItems = result.trace; agent.transcriptCursor = result.nextCursor;
   agent.transcriptTotal = result.trace.length; agent.transcriptActivityCount = currentAgentThread()?.itemCount;
-  let cards = (options.poll || options.restored) && previous ? patchClaudeTranscript(previous, result.trace) : null;
+  // Patching only ever appends to the flat tail; reconciling bundles it again.
+  let cards = (options.poll || options.restored) && previous && $("#conversationTrace").children.length <= 2 * flatTailLimit ? patchClaudeTranscript(previous, result.trace) : null;
   if (cards) {
     // Question forms depend on the running turn even when unchanged.
     for (const item of result.trace) if (item.questionId && !cards.has(item.key)) cards.set(item.key, traceCard(item.key));
@@ -547,10 +555,24 @@ function decorateClaudeCards(cards, result, forms, thread) {
   }
 }
 
+// Cards by key. Entries are verified on use, so a stale one only costs a scan.
+const traceCardIndex = new Map();
+function indexedTraceCard(key) {
+  const card = traceCardIndex.get(key);
+  if (!card) return null;
+  const group = card._miraToolGroup;
+  if ((card.dataset.traceKey === key || card._miraLiveKey === key) && (card.isConnected ||
+      group?.isConnected && group._miraEntries.get(card.dataset.traceKey)?.card === card)) return card;
+  traceCardIndex.delete(key);
+  return null;
+}
+
 function traceCard(key) {
+  const indexed = indexedTraceCard(key);
+  if (indexed) return indexed;
   const trace = $("#conversationTrace");
   const card = trace.querySelector(`[data-trace-key="${CSS.escape(key)}"]`);
-  if (card) return card;
+  if (card) { traceCardIndex.set(key, card); return card; }
   for (const group of trace.querySelectorAll(".tool-group")) {
     const entry = group._miraEntries?.get(key);
     if (entry) return entry.card ?? materializeToolEntry(group, key, entry);
@@ -562,7 +584,7 @@ function traceCard(key) {
 function sameClaudeItem(left, right) {
   return Boolean(left) && ["kind", "title", "body", "status", "turnId", "compactionSummary", "steerState", "questionId", "questionState", "completedAt", "turnElapsedMs", "turnCompletedAt"]
     .every(field => left[field] === right[field]) && left.image?.url === right.image?.url &&
-    JSON.stringify([left.activity, left.turnCostEstimate]) === JSON.stringify([right.activity, right.turnCostEstimate]);
+    ["activity", "turnCostEstimate"].every(field => left[field] === right[field] || JSON.stringify(left[field]) === JSON.stringify(right[field]));
 }
 
 // A poll usually appends to the tail or finishes a running item. Update only
@@ -602,7 +624,7 @@ function patchClaudeTranscript(previous, next) {
   if (![tail, tail?._miraToolGroup, tail?.closest(".tool-group"), groupedEntries.get(kept.at(-1).key)?.group].includes(trace.lastElementChild)) return null;
   const changed = new Map(), turns = new Set();
   for (const item of next) {
-    if (sameClaudeItem(known.get(item.key), item)) continue;
+    if (known.get(item.key) === item) continue;
     changed.set(item.key, upsertTrace(item.key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", transcriptTraceOptions(item)));
     if (item.kind === "assistant") turns.add(item.turnId);
   }
@@ -1208,13 +1230,14 @@ function acceptThreadReadState(threadId, state) {
 
 function visibleReadPosition() {
   if (document.hidden || !document.hasFocus() || document.body.dataset.view !== "agentView" ||
-      (!agentSidebarDocked && agentThreadDrawerOpen) || document.querySelector("dialog[open]") ||
-      agent.transcriptGap || agent.transcriptLoadingOlder || agent.transcriptThreadId !== agent.threadId ||
-      !traceNearBottom(null, 24)) return null;
+      (!agentSidebarDocked && agentThreadDrawerOpen) ||
+      agent.transcriptGap || agent.transcriptLoadingOlder || agent.transcriptThreadId !== agent.threadId) return null;
   const generation = agent.transcriptGeneration, itemCount = agent.transcriptActivityCount;
   const state = agent.readStates.get(agent.threadId);
   if (!state || state.generation !== generation || !Number.isSafeInteger(itemCount) ||
       itemCount <= state.readItemCount || state.latestItemSeq <= state.readItemCount) return null;
+  // These read layout or search the page; scrolling asks only while unread.
+  if (!traceNearBottom(null, 24) || document.querySelector("dialog[open]")) return null;
   return { threadId: agent.threadId, generation, itemCount };
 }
 
@@ -3602,11 +3625,16 @@ function decorateTraceFileReferences(root, fileReferences = new Map(), context =
 }
 
 function createTraceCopyButton(card) {
-  const button = element("button", "trace-copy");
-  button.type = "button";
-  button.title = "复制消息原文（保留 Markdown）";
-  button.setAttribute("aria-label", "复制这条消息的原文");
-  button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.25" y="5.25" width="8" height="8" rx="1.25"></rect><path d="M10.75 5.25V3.5c0-.69-.56-1.25-1.25-1.25h-6c-.69 0-1.25.56-1.25 1.25v6c0 .69.56 1.25 1.25 1.25h1.75"></path></svg>';
+  // Cloned for every card: a long conversation has thousands of them.
+  let template = createTraceCopyButton.template;
+  if (!template) {
+    template = createTraceCopyButton.template = element("button", "trace-copy");
+    template.type = "button";
+    template.title = "复制消息原文（保留 Markdown）";
+    template.setAttribute("aria-label", "复制这条消息的原文");
+    template.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5.25" y="5.25" width="8" height="8" rx="1.25"></rect><path d="M10.75 5.25V3.5c0-.69-.56-1.25-1.25-1.25h-6c-.69 0-1.25.56-1.25 1.25v6c0 .69.56 1.25 1.25 1.25h1.75"></path></svg>';
+  }
+  const button = template.cloneNode(true);
   button.addEventListener("click", async (event) => {
     event?.preventDefault();
     event?.stopPropagation();
@@ -3636,31 +3664,41 @@ function setTraceMetadata(card, options = {}) {
   for (const field of ["turnCompletedAt", "turnElapsedMs", "turnElapsedApproximate", "turnCostEstimate"]) {
     if (options[field] != null) card[`_mira${field[0].toUpperCase()}${field.slice(1)}`] = options[field];
   }
-  const completed = footer.querySelector(".trace-completed");
-  const elapsed = footer.querySelector(".trace-elapsed");
-  const cost = footer.querySelector(".trace-cost");
   const clock = card._miraTimingScope === "turn" ? "" : traceClock(card._miraCompletedAt);
-  completed.textContent = clock;
-  completed.title = card._miraTimingScope === "recorded" ? "消息记录时间" : "消息时间";
-  completed.hidden = !clock;
-  elapsed.textContent = "";
-  elapsed.hidden = true;
-  cost.textContent = "";
-  cost.hidden = true;
+  setFooterText(footer.querySelector(".trace-completed"), clock,
+    card._miraTimingScope === "recorded" ? "消息记录时间" : "消息时间");
 }
 
-function refreshTurnFooters(turnId = null) {
+// Footers of unchanged turns are revisited often; identical writes would still
+// invalidate layout of the whole conversation.
+function setFooterText(node, text, title) {
+  if (node.textContent !== text) node.textContent = text;
+  if (node.hidden === Boolean(text)) node.hidden = !text;
+  if (title !== undefined && node.title !== title) node.title = title;
+}
+
+// One turn ID, a set of them, or null for every turn.
+function refreshTurnFooters(turnIds = null) {
+  const selected = turnIds == null ? null : turnIds instanceof Set ? turnIds : new Set([turnIds]);
   const turns = new Map();
   for (const card of $("#conversationTrace").querySelectorAll(".trace-card.assistant")) {
     const id = card.dataset.turnId;
-    if (turnId && id !== turnId) continue;
+    if (selected && !selected.has(id)) continue;
     setTraceMetadata(card);
-    if (!id || !card.querySelector(".trace-body")._miraSource) continue;
+    if (!id || !card.querySelector(".trace-body")._miraSource) {
+      setFooterText(card.querySelector(".trace-elapsed"), "");
+      setFooterText(card.querySelector(".trace-cost"), "");
+      continue;
+    }
     if (!turns.has(id)) turns.set(id, []);
     turns.get(id).push(card);
   }
   for (const [id, cards] of turns) {
     const last = cards.at(-1);
+    for (const card of cards) if (card !== last) {
+      setFooterText(card.querySelector(".trace-elapsed"), "");
+      setFooterText(card.querySelector(".trace-cost"), "");
+    }
     const stored = cards.findLast((card) => Number.isFinite(card._miraTurnElapsedMs));
     const legacy = cards.findLast((card) => card._miraTimingScope === "turn" && Number.isFinite(card._miraElapsedMs));
     const live = agent.turnTimings.get(id);
@@ -3671,26 +3709,20 @@ function refreshTurnFooters(turnId = null) {
     // Retain the aggregate through a disconnect or a refresh before storage catches up.
     setTraceMetadata(last, { turnCompletedAt: completedAt, turnElapsedMs: elapsedMs,
       turnElapsedApproximate: approximate, ...(costEstimate ? { turnCostEstimate: costEstimate } : {}) });
-    const elapsed = last.querySelector(".trace-elapsed");
     const duration = formatActivityDuration(elapsedMs);
-    elapsed.textContent = duration ? `本轮总耗时${approximate ? "约" : ""} ${duration}` : "";
-    elapsed.hidden = !duration;
-    const cost = last.querySelector(".trace-cost");
+    setFooterText(last.querySelector(".trace-elapsed"), duration ? `本轮总耗时${approximate ? "约" : ""} ${duration}` : "");
     const finished = Boolean(completedAt || duration);
-    cost.textContent = finished ? `费用 ${compactCost(costEstimate)}` : "";
-    cost.hidden = !finished;
-    cost.title = costEstimate?.status === "partial"
+    let title = costEstimate?.status === "partial"
       ? `部分请求已计价：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
       : costEstimate?.status === "complete"
         ? `API 估算：${formatEstimatedCost(costEstimate.amount)} · Standard 公开价，非套餐实际扣费`
         : "暂无法估算本轮费用：缺少请求用量、模型或对应价格";
-    if (costEstimate?.basis === "claude_sdk") cost.title = `Claude SDK 估算：${formatEstimatedCost(costEstimate.amount)}，网关实际扣费可能不同${costEstimate.status === "partial" ? "；部分记录缺失" : ""}`;
-    if (costEstimate?.running) cost.title = costEstimate.note;
+    if (costEstimate?.basis === "claude_sdk") title = `Claude SDK 估算：${formatEstimatedCost(costEstimate.amount)}，网关实际扣费可能不同${costEstimate.status === "partial" ? "；部分记录缺失" : ""}`;
+    if (costEstimate?.running) title = costEstimate.note;
+    setFooterText(last.querySelector(".trace-cost"), finished ? `费用 ${compactCost(costEstimate)}` : "", title ?? "");
     const clock = last.querySelector(".trace-completed");
     if (clock.hidden && traceClock(completedAt)) {
-      clock.textContent = traceClock(completedAt);
-      clock.title = "本轮结束时间（历史未记录单条消息时间）";
-      clock.hidden = false;
+      setFooterText(clock, traceClock(completedAt), "本轮结束时间（历史未记录单条消息时间）");
     }
   }
 }
@@ -3716,9 +3748,24 @@ function cancelTraceStreamRender(card) {
   traceStreamRenders.delete(card);
 }
 
+// Reserve roughly the height a body will take. A wide (CJK) character takes two columns.
+function estimatedTraceHeight(value, width) {
+  const columns = Math.max(20, Math.min(808, width - 48) / 8);
+  let lines = 1, column = 0;
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code === 10) { lines++; column = 0; continue; }
+    const size = code >= 0x2e80 ? 2 : 1;
+    if (column + size > columns) { lines++; column = 0; }
+    column += size;
+  }
+  return Math.max(24, lines * 25);
+}
+
 function setTraceBody(card, body, kind = card.dataset.traceKind) {
   const value = body ?? "";
   const node = card.querySelector(".trace-body");
+  if (node._miraSource !== value) node._miraMeasuredHeight = undefined;
   cancelTraceStreamRender(card);
   node._miraStreamText = null;
   updateTraceBodyState(card, value, kind);
@@ -3731,15 +3778,14 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
     // Only prose occupies space while its contents are absent. Tool details are
     // already hidden by <details>; their group has independent lightweight rows.
     if (!collapsible) {
-      const columns = Math.max(20, Math.min(808, traceScroller().clientWidth - 48) / 8);
-      const lines = value.split("\n").reduce((sum, line) => sum + Math.max(1, Math.ceil(line.length / columns)), 0);
-      node.style.minHeight = `${node._miraMeasuredHeight ?? Math.max(24, lines * 25)}px`;
+      const height = node._miraMeasuredHeight ?? estimatedTraceHeight(value, traceViewport().width);
+      if (value && node.style.minHeight !== `${height}px`) node.style.minHeight = `${height}px`;
     }
-    node.replaceChildren();
+    if (node.firstChild) node.replaceChildren();
     return;
   }
   card._miraDeferredBody = false;
-  node.style.minHeight = "";
+  if (node.style.minHeight) node.style.minHeight = "";
   if (markdown) {
     const fileReferences = new Map();
     const sourceContext = card._miraFileContext ?? {};
@@ -3778,8 +3824,7 @@ function setTraceBody(card, body, kind = card.dataset.traceKind) {
 function queueTraceStreamRender(card, value, kind, follow, delta = null) {
   const node = card.querySelector(".trace-body");
   if (!card._miraViewportVisible || card._miraExpandable && !card.querySelector(".trace-detail").open) {
-    updateTraceBodyState(card, value, kind);
-    card._miraDeferredBody = true;
+    setTraceBody(card, value, kind);
     return;
   }
   const queued = traceStreamRenders.get(card);
@@ -3823,7 +3868,7 @@ function queueTraceStreamRender(card, value, kind, follow, delta = null) {
 function traceScroller() { return $("#conversationScroll"); }
 
 function traceViewport() {
-  return traceViewport.renderer ??= new ViewportRenderer(traceScroller());
+  return traceViewport.renderer ??= new ViewportRenderer(traceScroller(), $("#conversationTrace"));
 }
 
 function watchTraceBody(card) {
@@ -3831,18 +3876,20 @@ function watchTraceBody(card) {
   traceViewport().watch(card, () => {
     card._miraViewportVisible = true;
     if (card._miraDeferredBody) setTraceBody(card, card.querySelector(".trace-body")._miraSource, card.dataset.traceKind);
-    refreshTurnFooters(card.dataset.turnId);
-  }, () => {
+  }, height => {
     card._miraViewportVisible = false;
     const body = card.querySelector(".trace-body");
-    const height = body.getBoundingClientRect().height;
-    if (!["tool", "reasoning", "compaction", "recovery"].includes(card.dataset.traceKind) && height) {
+    if (height) {
       body._miraMeasuredHeight = height;
       body.style.minHeight = `${height}px`;
     }
     cancelTraceStreamRender(card);
     body.replaceChildren();
     card._miraDeferredBody = true;
+  }, {
+    shown: card._miraViewportVisible === true,
+    measure: () => ["tool", "reasoning", "compaction", "recovery"].includes(card.dataset.traceKind) ? 0
+      : card.querySelector(".trace-body").getBoundingClientRect().height,
   });
 }
 
@@ -3888,17 +3935,15 @@ function groupedTrace(kind, title, options = {}) {
   return options.collapseTools !== false && (kind === "tool" || (kind === "reasoning" && title !== "计划"));
 }
 
-function ensureToolGroup(trace, turnId = "", before = null) {
-  let group = before ? before.previousElementSibling : trace.lastElementChild;
-  if (group?.classList.contains("tool-group") && group.dataset.turnId === turnId) return group;
-  group = element("details", "tool-group");
+function createToolGroup(turnId = "") {
+  const group = element("details", "tool-group");
   group.dataset.turnId = turnId;
   group._miraEntries = new Map();
   const summary = element("summary", "tool-group-summary");
   summary.append(element("span", "tool-group-total"), element("span", "tool-group-latest"), element("span", "tool-group-counts"));
   group.append(summary, element("div", "tool-group-items"));
   group.addEventListener("toggle", () => {
-    if (group.open) mountToolGroup(group);
+    if (group.open) { mountToolGroup(group); traceViewport().settle(); }
     else {
       for (const entry of group._miraEntries.values()) {
         if (entry.row) traceViewport().forget(entry.row);
@@ -3908,6 +3953,13 @@ function ensureToolGroup(trace, turnId = "", before = null) {
       group.querySelector(".tool-group-items").replaceChildren();
     }
   });
+  return group;
+}
+
+function ensureToolGroup(trace, turnId = "", before = null) {
+  const previous = before ? before.previousElementSibling : trace.lastElementChild;
+  if (previous?.classList.contains("tool-group") && previous.dataset.turnId === turnId) return previous;
+  const group = createToolGroup(turnId);
   trace.insertBefore(group, before);
   return group;
 }
@@ -3922,11 +3974,17 @@ function materializeToolEntry(group, key, entry) {
 
 function mountToolGroup(group) {
   const host = group.querySelector(".tool-group-items");
+  let cursor = host.firstChild;
   for (const [key, entry] of group._miraEntries) {
-    if (entry.row) continue;
+    if (entry.row) {
+      // Rows follow entry order even when an entry arrived before them.
+      if (entry.row === cursor) cursor = cursor.nextSibling;
+      else host.insertBefore(entry.row, cursor);
+      continue;
+    }
     const row = entry.row = element("div", "tool-row-placeholder");
     row.style.minHeight = `${entry.height ?? 32}px`;
-    host.append(row);
+    host.insertBefore(row, cursor);
     // Reconciliation must preserve an already visible expanded body before
     // restoring scrollTop; an asynchronous observer cannot do that after paint.
     if (entry.card?._miraViewportVisible) {
@@ -3935,17 +3993,18 @@ function mountToolGroup(group) {
       watchTraceBody(entry.card);
     }
     traceViewport().watch(row, () => {
-      if (!group.open) return;
-      const card = materializeToolEntry(group, key, entry);
+      const owner = entry.card?._miraToolGroup ?? group;
+      if (!owner.open) return;
+      const card = materializeToolEntry(owner, key, entry);
       row.replaceChildren(card);
       row.style.minHeight = "";
       watchTraceBody(card);
-    }, () => {
-      entry.height = Math.max(32, row.getBoundingClientRect().height);
+    }, height => {
+      entry.height = Math.max(32, height);
       row.style.minHeight = `${entry.height}px`;
       if (entry.card) traceViewport().forget(entry.card);
       row.replaceChildren();
-    });
+    }, { shown: row.firstChild !== null, measure: () => row.getBoundingClientRect().height });
   }
 }
 
@@ -3965,10 +4024,8 @@ function attachToolCard(group, key, card, before = null) {
   card._miraToolGroup = group;
   if (group.open) {
     mountToolGroup(group);
-    const nextRow = before && group._miraEntries.get(before.dataset.traceKey)?.row;
-    if (entry.row && nextRow?.parentNode === entry.row.parentNode) entry.row.parentNode.insertBefore(entry.row, nextRow);
     // An observed row may already be visible when streaming adds a card.
-    if (entry.row?.isConnected && traceViewport().rows.get(entry.row)?.visible) {
+    if (entry.row?.isConnected && traceViewport().rows.get(entry.row)?.shown) {
       entry.row.append(card);
       watchTraceBody(card);
     }
@@ -3998,17 +4055,19 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
   }
   const trace = $("#conversationTrace");
   const follow = options.autoScroll !== false && (options.forceScroll === true || traceNearBottom(trace));
-  trace.querySelector(".conversation-empty")?.remove();
+  // An empty notice is always the last child.
+  if (!options.detached && trace.lastElementChild?.classList.contains("conversation-empty")) trace.lastElementChild.remove();
   let card = (key && !options.skipLookup ? traceCard(key) : null) ?? options.reuseCard;
   let replacementPosition;
   if (card && card.dataset.traceKind !== kind && [card.dataset.traceKind, kind].includes("recovery")) {
     replacementPosition = { parent: card.parentNode, next: card.nextSibling };
+    traceViewport().forget(card);
     card.remove();
     card = null;
   }
   if (!card) {
     card = element("article", `trace-card ${kind}`);
-    if (key) card.dataset.traceKey = key;
+    if (key) { card.dataset.traceKey = key; traceCardIndex.set(key, card); }
     card.dataset.traceKind = kind;
     card._miraFileContext = options.sourceContext ?? (options.transcriptKey ? { cwd: "" } : {
       nodeId: agent.threadRuntimeNodeId || agent.socketNodeId || currentAgentThread()?.runtimeNodeId,
@@ -4029,6 +4088,7 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     } else if (kind === "assistant") {
       const footer = element("footer", "trace-footer");
       footer.append(element("span", "trace-completed"), element("span", "trace-elapsed"), element("span", "trace-cost"), copy);
+      for (const value of [...footer.children].slice(0, 3)) value.hidden = true;
       card.append(element("div", "trace-body"), footer);
     } else if (["compaction", "recovery"].includes(kind)) {
       const details = element("details", "trace-detail compaction-detail");
@@ -4048,21 +4108,30 @@ function upsertTrace(key, kind, title, body = undefined, status = "", options = 
     }
     if (!["image", "compaction", "recovery"].includes(kind)) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
-    if (groupedTrace(kind, title, options)) {
+    if (options.detached) {
+      // renderTranscript places the card together with its neighbours.
+    } else if (groupedTrace(kind, title, options)) {
       attachToolCard(options.group ?? ensureToolGroup(trace, options.turnId ?? ""), key, card);
     } else {
       trace.append(card);
     }
   } else {
-    card.className = `trace-card ${kind}`;
+    // Keep state classes such as a running jump highlight on unchanged kinds.
+    if (card.dataset.traceKind !== kind) card.className = `trace-card ${kind}`;
     card.dataset.traceKind = kind;
     if (options.sourceContext) card._miraFileContext = options.sourceContext;
-    if (card.querySelector(".trace-kind")) card.querySelector(".trace-kind").textContent = title;
-    if (card.querySelector(".trace-status")) card.querySelector(".trace-status").textContent = status;
-    if (!["image", "compaction", "recovery"].includes(kind) && body !== undefined && card.querySelector(".trace-body")._miraSource !== body) setTraceBody(card, body, kind);
+    const heading = card.querySelector(".trace-kind"), state = card.querySelector(".trace-status");
+    if (heading && heading.textContent !== title) heading.textContent = title;
+    if (state && state.textContent !== status) state.textContent = status;
+    // Streamed text is plain until its item completes; typeset it then even
+    // though the text itself did not change.
+    const shown = card.querySelector(".trace-body"), streamed = shown._miraStreamText && status !== "运行中";
+    if (!["image", "compaction", "recovery"].includes(kind) && body !== undefined && (shown._miraSource !== body || streamed)) setTraceBody(card, body, kind);
     setTraceMetadata(card, options);
   }
-  if (!trace.contains(card)) {
+  // What this card last showed; a live update makes it differ from storage.
+  card._miraItem = options.item ?? null;
+  if (!options.detached && !trace.contains(card)) {
     if (groupedTrace(kind, title, options)) attachToolCard(options.group ??
       (trace.contains(card._miraToolGroup) ? card._miraToolGroup : ensureToolGroup(trace, options.turnId ?? "")), key, card);
     else trace.append(card);
@@ -4323,6 +4392,7 @@ function resetAgentTranscript(threadId = null) {
   agent.transcriptGeneration = null;
   agent.transcriptItems = [];
   traceViewport.renderer?.clear();
+  traceCardIndex.clear();
   agent.transcriptCursor = null;
   agent.transcriptTotal = 0;
   agent.transcriptLoadingOlder = false;
@@ -4394,15 +4464,32 @@ function renderTurnDiagnostics() {
   void recoveryNotices.refresh();
 }
 
+const toolRangeEnd = page => /^t2:\d+:(\d+):\d+$/.exec(page.cursor ?? "")?.[1] ?? page.cursor;
+
+// Re-read records keep their item object, so rendering can skip them.
+function sameTranscriptItem(left, right) {
+  if (left === right) return true;
+  const keys = Object.keys(right);
+  return keys.length === Object.keys(left).length && keys.every(key => left[key] === right[key] ||
+    typeof left[key] === "object" && typeof right[key] === "object" && JSON.stringify(left[key]) === JSON.stringify(right[key]));
+}
+
 function mergeTranscriptItems(current, updates) {
   const merged = new Map();
   for (const item of [...current, ...updates]) {
     const previous = merged.get(item.key);
     if (previous?.toolFragment && item.toolFragment) {
+      // A page cursor names the snapshot it came from. An outline range is the
+      // same page in every snapshot until its tool gains another record;
+      // treating each read as a new page made one expansion load hundreds.
       const pageMap = new Map();
       for (const page of [...(previous.toolDetail?.pages ?? []), ...(item.toolDetail?.pages ?? [])]) {
-        const existing = pageMap.get(page.cursor);
-        pageMap.set(page.cursor, { ...existing, ...page, loaded: Boolean(existing?.loaded || page.loaded) });
+        // A loaded page answers the cursor it was requested with.
+        const outline = pageMap.get("outline");
+        const outlined = Number.isSafeInteger(page.from) || outline?.cursor === page.cursor;
+        const id = outlined ? "outline" : page.cursor, existing = pageMap.get(id);
+        const same = existing && (!outlined || toolRangeEnd(existing) === toolRangeEnd(page));
+        pageMap.set(id, same ? { ...existing, ...page, cursor: existing.cursor, loaded: Boolean(existing.loaded || page.loaded) } : page);
       }
       const previousHasInput = previous.toolFragment.hasInput ?? previous.toolFragment.input != null;
       const itemHasInput = item.toolFragment.hasInput ?? item.toolFragment.input != null;
@@ -4418,7 +4505,7 @@ function mergeTranscriptItems(current, updates) {
         hasOutput: itemHasOutput || previousHasOutput,
         materialized: Boolean(item.toolFragment.materialized || previous.toolFragment.materialized),
       };
-      merged.set(item.key, {
+      const next = {
         ...previous, ...item, ...(materialized ?? {}),
         sourceItemSeq: Math.min(previous.sourceItemSeq, item.sourceItemSeq),
         toolDetail: pageMap.size ? { pages: [...pageMap.values()] } : undefined,
@@ -4429,10 +4516,13 @@ function mergeTranscriptItems(current, updates) {
           toolFragment: fragments,
           body: [fragments.input ? `输入\n${fragments.input}` : "", fragments.output ? `输出\n${fragments.output}` : ""].filter(Boolean).join("\n\n"),
         } : {}),
-      });
-    } else merged.set(item.key, previous && previous.turnId === item.turnId
-      ? { ...item, turnCostEstimate: item.turnCostEstimate ?? previous.turnCostEstimate }
-      : item);
+      };
+      merged.set(item.key, sameTranscriptItem(previous, next) ? previous : next);
+    } else {
+      const cost = previous && previous.turnId === item.turnId ? item.turnCostEstimate ?? previous.turnCostEstimate : undefined;
+      const next = cost === undefined ? item : { ...item, turnCostEstimate: cost };
+      merged.set(item.key, previous && sameTranscriptItem(previous, next) ? previous : next);
+    }
   }
   const narratives = new Map();
   return [...merged.values()].sort((left, right) =>
@@ -4440,7 +4530,7 @@ function mergeTranscriptItems(current, updates) {
     (left.kind === "image") - (right.kind === "image") || (left.imageIndex ?? 0) - (right.imageIndex ?? 0))
     .filter((item) => {
       if (!["user", "assistant", "reasoning"].includes(item.kind)) return true;
-      const signature = JSON.stringify([item.turnId, item.kind, item.phase, item.body]);
+      const signature = `${item.turnId ?? ""}\n${item.kind}\n${item.phase ?? ""}\n${item.body ?? ""}`;
       const previous = narratives.get(signature);
       if (previous && (item.turnId || item.sourceItemSeq - previous.sourceItemSeq <= 3)) return false;
       narratives.set(signature, item);
@@ -4525,8 +4615,9 @@ function scheduleTranscriptCosts(threadId, transcript) {
       for (const turnId of batch) query.append("turnId", turnId);
       const result = await api(`${engineOf(threadId) === "claude" ? "/v1/claude/sessions" : "/v1/codex/threads"}/${encodeURIComponent(threadId)}/costs?${query}`);
       if (agent.threadId !== threadId || agent.transcriptGeneration !== result.generation) return;
+      const turns = new Set(batch);
       for (const item of agent.transcriptItems) {
-        if (item.kind === "assistant" && item.turnId && Object.hasOwn(result.turnCostEstimates ?? {}, item.turnId)) {
+        if (item.kind === "assistant" && turns.has(item.turnId) && Object.hasOwn(result.turnCostEstimates ?? {}, item.turnId)) {
           item.turnCostEstimate = result.turnCostEstimates[item.turnId];
         }
       }
@@ -4537,7 +4628,7 @@ function scheduleTranscriptCosts(threadId, transcript) {
       }
       const projected = agent.threads.find((thread) => thread.threadId === threadId);
       if (projected) rememberThreadCost({ ...projected, ...result });
-      refreshTurnFooters();
+      refreshTurnFooters(turns);
       renderThreadStates();
     }
   })();
@@ -4547,16 +4638,20 @@ function scheduleTranscriptCosts(threadId, transcript) {
 }
 
 function renderHistoryLoader(trace) {
-  if (agent.transcriptCursor === null) return;
+  if (agent.transcriptCursor === null) return null;
+  const existing = trace.querySelector(":scope > .history-loader");
+  if (existing) return existing;
   const loader = element("div", "history-loader");
+  loader.dataset.scrollAnchor = "none"; // Older messages arrive below it.
   const status = element("span", "history-load-status");
   status.setAttribute("role", "status");
   const button = element("button", "history-load-button", "加载失败，点击重试");
   button.type = "button";
   button.dataset.loadOlder = "true";
   loader.append(status, button);
-  trace.append(loader);
+  trace.prepend(loader);
   updateHistoryLoader();
+  return loader;
 }
 
 function updateHistoryLoader() {
@@ -4588,15 +4683,20 @@ function scheduleOlderTranscriptLoad() {
 // remains the user's choice. Prefer a visible card over a raw pixel offset.
 function captureTraceViewport() {
   const scroll = traceScroller();
-  const top = scroll.getBoundingClientRect().top;
-  const card = [...$("#conversationTrace").querySelectorAll(".trace-card[data-trace-key]")]
-    .find(card => card.getBoundingClientRect().bottom > top && card.getBoundingClientRect().height > 0);
-  return { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight,
+  const anchor = traceViewport().anchor();
+  // Rows survive reconciliation; the key only matters when a card is replaced.
+  const card = anchor?.element.matches(".trace-card[data-trace-key]") ? anchor.element : anchor?.element.querySelector(".trace-card[data-trace-key]");
+  return { mode: "stable", top: scroll.scrollTop, height: scroll.scrollHeight, anchor,
     anchorKey: card?.dataset.traceKey, anchorTop: card?.getBoundingClientRect().top };
 }
 
 function restoreTraceViewport(viewport) {
   const scroll = traceScroller();
+  if (viewport.anchor?.element.isConnected && viewport.anchor.element.getClientRects().length) {
+    const moved = viewport.anchor.element.getBoundingClientRect().top - viewport.anchor.top;
+    if (moved) scroll.scrollTop += moved;
+    return;
+  }
   const anchor = viewport.anchorKey && $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(viewport.anchorKey)}"]`);
   scroll.scrollTop = anchor ? scroll.scrollTop + anchor.getBoundingClientRect().top - viewport.anchorTop
     : viewport.mode === "prepend" ? viewport.top + scroll.scrollHeight - viewport.height : viewport.top;
@@ -4622,7 +4722,7 @@ function compactionSummaryKeys(items) {
 
 function transcriptTraceOptions(item) {
   return {
-    autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, turnId: item.turnId,
+    item, autoScroll: false, deferTurnFooter: true, activity: item.activity, summaryParts: item.summaryParts, image: item.image, turnId: item.turnId,
     transcriptKey: item.key, sourceContext: { cwd: "", ...item.sourceContext, sourceThreadId: agent.threadId, sourceTurnId: item.turnId }, toolDetail: item.toolDetail, compactionSummary: item.compactionSummary ?? "",
     completedAt: item.completedAt, elapsedMs: item.elapsedMs, timingScope: item.timingScope,
     elapsedApproximate: item.elapsedApproximate,
@@ -4633,129 +4733,323 @@ function transcriptTraceOptions(item) {
   };
 }
 
+// The conversation's rows in order, including those bundled in sections.
+function traceRows(trace) {
+  return [...trace.children].flatMap(row => row.classList.contains("trace-section") ? [...row.children] : row);
+}
+
 // Folded groups own detached cards. Keep them at the group's position among
 // replies so each reconciliation uses conversation order, not DOM visibility.
 function traceCardsInOrder(trace) {
-  return [...trace.children].flatMap(row => row.classList.contains("tool-group")
+  return traceRows(trace).flatMap(row => row.classList.contains("tool-group")
     ? [...row._miraEntries.values()].map(entry => entry.card).filter(Boolean)
     : row.classList.contains("trace-card") ? [row] : [...row.querySelectorAll(".trace-card")]);
 }
 
+// Make `container` hold exactly `nodes`, touching only what differs.
+function placeRows(container, nodes, removed) {
+  const keep = new Set(nodes);
+  let cursor = container.firstChild;
+  const skipRemoved = () => {
+    while (cursor && !keep.has(cursor)) {
+      const next = cursor.nextSibling;
+      removed(cursor);
+      cursor.remove();
+      cursor = next;
+    }
+  };
+  for (const node of nodes) {
+    skipRemoved();
+    if (node === cursor) cursor = cursor.nextSibling;
+    else container.insertBefore(node, cursor);
+  }
+  skipRemoved();
+}
+
+// Laying out thousands of sibling rows takes tens of milliseconds whenever one
+// of them changes. Rows well above the tail are bundled into sections that lay
+// out independently; the tail, where output arrives, stays flat. Sections are
+// stable: a row never leaves the section it was put in.
+const sectionRows = 50, flatTailRows = 120, flatTailLimit = 220;
+
+function sectionTraceRows(trace, loader, nodes, removed) {
+  const runs = []; // { section | null, nodes }
+  const used = new Set();
+  for (const node of nodes) {
+    const parent = node.parentNode;
+    const section = parent?.parentNode === trace && parent.classList.contains("trace-section") ? parent : null;
+    const run = runs.at(-1);
+    // A new row joins its neighbours; a placed one keeps its place.
+    if (run && (run.section === section || !parent || used.has(section))) run.nodes.push(node);
+    else { runs.push({ section, nodes: [node] }); if (section) used.add(section); }
+  }
+  const isUser = node => node.classList.contains("user");
+  const result = [];
+  for (const [index, run] of runs.entries()) {
+    if (run.section) { result.push(run); continue; }
+    const last = index === runs.length - 1;
+    if (run.nodes.length <= (last ? flatTailLimit : sectionRows)) { result.push(run); continue; }
+    const end = last ? run.nodes.length - flatTailRows : run.nodes.length;
+    let start = 0;
+    while (start < end) {
+      let stop = Math.min(end, start + sectionRows);
+      // Margins around user messages depend on their sibling: break before one.
+      while (stop < end && stop < start + 2 * sectionRows && !(isUser(run.nodes[stop]) && !isUser(run.nodes[stop - 1]))) stop++;
+      while (stop < run.nodes.length && isUser(run.nodes[stop - 1])) stop++;
+      const bundle = run.nodes.slice(start, stop);
+      // Moving a row that is being read would lose its selection and focus.
+      if (bundle.some(node => node.isConnected && (traceViewport().shown.has(node) || node.contains(document.activeElement)))) break;
+      result.push({ section: element("div", "trace-section"), nodes: bundle });
+      start = stop;
+    }
+    if (start < run.nodes.length) result.push({ section: null, nodes: run.nodes.slice(start) });
+  }
+  for (const run of result) if (run.section) placeRows(run.section, run.nodes, removed);
+  placeRows(trace, [...(loader ? [loader] : []), ...result.flatMap(run => run.section ?? run.nodes)], removed);
+}
+
+function forgetTraceRow(row) {
+  if (row.classList.contains("trace-section")) { for (const child of row.children) forgetTraceRow(child); return; }
+
+  for (const entry of row._miraEntries?.values() ?? []) {
+    if (entry.row) traceViewport().forget(entry.row);
+    if (entry.card) traceViewport().forget(entry.card);
+    entry.row?.remove();
+    entry.row = null;
+  }
+  traceViewport().forget(row);
+}
+
+const narrativeBody = card => card.querySelector(".trace-body")._miraSource ?? "";
+const narrativeKey = (turnId, kind, body) => `${turnId ?? ""}\n${kind}\n${body ?? ""}`;
+
+// Reconcile the open transcript with agent.transcriptItems. A running
+// conversation is re-read every few seconds, so unchanged items must cost
+// nothing: cards and groups are kept by key, an item object that a card already
+// shows is skipped, and only rows that actually differ are written.
 function renderTranscript(fallbackThread, options = {}) {
   scheduleMessageRailUpdate();
-  const existingTrace = $("#conversationTrace");
+  const trace = $("#conversationTrace");
   const visibleItems = agent.transcriptItems;
   const summaryKeys = compactionSummaryKeys(visibleItems);
-  const hiddenSummaries = new Set(visibleItems.filter(item => summaryKeys.has(item.key))
-    .map(item => JSON.stringify([item.turnId ?? "", item.body?.trim()])));
-  const previousCards = traceCardsInOrder(existingTrace);
-  const previousGroupEntries = new Map([...existingTrace.querySelectorAll(".tool-group")]
-    .flatMap(group => [...group._miraEntries].map(([key, entry]) => [key, {
-      ...entry, height: entry.row?.getBoundingClientRect().height || entry.height,
-    }])));
-  // Keep expanded details and decoded images intact across reconciliation.
-  const reusableCards = new Map(previousCards
-    .map((card) => [card.dataset.traceKey, card]));
-  const liveCards = options.preserveLive || options.preserveViewport?.mode === "prepend"
-    ? previousCards.filter(card => card.dataset.traceKey?.startsWith("item-") && card.dataset.traceKind !== "compaction" || card.dataset.pendingUser === "true")
-      .filter(card => card.dataset.traceKind !== "assistant" || !hiddenSummaries.has(
-        JSON.stringify([card.dataset.turnId ?? "", card.querySelector(".trace-body")._miraSource?.trim()])))
-    : [];
-  const liveCompactions = [...existingTrace.querySelectorAll('.trace-card.compaction')]
-    .filter((card) => card.dataset.traceKey?.startsWith("item-"));
-  const preciseClocks = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
-    .filter((card) => card._miraCompletedAt && !card._miraTimingScope)
-    .map((card) => [JSON.stringify([card.dataset.turnId ?? null, card.querySelector('.trace-body')._miraSource]),
-      { completedAt: card._miraCompletedAt }]));
-  const knownTurnTimings = new Map([...existingTrace.querySelectorAll('.trace-card.assistant')]
-    .filter((card) => card.dataset.turnId && Number.isFinite(card._miraTurnElapsedMs))
-    .map((card) => [card.dataset.turnId, { turnCompletedAt: card._miraTurnCompletedAt,
-      turnElapsedMs: card._miraTurnElapsedMs, turnElapsedApproximate: card._miraTurnElapsedApproximate,
-      turnCostEstimate: card._miraTurnCostEstimate }]));
-  const expandedItems = new Set([...$("#conversationTrace").querySelectorAll(".trace-detail[open]")]
-    .map((details) => details.closest(".trace-card").dataset.traceKey));
-  const expandedGroups = new Set([...existingTrace.querySelectorAll(".tool-group[open]")]
-    .flatMap(group => [...group._miraEntries.keys()]));
-  traceViewport().clear();
-  const trace = clear($("#conversationTrace"));
-  renderHistoryLoader(trace);
-  const batchCards = new Map();
+  const previousCards = traceCardsInOrder(trace);
+  const previousEntries = new Map(), previousGroups = new Map();
+  for (const group of trace.querySelectorAll(".tool-group")) {
+    for (const [key, entry] of group._miraEntries) { previousEntries.set(key, entry); previousGroups.set(key, group); }
+  }
+  const reusableCards = new Map(previousCards.map(card => [card.dataset.traceKey, card]));
+  const isLive = card => card.dataset.pendingUser === "true" ||
+    card.dataset.traceKey?.startsWith("item-") && card.dataset.traceKind !== "compaction";
+  let liveCards = [];
+  if (options.preserveLive || options.preserveViewport?.mode === "prepend") {
+    liveCards = previousCards.filter(isLive);
+    if (liveCards.length && summaryKeys.size) {
+      const hidden = new Set(visibleItems.filter(item => summaryKeys.has(item.key))
+        .map(item => narrativeKey(item.turnId, "assistant", item.body?.trim())));
+      liveCards = liveCards.filter(card => card.dataset.traceKind !== "assistant" ||
+        !hidden.has(narrativeKey(card.dataset.turnId, "assistant", narrativeBody(card).trim())));
+    }
+  }
+  const liveCompactions = previousCards.filter(card => card.dataset.traceKind === "compaction" && card.dataset.traceKey?.startsWith("item-"));
+
+  // Clocks and turn timings measured live survive a card that storage replaces.
+  let turnKnowledge = null;
+  const knownTurn = turnId => {
+    if (!turnKnowledge) {
+      turnKnowledge = new Map();
+      for (const card of previousCards) {
+        if (card.dataset.traceKind !== "assistant" || !card.dataset.turnId) continue;
+        const known = turnKnowledge.get(card.dataset.turnId) ?? { clocks: new Map(), timing: undefined };
+        turnKnowledge.set(card.dataset.turnId, known);
+        if (card._miraCompletedAt && !card._miraTimingScope) known.clocks.set(narrativeBody(card), card._miraCompletedAt);
+        if (Number.isFinite(card._miraTurnElapsedMs)) known.timing = { turnCompletedAt: card._miraTurnCompletedAt,
+          turnElapsedMs: card._miraTurnElapsedMs, turnElapsedApproximate: card._miraTurnElapsedApproximate,
+          turnCostEstimate: card._miraTurnCostEstimate };
+      }
+    }
+    return turnKnowledge.get(turnId);
+  };
+  // A message that streamed here keeps its card when its stored record arrives
+  // under another key; a new card would briefly show an empty message.
+  let liveByBody = null;
+  const adoptLiveCard = (key, item) => {
+    if (!["user", "assistant", "reasoning"].includes(item.kind) || !item.body) return undefined;
+    liveByBody ??= new Map(previousCards.filter(card => isLive(card) && !visibleKeys.has(card.dataset.traceKey))
+      .map(card => [narrativeKey(card.dataset.turnId, card.dataset.traceKind, narrativeBody(card)), card]));
+    const body = narrativeKey(item.turnId, item.kind, item.body), card = liveByBody.get(body);
+    if (!card) return undefined;
+    liveByBody.delete(body);
+    card._miraLiveKey = card.dataset.traceKey; // Late live notifications still find it.
+    card.dataset.traceKey = key;
+    delete card.dataset.pendingUser;
+    traceCardIndex.set(key, card);
+    return card;
+  };
+
+  // The desired rows, in order: { card } or { turnId, entries, dirty }.
+  const rows = [], rowByKey = new Map(), dirtyTurns = new Set();
+  const groupAfter = (index, turnId) => {
+    const previous = rows[index - 1];
+    if (previous?.entries && previous.turnId === turnId) return previous;
+    const group = { turnId, entries: new Map(), dirty: false };
+    rows.splice(index, 0, group);
+    return group;
+  };
+  const keyOf = item => item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
+  const visibleKeys = new Set();
+  for (const item of visibleItems) if (!summaryKeys.has(item.key)) visibleKeys.add(keyOf(item));
   for (const item of visibleItems) {
     if (summaryKeys.has(item.key)) continue;
-    const diagnosticKey = JSON.stringify([agent.threadId, item.turnId ?? "unscoped"]);
-    const diagnostic = item.kind === "error" && agent.diagnostics.get(diagnosticKey);
+    const diagnosticKey = item.kind === "error" ? JSON.stringify([agent.threadId, item.turnId ?? "unscoped"]) : null;
+    const diagnostic = diagnosticKey && agent.diagnostics.get(diagnosticKey);
     if (diagnostic) {
       addDiagnosticMessage(diagnostic, item.body);
-      renderTurnDiagnostic(diagnosticKey, diagnostic, reusableCards.get(`diagnostic-${diagnosticKey}`));
+      const card = renderTurnDiagnostic(diagnosticKey, diagnostic, reusableCards.get(`diagnostic-${diagnosticKey}`));
+      if (card && !rows.some(row => row.card === card)) rows.push({ card });
       continue;
     }
-    const key = item.itemId ? liveTraceKey({ turnId: item.turnId }, item.itemId) : item.key;
+    const key = keyOf(item), seen = rowByKey.get(key);
     if (groupedTrace(item.kind, item.title)) {
-      const group = ensureToolGroup(trace, item.turnId ?? "");
-      const entry = { item, card: reusableCards.get(key), height: previousGroupEntries.get(key)?.height };
-      group._miraEntries.set(key, entry);
-      if (entry.card) {
-        upsertTrace(key, item.kind, item.title, item.body, item.status, {
-          ...transcriptTraceOptions(item), reuseCard: entry.card, group, skipLookup: true, deferToolGroup: true,
-        });
-      }
-      if (expandedGroups.has(key)) group.open = true;
+      const group = seen?.entries ? seen : groupAfter(rows.length, item.turnId ?? "");
+      const entry = group.entries.get(key) ?? previousEntries.get(key) ?? {};
+      if (!entry.card && !entry.item) entry.card = reusableCards.get(key) ?? adoptLiveCard(key, item);
+      group.entries.set(key, entry);
+      rowByKey.set(key, group);
+      if (entry.card && entry.card._miraItem !== item) upsertTrace(key, item.kind, item.title, item.body, item.status, {
+        ...transcriptTraceOptions(item), reuseCard: entry.card, skipLookup: true, detached: true, deferToolGroup: true,
+      });
+      if (entry.item !== item) group.dirty = true;
+      entry.item = item;
       continue;
     }
-    const knownClock = (!item.completedAt || item.timingScope) && preciseClocks.get(JSON.stringify([item.turnId ?? null, item.body]));
-    const card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
-      ...transcriptTraceOptions(item), reuseCard: batchCards.get(key) ?? reusableCards.get(key), skipLookup: true, deferToolGroup: true,
-      ...(Number.isFinite(item.turnElapsedMs) ? {
-        turnCostEstimate: item.turnCostEstimate ?? knownTurnTimings.get(item.turnId)?.turnCostEstimate,
-      } : knownTurnTimings.get(item.turnId)),
-      ...(knownClock ? { ...knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
-    });
-    batchCards.set(key, card);
-    if (expandedItems.has(key) && card.querySelector(".trace-detail")) card.querySelector(".trace-detail").open = true;
-    if (expandedGroups.has(key) && card.closest(".tool-group")) card.closest(".tool-group").open = true;
-  }
-  for (const group of trace.querySelectorAll(".tool-group[open]")) mountToolGroup(group);
-  // Older pages must not replace prose or tool output still arriving at the tail.
-  const renderedCards = liveCards.length ? traceCardsInOrder(trace) : [];
-  const narrativeKey = (card) => JSON.stringify([card.dataset.turnId, card.dataset.traceKind, card.querySelector(".trace-body")._miraSource]);
-  const renderedByKey = new Map(renderedCards.map((card) => [card.dataset.traceKey, card]));
-  const renderedByBody = new Map(renderedCards.map((card) => [narrativeKey(card), card]));
-  const preservedCards = new Set(liveCards);
-  let nextLiveAnchor = null;
-  for (const card of previousCards.reverse()) {
-    const replacement = renderedByKey.get(card.dataset.traceKey) ?? renderedByBody.get(narrativeKey(card));
-    if (replacement) {
-      // Canonical completion supersedes an older partial live item. Prepending
-      // older pages must instead keep the still-running tail untouched.
-      if (preservedCards.has(card) && options.preserveViewport?.mode === "prepend") { replacement.replaceWith(card); nextLiveAnchor = card; }
-      else nextLiveAnchor = replacement;
+    let card = seen?.card ?? reusableCards.get(key) ?? adoptLiveCard(key, item);
+    if (!card || card._miraItem !== item) {
+      const known = item.kind === "assistant" ? knownTurn(item.turnId) : undefined;
+      const knownClock = (!item.completedAt || item.timingScope) && known?.clocks.get(item.body ?? "");
+      card = upsertTrace(key, item.kind ?? "tool", item.title ?? "事件", item.body ?? "", item.status ?? "", {
+        ...transcriptTraceOptions(item), reuseCard: card, skipLookup: true, detached: true, deferToolGroup: true,
+        ...(Number.isFinite(item.turnElapsedMs) ? {
+          turnCostEstimate: item.turnCostEstimate ?? known?.timing?.turnCostEstimate,
+        } : known?.timing),
+        ...(knownClock ? { completedAt: knownClock, timingScope: undefined, elapsedApproximate: undefined } : {}),
+      });
+      if (item.kind === "assistant") dirtyTurns.add(item.turnId);
     }
-    else if (preservedCards.has(card)) {
-      // Nested tool notifications may have no rollout counterpart. Preserve
-      // their position before the next known live item (often the final reply),
-      // instead of appending them after the completed turn during reconciliation.
-      const anchorGroup = nextLiveAnchor?._miraToolGroup ?? nextLiveAnchor?.closest(".tool-group");
-      const before = anchorGroup ?? nextLiveAnchor;
-      if (groupedTrace(card.dataset.traceKind, card.dataset.traceTitle)) {
-        const sameGroup = anchorGroup?.dataset.turnId === (card.dataset.turnId ?? "");
-        const group = sameGroup ? anchorGroup : ensureToolGroup(trace, card.dataset.turnId ?? "", before);
-        attachToolCard(group, card.dataset.traceKey, card, sameGroup ? nextLiveAnchor : null);
-      } else trace.insertBefore(card, before);
-      nextLiveAnchor = card;
+    if (seen) continue;
+    const row = { card };
+    rows.push(row);
+    rowByKey.set(key, row);
+  }
+
+  // Live output without a stored counterpart keeps its place before the next
+  // known item. Older pages must not replace output still arriving at the tail.
+  if (liveCards.length) {
+    const preserved = new Set(liveCards);
+    const liveTurns = new Set(liveCards.map(card => card.dataset.turnId ?? ""));
+    const renderedByBody = new Map();
+    for (const row of rows) for (const card of row.card ? [row.card] : [...row.entries.values()].map(entry => entry.card)) {
+      if (card && liveTurns.has(card.dataset.turnId ?? "")) renderedByBody.set(narrativeKey(card.dataset.turnId, card.dataset.traceKind, narrativeBody(card)), { row, card });
+    }
+    let anchor = null; // { row, key } of the next item after the insertion point.
+    for (const card of previousCards.reverse()) {
+      const key = card.dataset.traceKey;
+      const row = rowByKey.get(key);
+      const match = row ? { row, card: row.card ?? card } : renderedByBody.get(narrativeKey(card.dataset.turnId, card.dataset.traceKind, narrativeBody(card)));
+      if (match) {
+        if (match.row.card && match.card !== card && preserved.has(card) && options.preserveViewport?.mode === "prepend") match.row.card = card;
+        anchor = { row: match.row, key: match.card.dataset.traceKey };
+      } else if (preserved.has(card)) {
+        const at = anchor ? rows.indexOf(anchor.row) : rows.length;
+        if (groupedTrace(card.dataset.traceKind, card.dataset.traceTitle)) {
+          const turnId = card.dataset.turnId ?? "";
+          const inside = anchor?.row.entries && anchor.row.turnId === turnId;
+          const group = inside ? anchor.row : groupAfter(at, turnId);
+          const entry = previousEntries.get(key) ?? { card };
+          if (inside && group.entries.has(anchor.key)) {
+            const ordered = new Map();
+            for (const [entryKey, value] of group.entries) {
+              if (entryKey === anchor.key) ordered.set(key, entry);
+              ordered.set(entryKey, value);
+            }
+            group.entries = ordered;
+          } else group.entries.set(key, entry);
+          group.dirty = true;
+          anchor = { row: group, key };
+        } else {
+          const live = { card };
+          rows.splice(at, 0, live);
+          anchor = { row: live, key };
+        }
+      }
     }
   }
-  for (const group of trace.querySelectorAll(".tool-group")) updateToolGroup(group);
   const storedCompactions = new Map();
-  for (const item of visibleItems.filter((item) => item.kind === "compaction")) {
-    const turn = item.turnId ?? "";
-    storedCompactions.set(turn, (storedCompactions.get(turn) ?? 0) + 1);
+  if (liveCompactions.length) for (const item of visibleItems) {
+    if (item.kind !== "compaction") continue;
+    storedCompactions.set(item.turnId ?? "", (storedCompactions.get(item.turnId ?? "") ?? 0) + 1);
   }
+  const placed = new Set(rows.map(row => row.card));
   for (const card of liveCompactions) {
+    if (placed.has(card)) continue;
     const turn = card.dataset.turnId ?? "";
     const remaining = storedCompactions.get(turn) ?? 0;
     if (remaining) storedCompactions.set(turn, remaining - 1);
-    else trace.append(card); // Keep the notice while its durable write catches up.
+    else rows.push({ card }); // Keep the notice while its durable write catches up.
   }
+
+  // Commit. A group element keeps its identity, open state and mounted rows.
+  const usedGroups = new Set(), groups = [];
+  for (const row of rows) {
+    if (row.card) continue;
+    const keys = [...row.entries.keys()];
+    let group = null;
+    for (const key of keys) {
+      const candidate = previousGroups.get(key);
+      if (candidate && !usedGroups.has(candidate) && candidate.dataset.turnId === row.turnId) { group = candidate; break; }
+    }
+    if (group) {
+      const before = group._miraEntries;
+      if (before.size !== row.entries.size || ![...before.keys()].every((key, index) => key === keys[index])) row.dirty = true;
+    } else {
+      group = createToolGroup(row.turnId);
+      row.dirty = true;
+      group.open = keys.some(key => previousGroups.get(key)?.open);
+    }
+    usedGroups.add(group);
+    row.group = group;
+    groups.push(row);
+  }
+  for (const { group, entries, dirty } of groups) {
+    if (!dirty) continue;
+    for (const [key, entry] of group._miraEntries) {
+      if (entries.has(key)) continue;
+      // Moved to another group, or gone: this group's row goes either way.
+      if (entry.row) { traceViewport().forget(entry.row); entry.row.remove(); entry.row = null; }
+    }
+    group._miraEntries = entries;
+  }
+  for (const { group, entries, dirty } of groups) {
+    if (!dirty) continue;
+    for (const entry of entries.values()) {
+      if (entry.card) entry.card._miraToolGroup = group;
+      if (entry.row && (!group.open || entry.row.parentNode !== group.querySelector(".tool-group-items"))) {
+        traceViewport().forget(entry.row); entry.row.remove(); entry.row = null;
+      }
+    }
+  }
+  const removed = row => {
+    // The turn's footer belongs to its last remaining reply.
+    for (const card of row.matches(".trace-card.assistant") ? [row] : row.querySelectorAll(".trace-card.assistant")) {
+      if (card.dataset.turnId) dirtyTurns.add(card.dataset.turnId);
+    }
+    forgetTraceRow(row);
+  };
+  sectionTraceRows(trace, renderHistoryLoader(trace), rows.map(row => row.card ?? row.group), removed);
+  for (const { group, entries, dirty } of groups) {
+    if (group.open && (dirty || !entries.values().next().value?.row)) mountToolGroup(group);
+    if (dirty) updateToolGroup(group);
+  }
+  for (const row of rows) if (row.card) watchTraceBody(row.card);
   renderTurnDiagnostics();
   if (!agent.transcriptItems.length && !liveCompactions.length && !liveCards.length && !trace.querySelector("[data-diagnostic-key]")) {
     if (agent.transcriptCursor !== null) {
@@ -4763,17 +5057,27 @@ function renderTranscript(fallbackThread, options = {}) {
       scheduleOlderTranscriptLoad();
       return;
     }
+    for (const row of traceRows(trace)) forgetTraceRow(row);
     renderThread(fallbackThread);
     if (!fallbackThread?.turns?.some((turn) => (turn.items ?? []).length > 0)) {
       clear(trace).append(element("div", "conversation-empty", "数据库中没有可投影的消息或工具记录。"));
     }
     return;
   }
-  refreshTurnFooters();
+  // Clocks read differently on another day; otherwise only changed turns do.
+  const today = new Date().toDateString();
+  refreshTurnFooters(trace.dataset.clockDay === today ? dirtyTurns : null);
+  trace.dataset.clockDay = today;
   const last = trace.lastElementChild;
   const scroll = traceScroller();
-  if (options.preserveViewport) restoreTraceViewport(options.preserveViewport);
-  else if (options.anchorBottom !== false) scrollTraceToBottom(trace);
+  const place = () => {
+    if (options.preserveViewport) restoreTraceViewport(options.preserveViewport);
+    else if (options.anchorBottom !== false) scrollTraceToBottom(trace);
+  };
+  place();
+  // Show what is in view before this frame paints.
+  traceViewport().settle();
+  place();
   const scrollTop = scroll.scrollTop;
   requestAnimationFrame(() => {
     if (trace.lastElementChild !== last || scroll.scrollTop !== scrollTop) return;
@@ -4816,11 +5120,7 @@ async function loadAgentTranscript(threadId, fallbackThread = null, options = {}
     : options.preserveLoaded && sameThread && !anchorBottom
       ? captureTraceViewport()
       : null;
-  if (options.prepend) {
-    const top = $("#agentView .conversation-head").getBoundingClientRect().bottom;
-    const anchor = [...trace.querySelectorAll(".trace-card[data-trace-key]")].find((card) => card.getBoundingClientRect().bottom > top);
-    if (anchor) Object.assign(preserveViewport, { anchorKey: anchor.dataset.traceKey, anchorTop: anchor.getBoundingClientRect().top });
-  }
+  if (options.prepend) Object.assign(preserveViewport, captureTraceViewport(), { mode: "prepend" });
   const completeOutline = transcript.outline === true && transcript.after == null;
   if (options.prepend && sameThread) {
     agent.transcriptItems = mergeTranscriptItems(incoming, agent.transcriptItems);
@@ -4968,6 +5268,8 @@ function transcriptCardKey(item) {
 }
 
 function transcriptCardForKey(key, materialize = true) {
+  const card = indexedTraceCard(key);
+  if (card?.isConnected) return card;
   return $("#conversationTrace").querySelector(`[data-trace-key="${CSS.escape(key)}"]`) ?? (materialize ? traceCard(key) : null);
 }
 
@@ -4980,7 +5282,7 @@ function updateMessageRail() {
   const persisted = new Map(agent.transcriptThreadId === agent.threadId ? agent.transcriptItems
     .filter(item => item.kind === "user").map(item => [transcriptCardKey(item), item]) : []);
   const entries = [];
-  for (const card of $("#conversationTrace").querySelectorAll(":scope > .trace-card.user[data-trace-key]")) {
+  for (const card of $("#conversationTrace").querySelectorAll(".trace-card.user[data-trace-key]")) {
     const item = persisted.get(card.dataset.traceKey);
     const body = item?.body ?? card.querySelector(".trace-body")?._miraSource ?? "";
     if (!String(body).trim()) continue;

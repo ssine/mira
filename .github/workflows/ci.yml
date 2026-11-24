@@ -228,7 +228,7 @@ jobs:
           - shard: layout
             tests: thread_pages sidebar_swipe thread_token_usage file_links
           - shard: conversation
-            tests: thread_list thinking_activity thread_models codex_fast codex_accounts claude_accounts claude_plan_usage claude_questions claude_cache account_overview sidebar_layout composer_drafts transcript_images conversation_scroll trace_diagrams markdown recovery_notices conversation_index conversation_rail timeline_live timeline_new_thread
+            tests: thread_list thinking_activity thread_models codex_fast codex_accounts claude_accounts claude_plan_usage claude_questions claude_cache account_overview sidebar_layout composer_drafts transcript_images conversation_scroll trace_diagrams markdown recovery_notices conversation_index conversation_rail long_conversation timeline_live timeline_new_thread
     env:
       DATABASE_URL: postgresql://mira:mira-local@127.0.0.1:55432/mira
       MIRA_SECURE_COOKIES: "false"

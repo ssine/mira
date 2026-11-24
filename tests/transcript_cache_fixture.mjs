@@ -68,9 +68,9 @@ const server = http.createServer(async (request, response) => {
         const renderer = traceViewport();
         const group = document.querySelector(".tool-group");
         const first = group?._miraEntries.get("history-1");
-        return { watched: renderer.rows.size, margin: renderer.margin,
-          visible: [...renderer.rows.values()].filter(row => row.visible).length,
-          first: first && { watched: renderer.rows.has(first.row), visible: renderer.rows.get(first.row)?.visible,
+        return { watched: renderer.rows.size, shown: renderer.shown.size,
+          visible: [...renderer.rows.values()].filter(row => row.shown).length,
+          first: first && { watched: renderer.rows.has(first.row), visible: renderer.rows.get(first.row)?.shown,
             cardVisible: first.card?._miraViewportVisible, children: first.row?.childElementCount,
             sameRow: first.card?.parentNode === first.row, top: first.row?.getBoundingClientRect().top } };
       };

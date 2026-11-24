@@ -20,6 +20,7 @@ function fixture(clipboard) {
       attributes: {},
       listeners: {},
       innerHTML: "",
+      cloneNode() { return { ...this, listeners: {} }; },
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, listener) { this.listeners[name] = listener; },
       click() { return this.listeners.click(); },
