@@ -229,6 +229,43 @@ func TestConversationIndexPostgres(t *testing.T) {
 		}
 	})
 
+	t.Run("search matches any term and filters by engine and time", func(t *testing.T) {
+		found := func(options SearchOptions) map[string]bool {
+			t.Helper()
+			result, err := service.SearchConversations(ctx, store, options)
+			if err != nil || result.Status != 200 {
+				t.Fatalf("%#v: %v %#v", options, err, result.Body)
+			}
+			threads := map[string]bool{}
+			for _, item := range result.Body["results"].([]*searchResult) {
+				if item.ThreadID == root || item.ThreadID == child {
+					threads[item.ThreadID] = true
+				}
+			}
+			return threads
+		}
+		if got := found(SearchOptions{Query: "全文 trigram"}); len(got) != 0 {
+			t.Fatalf("all terms: %v", got)
+		}
+		if got := found(SearchOptions{Query: "全文 trigram", Any: true}); !got[root] || !got[child] {
+			t.Fatalf("any term: %v", got)
+		}
+		if got := found(SearchOptions{Query: "全文 trigram", Any: true, Engine: "claude"}); len(got) != 0 {
+			t.Fatalf("engine: %v", got)
+		}
+		past, future := base.Add(-time.Hour), time.Now().Add(time.Hour)
+		if got := found(SearchOptions{Query: "全文 trigram", Any: true, Since: &past}); !got[root] || !got[child] {
+			t.Fatalf("since past: %v", got)
+		}
+		// A date bound also drops title-only matches.
+		if got := found(SearchOptions{Query: "全文搜索设计", Since: &future}); len(got) != 0 {
+			t.Fatalf("since future: %v", got)
+		}
+		if got := found(SearchOptions{Query: "全文搜索设计"}); !got[root] {
+			t.Fatalf("title match: %v", got)
+		}
+	})
+
 	t.Run("timeline lanes follow the subagent tree", func(t *testing.T) {
 		result, err := service.GetCodexTimeline(ctx, store, root, "")
 		if err != nil || result.Status != 200 {

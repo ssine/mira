@@ -24,6 +24,13 @@ type SearchOptions struct {
 	Query    string
 	Archived string // "include" (default), "exclude" or "only"
 	Limit    int
+	// Any matches messages and titles containing at least one term instead of
+	// every term, like a regex alternation.
+	Any bool
+	// Engine restricts results to "codex" or "claude"; empty searches both.
+	Engine string
+	// Since, when set, only matches messages recorded at or after it.
+	Since *time.Time
 }
 
 type searchHit struct {
@@ -123,13 +130,15 @@ func (service *Service) SearchConversations(ctx context.Context, storeID string,
 	if archived != "exclude" && archived != "only" {
 		archived = "include"
 	}
+	joiner := " AND "
+	if options.Any {
+		joiner = " OR "
+	}
 	patterns := make([]any, len(terms))
 	bodyClauses := make([]string, len(terms))
-	titleClauses := make([]string, len(terms))
 	for index, term := range terms {
 		patterns[index] = likePattern(term)
 		bodyClauses[index] = fmt.Sprintf("m.body ILIKE $%d", index+3)
-		titleClauses[index] = fmt.Sprintf("t.title ILIKE $%d", index+3)
 	}
 	results := map[string]*searchResult{}
 	resultKey := func(engine, threadID string) string { return engine + ":" + threadID }
@@ -140,9 +149,18 @@ func (service *Service) SearchConversations(ctx context.Context, storeID string,
 			return err
 		}
 		args := append([]any{storeID, searchHitScan}, patterns...)
+		filters := ""
+		if options.Engine != "" {
+			args = append(args, options.Engine)
+			filters += fmt.Sprintf(" AND m.engine=$%d", len(args))
+		}
+		if options.Since != nil {
+			args = append(args, *options.Since)
+			filters += fmt.Sprintf(" AND m.recorded_at>=$%d", len(args))
+		}
 		rows, err := tx.Query(ctx, `SELECT m.engine,m.thread_id,m.generation,m.item_seq,m.role,m.body,m.recorded_at
 		  FROM mira_conversation_messages m
-		  WHERE (m.engine='claude' OR m.store_id=$1) AND `+strings.Join(bodyClauses, " AND ")+`
+		  WHERE (m.engine='claude' OR m.store_id=$1) AND (`+strings.Join(bodyClauses, joiner)+`)`+filters+`
 		  ORDER BY m.recorded_at DESC NULLS LAST LIMIT $2`, args...)
 		if err != nil {
 			return err
@@ -180,13 +198,26 @@ func (service *Service) SearchConversations(ctx context.Context, storeID string,
 		}
 		truncated = scanned == searchHitScan
 		// Titles: Codex renames live in state entries; Claude sessions carry theirs.
+		// Titles carry no time, so a date-bounded search matches messages only.
+		titleEngines := []string{"codex", "claude"}
+		if options.Engine != "" {
+			titleEngines = []string{options.Engine}
+		}
+		if options.Since != nil {
+			titleEngines = nil
+		}
+		titleArgs := append([]any{storeID, searchHitScan, titleEngines}, patterns...)
+		titleClauses := make([]string, len(terms))
+		for index := range terms {
+			titleClauses[index] = fmt.Sprintf("t.title ILIKE $%d", index+4)
+		}
 		titleRows, err := tx.Query(ctx, `SELECT 'codex',t.thread_id,t.active_generation FROM (
 		    SELECT p.thread_id,p.active_generation,COALESCE(NULLIF(n.value#>>'{}',''),p.title) AS title FROM codex_thread_projections p
 		    LEFT JOIN codex_store_state_entries n ON n.store_id=p.store_id AND n.field='names' AND NOT n.is_root AND n.entry_key=p.thread_id
-		    WHERE p.store_id=$1) t WHERE `+strings.Join(titleClauses, " AND ")+`
+		    WHERE p.store_id=$1 AND 'codex'=ANY($3::text[])) t WHERE `+strings.Join(titleClauses, joiner)+`
 		  UNION ALL
-		  SELECT 'claude',t.session_id::text,1 FROM mira_claude_sessions t WHERE `+strings.Join(titleClauses, " AND ")+`
-		  LIMIT $2`, args...)
+		  SELECT 'claude',t.session_id::text,1 FROM mira_claude_sessions t WHERE 'claude'=ANY($3::text[]) AND (`+strings.Join(titleClauses, joiner)+`)
+		  LIMIT $2`, titleArgs...)
 		if err != nil {
 			return err
 		}
@@ -241,7 +272,8 @@ func (service *Service) SearchConversations(ctx context.Context, storeID string,
 	if len(list) > limit {
 		list, truncated = list[:limit], true
 	}
-	return Result{Status: 200, Body: map[string]any{"query": options.Query, "terms": terms, "results": list, "truncated": truncated}}, nil
+	return Result{Status: 200, Body: map[string]any{"query": options.Query, "terms": terms, "match": map[bool]string{true: "any", false: "all"}[options.Any],
+		"results": list, "truncated": truncated}}, nil
 }
 
 // describeSearchResults fills titles, archive state and root conversations,

@@ -72,7 +72,10 @@ var conversationKinds = map[string]bool{"user": true, "assistant": true, "tool":
 
 func (client *cliClient) runConversation(ctx context.Context, args []string, json bool) (any, error) {
 	if len(args) == 0 {
-		return nil, fmt.Errorf("conversation action is required: read")
+		return nil, fmt.Errorf("conversation action is required: read or search")
+	}
+	if args[0] == "search" {
+		return client.runConversationSearch(ctx, args[1:], json)
 	}
 	if args[0] != "read" {
 		return nil, fmt.Errorf("unknown conversation action %s", args[0])

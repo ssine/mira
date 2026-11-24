@@ -87,10 +87,13 @@ fall back to paged history while a very large conversation is still indexing.
   of a turn touched since `after`. `409 outline_pending` means: use paged reads.
 - `...transcript?tail=1&toolDetails=1&cursor=t2:G:END:S&from=F` reads tool
   details for one outline range (bounded to 2,000 records and 200 tools).
-- `GET /v1/conversations/search?q=...&archived=include|exclude|only` matches every
+- `GET /v1/conversations/search?q=...&archived=include|exclude|only` (administrator
+  or any approved Node credential, so `mira conversation search` can use it) matches every
   whitespace-separated term (case-insensitive substring, at most 8 terms) in
   titles and prose of Codex and Claude conversations, archived ones and
-  subagents included. Each result names its root conversation and at most three
+  subagents included. `match=any` matches any term instead; `engine=codex|claude`
+  restricts the engine; `since=<RFC 3339>` only matches messages recorded since
+  then and skips title-only matches. Each result names its root conversation and at most three
   hits with snippets. Statements are bounded to 15 seconds; one- and
   two-character terms cannot use trigrams.
 - `GET /v1/conversations/{id}/messages?after=SEQ&limit=N` (administrator or any

@@ -889,7 +889,7 @@ Commands:
   schedule       Manage scheduled scripts and execution history
   site           Register persistent public sites for Node loopback ports
   notify         Send a system alert to Android devices with notifications on
-  conversation   Read a Codex or Claude conversation (messages and tools) by ID
+  conversation   Search conversations, or read one (messages and tools) by ID
   app-server     Inspect, start, stop or connect to Codex App Server
   accounts       List this Node's Codex and Claude accounts (offline)
   codex          Choose a Codex account and run Codex CLI
@@ -935,10 +935,19 @@ Delivery retries every 30 seconds for up to 12 hours; the command returns once
 the alert is queued. It fails with no_notification_device when no device has
 notifications enabled. Authenticates with this Node's credential.`,
 		"conversation": `Usage:
+  mira conversation search <terms...> [--any] [--engine codex|claude] [--since YYYY-MM-DD]
+      [--archived include|exclude|only] [--limit 20] [--json]
   mira conversation read <conversation-id> [--tail N] [--max N] [--after SEQ]
       [--kind user,assistant,tool,compaction,error,notice] [--tool-output-limit BYTES] [--no-tools] [--json]
 
-Reads one Codex thread, Claude session or subagent conversation from Mira
+search finds Codex and Claude conversations (subagents and archived ones
+included) whose title or user/assistant messages contain every term, or any
+term with --any; terms are case-insensitive substrings, at most 8. Each result
+shows the conversation ID, its root conversation, the hit count and up to three
+matching messages with their sequence. Tool calls, tool output and compaction
+summaries are not searched. Read a hit with read <thread> --after SEQ-1.
+
+read reads one Codex thread, Claude session or subagent conversation from Mira
 Server by its UUID, whichever Node ran it. Output is the title, engine, cwd,
 parent and subagent IDs, then every user message, assistant message and tool
 call (name, status, input and output) and every context compaction with the
@@ -1409,6 +1418,13 @@ func RunCLI(ctx context.Context, args []string, stdin io.Reader, stdout, stderr 
 		return cliExitCode(err)
 	}
 	if result != nil {
+		if text, ok := result.(conversationSearchText); ok {
+			if err := printConversationSearch(stdout, text.conversationSearch); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			return 0
+		}
 		if text, ok := result.(conversationText); ok {
 			if err := printConversation(stdout, text.conversationRead); err != nil {
 				fmt.Fprintln(stderr, err)
