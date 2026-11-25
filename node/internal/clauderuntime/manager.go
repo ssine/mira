@@ -58,6 +58,7 @@ type Manager struct {
 	closeOnce sync.Once
 	// usageSlots bounds concurrent plan-usage workers.
 	usageSlots chan struct{}
+	prepareAt  time.Time // last preparation start; guarded by mu
 	// keeper renews subscription logins ahead of the CLI (login_keeper.go).
 	keeper       *loginKeeper
 	keeperCancel context.CancelFunc
@@ -91,6 +92,7 @@ func (m *Manager) prepare() {
 		return
 	}
 	m.preparing = true
+	m.prepareAt = time.Now()
 	m.state = "preparing"
 	m.lastError = ""
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)

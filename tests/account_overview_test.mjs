@@ -171,3 +171,35 @@ test("plan periods separate recorded, estimated and manually entered ends", asyn
   assert.equal(claudePlanPeriod("2026-11-24", now - 17 * day, now).kind, "estimate", "a passed manual day falls back to the estimate");
   assert.equal(claudePlanPeriod("2026-11-24", null, now), null);
 });
+
+test("one Claude account on several Nodes uses the login that can be read", async () => {
+  const originalFetch = globalThis.fetch, calls = [];
+  const replies = {};
+  globalThis.fetch = async url => { const id = url.split("/")[4]; calls.push(id); return replies[id]; };
+  const ok = (accountKey, sevenDay, extra = {}) => ({ ok: true, json: async () => ({ usage: { available: true, accountKey, sevenDay: { utilization: sevenDay } }, observedAt: Date.now(), ...extra }) });
+  const member = (id, status = "online") => ({ node: { status }, account: { nodeAccountId: id, authType: "subscription", configured: true, enabled: true } });
+  const build = members => Object.assign(Object.create(AccountSidebar.prototype), {
+    summariesActive: true, intervalMs: 300_000, planJobs: new Map(), planUsage: new Map(), summaryJobs: new Map(), threads: [], expanded: true,
+    groups: [{ key: "a", engine: "claude", members }], render() { this.loadPlanUsages(); }, renderOverview() {},
+  });
+  const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(resolve => setImmediate(resolve)); };
+  const chosen = sidebar => sidebar.subscriptionMember(sidebar.groups[0]).account.nodeAccountId;
+  const sidebars = [];
+  try {
+    const start = members => { calls.length = 0; const sidebar = build(members); sidebars.push(sidebar); sidebar.loadPlanUsages(); return sidebar; };
+    // The first Node returns only its last stored sample.
+    replies.win = ok("same", 90, { stale: true, message: "Claude runtime is not ready", observedAt: 1 }); replies.wsl = ok("same", 10); replies.off = ok("same", 50);
+    let sidebar = start([member("off", "offline"), member("win"), member("wsl")]); await settle();
+    assert.deepEqual(calls, ["win", "wsl"], "later logins are read only while earlier ones are unavailable");
+    assert.equal(chosen(sidebar), "wsl"); assert.equal(sidebar.groupQuota(sidebar.groups[0]).remaining, 90);
+    replies.win = ok("same", 20); sidebar = start([member("win"), member("wsl")]); await settle();
+    assert.deepEqual(calls, ["win"], "a readable login needs no second read");
+    // Known different accounts never stand in for each other, even under one name.
+    replies.win = ok("other", 90, { stale: true, message: "offline", observedAt: 1 }); sidebar = start([member("win"), member("wsl")]); await settle();
+    assert.equal(chosen(sidebar), "win"); assert.equal(sidebar.groupQuota(sidebar.groups[0]).remaining, 10);
+    // Nothing can be read: keep the newest stored result.
+    replies.win = { ok: false, json: async () => ({ error: "offline" }) }; replies.wsl = ok("same", 30, { stale: true, message: "offline", observedAt: 5 });
+    sidebar = start([member("win"), member("wsl")]); await settle();
+    assert.equal(chosen(sidebar), "wsl");
+  } finally { for (const sidebar of sidebars) { sidebar.summariesActive = false; sidebar.stopSummaries(); } globalThis.fetch = originalFetch; }
+});
