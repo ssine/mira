@@ -134,6 +134,7 @@ export class CodexAccounts {
     this.form.elements.inheritEnv.value = (account?.desiredAppServer?.inheritEnv ?? []).join(", ");
     this.form.elements.baseUrl.value = account?.reportedAppServer?.provider?.baseUrl || "";
     this.form.elements.loginEmail.value = account?.email || "";
+    this.form.elements.planPeriodEndsOn.value = account?.planPeriodEndsOn || "";
     this.form.elements.claudeModel.value = account?.reportedAppServer?.provider?.model || "";
     this.form.elements.claudeEffort.value = account?.reportedAppServer?.provider?.effort || "";
     this.form.elements.region.value = account?.reportedAppServer?.provider?.region || "us-east-1";
@@ -172,6 +173,7 @@ export class CodexAccounts {
     this.dialog.querySelector("[data-account-home]").hidden = mode !== "adopt";
     this.dialog.querySelector("[data-account-provider]").hidden = subscription || !claude && mode !== "custom";
     this.dialog.querySelector("[data-account-login-email]").hidden = !subscription;
+    this.dialog.querySelector("[data-account-period-end]").hidden = !subscription;
     this.dialog.querySelector("[data-account-api-key]").hidden = subscription;
     this.form.elements.home.required = mode === "adopt";
     this.form.elements.baseUrl.required = claude && !subscription || mode === "custom";
@@ -264,11 +266,15 @@ export class CodexAccounts {
     const provider = { id: subscription ? "anthropic" : fields.mode.value, baseUrl: subscription ? "https://api.anthropic.com" : fields.baseUrl.value.trim(), model: fields.claudeModel.value.trim(), ...(fields.claudeEffort.value ? { effort: fields.claudeEffort.value } : {}), ...(fields.mode.value === "bedrock" ? { region: fields.region.value.trim() } : {}) };
     const authType = subscription ? "subscription" : "api_key";
     const loginEmail = fields.loginEmail.value.trim();
-    if (!this.current) {
+    const existing = Boolean(this.current);
+    if (!existing) {
       const created = await this.api("/v1/claude/accounts", { method: "POST", body: JSON.stringify({ nodeId: fields.node.value, name: fields.name.value.trim(), authType, loginEmail }) });
       this.current = { node: { nodeId: fields.node.value }, account: created };
       fields.node.disabled = fields.engine.disabled = true;
-    } else await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}`, { method: "PATCH", body: JSON.stringify({ name: fields.name.value.trim() }) });
+    }
+    const update = existing ? { name: fields.name.value.trim() } : {};
+    if (subscription && fields.planPeriodEndsOn.value !== (this.current.account.planPeriodEndsOn || "")) update.planPeriodEndsOn = fields.planPeriodEndsOn.value;
+    if (Object.keys(update).length) await this.api(`/v1/claude/accounts/${this.current.account.nodeAccountId}`, { method: "PATCH", body: JSON.stringify(update) });
     const body = { provider, authType, loginEmail };
     if (!subscription && fields.apiKey.value) body.apiKey = fields.apiKey.value;
     else if (!subscription && fields.clearKey.checked) body.apiKey = "";

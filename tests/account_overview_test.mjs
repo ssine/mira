@@ -139,3 +139,35 @@ test("Claude subscription windows read like Codex quota and API accounts keep co
     assert.equal(sidebar.planUsage.has("c"), false, "aborted replies cannot repopulate after logout");
   } finally { sidebar.summariesActive = false; sidebar.stopSummaries(); globalThis.fetch = originalFetch; }
 });
+
+test("plan periods separate recorded, estimated and manually entered ends", async () => {
+  const { nextMonthlyRenewal, codexPlanPeriod, claudePlanPeriod, planPeriodView } = await import("../server/public/account-quota.js");
+  const iso = value => new Date(value).toISOString(), at = text => Date.parse(text), day = 86_400_000;
+  assert.equal(iso(nextMonthlyRenewal(at("2026-11-08T11:16:40Z"), at("2026-11-25T07:00:00Z"))), "2026-12-08T11:16:40.000Z");
+  assert.equal(iso(nextMonthlyRenewal(at("2026-11-08T11:16:40Z"), at("2026-12-08T11:16:40Z"))), "2027-01-08T11:16:40.000Z", "the renewal instant starts the next period");
+  assert.equal(iso(nextMonthlyRenewal(at("2026-01-31T05:00:00Z"), at("2026-02-10T00:00:00Z"))), "2026-02-28T05:00:00.000Z");
+  assert.equal(iso(nextMonthlyRenewal(at("2026-01-31T05:00:00Z"), at("2026-03-01T00:00:00Z"))), "2026-03-31T05:00:00.000Z", "a short month does not move later renewals");
+  assert.equal(nextMonthlyRenewal(null), null);
+  assert.equal(nextMonthlyRenewal(at("2027-01-01T00:00:00Z"), at("2026-11-25T00:00:00Z")), null);
+
+  const now = +new Date(2026, 10, 25, 15, 0);
+  assert.equal(codexPlanPeriod([undefined, { endsAt: "soon" }, {}]), null);
+  assert.equal(codexPlanPeriod([{ endsAt: now + 9 * day, checkedAt: now - day }, { endsAt: now + 5 * day, checkedAt: now }]).endsAt, now + 5 * day, "the most recently refreshed login wins");
+  const exact = left => planPeriodView({ kind: "exact", endsAt: now + left }, now);
+  assert.deepEqual([exact(14 * day + 3 * 3_600_000).text, exact(14 * day).level], ["12/09 18:00 · 还剩 14 天", ""]);
+  assert.equal(exact(7 * day).level, "warning");
+  assert.deepEqual([exact(9.5 * 3_600_000).text, exact(9.5 * 3_600_000).level], ["11/26 00:30 · 还剩 9 小时", "danger"]);
+  assert.match(exact(60_000).text, /不足 1 小时$/);
+  assert.equal(exact(0).text, "等待更新");
+  assert.match(exact(60 * day).text, /^2027\/01\/24/, "another year is spelled out");
+  assert.equal(planPeriodView(null, now).text, "未提供");
+
+  const estimate = claudePlanPeriod("", now - 17 * day, now);
+  assert.equal(estimate.kind, "estimate");
+  assert.match(planPeriodView(estimate, now).text, /^约 12\/08 15:00 · 还剩 13 天$/);
+  const manual = claudePlanPeriod("2026-12-08", now - 17 * day, now);
+  assert.equal(planPeriodView(manual, now).text, "12/08 · 还剩 13 天");
+  assert.deepEqual([planPeriodView(claudePlanPeriod("2026-11-25", null, now), now).text, planPeriodView(claudePlanPeriod("2026-11-25", null, now), now).level], ["11/25 · 今天", "danger"]);
+  assert.equal(claudePlanPeriod("2026-11-24", now - 17 * day, now).kind, "estimate", "a passed manual day falls back to the estimate");
+  assert.equal(claudePlanPeriod("2026-11-24", null, now), null);
+});

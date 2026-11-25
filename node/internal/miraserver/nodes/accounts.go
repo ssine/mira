@@ -177,6 +177,15 @@ func (service *Service) ReportAccounts(ctx context.Context, nodeID string, raw a
 			}
 			clean["memoryResidency"] = view
 		}
+		if subscription, ok := reported["subscription"].(map[string]any); ok {
+			view := map[string]any{}
+			for _, key := range []string{"startsAt", "endsAt", "checkedAt"} {
+				if value, ok := integer(subscription[key]); ok && value > 0 {
+					view[key] = value
+				}
+			}
+			clean["subscription"] = view
+		}
 		if provider, ok := reported["provider"].(map[string]any); ok {
 			view := map[string]any{}
 			for _, key := range []string{"id", "name", "wireApi", "baseUrl", "credentialSource"} {

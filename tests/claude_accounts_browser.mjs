@@ -95,6 +95,7 @@ try {
   const dialog = page.locator("#codexAccountDialog");
   assert.equal(await dialog.locator("[name=engine]").inputValue(), "claude");
   assert.equal(await dialog.locator("[data-account-login]").isVisible(), false);
+  assert.equal(await dialog.locator("[name=planPeriodEndsOn]").isVisible(), false, "API accounts have no plan period");
   assert.equal(await dialog.locator("[name=claudeEffort]").inputValue(), "");
   await dialog.locator("[name=claudeEffort]").selectOption("high");
   await dialog.locator("[name=apiKey]").fill("synthetic-claude-browser-secret");
@@ -122,6 +123,10 @@ try {
   assert.equal(await dialog.locator("[name=mode]").inputValue(), "subscription");
   assert.equal(await dialog.locator("[name=apiKey]").isVisible(), false);
   assert.equal(await dialog.locator("[name=loginEmail]").isVisible(), true);
+  await dialog.locator("[name=planPeriodEndsOn]").fill("2026-12-08");
+  await dialog.locator("button[type=submit]").click();
+  await dialog.getByText("账号配置已保存。点击「登录 Claude.ai」完成官方 OAuth 登录。", { exact: true }).waitFor();
+  assert.deepEqual(calls.find(c => c.path === `/v1/claude/accounts/${ids[2]}`).body, { name: "Max subscription", planPeriodEndsOn: "2026-12-08" });
   await dialog.locator("[data-account-login]").click();
   await dialog.locator(".account-login-code input").waitFor();
   assert.equal(calls.some(c => c.path === `/v1/claude/runtimes/${nodeId}/prepare`), true);

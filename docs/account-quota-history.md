@@ -45,3 +45,23 @@ Validation: `go test ./internal/miraserver/accountsampler ./internal/miraserver/
 the opt-in PostgreSQL integration tests, and `tests/account_sidebar_browser.mjs` cover quota normalization, read-only transport,
 concurrent/restarted sampling, identity/runtime changes, history authorization, gaps, cache behavior,
 keyboard/pointer interaction, mobile layout and light/dark themes.
+
+## Plan period end
+
+The account popover shows one "本期结束" line for subscription accounts; sidebar rows do not. It is the
+end of the current billing period, not a promise that the plan stops: neither login records whether
+auto-renewal is on. Text turns amber within seven days and red within 24 hours.
+
+- **Codex**: the Node reads `auth.json` of the account's Codex home and reports only
+  `reportedAppServer.subscription` `{startsAt, endsAt, checkedAt}` (Unix ms) from the ChatGPT login
+  token's claims. The file is checked at most every 30 seconds and parsed when it changed. Tokens and
+  identity claims stay on the Node; API-key logins, free plans and keyring-only credentials report
+  nothing. Among Nodes that share an account name, the most recently refreshed token wins. Codex
+  refreshes the token itself, so a passed end shows "等待更新" until then. No extra upstream request.
+- **Claude**: the native profile has only the subscription start, returned as `usage.subscribedAt`
+  beside the plan windows. The browser estimates the next monthly renewal (UTC, clamped to the month's
+  last day) and marks it "约". Annual or cancelled plans make the estimate wrong, so an administrator
+  may set `planPeriodEndsOn` (`PATCH /v1/claude/accounts/:id`, `YYYY-MM-DD`, empty clears; schema 52).
+  That day wins until it has passed in the browser's timezone, then the estimate returns.
+
+Older Nodes report neither field; the line then shows "未提供" or the manual day.
