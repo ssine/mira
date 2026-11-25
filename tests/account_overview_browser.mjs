@@ -3,6 +3,8 @@ import { accountOverviewFixture } from "./account_overview_fixtures.mjs";
 const { chromium } = await import(process.argv[2] ?? "playwright");
 const origin = process.env.MIRA_SERVER_URL ?? "http://127.0.0.1:8787";
 const { nodes, threads, history } = accountOverviewFixture();
+nodes[0].codexAccounts[0].reportedAppServer.subscription = { endsAt: Date.now() + 5.5 * 86400_000, checkedAt: 2 };
+nodes[1].codexAccounts[0].reportedAppServer.subscription = { endsAt: Date.now() - 86400_000, checkedAt: 1 };
 const browser = await chromium.launch({ headless: true });
 try {
   // Start narrow with an empty page cache; shrinking a warmed desktop page
@@ -53,6 +55,10 @@ try {
   assert.equal(await rows.filter({ hasText: "Shared" }).textContent(), "Codex · Shared剩余 0%");
   await rows.filter({ hasText: "Shared" }).click();
   assert.equal(await page.locator("[data-account-remaining]").textContent(), "0%");
+  const period = page.locator("[data-account-period]");
+  assert.match(await period.textContent(), /^(?:\d{4}\/)?\d\d\/\d\d \d\d:\d\d · 还剩 5 天$/, "the freshest login supplies the period end");
+  assert.equal(await period.getAttribute("data-level"), "warning");
+  assert.equal(await page.locator("[data-account-period-row]").evaluate(row => row.offsetHeight < 24), true, "the period stays on one line");
   assert.match(await page.locator("[data-account-node]").textContent(), /Node 2.*Node 1/);
   await page.getByRole("button", { name: "关闭账户详情", exact: true }).click();
   await rows.filter({ hasText: /^Codex · API/ }).click();

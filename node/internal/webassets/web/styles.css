@@ -425,6 +425,10 @@ tbody tr:hover { background: var(--hover); }
 .account-plan-row > div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .account-plan-row meter { margin-top: 2px; }
 .account-plan-row small { color: var(--muted); font-size: 11px; }
+.account-plan-period { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.account-plan-period > span:first-child { color: var(--muted); }
+.account-period[data-level="warning"] { color: var(--warning); }
+.account-period[data-level="danger"] { color: var(--danger); }
 .chat-manage-link { width: 100%; }
 .chat-manage-link.danger { color: var(--danger); }
 .chat-manage-link > span:last-child { display: grid; gap: 3px; min-width: 0; }

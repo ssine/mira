@@ -1,6 +1,6 @@
 import { MiraSocket } from "./mira-socket.js";
 import { accountQuery, accountNode, accountGroups, recentAccountKeys } from "./codex-accounts.js";
-import { weeklyQuota, claudePlanQuota } from "./account-quota.js";
+import { weeklyQuota, claudePlanQuota, claudePlanPeriod, codexPlanPeriod, planPeriodView } from "./account-quota.js";
 import { AccountHistory } from "./account-history.js";
 import { AccountSpend, spendCacheLifetime, spendProjectionStatus } from "./account-spend.js";
 export { weeklyQuota } from "./account-quota.js";
@@ -495,12 +495,25 @@ export class AccountSidebar {
       line.append(el("span", "额外用量 · 本月"), el("strong", used === null ? "已开启" : `${used}${limit === null ? "" : ` / ${limit}`}${extra.currency ? ` ${extra.currency}` : ""}`));
       row.append(line); fragment.append(row);
     }
+    const endsOn = member.account.planPeriodEndsOn || group.members.find(value => value.account.planPeriodEndsOn)?.account.planPeriodEndsOn;
+    const period = claudePlanPeriod(endsOn, entry?.data?.usage?.subscribedAt);
+    if (period || entry) {
+      const row = el("div", "", "account-plan-period");
+      row.append(el("span", "本期结束"), this.renderPeriod(el("span", "", "account-period"), period));
+      fragment.append(row);
+    }
     const status = !entry ? "正在读取套餐用量…" : entry.message ? (quota.windows.length ? `更新失败，显示上次结果：${entry.message}` : entry.message)
       : !entry.data?.usage?.available ? "此账号未提供套餐用量" : !quota.windows.length ? "套餐用量未提供窗口数据" : "";
     const observed = entry?.data?.observedAt;
     const footer = el("small", status || (observed ? `更新于 ${new Date(observed).toLocaleTimeString("zh-CN", { hour12: false })}` : ""), "muted");
     if (footer.textContent) fragment.append(footer);
     target.replaceChildren(fragment);
+  }
+
+  renderPeriod(target, period) {
+    const view = planPeriodView(period);
+    target.textContent = view.text; target.title = view.title; target.dataset.level = view.level;
+    return target;
   }
 
   render() {
@@ -537,6 +550,9 @@ export class AccountSidebar {
     find("[data-account-reset]").title = resetsAt ? `${new Date(resetsAt).toLocaleString()}（本地时间）` : "按本地时区显示";
     find("[data-account-credits]").textContent = resetCount === null ? "未提供" : `${resetCount} 次`;
     find("dl").classList.toggle("hidden", this.account?.type !== "chatgpt");
+    find("[data-account-period-row]").classList.toggle("hidden", this.account?.planType === "free");
+    const reports = group ? group.members.map(value => value.account.reportedAppServer?.subscription) : [this.node?.reportedAppServer?.subscription];
+    this.renderPeriod(find("[data-account-period]"), codexPlanPeriod(reports));
     find("[data-account-status]").textContent = this.message ?? "";
     find("[data-account-status]").classList.toggle("hidden", !this.message);
     find("[data-account-refresh]").disabled = (!this.available && !group) || Boolean(this.operation);

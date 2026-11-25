@@ -141,6 +141,24 @@ func (server *Server) routeClaudeAccounts(ctx context.Context, w http.ResponseWr
 			}
 			operation = "enabled_changed"
 		}
+		if raw, ok := b["planPeriodEndsOn"]; ok {
+			value, valid := raw.(string)
+			if raw == nil {
+				valid = true
+			}
+			if value != "" {
+				day, parseErr := time.Parse(time.DateOnly, value)
+				valid = valid && parseErr == nil && day.Year() >= 2020 && day.Year() <= 2100
+			}
+			if !valid {
+				return claudeError(400, "Plan period end must be a date such as 2026-12-31")
+			}
+			_, err = tx.Exec(ctx, `UPDATE mira_claude_accounts SET plan_period_ends_on=NULLIF($2::text,'')::date WHERE node_account_id=$1`, id, value)
+			if err != nil {
+				return err
+			}
+			operation = "plan_period_changed"
+		}
 	} else if len(parts) == 3 && parts[2] == "configure" && r.Method == "POST" {
 		var provider clauderuntime.AccountProvider
 		raw, _ := json.Marshal(b["provider"])

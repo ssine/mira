@@ -2,6 +2,8 @@ package clauderuntime
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -56,5 +58,26 @@ func TestCleanPlanUsage(t *testing.T) {
 	unavailable := CleanPlanUsage(map[string]any{"subscription_type": nil, "rate_limits_available": false, "rate_limits": nil})
 	if unavailable.Available || unavailable.SevenDay != nil || unavailable.SubscriptionType != "" {
 		t.Fatalf("unavailable: %+v", unavailable)
+	}
+}
+
+func TestSubscriptionStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".claude.json")
+	if subscriptionStart(path) != nil {
+		t.Fatal("missing profile")
+	}
+	for _, content := range []string{`{`, `{}`, `{"oauthAccount":null}`, `{"oauthAccount":{"subscriptionCreatedAt":null}}`, `{"oauthAccount":{"subscriptionCreatedAt":5}}`, `{"oauthAccount":{"subscriptionCreatedAt":"soon"}}`} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if value := subscriptionStart(path); value != nil {
+			t.Fatalf("%s: %d", content, *value)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"projects":{},"oauthAccount":{"emailAddress":"x@example.test","subscriptionCreatedAt":"2026-11-08T11:16:40.478986Z"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if value := subscriptionStart(path); value == nil || *value != 1794136600478 {
+		t.Fatalf("subscription start: %v", value)
 	}
 }

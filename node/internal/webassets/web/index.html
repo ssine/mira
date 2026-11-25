@@ -191,6 +191,7 @@
                   <div><dt>周额度剩余</dt><dd data-account-remaining>未提供</dd></div>
                   <div><dt>下次重置</dt><dd data-account-reset title="按本地时区显示">未提供</dd></div>
                   <div><dt>重置机会</dt><dd data-account-credits>未提供</dd></div>
+                  <div data-account-period-row><dt>本期结束</dt><dd data-account-period class="account-period">未提供</dd></div>
                 </dl>
                 <meter class="hidden" min="0" max="100" value="0" aria-label="周额度剩余百分比"></meter>
                 <section class="account-plan-usage hidden" data-account-plan-usage aria-label="Claude 套餐用量"></section>
@@ -613,6 +614,7 @@
         <label data-account-home hidden>节点上的 Codex home<input name="home" placeholder="配置目录的绝对路径"></label>
         <label data-account-provider hidden>服务商 API 地址<input name="baseUrl" type="url" placeholder="https://provider.example/v1"></label>
         <label data-account-login-email hidden>Claude 登录邮箱<input name="loginEmail" type="email" maxlength="320" placeholder="name@example.com"></label>
+        <label data-account-period-end hidden>本期结束日期（可选）<input name="planPeriodEndsOn" type="date" min="2020-01-01" max="2100-12-31"><small class="muted">留空则按订阅开始日推算。日期过后自动恢复推算。</small></label>
         <label data-account-claude-model hidden>默认模型<input name="claudeModel" maxlength="200" placeholder="claude-opus-5-5"></label>
         <label data-account-claude-effort hidden>默认思考强度<select name="claudeEffort"><option value="">Claude Code 默认</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option><option value="xhigh">很高</option><option value="max">最高</option></select></label>
         <label data-account-region hidden>AWS 区域<input name="region" value="us-east-1" maxlength="64"></label>

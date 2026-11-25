@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,9 @@ import (
 // a short-lived native Claude process, so extra callers fail fast instead of
 // queueing behind it.
 const usageReads = 2
+
+// The native profile also holds per-project state and can grow large.
+const claudeProfileLimit = 16 * 1024 * 1024
 
 // UsageWindow is one claude.ai plan rate-limit window. Utilization is the used
 // percentage (0-100); ResetsAt is Unix milliseconds.
@@ -51,6 +56,9 @@ type PlanUsage struct {
 	SevenDaySonnet   *UsageWindow       `json:"sevenDaySonnet,omitempty"`
 	Models           []UsageModelWindow `json:"models,omitempty"`
 	Extra            *UsageExtra        `json:"extra,omitempty"`
+	// SubscribedAt is when the subscription began (Unix milliseconds). Claude
+	// records no billing period end locally; clients label any estimate as such.
+	SubscribedAt *int64 `json:"subscribedAt,omitempty"`
 }
 
 // CleanPlanUsage projects the worker's raw get_usage response.
@@ -196,5 +204,41 @@ func (m *Manager) usage(accountID string) (any, error) {
 	if err = json.Unmarshal(output.Bytes(), &raw); err != nil {
 		return nil, errors.New("Claude returned an invalid plan usage response")
 	}
-	return CleanPlanUsage(raw), nil
+	usage := CleanPlanUsage(raw)
+	if home, err := m.accountHome(accountID); err == nil {
+		usage.SubscribedAt = subscriptionStart(filepath.Join(home, ".claude.json"))
+	}
+	return usage, nil
+}
+
+// subscriptionStart reads one timestamp from the profile that the native CLI
+// keeps beside its login. Nothing else in that file leaves the Node.
+func subscriptionStart(path string) *int64 {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, claudeProfileLimit+1))
+	if err != nil || len(data) > claudeProfileLimit {
+		return nil
+	}
+	var profile struct {
+		Account struct {
+			SubscribedAt any `json:"subscriptionCreatedAt"`
+		} `json:"oauthAccount"`
+	}
+	if json.Unmarshal(data, &profile) != nil {
+		return nil
+	}
+	text, ok := profile.Account.SubscribedAt.(string)
+	if !ok || len(text) > 64 {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil || parsed.UnixMilli() <= 0 || parsed.Year() > 9999 {
+		return nil
+	}
+	milliseconds := parsed.UnixMilli()
+	return &milliseconds
 }

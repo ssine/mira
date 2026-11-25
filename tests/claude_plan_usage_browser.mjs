@@ -12,6 +12,7 @@ nodes[0].capabilities.claudeAccountsV1 = true;
 nodes[0].claudeAccounts = [claude(subscriptionId, "Max", "subscription"), claude(apiId, "Gateway", "api_key")];
 const reset = Date.now() + 3 * 3600_000, weekly = Date.now() + 4 * 86400_000;
 let usageCalls = [], failUsage = false, sevenDay = 4;
+const subscribedAt = Date.now() - 2 * 86400_000;
 const browser = await chromium.launch({ headless: true, ...(process.env.MIRA_BROWSER_EXECUTABLE ? { executablePath: process.env.MIRA_BROWSER_EXECUTABLE } : {}) });
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, timezoneId: "Asia/Shanghai" });
@@ -25,7 +26,7 @@ try {
     if (failUsage) return route.fulfill({ status: 409, json: { error: "Claude account Node is offline", code: "claude_session" } });
     return route.fulfill({ json: { nodeAccountId: subscriptionId, observedAt: Date.now(), stale: false, usage: {
       subscriptionType: "max", available: true, fiveHour: { utilization: 12.5, resetsAt: reset }, sevenDay: { utilization: sevenDay, resetsAt: weekly },
-      models: [{ name: "Fable", utilization: 0, resetsAt: weekly }], extra: { enabled: false } } } });
+      models: [{ name: "Fable", utilization: 0, resetsAt: weekly }], extra: { enabled: false }, subscribedAt } } });
   });
   const historyCalls = [];
   await context.route(/\/v1\/claude\/accounts\/[^/]+\/usage-history/, route => {
@@ -64,9 +65,15 @@ try {
   const usage = page.locator("[data-account-plan-usage]");
   await usage.locator(".account-plan-row").first().waitFor();
   assert.deepEqual(await usage.locator(".account-plan-row > div").allTextContents(), ["5 小时剩余 87.5%", "本周 · 全部模型剩余 96%", "本周 · Fable剩余 100%"]);
+  const period = usage.locator(".account-plan-period");
+  assert.match(await period.textContent(), /^本期结束约 (?:\d{4}\/)?\d\d\/\d\d \d\d:\d\d · 还剩 (?:2[5-9]|30) 天$/, "Claude period ends are marked as estimates");
+  assert.match(await period.locator(".account-period").getAttribute("title"), /每月续期推算/);
+  assert.equal(await period.evaluate(row => row.getClientRects().length && row.offsetHeight < 24), true, "the period stays on one line");
   assert.equal(await usage.locator("meter").first().evaluate(meter => meter.value), 87.5);
   assert.match(await usage.locator(".account-plan-row small").first().textContent(), /^\d\d\/\d\d \d\d:\d\d 重置$/);
   assert.equal(await page.locator("[data-account-plan]").textContent(), "MAX");
+  assert.doesNotMatch(await row.textContent(), /本期|还剩/, "sidebar rows do not show the period");
+  assert.doesNotMatch(await row.getAttribute("title"), /本期|还剩/);
   assert.equal(await page.locator("[data-account-spend]").isVisible(), false, "subscriptions chart quota history instead of estimated cost");
   const chart = page.locator("[data-account-history] .quota-chart:not(.hidden)");
   await chart.waitFor();

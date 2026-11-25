@@ -69,6 +69,37 @@ func TestClaudePlanUsageRoutesSamplerAndHistory(t *testing.T) {
 	apiID := f.call("POST", "/v1/claude/accounts", map[string]any{"nodeId": f.nodeID, "name": "Gateway"})["nodeAccountId"].(string)
 	f.call("POST", "/v1/claude/accounts/"+apiID+"/configure", map[string]any{"provider": provider, "apiKey": "fixture-key"})
 
+	accountPeriod := func() any {
+		t.Helper()
+		node, err := f.server.nodes.Get(ctx, f.nodeID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, account := range node.ClaudeAccounts {
+			if account["nodeAccountId"] == id {
+				return account["planPeriodEndsOn"]
+			}
+		}
+		t.Fatal("account is missing")
+		return nil
+	}
+	if accountPeriod() != nil {
+		t.Fatalf("initial plan period: %v", accountPeriod())
+	}
+	f.call("PATCH", "/v1/claude/accounts/"+id, map[string]any{"planPeriodEndsOn": "2026-12-08"})
+	for _, invalid := range []any{"2026-13-40", "tomorrow", "1999-01-01", 5, true} {
+		if status, raw := f.request("PATCH", "/v1/claude/accounts/"+id, map[string]any{"planPeriodEndsOn": invalid}, nil); status != 400 {
+			t.Fatalf("invalid plan period %v: %d %s", invalid, status, raw)
+		}
+	}
+	f.call("PATCH", "/v1/claude/accounts/"+id, map[string]any{"name": "Max"})
+	if accountPeriod() != "2026-12-08" {
+		t.Fatalf("saved plan period: %v", accountPeriod())
+	}
+	f.call("PATCH", "/v1/claude/accounts/"+id, map[string]any{"planPeriodEndsOn": ""})
+	if accountPeriod() != nil {
+		t.Fatalf("cleared plan period: %v", accountPeriod())
+	}
 	if status, raw := f.request("GET", "/v1/claude/accounts/"+apiID+"/usage", nil, nil); status != 409 {
 		t.Fatalf("API-key usage: %d %s", status, raw)
 	}

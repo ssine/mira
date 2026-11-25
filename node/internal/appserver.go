@@ -84,6 +84,8 @@ type appServerManager struct {
 	transitioning     bool
 	activityChecking  bool
 	providerView      map[string]any
+	accountHome       string // latest desired Codex home; empty uses Codex's default
+	subscription      codexSubscriptionCache
 	runtimePreparing  bool
 	runtimeCancel     context.CancelFunc
 	runtimeRetryAt    time.Time
@@ -250,6 +252,7 @@ func (manager *appServerManager) reconcile(ctx context.Context, desired desiredA
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	desired = manager.effectiveDesired(desired)
+	manager.accountHome = desired.CodexHome
 	if manager.transitioning || manager.activityChecking || (manager.managementSession != "" && manager.instance == nil) {
 		return nil
 	}
@@ -633,6 +636,7 @@ func (manager *appServerManager) report() map[string]any {
 		return map[string]any{"status": "unsupported"}
 	}
 	miraCLIPath := localMiraCLIPath()
+	subscription := manager.subscription.read(manager.accountHome, time.Now())
 	instance := manager.instance
 	if instance == nil || channelClosed(instance.done) {
 		status := "stopped"
@@ -642,6 +646,7 @@ func (manager *appServerManager) report() map[string]any {
 		return map[string]any{
 			"status": status, "lastError": manager.lastError,
 			"provider":         manager.providerView,
+			"subscription":     subscription,
 			"runtimePreparing": manager.runtimePreparing,
 			"miraCliPath":      miraCLIPath,
 		}
@@ -659,6 +664,7 @@ func (manager *appServerManager) report() map[string]any {
 		"codexHome":   instance.codexHome, "configOverrideCount": len(instance.configOverrides),
 		"startedAt": instance.startedAt.Format(time.RFC3339Nano), "lastError": manager.lastError,
 		"memoryResidency": manager.residencyStatus,
+		"subscription":    subscription,
 	}
 }
 
