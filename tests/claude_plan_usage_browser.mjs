@@ -10,6 +10,10 @@ const claude = (nodeAccountId, name, authType) => ({ engine: "claude", nodeAccou
   configured: true, provider: "anthropic", credentialRevision: 2, authType, email: "", desiredAppServer: {}, reportedAppServer: { provider: { id: "anthropic", model: "opus" }, status: "ready" } });
 nodes[0].capabilities.claudeAccountsV1 = true;
 nodes[0].claudeAccounts = [claude(subscriptionId, "Max", "subscription"), claude(apiId, "Gateway", "api_key")];
+// The same account on another online Node that sorts first but cannot be read.
+const unreadableId = "20000000-0000-4000-8000-000000000001";
+nodes[1].status = "online"; nodes[1].capabilities.claudeAccountsV1 = true;
+nodes[1].claudeAccounts = [{ ...claude(unreadableId, "Max", "subscription"), nodeId: nodes[1].nodeId }];
 const reset = Date.now() + 3 * 3600_000, weekly = Date.now() + 4 * 86400_000;
 let usageCalls = [], failUsage = false, sevenDay = 4;
 const subscribedAt = Date.now() - 2 * 86400_000;
@@ -23,6 +27,8 @@ try {
   await context.route(/\/v1\/claude\/accounts\/[^/]+\/usage(?:\?|$)/, route => {
     const url = new URL(route.request().url());
     usageCalls.push({ id: url.pathname.split("/")[4], refresh: url.searchParams.get("refresh") });
+    if (url.pathname.includes(unreadableId)) return route.fulfill({ json: { nodeAccountId: unreadableId, observedAt: Date.now() - 3600_000, stale: true,
+      message: "Claude runtime is not ready", usage: { subscriptionType: "max", available: true, sevenDay: { utilization: 50, resetsAt: weekly } } } });
     if (failUsage) return route.fulfill({ status: 409, json: { error: "Claude account Node is offline", code: "claude_session" } });
     return route.fulfill({ json: { nodeAccountId: subscriptionId, observedAt: Date.now(), stale: false, usage: {
       subscriptionType: "max", available: true, fiveHour: { utilization: 12.5, resetsAt: reset }, sevenDay: { utilization: sevenDay, resetsAt: weekly },
@@ -59,7 +65,7 @@ try {
   await page.waitForFunction(() => [...document.querySelectorAll(".sidebar-account-row")].some(row => row.textContent === "Claude · Max剩余 5h 87.5% · 周 96%"));
   assert.match(await row.getAttribute("title"), /5 小时 .*重置；本周 · 全部模型 .*重置；本周 · Fable/);
   await page.waitForFunction(() => /7 天/.test([...document.querySelectorAll(".sidebar-account-row")].find(row => row.textContent.startsWith("Claude · Gateway"))?.textContent ?? ""));
-  assert.deepEqual([...new Set(usageCalls.map(call => call.id))], [subscriptionId], "API-key Claude accounts never request plan usage");
+  assert.deepEqual([...new Set(usageCalls.map(call => call.id))].sort(), [unreadableId, subscriptionId], "API-key Claude accounts never request plan usage");
 
   await row.click();
   const usage = page.locator("[data-account-plan-usage]");
@@ -88,7 +94,7 @@ try {
   failUsage = true;
   await page.locator("[data-account-refresh]").click();
   await page.waitForFunction(() => /更新失败，显示上次结果：Claude account Node is offline/.test(document.querySelector("[data-account-plan-usage]").textContent));
-  assert.equal(usageCalls.at(-1).refresh, "1");
+  assert.equal(usageCalls.findLast(call => call.id === subscriptionId).refresh, "1");
   assert.equal(await usage.locator(".account-plan-row").count(), 3);
   await page.getByRole("button", { name: "关闭账户详情", exact: true }).click();
   assert.equal(await row.textContent(), "Claude · Max剩余 5h 87.5% · 周 96% · 上次结果");

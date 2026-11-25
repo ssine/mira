@@ -64,4 +64,12 @@ auto-renewal is on. Text turns amber within seven days and red within 24 hours.
   may set `planPeriodEndsOn` (`PATCH /v1/claude/accounts/:id`, `YYYY-MM-DD`, empty clears; schema 52).
   That day wins until it has passed in the browser's timezone, then the estimate returns.
 
+One Claude account is often logged in on several Nodes. Logins under one account name form one row,
+online Nodes first. The browser shows the first login whose usage can be read now and asks the next
+one only when an earlier login fails or returns a stored result; if none can be read, the newest
+stored result is kept. `usage.accountKey` is a one-way hash of the native account and organization
+IDs: logins known to differ never stand in for each other, and unknown keys (older Nodes) rely on the
+name. Reading plan usage also starts a Claude runtime that is stopped after a Node restart, waiting at
+most eight seconds; a failed preparation is retried at most every 30 minutes.
+
 Older Nodes report neither field; the line then shows "未提供" or the manual day.

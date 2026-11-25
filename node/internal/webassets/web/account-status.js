@@ -87,16 +87,34 @@ export class AccountSidebar {
     const group = this.groups?.find(group => group.key === name);
     if (!group) return;
     this.selectedName = name;
-    const { node, account } = group.members[0];
+    const { node, account } = this.subscriptionMember(group) ?? group.members[0];
     this.select(accountNode(node, account.nodeAccountId), this.active);
     this.render();
   }
 
   // Claude.ai subscriptions report plan windows; API-key accounts only have cost estimates.
-  subscriptionMember(group) {
-    if (group?.engine !== "claude") return null;
+  // Logins under one name on several Nodes, online first. A login known to be a
+  // different Claude account than the first never stands in for it.
+  subscriptionMembers(group) {
+    if (group?.engine !== "claude") return [];
     const members = group.members.filter(({ account }) => account.authType === "subscription" && account.configured && account.enabled !== false);
-    return members.find(({ node }) => node.status === "online") ?? members[0] ?? null;
+    members.sort((a, b) => Number(b.node.status === "online") - Number(a.node.status === "online"));
+    const identity = member => this.planUsage.get(member.account.nodeAccountId)?.data?.usage?.accountKey;
+    const primary = members.length ? identity(members[0]) : "";
+    return members.filter(member => !primary || !identity(member) || identity(member) === primary);
+  }
+
+  planReadable(member) {
+    const entry = this.planUsage.get(member.account.nodeAccountId);
+    return Boolean(entry?.data?.usage?.available && !entry.data.stale && !entry.message);
+  }
+
+  // The first login that can be read now, else the one with the newest result.
+  subscriptionMember(group) {
+    const members = this.subscriptionMembers(group);
+    const observed = member => this.planUsage.get(member.account.nodeAccountId)?.data?.observedAt ?? 0;
+    return members.find(member => this.planReadable(member)) ??
+      members.reduce((best, member) => !best || observed(member) > observed(best) ? member : best, null);
   }
 
   groupQuota(group) {
@@ -123,7 +141,7 @@ export class AccountSidebar {
       if (list.children[index] !== row) list.insertBefore(row, list.children[index] ?? null);
       row.hidden = !visible.includes(group);
       existing.delete(group.key);
-      const { node } = group.members[0];
+      const { node } = this.subscriptionMember(group) ?? group.members[0];
       const quota = this.groupQuota(group);
       row.firstChild.textContent = `${group.engine === "claude" ? "Claude" : "Codex"} · ${group.name}`;
       row.dataset.accountEngine = group.engine;
@@ -158,15 +176,20 @@ export class AccountSidebar {
   loadPlanUsages() {
     clearTimeout(this.planTimer);
     if (!this.summariesActive || navigator.onLine === false) return;
-    const members = (this.groups?.length ? this.visibleGroups().visible : []).map(group => this.subscriptionMember(group)).filter(Boolean);
+    const groups = this.groups?.length ? this.visibleGroups().visible : [], next = [];
     let started = false;
-    for (const { account } of members) {
-      if (this.planJobs.size >= 2) break;
-      const id = account.nodeAccountId;
-      if (this.planJobs.has(id) || (this.planUsage.get(id)?.expiresAt ?? 0) > Date.now()) continue;
-      this.loadPlanUsage(id); started = true;
+    for (const group of groups) {
+      // Other Nodes are only asked while no earlier login of the account can be read.
+      for (const member of this.subscriptionMembers(group)) {
+        const id = member.account.nodeAccountId, expiresAt = this.planUsage.get(id)?.expiresAt ?? 0;
+        if (expiresAt > Date.now()) next.push(expiresAt);
+        else if (!this.planJobs.has(id)) {
+          if (this.planJobs.size >= 2) break;
+          this.loadPlanUsage(id); started = true;
+        }
+        if (this.planJobs.has(id) || this.planReadable(member)) break;
+      }
     }
-    const next = members.map(({ account }) => this.planUsage.get(account.nodeAccountId)?.expiresAt).filter(value => value > Date.now());
     if (next.length) this.planTimer = setTimeout(() => this.loadPlanUsages(), Math.max(1_000, Math.min(...next) - Date.now()));
     if (started) this.renderOverview();
   }
@@ -189,9 +212,16 @@ export class AccountSidebar {
         this.planUsage.set(id, { data: previous?.data, message, expiresAt: Date.now() + 60_000 });
       } finally {
         clearTimeout(timer);
-        if (this.planJobs.get(id) === controller) { this.planJobs.delete(id); this.render(); }
+        if (this.planJobs.get(id) === controller) { this.planJobs.delete(id); this.planUsageSettled(); }
       }
     })();
+  }
+
+  // The popover and its history follow the login that supplies the plan usage.
+  planUsageSettled() {
+    const member = this.subscriptionMember(this.groups?.find(group => group.key === this.selectedName));
+    if (member && this.node && member.account.nodeAccountId !== this.node.nodeAccountId) this.selectGroup(this.selectedName);
+    else this.render();
   }
 
   stopSummaries() {
@@ -496,7 +526,8 @@ export class AccountSidebar {
       row.append(line); fragment.append(row);
     }
     const endsOn = member.account.planPeriodEndsOn || group.members.find(value => value.account.planPeriodEndsOn)?.account.planPeriodEndsOn;
-    const period = claudePlanPeriod(endsOn, entry?.data?.usage?.subscribedAt);
+    const subscribedAt = [member, ...this.subscriptionMembers(group)].map(value => this.planUsage.get(value.account.nodeAccountId)?.data?.usage?.subscribedAt).find(Boolean);
+    const period = claudePlanPeriod(endsOn, subscribedAt);
     if (period || entry) {
       const row = el("div", "", "account-plan-period");
       row.append(el("span", "本期结束"), this.renderPeriod(el("span", "", "account-period"), period));
@@ -506,6 +537,7 @@ export class AccountSidebar {
       : !entry.data?.usage?.available ? "此账号未提供套餐用量" : !quota.windows.length ? "套餐用量未提供窗口数据" : "";
     const observed = entry?.data?.observedAt;
     const footer = el("small", status || (observed ? `更新于 ${new Date(observed).toLocaleTimeString("zh-CN", { hour12: false })}` : ""), "muted");
+    if (group.members.length > 1) footer.title = `读取自 ${member.node.displayName || member.node.hostname}`;
     if (footer.textContent) fragment.append(footer);
     target.replaceChildren(fragment);
   }

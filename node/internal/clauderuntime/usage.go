@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -20,6 +22,11 @@ import (
 // a short-lived native Claude process, so extra callers fail fast instead of
 // queueing behind it.
 const usageReads = 2
+
+const (
+	usagePrepareWait  = 8 * time.Second
+	usagePrepareRetry = 30 * time.Minute
+)
 
 // The native profile also holds per-project state and can grow large.
 const claudeProfileLimit = 16 * 1024 * 1024
@@ -59,6 +66,8 @@ type PlanUsage struct {
 	// SubscribedAt is when the subscription began (Unix milliseconds). Claude
 	// records no billing period end locally; clients label any estimate as such.
 	SubscribedAt *int64 `json:"subscribedAt,omitempty"`
+	// AccountKey is equal for logins to the same account on different Nodes.
+	AccountKey string `json:"accountKey,omitempty"`
 }
 
 // CleanPlanUsage projects the worker's raw get_usage response.
@@ -150,21 +159,16 @@ func (m *Manager) usage(accountID string) (any, error) {
 	if accountID == "" {
 		return nil, errors.New("Choose a Claude subscription account")
 	}
-	m.mu.Lock()
-	closed, ready, dir := m.closed, m.state == "ready", m.dir
-	m.mu.Unlock()
-	if closed {
-		return nil, errors.New("Claude manager is shutting down")
-	}
-	if !ready {
-		return nil, errors.New("Claude runtime is not ready")
-	}
 	account, err := m.readAccount(accountID)
 	if err != nil {
 		return nil, err
 	}
 	if account.AuthType != "subscription" {
 		return nil, errors.New("Claude account does not use subscription authentication")
+	}
+	dir, err := m.usageRuntime(usagePrepareWait)
+	if err != nil {
+		return nil, err
 	}
 	select {
 	case m.usageSlots <- struct{}{}:
@@ -206,39 +210,74 @@ func (m *Manager) usage(accountID string) (any, error) {
 	}
 	usage := CleanPlanUsage(raw)
 	if home, err := m.accountHome(accountID); err == nil {
-		usage.SubscribedAt = subscriptionStart(filepath.Join(home, ".claude.json"))
+		usage.SubscribedAt, usage.AccountKey = readProfile(filepath.Join(home, ".claude.json"))
 	}
 	return usage, nil
 }
 
-// subscriptionStart reads one timestamp from the profile that the native CLI
-// keeps beside its login. Nothing else in that file leaves the Node.
-func subscriptionStart(path string) *int64 {
+// usageRuntime returns the prepared SDK directory. A Node restart leaves the
+// runtime stopped until someone uses Claude there, so plan usage starts the
+// preparation itself and waits briefly; a first download outlives the wait and
+// serves a later read. A failed preparation is retried at most every
+// usagePrepareRetry, because the Server samples every five minutes.
+func (m *Manager) usageRuntime(wait time.Duration) (string, error) {
+	deadline := time.Now().Add(wait)
+	for {
+		m.mu.Lock()
+		if m.state == "stopped" || m.state == "error" && time.Since(m.prepareAt) >= usagePrepareRetry {
+			m.prepare()
+		}
+		closed, state, dir, lastError := m.closed, m.state, m.dir, m.lastError
+		m.mu.Unlock()
+		switch {
+		case closed:
+			return "", errors.New("Claude manager is shutting down")
+		case state == "ready":
+			return dir, nil
+		case state == "error":
+			return "", errors.New("Claude runtime is not ready: " + lastError)
+		case !time.Now().Before(deadline):
+			return "", errors.New("Claude runtime is being prepared; retry shortly")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// readProfile reads two facts from the profile that the native CLI
+// keeps beside its login: when the subscription began and a one-way key that is
+// equal for the same Claude account and organization on different Nodes. The
+// identifiers themselves and everything else in that file stay on the Node.
+func readProfile(path string) (subscribedAt *int64, accountKey string) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, claudeProfileLimit+1))
 	if err != nil || len(data) > claudeProfileLimit {
-		return nil
+		return nil, ""
 	}
 	var profile struct {
 		Account struct {
-			SubscribedAt any `json:"subscriptionCreatedAt"`
+			SubscribedAt   any `json:"subscriptionCreatedAt"`
+			AccountID      any `json:"accountUuid"`
+			OrganizationID any `json:"organizationUuid"`
 		} `json:"oauthAccount"`
 	}
 	if json.Unmarshal(data, &profile) != nil {
-		return nil
+		return nil, ""
 	}
-	text, ok := profile.Account.SubscribedAt.(string)
-	if !ok || len(text) > 64 {
-		return nil
+	account, _ := profile.Account.AccountID.(string)
+	organization, _ := profile.Account.OrganizationID.(string)
+	if accountIDPattern.MatchString(account) && accountIDPattern.MatchString(organization) {
+		sum := sha256.Sum256([]byte("mira-claude-account-v1\x00" + strings.ToLower(account) + "\x00" + strings.ToLower(organization)))
+		accountKey = hex.EncodeToString(sum[:16])
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, text)
-	if err != nil || parsed.UnixMilli() <= 0 || parsed.Year() > 9999 {
-		return nil
+	if text, ok := profile.Account.SubscribedAt.(string); ok && len(text) <= 64 {
+		if parsed, err := time.Parse(time.RFC3339Nano, text); err == nil && parsed.UnixMilli() > 0 && parsed.Year() <= 9999 {
+			milliseconds := parsed.UnixMilli()
+			subscribedAt = &milliseconds
+		}
 	}
-	milliseconds := parsed.UnixMilli()
-	return &milliseconds
+	return subscribedAt, accountKey
 }

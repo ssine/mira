@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestCleanPlanUsage(t *testing.T) {
@@ -61,23 +64,70 @@ func TestCleanPlanUsage(t *testing.T) {
 	}
 }
 
-func TestSubscriptionStart(t *testing.T) {
+func TestReadProfile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".claude.json")
-	if subscriptionStart(path) != nil {
-		t.Fatal("missing profile")
-	}
-	for _, content := range []string{`{`, `{}`, `{"oauthAccount":null}`, `{"oauthAccount":{"subscriptionCreatedAt":null}}`, `{"oauthAccount":{"subscriptionCreatedAt":5}}`, `{"oauthAccount":{"subscriptionCreatedAt":"soon"}}`} {
+	read := func(content string) (*int64, string) {
+		t.Helper()
 		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if value := subscriptionStart(path); value != nil {
-			t.Fatalf("%s: %d", content, *value)
+		return readProfile(path)
+	}
+	if at, key := readProfile(path); at != nil || key != "" {
+		t.Fatal("missing profile")
+	}
+	for _, content := range []string{`{`, `{}`, `{"oauthAccount":null}`, `{"oauthAccount":{"subscriptionCreatedAt":null,"accountUuid":null}}`, `{"oauthAccount":{"subscriptionCreatedAt":5,"accountUuid":7,"organizationUuid":{}}}`, `{"oauthAccount":{"subscriptionCreatedAt":"soon","accountUuid":"person"}}`} {
+		if at, key := read(content); at != nil || key != "" {
+			t.Fatalf("%s: %v %q", content, at, key)
 		}
 	}
-	if err := os.WriteFile(path, []byte(`{"projects":{},"oauthAccount":{"emailAddress":"x@example.test","subscriptionCreatedAt":"2026-11-08T11:16:40.478986Z"}}`), 0600); err != nil {
+	const account, organization = "AAAAAAAA-0000-4000-8000-000000000001", "bbbbbbbb-0000-4000-8000-000000000002"
+	profile := func(account, organization string) string {
+		return `{"projects":{},"oauthAccount":{"emailAddress":"x@example.test","accountUuid":"` + account + `","organizationUuid":"` + organization + `","subscriptionCreatedAt":"2026-11-08T11:16:40.478986Z"}}`
+	}
+	at, key := read(profile(account, organization))
+	if at == nil || *at != 1794136600478 || len(key) != 32 || strings.Contains(key, "aaaaaaaa") {
+		t.Fatalf("profile: %v %q", at, key)
+	}
+	if _, same := read(profile(strings.ToLower(account), organization)); same != key {
+		t.Fatal("the same account must have one key")
+	}
+	if _, other := read(profile(account, account)); other == key {
+		t.Fatal("another organization must have another key")
+	}
+}
+
+func TestUsageStartsTheStoppedRuntime(t *testing.T) {
+	m := New(t.TempDir())
+	defer m.Close()
+	dir := filepath.Join(m.root, assetDigest())
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if value := subscriptionStart(path); value == nil || *value != 1794136600478 {
-		t.Fatalf("subscription start: %v", value)
+	if err := os.WriteFile(filepath.Join(dir, "ready"), []byte("1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A prepared SDK needs no download, only the Node.js version check.
+	fake := filepath.Join(t.TempDir(), "node")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		t.Setenv("MIRA_NODE_CLAUDE_NODE", fake)
+	}
+	if got, err := m.usageRuntime(10 * time.Second); err != nil || got != dir {
+		t.Fatalf("stopped runtime: %q %v", got, err)
+	}
+	m.mu.Lock()
+	m.state, m.lastError, m.prepareAt = "error", "npm failed", time.Now()
+	m.mu.Unlock()
+	if _, err := m.usageRuntime(time.Second); err == nil || !strings.Contains(err.Error(), "npm failed") {
+		t.Fatalf("recent failure must not retry: %v", err)
+	}
+	m.mu.Lock()
+	m.prepareAt = time.Now().Add(-usagePrepareRetry)
+	m.mu.Unlock()
+	if got, err := m.usageRuntime(10 * time.Second); err != nil || got != dir {
+		t.Fatalf("retry: %q %v", got, err)
 	}
 }
