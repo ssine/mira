@@ -898,7 +898,13 @@ func (channel *Channel) readRuntimeInstructionsFile(ctx context.Context, target 
 	if contentText == "" {
 		return "", nil
 	}
-	return strings.Join([]string{nodeDeveloperInstructionsBegin, "The following persistent Developer instructions were loaded by Mira for this execution Node.", contentText, nodeDeveloperInstructionsEnd}, "\n"), nil
+	return strings.Join([]string{
+		nodeDeveloperInstructionsBegin,
+		"The following persistent Developer instructions were loaded by Mira for this execution Node from the file " + jsQuote(path) + ".",
+		"Resolve relative paths in these instructions against that file's directory, not the current working directory.",
+		contentText,
+		nodeDeveloperInstructionsEnd,
+	}, "\n"), nil
 }
 
 func invalidDeveloperInstructionsResponse() error {
