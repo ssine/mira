@@ -6,6 +6,8 @@ Mira 把 Windows、WSL、Linux、NAS 和 Android 组织成一个由用户批准�
 顺序和热历史；可选的对象存储只保存不可变、按哈希校验的冷历史正文（见
 [冷历史](docs/cold-history.md)）。
 
+1.0.138 Node 的 Developer instructions 注入时写明来源文件的绝对路径，文件中的相对路径按该文件所在目录解析；Codex 与 Claude 不再需要在文件系统里搜索被引用的 Skill。需升级 Server；无数据库迁移。
+
 1.0.137 同一个 Claude 订阅账号在多台 Node 上登录时，额度、“本期结束”和额度历史取自能读到用量的那台（在线优先，前一台失败或只有旧数据时才读下一台）；Node 只上报账号与组织 ID 的单向哈希，已知不是同一账号的登录不会互相借用。修复 Node 重启后要等有人使用 Claude 才能读取额度：读取用量会自动启动 Claude 运行环境。需升级 Server 和运行 Claude 的 Node；无数据库迁移，见[账号额度](docs/account-quota-history.md)。
 
 1.0.136 账户弹层新增“本期结束”：订阅账号显示当前计费周期的结束时间和剩余天数，7 天内变橙、24 小时内变红；侧栏账号行不变。Codex 由 Node 从本地 ChatGPT 登录凭证读取（只上报起止与更新时间）；Claude 本地只有订阅开始时间，按每月续期推算并标“约”，可在 Claude 订阅账号设置里填写“本期结束日期”覆盖，日期过后自动恢复推算。不上传凭证，也不增加对服务商的请求。需升级 Server 和运行账号的 Node；数据库迁移 schema 52（仅新增列），见[账号额度](docs/account-quota-history.md)。
@@ -263,13 +265,13 @@ Supervisor 和 Web 已合并进同一个原生 Mira 镜像，运行时不需要 
 Linux（也适用于 WSL，支持 amd64/arm64）：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.137
+curl -fsSL https://raw.githubusercontent.com/ssine/mira/main/scripts/install.sh | sh -s -- --role node --server https://mira.example.com --version 1.0.138
 ```
 
 Windows x64（在管理员 PowerShell 中运行）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.137'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/ssine/mira/main/scripts/install.ps1'))) -Role node -Server 'https://mira.example.com' -Version '1.0.138'"
 ```
 
 命令会下载并校验指定 Release、安装并启动 Node，然后向 Server 提交注册申请。显式版本可以避免查询
